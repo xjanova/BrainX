@@ -306,6 +306,64 @@ internal static class Program
                         ["windowDays"] = new JObject { ["type"] = "integer", ["description"] = "days of history to analyze (default 14)", ["default"] = 14 },
                         ["limit"] = new JObject { ["type"] = "integer", ["default"] = 10 }
                     }
+                }),
+            // ─── Co-Pilot Arena review queue (Phase 1C) ────────────────
+            // Three tools that bridge the ObsidianX orchestrator and the
+            // Claude Desktop senior reviewer. Items live as one JSON file
+            // each at <vault>/.obsidianx/review-queue/<id>.json. The
+            // orchestrator submits, Claude Desktop fetches + posts a
+            // verdict, the orchestrator polls for the verdict and acts on
+            // it (approve / revise loop / reject).
+            Tool("submit_for_review",
+                "Queue a worker output for the senior reviewer (Claude Desktop). Used by the " +
+                "ObsidianX Co-Pilot Arena orchestrator after CluadeX produces a diff — NOT typically " +
+                "called by the user. Writes one JSON file per task to <vault>/.obsidianx/review-queue/.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["taskId"] = new JObject { ["type"] = "string", ["description"] = "orchestrator task id (e.g. task-260426-082412)" },
+                        ["intent"] = new JObject { ["type"] = "string", ["description"] = "the user's original spec / what they asked for" },
+                        ["spec"] = new JObject { ["type"] = "string", ["description"] = "intern's refined spec sent to the worker" },
+                        ["diff"] = new JObject { ["type"] = "string", ["description"] = "the worker's output (diff or full reply)" },
+                        ["files"] = new JObject { ["type"] = "array", ["items"] = new JObject { ["type"] = "string" }, ["description"] = "files the worker likely touched" },
+                        ["transcriptRef"] = new JObject { ["type"] = "string", ["description"] = "optional CluadeX session id for cross-reference" },
+                        ["revisionRound"] = new JObject { ["type"] = "integer", ["default"] = 1, ["description"] = "1 for first submit, 2+ for revises" },
+                        ["previousOutput"] = new JObject { ["type"] = "string", ["description"] = "optional — the prior diff this round revises" }
+                    },
+                    ["required"] = new JArray { "taskId", "intent", "spec", "diff" }
+                }),
+            Tool("fetch_review_queue",
+                "Pull pending items from the Co-Pilot Arena review queue. Use when the user says " +
+                "'ดู review queue', 'check the review queue', 'what's waiting for review'. Returns " +
+                "an array of items the senior reviewer (you, Claude Desktop) should evaluate. " +
+                "Default filter is status=pending; pass status=any to see history.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["status"] = new JObject { ["type"] = "string", ["enum"] = new JArray { "pending", "approved", "revise", "rejected", "any" }, ["default"] = "pending" },
+                        ["limit"] = new JObject { ["type"] = "integer", ["default"] = 20 }
+                    }
+                }),
+            Tool("post_review_verdict",
+                "Post a verdict on a review-queue item back to the orchestrator. Use after you've " +
+                "read the diff and decided. verdict='approved' = ship it; 'revise' = needs another " +
+                "round (include actionable notes); 'rejected' = abandon (e.g. wrong direction, " +
+                "user should clarify). The orchestrator polls every 2-3 s and will act on the " +
+                "verdict as soon as it lands.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["id"] = new JObject { ["type"] = "string", ["description"] = "the item id (taskId from fetch_review_queue)" },
+                        ["verdict"] = new JObject { ["type"] = "string", ["enum"] = new JArray { "approved", "revise", "rejected" } },
+                        ["notes"] = new JObject { ["type"] = "string", ["description"] = "verdict notes — required for 'revise', helpful for 'rejected'" }
+                    },
+                    ["required"] = new JArray { "id", "verdict" }
                 })
         }
     });
@@ -343,6 +401,9 @@ internal static class Program
                 "brain_suggest_links"       => BrainSuggestLinks(args),
                 "brain_find_contradictions" => BrainFindContradictions(args),
                 "brain_suggest_topics"      => BrainSuggestTopics(args),
+                "submit_for_review"         => SubmitForReview(args),
+                "fetch_review_queue"        => FetchReviewQueue(args),
+                "post_review_verdict"       => PostReviewVerdict(args),
                 _ => throw new InvalidOperationException($"unknown tool: {name}")
             };
 
@@ -1369,6 +1430,170 @@ internal static class Program
             dir = dir.Parent;
         }
         return null;
+    }
+
+    // ───────────── Co-Pilot Arena review queue (Phase 1C) ─────────────
+    //
+    // Queue layout
+    //   <vault>/.obsidianx/review-queue/<id>.json
+    //
+    // Each file is one task. The orchestrator (ObsidianX) writes;
+    // Claude Desktop reads + writes verdict back; the orchestrator polls
+    // for the verdict and then either ships it (approved), sends back to
+    // the worker (revise), or escalates (rejected).
+    //
+    // Why per-file (vs one big queue.json)?
+    //   • Atomic appends without locking — `File.WriteAllText(<id>.json)`
+    //     is one syscall, no read-modify-write race between submit + verdict.
+    //   • Easy debugging — `ls .obsidianx/review-queue/` shows the queue.
+    //   • Self-trim — once verdict-applied items can be moved to a
+    //     subdirectory or deleted without touching others.
+
+    private static string ReviewQueueDir() =>
+        Path.Combine(_vaultPath, ".obsidianx", "review-queue");
+
+    private static string ReviewQueueFile(string id)
+    {
+        // Hardening: id must look like a task id we generated. Never let a
+        // caller traverse out of the queue directory.
+        if (string.IsNullOrWhiteSpace(id) || id.IndexOfAny(['/', '\\', '.', ':']) >= 0)
+            throw new ArgumentException("invalid review item id", nameof(id));
+        return Path.Combine(ReviewQueueDir(), id + ".json");
+    }
+
+    private static JToken SubmitForReview(JObject args)
+    {
+        var taskId = args["taskId"]?.ToString() ?? "";
+        if (string.IsNullOrWhiteSpace(taskId))
+            throw new ArgumentException("taskId is required");
+        var intent = args["intent"]?.ToString() ?? "";
+        var spec = args["spec"]?.ToString() ?? "";
+        var diff = args["diff"]?.ToString() ?? "";
+        if (string.IsNullOrWhiteSpace(diff))
+            throw new ArgumentException("diff is required (worker output to review)");
+
+        var files = (args["files"] as JArray)?.Select(t => t.ToString()).ToArray() ?? [];
+        var transcriptRef = args["transcriptRef"]?.ToString();
+        var revisionRound = args["revisionRound"]?.ToObject<int>() ?? 1;
+        var previousOutput = args["previousOutput"]?.ToString();
+
+        Directory.CreateDirectory(ReviewQueueDir());
+        var path = ReviewQueueFile(taskId);
+
+        var doc = new JObject
+        {
+            ["id"] = taskId,
+            ["createdAt"] = DateTime.UtcNow.ToString("O"),
+            ["intent"] = intent,
+            ["spec"] = spec,
+            ["files"] = new JArray(files.Cast<object>().ToArray()),
+            ["diff"] = diff,
+            ["transcriptRef"] = transcriptRef,
+            ["revisionRound"] = revisionRound,
+            ["previousOutput"] = previousOutput,
+            ["status"] = "pending",
+            ["verdict"] = null,
+            ["verdictAt"] = null,
+            ["verdictNotes"] = null,
+        };
+        File.WriteAllText(path, doc.ToString(Formatting.Indented));
+
+        return new JObject
+        {
+            ["id"] = taskId,
+            ["queueFile"] = path,
+            ["status"] = "pending",
+            ["message"] = $"Queued task {taskId} for review (round {revisionRound}). Reviewer can fetch it with fetch_review_queue."
+        };
+    }
+
+    private static JToken FetchReviewQueue(JObject args)
+    {
+        var statusFilter = args["status"]?.ToString() ?? "pending";
+        var limit = args["limit"]?.ToObject<int>() ?? 20;
+        var dir = ReviewQueueDir();
+        if (!Directory.Exists(dir))
+        {
+            return new JObject
+            {
+                ["count"] = 0,
+                ["items"] = new JArray(),
+                ["message"] = "Review queue is empty (no submissions yet)."
+            };
+        }
+
+        var items = new JArray();
+        // Newest first — orchestrator created files have createdAt; tie-break
+        // on file mtime which Windows updates on overwrite (verdict post).
+        var files = new DirectoryInfo(dir).GetFiles("*.json")
+            .OrderByDescending(f => f.LastWriteTimeUtc);
+
+        foreach (var f in files)
+        {
+            JObject obj;
+            try { obj = JObject.Parse(File.ReadAllText(f.FullName)); }
+            catch { continue; }
+            var st = obj["status"]?.ToString() ?? "pending";
+            if (statusFilter != "any" && !string.Equals(st, statusFilter, StringComparison.OrdinalIgnoreCase))
+                continue;
+            items.Add(obj);
+            if (items.Count >= limit) break;
+        }
+
+        return new JObject
+        {
+            ["count"] = items.Count,
+            ["status_filter"] = statusFilter,
+            ["items"] = items,
+            ["hint"] = items.Count == 0
+                ? "No items match. Try status='any' to see history."
+                : "Read each item's diff + intent + spec, then call post_review_verdict(id, verdict, notes)."
+        };
+    }
+
+    private static JToken PostReviewVerdict(JObject args)
+    {
+        var id = args["id"]?.ToString() ?? "";
+        if (string.IsNullOrWhiteSpace(id))
+            throw new ArgumentException("id is required");
+        var verdict = (args["verdict"]?.ToString() ?? "").ToLowerInvariant();
+        if (verdict is not ("approved" or "revise" or "rejected"))
+            throw new ArgumentException("verdict must be approved | revise | rejected");
+        var notes = args["notes"]?.ToString();
+        if (verdict == "revise" && string.IsNullOrWhiteSpace(notes))
+            throw new ArgumentException("'revise' verdict requires actionable notes for the worker");
+
+        var path = ReviewQueueFile(id);
+        if (!File.Exists(path))
+            throw new FileNotFoundException($"No review item with id={id}. Did you fetch the queue first?");
+
+        var obj = JObject.Parse(File.ReadAllText(path));
+        var prevStatus = obj["status"]?.ToString() ?? "pending";
+        if (prevStatus != "pending")
+        {
+            // Idempotent guard: already-verdicted items shouldn't silently
+            // get overwritten — surface so the user notices a double-post.
+            return new JObject
+            {
+                ["id"] = id,
+                ["status"] = prevStatus,
+                ["warning"] = $"Item {id} already has status={prevStatus}. Verdict NOT applied a second time."
+            };
+        }
+
+        obj["status"] = verdict;
+        obj["verdict"] = verdict;
+        obj["verdictAt"] = DateTime.UtcNow.ToString("O");
+        obj["verdictNotes"] = notes;
+        File.WriteAllText(path, obj.ToString(Formatting.Indented));
+
+        return new JObject
+        {
+            ["id"] = id,
+            ["status"] = verdict,
+            ["queueFile"] = path,
+            ["message"] = $"Verdict '{verdict}' posted on {id}. The orchestrator polls every ~3 s and will pick it up."
+        };
     }
 
     // ───────────── JSON-RPC framing ─────────────

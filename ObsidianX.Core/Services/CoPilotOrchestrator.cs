@@ -41,6 +41,18 @@ public sealed class CoPilotOrchestrator
     /// <summary>CluadeX worker client. Required.</summary>
     public CluadeXClient? Worker { get; init; }
 
+    /// <summary>Optional. When set, every worker output is queued for the
+    /// senior reviewer (Claude Desktop) and the orchestrator polls for a
+    /// verdict before returning. When null, Phase 3 is skipped and the
+    /// orchestrator returns as soon as the worker finishes — useful for
+    /// experiments and the Phase 1B workflow.</summary>
+    public ReviewQueueClient? ReviewQueue { get; init; }
+
+    /// <summary>How often to re-read the queue file while waiting for a
+    /// verdict. 3 s is responsive enough for an interactive UI without
+    /// pegging the disk.</summary>
+    public TimeSpan VerdictPollInterval { get; init; } = TimeSpan.FromSeconds(3);
+
     public OrchestrationOptions Options { get; init; } = new();
 
     /// <summary>Run one orchestrated task end-to-end. Always returns a
@@ -98,37 +110,126 @@ public sealed class CoPilotOrchestrator
             return new TaskRunResult { TaskId = taskId, Status = TaskRunStatus.Failed, Started = started, Ended = DateTime.UtcNow, Error = ex.Message };
         }
 
-        // ─── Phase 2: worker codes ────────────────────────────────────
-        // Compose the worker spec: intern's refined spec + acceptance
-        // bullets. Lessons stays null until Phase 1C wires brain-derived
-        // self-improvement principles into the call.
-        string workerSpec = BuildWorkerSpec(plan);
-        string workerOutput;
-        try
+        // ─── Phase 2 + 3: worker codes, optional reviewer in a loop ───
+        //
+        // When ReviewQueue is configured, this loop runs until:
+        //   • approved verdict   → ship it, status = Done
+        //   • rejected verdict   → bail, status = Failed (reviewer notes)
+        //   • max revise rounds  → bail, status = Failed (round cap)
+        //   • wall-clock exhausts → bail, status = TimedOut
+        //
+        // When ReviewQueue is null, the loop runs once with no review and
+        // exits as soon as the worker returns — preserving the original
+        // Phase 1B behaviour for callers that opted out.
+        var revisionLessons = new List<string>();
+        string workerOutput = "";
+        ReviewItem? lastVerdict = null;
+        int round = 1;
+        while (true)
         {
-            progress?.Report(new WorkerStarted(DateTime.UtcNow, taskId));
-            int remainingMs = Math.Max(5_000, (int)Math.Min(int.MaxValue, (Options.MaxWallClock - sw.Elapsed).TotalMilliseconds));
-            workerOutput = await Worker.WriteCodeAsync(
-                taskId,
-                workerSpec,
-                lessons: null,
-                contextFiles: plan.Files,
-                workingDirectory: workingDirectory,
-                timeoutMs: remainingMs,
-                ct: token);
-            progress?.Report(new WorkerFinished(DateTime.UtcNow, workerOutput));
-        }
-        catch (OperationCanceledException) when (budgetCts.IsCancellationRequested && !ct.IsCancellationRequested)
-        {
-            progress?.Report(new OrchestratorError(DateTime.UtcNow, "worker", "wall-clock budget exhausted during coding"));
-            progress?.Report(new OrchestratorFinished(DateTime.UtcNow, TaskRunStatus.TimedOut));
-            return new TaskRunResult { TaskId = taskId, Status = TaskRunStatus.TimedOut, Started = started, Ended = DateTime.UtcNow, Plan = plan };
-        }
-        catch (Exception ex)
-        {
-            progress?.Report(new OrchestratorError(DateTime.UtcNow, "worker", ex.Message));
-            progress?.Report(new OrchestratorFinished(DateTime.UtcNow, TaskRunStatus.Failed));
-            return new TaskRunResult { TaskId = taskId, Status = TaskRunStatus.Failed, Started = started, Ended = DateTime.UtcNow, Plan = plan, Error = ex.Message };
+            // ─── Worker call ─────────────────────────────────────────
+            // Distinct CluadeX session id per round so the user can
+            // scroll back and compare ‑r1, ‑r2 etc. The review-queue id
+            // stays the SAME so the file overwrites cleanly on resubmit.
+            string cluadeSessionId = round == 1 ? taskId : $"{taskId}-r{round}";
+            string workerSpec = BuildWorkerSpec(plan, round, lastVerdict);
+            try
+            {
+                progress?.Report(new WorkerStarted(DateTime.UtcNow, cluadeSessionId, round));
+                int remainingMs = Math.Max(5_000, (int)Math.Min(int.MaxValue, (Options.MaxWallClock - sw.Elapsed).TotalMilliseconds));
+                workerOutput = await Worker.WriteCodeAsync(
+                    cluadeSessionId,
+                    workerSpec,
+                    lessons: revisionLessons.Count > 0 ? revisionLessons : null,
+                    contextFiles: plan.Files,
+                    workingDirectory: workingDirectory,
+                    timeoutMs: remainingMs,
+                    ct: token);
+                progress?.Report(new WorkerFinished(DateTime.UtcNow, workerOutput, round));
+            }
+            catch (OperationCanceledException) when (budgetCts.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                progress?.Report(new OrchestratorError(DateTime.UtcNow, "worker", $"wall-clock budget exhausted during round {round}"));
+                progress?.Report(new OrchestratorFinished(DateTime.UtcNow, TaskRunStatus.TimedOut));
+                return new TaskRunResult { TaskId = taskId, Status = TaskRunStatus.TimedOut, Started = started, Ended = DateTime.UtcNow, Plan = plan, RevisionsUsed = round - 1 };
+            }
+            catch (Exception ex)
+            {
+                progress?.Report(new OrchestratorError(DateTime.UtcNow, "worker", ex.Message));
+                progress?.Report(new OrchestratorFinished(DateTime.UtcNow, TaskRunStatus.Failed));
+                return new TaskRunResult { TaskId = taskId, Status = TaskRunStatus.Failed, Started = started, Ended = DateTime.UtcNow, Plan = plan, Error = ex.Message, RevisionsUsed = round - 1 };
+            }
+
+            // ─── Review (optional) ───────────────────────────────────
+            if (ReviewQueue is null)
+                break; // Phase 1B behaviour — done after worker
+
+            try
+            {
+                ReviewQueue.Submit(new ReviewSubmission
+                {
+                    TaskId = taskId,
+                    Intent = userSpec,
+                    Spec = plan.Spec,
+                    Diff = workerOutput,
+                    Files = plan.Files,
+                    TranscriptRef = cluadeSessionId,
+                    RevisionRound = round,
+                    PreviousOutput = round > 1 ? null : null, // could include older diff later
+                });
+                progress?.Report(new ReviewSubmitted(DateTime.UtcNow, taskId, round));
+            }
+            catch (Exception ex)
+            {
+                progress?.Report(new OrchestratorError(DateTime.UtcNow, "review-submit", ex.Message));
+                progress?.Report(new OrchestratorFinished(DateTime.UtcNow, TaskRunStatus.Failed));
+                return new TaskRunResult { TaskId = taskId, Status = TaskRunStatus.Failed, Started = started, Ended = DateTime.UtcNow, Plan = plan, WorkerOutput = workerOutput, Error = ex.Message, RevisionsUsed = round - 1 };
+            }
+
+            ReviewItem? verdict;
+            try
+            {
+                verdict = await ReviewQueue.WaitForVerdictAsync(taskId, VerdictPollInterval, token);
+            }
+            catch (OperationCanceledException) when (budgetCts.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                progress?.Report(new OrchestratorError(DateTime.UtcNow, "review-wait", "wall-clock budget exhausted while waiting for reviewer verdict"));
+                progress?.Report(new OrchestratorFinished(DateTime.UtcNow, TaskRunStatus.TimedOut));
+                return new TaskRunResult { TaskId = taskId, Status = TaskRunStatus.TimedOut, Started = started, Ended = DateTime.UtcNow, Plan = plan, WorkerOutput = workerOutput, RevisionsUsed = round - 1 };
+            }
+
+            if (verdict is null)
+            {
+                // Cancelled by caller (not budget) — bubble up as cancelled.
+                progress?.Report(new OrchestratorError(DateTime.UtcNow, "review-wait", "cancelled while waiting for verdict"));
+                progress?.Report(new OrchestratorFinished(DateTime.UtcNow, TaskRunStatus.Failed));
+                return new TaskRunResult { TaskId = taskId, Status = TaskRunStatus.Failed, Started = started, Ended = DateTime.UtcNow, Plan = plan, WorkerOutput = workerOutput, RevisionsUsed = round - 1 };
+            }
+
+            lastVerdict = verdict;
+            progress?.Report(new ReviewVerdict(DateTime.UtcNow, verdict.Verdict ?? verdict.Status, verdict.VerdictNotes, round));
+
+            string verdictKind = (verdict.Verdict ?? verdict.Status ?? "").ToLowerInvariant();
+            if (verdictKind == "approved")
+                break; // ship it
+
+            if (verdictKind == "rejected")
+            {
+                progress?.Report(new OrchestratorFinished(DateTime.UtcNow, TaskRunStatus.Failed));
+                return new TaskRunResult { TaskId = taskId, Status = TaskRunStatus.Failed, Started = started, Ended = DateTime.UtcNow, Plan = plan, WorkerOutput = workerOutput, Error = "Reviewer rejected: " + (verdict.VerdictNotes ?? "(no notes)"), RevisionsUsed = round - 1 };
+            }
+
+            // verdictKind == "revise"
+            if (round >= Options.MaxReviseRounds)
+            {
+                progress?.Report(new OrchestratorError(DateTime.UtcNow, "review", $"max revise rounds ({Options.MaxReviseRounds}) reached without approval"));
+                progress?.Report(new OrchestratorFinished(DateTime.UtcNow, TaskRunStatus.Failed));
+                return new TaskRunResult { TaskId = taskId, Status = TaskRunStatus.Failed, Started = started, Ended = DateTime.UtcNow, Plan = plan, WorkerOutput = workerOutput, Error = $"Reviewer asked for revision past round-{Options.MaxReviseRounds} cap", RevisionsUsed = round };
+            }
+
+            revisionLessons.Add($"Round {round} reviewer (revise) notes: {verdict.VerdictNotes ?? "(no notes provided)"}");
+            round++;
+            // loop continues — re-call worker with the accumulated notes
         }
 
         sw.Stop();
@@ -142,6 +243,7 @@ public sealed class CoPilotOrchestrator
             Elapsed = sw.Elapsed,
             Plan = plan,
             WorkerOutput = workerOutput,
+            RevisionsUsed = round - 1,
         };
     }
 
@@ -167,7 +269,7 @@ public sealed class CoPilotOrchestrator
         {{userSpec}}
         """;
 
-    private static string BuildWorkerSpec(InternPlan plan)
+    private static string BuildWorkerSpec(InternPlan plan, int round = 1, ReviewItem? lastVerdict = null)
     {
         var sb = new StringBuilder();
         sb.Append(plan.Spec);
@@ -182,6 +284,18 @@ public sealed class CoPilotOrchestrator
         {
             sb.AppendLine();
             sb.Append("Rationale from intern: ").Append(plan.Rationale);
+        }
+        // On revise rounds, prepend reviewer notes prominently. Worker
+        // sessions are fresh — they can't see the previous round, so the
+        // notes have to ride in the spec itself.
+        if (round > 1 && lastVerdict != null && !string.IsNullOrWhiteSpace(lastVerdict.VerdictNotes))
+        {
+            sb.AppendLine();
+            sb.AppendLine();
+            sb.AppendLine($"REVISE ROUND {round} — the senior reviewer rejected your previous attempt with these notes:");
+            sb.AppendLine(lastVerdict.VerdictNotes);
+            sb.AppendLine();
+            sb.AppendLine("Address these specifically in this round. Don't restate the original spec — just fix the issues called out above.");
         }
         return sb.ToString();
     }
@@ -336,6 +450,9 @@ public sealed class TaskRunResult
     public InternPlan? Plan { get; set; }
     public string? WorkerOutput { get; set; }
     public string? Error { get; set; }
+    /// <summary>How many revise rounds the reviewer requested before
+    /// the run ended. 0 = approved on the first try (or no review).</summary>
+    public int RevisionsUsed { get; set; }
 }
 
 // ─── Events ──────────────────────────────────────────────────────────
@@ -347,7 +464,14 @@ public abstract record OrchestrationEvent(DateTime Ts);
 public sealed record TaskCreated(DateTime Ts, string TaskId, string UserSpec) : OrchestrationEvent(Ts);
 public sealed record InternStarted(DateTime Ts) : OrchestrationEvent(Ts);
 public sealed record InternFinished(DateTime Ts, InternPlan Plan) : OrchestrationEvent(Ts);
-public sealed record WorkerStarted(DateTime Ts, string TaskId) : OrchestrationEvent(Ts);
-public sealed record WorkerFinished(DateTime Ts, string Output) : OrchestrationEvent(Ts);
+public sealed record WorkerStarted(DateTime Ts, string TaskId, int Round = 1) : OrchestrationEvent(Ts);
+public sealed record WorkerFinished(DateTime Ts, string Output, int Round = 1) : OrchestrationEvent(Ts);
+/// <summary>Worker output has been queued for the senior reviewer. UI should
+/// switch its budget gauge to "waiting for verdict…" and disable Send.</summary>
+public sealed record ReviewSubmitted(DateTime Ts, string TaskId, int Round) : OrchestrationEvent(Ts);
+/// <summary>Reviewer posted a verdict. UI should render a Reviewer bubble
+/// with verdict colour-coded + notes. <c>Verdict</c> is one of approved /
+/// revise / rejected.</summary>
+public sealed record ReviewVerdict(DateTime Ts, string Verdict, string? Notes, int Round) : OrchestrationEvent(Ts);
 public sealed record OrchestratorError(DateTime Ts, string Phase, string Message) : OrchestrationEvent(Ts);
 public sealed record OrchestratorFinished(DateTime Ts, TaskRunStatus Status) : OrchestrationEvent(Ts);

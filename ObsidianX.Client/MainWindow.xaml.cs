@@ -4310,9 +4310,19 @@ public partial class MainWindow : Window
         {
             Worker = EnsureCluadeXBridge(),
             Planner = PlanWithLocalInternAsync,
+            // Plug the review queue in. Vault path drives where the JSON
+            // files live so Claude Desktop's obsidianx-mcp tools see the
+            // exact same directory. When the user wants Phase 1B behaviour
+            // (no reviewer), we'd null this out — for the comprehensive
+            // flow, every Co-Pilot Arena task goes through review.
+            ReviewQueue = new ReviewQueueClient(_vaultPath),
+            VerdictPollInterval = TimeSpan.FromSeconds(3),
+            // Bigger wall-clock for review-enabled runs because the
+            // reviewer is human-paced and may take a few minutes to read
+            // the diff before posting.
             Options = new OrchestrationOptions
             {
-                MaxWallClock = TimeSpan.FromMinutes(5),
+                MaxWallClock = TimeSpan.FromMinutes(20),
                 MaxTurnsPerTask = 15,
                 MaxUsdPerTask = 0.20m,
                 MaxReviseRounds = 3,
@@ -4432,21 +4442,56 @@ public partial class MainWindow : Window
                     f.Plan.ToDisplay(), taskId: null);
                 break;
             case WorkerStarted ws:
-                AppendArenaBubble(BubbleKind.Status, "🤖 Worker started",
-                    $"CluadeX is running task {ws.TaskId}. Watch the new session in CluadeX's sidebar.",
-                    taskId: ws.TaskId);
-                if (ArenaBudgetGauge != null)
-                    ArenaBudgetGauge.Text = $"task {ws.TaskId} · worker running…";
-                // First worker call of the session is the right moment to
-                // dock CluadeX next to us — bridge is verified up, user is
-                // about to spend the next 30-60s watching for output, and
-                // we haven't done it yet (idempotent flag inside).
-                _ = DockCluadeXAdjacentAsync();
-                break;
+                {
+                    string roundTag = ws.Round > 1 ? $" (revise round {ws.Round})" : "";
+                    AppendArenaBubble(BubbleKind.Status, $"🤖 Worker started{roundTag}",
+                        $"CluadeX is running task {ws.TaskId}. Watch the new session in CluadeX's sidebar.",
+                        taskId: ws.TaskId);
+                    if (ArenaBudgetGauge != null)
+                        ArenaBudgetGauge.Text = $"task {ws.TaskId} · worker running{roundTag}…";
+                    // First worker call of the session is the right moment to
+                    // dock CluadeX next to us — bridge is verified up, user is
+                    // about to spend the next 30-60s watching for output, and
+                    // we haven't done it yet (idempotent flag inside).
+                    _ = DockCluadeXAdjacentAsync();
+                    break;
+                }
             case WorkerFinished wf:
-                AppendArenaBubble(BubbleKind.Worker, "🤖 CluadeX worker",
-                    TruncateForBubble(wf.Output), taskId: ExtractTaskIdFromGauge());
+                {
+                    string title = wf.Round > 1 ? $"🤖 CluadeX worker (round {wf.Round})" : "🤖 CluadeX worker";
+                    AppendArenaBubble(BubbleKind.Worker, title,
+                        TruncateForBubble(wf.Output), taskId: ExtractTaskIdFromGauge());
+                    break;
+                }
+            case ReviewSubmitted rs:
+                AppendArenaBubble(BubbleKind.Status, $"📤 Submitted for review (round {rs.Round})",
+                    $"Diff queued at .obsidianx/review-queue/{rs.TaskId}.json. " +
+                    "In Claude Desktop, ask: \"ดู review queue\" — it'll fetch this and post a verdict back.",
+                    taskId: null);
+                if (ArenaBudgetGauge != null)
+                    ArenaBudgetGauge.Text = $"task {rs.TaskId} · ⏳ waiting for reviewer (round {rs.Round})…";
                 break;
+            case ReviewVerdict rv:
+                {
+                    string emoji = rv.Verdict.ToLowerInvariant() switch
+                    {
+                        "approved" => "✅",
+                        "revise"   => "🔁",
+                        "rejected" => "🛑",
+                        _          => "📝",
+                    };
+                    var kind = rv.Verdict.Equals("approved", StringComparison.OrdinalIgnoreCase)
+                        ? BubbleKind.Worker  // green tint reads as success
+                        : (rv.Verdict.Equals("rejected", StringComparison.OrdinalIgnoreCase)
+                            ? BubbleKind.Error
+                            : BubbleKind.Intern); // revise = purple, distinct from worker green
+                    string body = string.IsNullOrWhiteSpace(rv.Notes)
+                        ? "(reviewer left no notes)"
+                        : rv.Notes;
+                    AppendArenaBubble(kind, $"{emoji} Reviewer · {rv.Verdict} (round {rv.Round})",
+                        body, taskId: null);
+                    break;
+                }
             case OrchestratorError err:
                 AppendArenaBubble(BubbleKind.Error, $"⚠ {err.Phase} error",
                     err.Message, taskId: null);
