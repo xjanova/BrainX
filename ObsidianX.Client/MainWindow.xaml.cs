@@ -4247,7 +4247,40 @@ public partial class MainWindow : Window
     private static extern bool SetForegroundWindow(IntPtr hWnd);
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+        int X, int Y, int cx, int cy, uint uFlags);
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hWnd, out W32Rect lpRect);
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern bool GetMonitorInfo(IntPtr hMonitor, ref W32MonitorInfoEx lpmi);
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct W32Rect { public int Left, Top, Right, Bottom; }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private struct W32MonitorInfoEx
+    {
+        public int Size;
+        public W32Rect Monitor;
+        public W32Rect WorkArea;
+        public uint Flags;
+        [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string DeviceName;
+    }
+
     private const int SW_RESTORE = 9;
+    private const uint MONITOR_DEFAULTTONEAREST = 2;
+    private const uint SWP_NOZORDER = 0x0004;
+    private const uint SWP_NOACTIVATE = 0x0010;
+    private const uint SWP_SHOWWINDOW = 0x0040;
+
+    /// <summary>Once true, we leave the user's preferred window layout
+    /// alone. Set after the first successful side-by-side dock so we
+    /// don't fight the user if they manually re-arrange.</summary>
+    private bool _cluadeXDocked;
 
     /// <summary>Toggle which body panel is visible based on the mode combo.
     /// Solo → ClaudeOutput card; Co-Pilot Arena → bubble feed. The two
@@ -4404,6 +4437,11 @@ public partial class MainWindow : Window
                     taskId: ws.TaskId);
                 if (ArenaBudgetGauge != null)
                     ArenaBudgetGauge.Text = $"task {ws.TaskId} · worker running…";
+                // First worker call of the session is the right moment to
+                // dock CluadeX next to us — bridge is verified up, user is
+                // about to spend the next 30-60s watching for output, and
+                // we haven't done it yet (idempotent flag inside).
+                _ = DockCluadeXAdjacentAsync();
                 break;
             case WorkerFinished wf:
                 AppendArenaBubble(BubbleKind.Worker, "🤖 CluadeX worker",
@@ -4581,6 +4619,105 @@ public partial class MainWindow : Window
     {
         try { _orchestratorCts?.Cancel(); }
         catch { /* race with completion is fine */ }
+    }
+
+    /// <summary>
+    /// Position CluadeX's window adjacent to ObsidianX so the user perceives
+    /// a single workspace instead of two scattered windows. Once-per-session:
+    /// after the first dock we don't fight the user if they manually move
+    /// either window.
+    ///
+    /// Layout heuristic
+    ///  • Pick the monitor ObsidianX is currently on.
+    ///  • Try docking CluadeX flush against ObsidianX's right edge first;
+    ///    fall back to its left edge if there isn't ≥800 px of room.
+    ///  • If neither side fits (small monitor, ObsidianX maximised), bail
+    ///    and leave CluadeX wherever it is — better to do nothing than to
+    ///    move CluadeX to a worse position.
+    ///  • Match CluadeX's height to ObsidianX's height so the two read as a
+    ///    single panel pair.
+    ///
+    /// Triggered from <see cref="OnOrchestratorEvent"/> on
+    /// <see cref="WorkerStarted"/> — that's the moment we KNOW CluadeX has
+    /// launched (the worker call only succeeds after the bridge is up) and
+    /// the user is about to spend the next 30-60s watching for the worker
+    /// reply, so a side-by-side layout matters most then.
+    /// </summary>
+    private async Task DockCluadeXAdjacentAsync(CancellationToken ct = default)
+    {
+        if (_cluadeXDocked) return;
+        try
+        {
+            var procs = Process.GetProcessesByName("CluadeX");
+            if (procs.Length == 0) return;
+            var p = procs[0];
+
+            // Just-launched WPF processes have a zero MainWindowHandle for
+            // ~1-2s while the dispatcher spins up. Poll briefly so we don't
+            // try to position a not-yet-real window.
+            var deadline = DateTime.UtcNow.AddSeconds(3);
+            while (p.MainWindowHandle == IntPtr.Zero && DateTime.UtcNow < deadline)
+            {
+                try { await Task.Delay(150, ct); } catch (OperationCanceledException) { return; }
+                p.Refresh();
+            }
+            var cluadeHwnd = p.MainWindowHandle;
+            if (cluadeHwnd == IntPtr.Zero) return;
+
+            var ourHwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+            if (ourHwnd == IntPtr.Zero) return;
+            if (!GetWindowRect(ourHwnd, out var ourRect)) return;
+
+            var hMonitor = MonitorFromWindow(ourHwnd, MONITOR_DEFAULTTONEAREST);
+            var mi = new W32MonitorInfoEx
+            {
+                Size = System.Runtime.InteropServices.Marshal.SizeOf<W32MonitorInfoEx>()
+            };
+            if (!GetMonitorInfo(hMonitor, ref mi)) return;
+            var work = mi.WorkArea;
+
+            const int minWidth = 800;
+            int rightSpace = work.Right - ourRect.Right;
+            int leftSpace = ourRect.Left - work.Left;
+            int x, y, w, h;
+            int ourHeight = ourRect.Bottom - ourRect.Top;
+
+            if (rightSpace >= minWidth)
+            {
+                x = ourRect.Right;
+                y = ourRect.Top;
+                w = Math.Min(1400, rightSpace);
+                h = ourHeight;
+            }
+            else if (leftSpace >= minWidth)
+            {
+                x = work.Left;
+                y = ourRect.Top;
+                w = leftSpace;
+                h = ourHeight;
+            }
+            else
+            {
+                // No clear adjacent space on this monitor. Leave layout alone.
+                return;
+            }
+
+            // Restore from minimised state first — SetWindowPos with
+            // SWP_SHOWWINDOW shows hidden windows but does NOT undo a
+            // minimise. A minimised window's GetWindowRect reads
+            // (-32000,-32000), so we'd merrily move it to (x,y,w,h)
+            // without actually surfacing it. Hit ShowWindow first.
+            ShowWindow(cluadeHwnd, SW_RESTORE);
+            SetWindowPos(cluadeHwnd, IntPtr.Zero, x, y, w, h,
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            _cluadeXDocked = true;
+        }
+        catch (Exception ex)
+        {
+            // Best-effort — if window manipulation fails for any reason
+            // (CluadeX exited, denied by UIPI, etc.) just skip.
+            Debug.WriteLine($"DockCluadeXAdjacent failed: {ex.Message}");
+        }
     }
 
     /// <summary>Bring CluadeX's main window to the foreground so the user
