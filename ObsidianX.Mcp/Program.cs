@@ -21,7 +21,7 @@ internal static class Program
 {
     private const string ProtocolVersion = "2025-06-18";
     private const string ServerName = "obsidianx-brain";
-    private const string ServerVersion = "2.0.0";
+    private const string ServerVersion = "2.1.0";
 
     private static string _vaultPath = ResolveVault(Environment.GetCommandLineArgs());
 
@@ -145,9 +145,12 @@ internal static class Program
             "  → Write a #session-handoff note in Notes/Claude-Sessions/ with: branch, files touched, what shipped, what's pending, gotchas, deploy steps, open questions.\n" +
             "  → The SessionStart hook auto-injects the most recent #session-handoff into the next Claude's context — a good handoff means the next session starts at full context.\n\n" +
             "═══ TOOL MENU ════════════════════════════════════════════════\n\n" +
-            "READ:  brain_search (keyword) · brain_semantic_search (embeddings) · brain_get_note · brain_get_backlinks · brain_list · brain_stats · brain_expertise · brain_synthesize (top-K bundle) · brain_suggest_links · brain_find_contradictions (LLM-verified) · brain_suggest_topics (gap analysis)\n" +
+            "READ:  brain_search (keyword) · brain_semantic_search (embeddings) · brain_walk (graph traversal — start at note(s), expand N hops via wiki-links, returns subgraph + edges) · brain_get_note · brain_get_backlinks · brain_list · brain_stats · brain_expertise · brain_synthesize (top-K bundle) · brain_suggest_links · brain_find_contradictions (LLM-verified) · brain_suggest_topics (gap analysis)\n" +
             "WRITE: brain_create_note · brain_append_note · brain_remember · brain_import_path\n" +
             "REVIEW QUEUE: submit_for_review · fetch_review_queue · post_review_verdict (Co-Pilot Arena bridge)\n\n" +
+            "═══ EFFICIENCY ══════════════════════════════════════════════\n\n" +
+            "Prefer brain_walk over chained brain_search + brain_get_backlinks when exploring 'what's near X'. One walk = one call = one logged event.\n" +
+            "If a tool response has cached=true, an identical call ran in this MCP process within the last 10 minutes — full results are still in your earlier turn. Do NOT re-narrate them; reference what you already saw. Pass bypass_cache:true to force a fresh run.\n\n" +
             "═══ HONESTY ═════════════════════════════════════════════════\n\n" +
             "When a tool returns mode='keyword-fallback' or 'legacy-heuristic', the smart path degraded — tell the user briefly and suggest precompute. When mode='semantic' or 'llm-verified', that's the real thing.\n\n" +
             "Citing the owner's notes ALWAYS beats a generic answer — these notes represent first-hand experience the model otherwise has no access to."
@@ -169,7 +172,8 @@ internal static class Program
                         ["query"] = new JObject { ["type"] = "string", ["description"] = "search keyword or phrase" },
                         ["limit"] = new JObject { ["type"] = "integer", ["description"] = "max results (default 10)", ["default"] = 10 },
                         ["preview_chars"] = new JObject { ["type"] = "integer", ["description"] = "max chars per preview (default 200, set 0 for full preview)", ["default"] = 200 },
-                        ["compact"] = new JObject { ["type"] = "boolean", ["description"] = "if true, drop preview/path/category; return id+title+score+tags only", ["default"] = false }
+                        ["compact"] = new JObject { ["type"] = "boolean", ["description"] = "if true, drop preview/path/category; return id+title+score+tags only", ["default"] = false },
+                        ["bypass_cache"] = new JObject { ["type"] = "boolean", ["description"] = "if true, skip the 10-min memo cache and always re-run", ["default"] = false }
                     },
                     ["required"] = new JArray { "query" }
                 }),
@@ -289,7 +293,8 @@ internal static class Program
                         ["query"] = new JObject { ["type"] = "string", ["description"] = "natural-language query" },
                         ["limit"] = new JObject { ["type"] = "integer", ["default"] = 10 },
                         ["preview_chars"] = new JObject { ["type"] = "integer", ["default"] = 200 },
-                        ["compact"] = new JObject { ["type"] = "boolean", ["default"] = false }
+                        ["compact"] = new JObject { ["type"] = "boolean", ["default"] = false },
+                        ["bypass_cache"] = new JObject { ["type"] = "boolean", ["description"] = "if true, skip the 10-min memo cache and always re-run", ["default"] = false }
                     },
                     ["required"] = new JArray { "query" }
                 }),
@@ -392,6 +397,38 @@ internal static class Program
                     },
                     ["required"] = new JArray { "kind" }
                 }),
+            Tool("brain_walk",
+                "Graph traversal — start from one or more notes, expand N hops along wiki-links, " +
+                "return the resulting subgraph (nodes + edges between them) ranked by relevance, " +
+                "centrality, or recency. Use this INSTEAD of repeated brain_search + brain_get_backlinks " +
+                "when the user asks 'what's around X', 'show notes related to X', 'how does X connect to Y', " +
+                "or you want to explore a concept's neighbourhood. One walk replaces ~5 search round-trips " +
+                "and uses the wiki-link graph (the brain's moat over flat-RAG systems).",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["start"] = new JObject
+                        {
+                            ["description"] = "starting note id (string), OR an array of ids for multi-seed walks (e.g. comparing two topics)",
+                            ["oneOf"] = new JArray
+                            {
+                                new JObject { ["type"] = "string" },
+                                new JObject { ["type"] = "array", ["items"] = new JObject { ["type"] = "string" } }
+                            }
+                        },
+                        ["hops"] = new JObject { ["type"] = "integer", ["default"] = 2, ["description"] = "BFS depth, capped at 5" },
+                        ["limit"] = new JObject { ["type"] = "integer", ["default"] = 20, ["description"] = "max nodes to return after ranking" },
+                        ["rank"] = new JObject { ["type"] = "string", ["enum"] = new JArray { "relevance", "centrality", "recency" }, ["default"] = "relevance", ["description"] = "relevance=hop-decayed importance (+ optional query boost); centrality=degree; recency=newer first" },
+                        ["direction"] = new JObject { ["type"] = "string", ["enum"] = new JArray { "out", "in", "both" }, ["default"] = "both", ["description"] = "out=follow outgoing wiki-links only, in=follow backlinks only, both=undirected" },
+                        ["query"] = new JObject { ["type"] = "string", ["description"] = "optional — when rank='relevance', boost nodes that also keyword-match this query" },
+                        ["include_seed"] = new JObject { ["type"] = "boolean", ["default"] = true, ["description"] = "include the seed note(s) in the result list" },
+                        ["preview_chars"] = new JObject { ["type"] = "integer", ["default"] = 120 },
+                        ["compact"] = new JObject { ["type"] = "boolean", ["default"] = false, ["description"] = "if true, drop preview/path/category — id+title+score+distance only" }
+                    },
+                    ["required"] = new JArray { "start" }
+                }),
             // ─── Co-Pilot Arena review queue (Phase 1C) ────────────────
             // Three tools that bridge the ObsidianX orchestrator and the
             // Claude Desktop senior reviewer. Items live as one JSON file
@@ -481,6 +518,7 @@ internal static class Program
                 "brain_append_note"         => BrainAppendNote(args),
                 "brain_remember"            => BrainRemember(args),
                 "brain_get_backlinks"       => BrainGetBacklinks(args),
+                "brain_walk"                => BrainWalk(args),
                 "brain_semantic_search"     => BrainSemanticSearch(args),
                 "brain_synthesize"          => BrainSynthesize(args),
                 "brain_suggest_links"       => BrainSuggestLinks(args),
@@ -526,10 +564,16 @@ internal static class Program
     private static JToken BrainSearch(JObject args)
     {
         var query = args["query"]?.ToString() ?? "";
+        if (string.IsNullOrWhiteSpace(query)) throw new ArgumentException("query is required");
+
+        // Cache short-circuit: identical query within MemoTtl returns a tiny
+        // payload that tells Claude not to re-narrate prior results.
+        var cached = TryGetMemoHit("brain_search", args, query);
+        if (cached != null) return cached;
+
         var limit = args["limit"]?.ToObject<int>() ?? 10;
         var previewChars = args["preview_chars"]?.ToObject<int>() ?? 200;
         var compact = args["compact"]?.ToObject<bool>() ?? false;
-        if (string.IsNullOrWhiteSpace(query)) throw new ArgumentException("query is required");
 
         var export = LoadExport()
             ?? throw new InvalidOperationException("brain-export.json not found — open ObsidianX → Settings → Export Brain Now");
@@ -548,11 +592,14 @@ internal static class Program
         // Log access for each hit so the 3D graph can pulse the matching nodes
         foreach (var m in matches) LogAccess(m.Node.Id, "search", query);
 
+        var resultsArr = new JArray(matches.Select(x => BuildSearchResult(x.Node, x.Score, previewChars, compact)));
+        StoreMemo("brain_search", args, query, resultsArr);
+
         return new JObject
         {
             ["query"] = query,
             ["count"] = matches.Count,
-            ["results"] = new JArray(matches.Select(x => BuildSearchResult(x.Node, x.Score, previewChars, compact)))
+            ["results"] = resultsArr
         };
     }
 
@@ -704,6 +751,15 @@ internal static class Program
     private static JToken BrainStats()
     {
         var export = LoadExport() ?? throw new InvalidOperationException("no brain-export");
+        int memoSize, hits, misses;
+        lock (_memoLock)
+        {
+            memoSize = _searchMemo.Count;
+            hits = _memoHits;
+            misses = _memoMisses;
+        }
+        var total = hits + misses;
+        var hitRate = total == 0 ? 0.0 : Math.Round((double)hits / total, 3);
         return new JObject
         {
             ["brainAddress"] = export.BrainAddress,
@@ -722,7 +778,15 @@ internal static class Program
             {
                 ["tag"] = t.Tag,
                 ["count"] = t.Count
-            }))
+            })),
+            ["searchMemo"] = new JObject
+            {
+                ["entries"] = memoSize,
+                ["hits"] = hits,
+                ["misses"] = misses,
+                ["hitRate"] = hitRate,
+                ["ttlMinutes"] = (int)MemoTtl.TotalMinutes
+            }
         };
     }
 
@@ -898,8 +962,22 @@ internal static class Program
             "brain_create_note" => $"title=\"{args["title"]?.ToString()}\" folder={args["folder"]?.ToString() ?? "Notes"}",
             "brain_append_note" => $"id={args["id"]?.ToString() ?? args["path"]?.ToString()}",
             "brain_remember"    => args["text"]?.ToString()?.Length is int n ? $"{n} chars" : null,
+            "brain_walk"        => SummarizeWalkArgs(args),
             _ => null
         };
+    }
+
+    private static string SummarizeWalkArgs(JObject args)
+    {
+        var startTok = args["start"];
+        string seed;
+        if (startTok is JArray arr) seed = $"[{arr.Count} seeds]";
+        else seed = startTok?.ToString() ?? "?";
+        var hops = args["hops"]?.ToObject<int>() ?? 2;
+        var rank = args["rank"]?.ToString() ?? "relevance";
+        var q = args["query"]?.ToString();
+        var qPart = string.IsNullOrEmpty(q) ? "" : $" q=\"{q}\"";
+        return $"start={seed} hops={hops} rank={rank}{qPart}";
     }
 
     /// <summary>Mirror of KnowledgeNode.IdFromPath so MCP-written notes
@@ -998,6 +1076,138 @@ internal static class Program
     }
 
     /// <summary>
+    /// Graph traversal — BFS from one or more seed notes along wiki-links,
+    /// rank reachable nodes, and return the resulting subgraph (nodes + the
+    /// edges between them). The unique-moat tool: most LLM-wiki systems are
+    /// flat-RAG, but ObsidianX has a real graph (LinkedNodeIds + BacklinkIds
+    /// precomputed per node). One walk replaces ~5 search round-trips.
+    /// </summary>
+    private static JToken BrainWalk(JObject args)
+    {
+        // ── parse start ids (string or string[]) ──
+        var startTok = args["start"] ?? throw new ArgumentException("start is required (string id or array of ids)");
+        var startIds = startTok is JArray arr
+            ? arr.Select(t => t.ToString()).Where(s => !string.IsNullOrEmpty(s)).Distinct().ToList()
+            : new List<string> { startTok.ToString() };
+        if (startIds.Count == 0) throw new ArgumentException("start must contain at least one id");
+
+        var hops = Math.Clamp(args["hops"]?.ToObject<int>() ?? 2, 1, 5);
+        var limit = Math.Max(1, args["limit"]?.ToObject<int>() ?? 20);
+        var rank = (args["rank"]?.ToString() ?? "relevance").ToLowerInvariant();
+        var direction = (args["direction"]?.ToString() ?? "both").ToLowerInvariant();
+        var query = args["query"]?.ToString();
+        var includeSeed = args["include_seed"]?.ToObject<bool>() ?? true;
+        var previewChars = args["preview_chars"]?.ToObject<int>() ?? 120;
+        var compact = args["compact"]?.ToObject<bool>() ?? false;
+
+        var export = LoadExport() ?? throw new InvalidOperationException("brain-export.json not found — open ObsidianX → Settings → Export Brain Now");
+        var byId = export.Nodes.ToDictionary(n => n.Id, n => n);
+
+        var validSeeds = startIds.Where(byId.ContainsKey).ToList();
+        if (validSeeds.Count == 0)
+            throw new InvalidOperationException($"none of the start ids exist in the brain: {string.Join(", ", startIds)}");
+
+        // ── BFS, recording min distance per node ──
+        var distance = new Dictionary<string, int>();
+        foreach (var s in validSeeds) distance[s] = 0;
+        var frontier = new Queue<string>(validSeeds);
+        while (frontier.Count > 0)
+        {
+            var cur = frontier.Dequeue();
+            var d = distance[cur];
+            if (d >= hops) continue;
+            if (!byId.TryGetValue(cur, out var node)) continue;
+
+            IEnumerable<string> neighbours = Array.Empty<string>();
+            if (direction != "in")  neighbours = neighbours.Concat(node.LinkedNodeIds);
+            if (direction != "out") neighbours = neighbours.Concat(node.BacklinkIds);
+
+            foreach (var nid in neighbours)
+            {
+                if (string.IsNullOrEmpty(nid) || distance.ContainsKey(nid)) continue;
+                distance[nid] = d + 1;
+                frontier.Enqueue(nid);
+            }
+        }
+
+        // ── Score reachable nodes ──
+        var ql = string.IsNullOrWhiteSpace(query) ? null : query!.ToLowerInvariant();
+        var nowUtc = DateTime.UtcNow;
+        var scored = distance
+            .Where(kv => byId.ContainsKey(kv.Key))
+            .Where(kv => includeSeed || kv.Value > 0)
+            .Select(kv =>
+            {
+                var n = byId[kv.Key];
+                var dist = kv.Value;
+                double score = rank switch
+                {
+                    "centrality" => n.LinkedNodeIds.Count + n.BacklinkIds.Count,
+                    "recency"    => 1.0 / (1.0 + Math.Max(0, (nowUtc - n.ModifiedAt).TotalDays) / 30.0),
+                    _            => RelevanceScore(n, dist, ql) // "relevance" or anything else
+                };
+                return (node: n, dist, score);
+            })
+            .OrderByDescending(t => t.score)
+            .ThenBy(t => t.dist)
+            .Take(limit)
+            .ToList();
+
+        // ── Build edges between kept nodes (deduped, single direction) ──
+        var keptIds = new HashSet<string>(scored.Select(t => t.node.Id));
+        var edges = new JArray();
+        var seenEdges = new HashSet<string>();
+        foreach (var (node, _, _) in scored)
+        {
+            foreach (var to in node.LinkedNodeIds)
+            {
+                if (!keptIds.Contains(to)) continue;
+                var key = $"{node.Id}->{to}";
+                if (!seenEdges.Add(key)) continue;
+                edges.Add(new JObject { ["from"] = node.Id, ["to"] = to });
+            }
+        }
+
+        // ── Log access so the Universe pulses the walked subgraph ──
+        var logCtx = ql ?? string.Join(",", validSeeds.Take(2));
+        foreach (var (node, _, _) in scored) LogAccess(node.Id, "walk", logCtx);
+
+        var nodes = new JArray(scored.Select(t =>
+        {
+            var o = (JObject)BuildSearchResult(t.node, Math.Round(t.score, 4), previewChars, compact);
+            o["distance"] = t.dist;
+            return o;
+        }));
+
+        return new JObject
+        {
+            ["seed"] = new JArray(validSeeds.Select(s => new JObject
+            {
+                ["id"] = s,
+                ["title"] = byId[s].Title
+            })),
+            ["hops"] = hops,
+            ["rank"] = rank,
+            ["direction"] = direction,
+            ["totalReachable"] = distance.Count(kv => includeSeed || kv.Value > 0),
+            ["returned"] = scored.Count,
+            ["nodes"] = nodes,
+            ["edges"] = edges
+        };
+    }
+
+    private static double RelevanceScore(NodeSummary n, int distance, string? ql)
+    {
+        // Hop decay: seed = 1.0, 1-hop = 0.5, 2-hop = 0.33, 3-hop = 0.25, …
+        var hopDecay = 1.0 / (1.0 + distance);
+        // Importance is precomputed in [0..1] range; scale into a comparable bonus
+        var imp = n.Importance;
+        // Optional keyword boost — normalised against ScoreNode's typical max (~10)
+        var qBoost = ql == null ? 0 : Math.Min(1.0, ScoreNode(n, ql) / 10.0);
+        return hopDecay * (1.0 + imp + qBoost);
+    }
+
+    /// <summary>
     /// Semantic search. Tries Ollama nomic-embed-text first to embed the
     /// query and rank notes by cosine similarity over precomputed
     /// embeddings. If Ollama is unreachable or no embeddings have been
@@ -1008,10 +1218,15 @@ internal static class Program
     private static JToken BrainSemanticSearch(JObject args)
     {
         var query = args["query"]?.ToString() ?? "";
+        if (string.IsNullOrWhiteSpace(query)) throw new ArgumentException("query is required");
+
+        // Cache short-circuit (same key shape as brain_search but distinct tool name)
+        var cached = TryGetMemoHit("brain_semantic_search", args, query);
+        if (cached != null) return cached;
+
         var limit = args["limit"]?.ToObject<int>() ?? 10;
         var previewChars = args["preview_chars"]?.ToObject<int>() ?? 200;
         var compact = args["compact"]?.ToObject<bool>() ?? false;
-        if (string.IsNullOrWhiteSpace(query)) throw new ArgumentException("query is required");
         var export = LoadExport() ?? throw new InvalidOperationException("no brain-export");
 
         // Try Ollama embedding — non-blocking, swallow any error
@@ -1055,12 +1270,14 @@ internal static class Program
         }
 
         foreach (var (n, _) in ranked) LogAccess(n.Id, "semantic_search", query);
+        var resultsArr = new JArray(ranked.Select(x => BuildSearchResult(x.node, Math.Round(x.score, 4), previewChars, compact)));
+        StoreMemo("brain_semantic_search", args, query, resultsArr);
         return new JObject
         {
             ["query"] = query,
             ["mode"] = mode,
             ["count"] = ranked.Count,
-            ["results"] = new JArray(ranked.Select(x => BuildSearchResult(x.node, Math.Round(x.score, 4), previewChars, compact)))
+            ["results"] = resultsArr
         };
     }
 
@@ -2159,6 +2376,111 @@ internal static class Program
         if (!File.Exists(path)) return null;
         try { return JsonConvert.DeserializeObject<BrainExport>(File.ReadAllText(path)); }
         catch { return null; }
+    }
+
+    // ───────────── search-memo cache (token-economy guard) ──────────────
+    //
+    // Wraps brain_search + brain_semantic_search. If the exact same query
+    // (with the same shape args) was answered in this MCP process within
+    // the last MemoTtl, we skip the work and return a TINY response that
+    // tells Claude "you already saw this — do not re-narrate". Compact
+    // results (id+title+score+tags only) are still included so Claude can
+    // line up the prior turn's notes.
+    //
+    // Cache key embeds the brain-export.json mtime, so a re-export busts
+    // every entry automatically. ENV escape hatch: OBSIDIANX_DISABLE_MEMO=1.
+    // Per-call escape hatch: pass bypass_cache:true.
+
+    private record MemoEntry(DateTime AtUtc, JArray Compact, int OriginalCount, int HitCount);
+
+    private static readonly Dictionary<string, MemoEntry> _searchMemo = new();
+    private static readonly object _memoLock = new();
+    private static readonly TimeSpan MemoTtl = TimeSpan.FromMinutes(10);
+    private const int MemoMaxEntries = 200;
+    private static int _memoHits;
+    private static int _memoMisses;
+
+    private static string MakeMemoKey(string toolName, JObject args, string queryOverride)
+    {
+        long mtime = 0;
+        try
+        {
+            var p = Path.Combine(_vaultPath, ".obsidianx", "brain-export.json");
+            if (File.Exists(p)) mtime = File.GetLastWriteTimeUtc(p).Ticks;
+        }
+        catch { /* mtime stays 0 — degraded but safe */ }
+
+        var q = queryOverride.Trim().ToLowerInvariant();
+        var limit = args["limit"]?.ToObject<int>() ?? 10;
+        var preview = args["preview_chars"]?.ToObject<int>() ?? 200;
+        var compact = (args["compact"]?.ToObject<bool>() ?? false) ? 1 : 0;
+        return $"{toolName}|mt={mtime}|q={q}|l={limit}|p={preview}|c={compact}";
+    }
+
+    private static JToken? TryGetMemoHit(string toolName, JObject args, string queryOverride)
+    {
+        if (Environment.GetEnvironmentVariable("OBSIDIANX_DISABLE_MEMO") == "1") return null;
+        if (args["bypass_cache"]?.ToObject<bool>() == true) return null;
+
+        var key = MakeMemoKey(toolName, args, queryOverride);
+        lock (_memoLock)
+        {
+            if (!_searchMemo.TryGetValue(key, out var entry))
+            {
+                _memoMisses++;
+                return null;
+            }
+            if (DateTime.UtcNow - entry.AtUtc > MemoTtl)
+            {
+                _searchMemo.Remove(key);
+                _memoMisses++;
+                return null;
+            }
+            var bumped = entry with { HitCount = entry.HitCount + 1 };
+            _searchMemo[key] = bumped;
+            _memoHits++;
+            var ageSeconds = (int)(DateTime.UtcNow - entry.AtUtc).TotalSeconds;
+            return new JObject
+            {
+                ["cached"] = true,
+                ["tool"] = toolName,
+                ["query"] = queryOverride,
+                ["originalAt"] = entry.AtUtc.ToString("O"),
+                ["ageSeconds"] = ageSeconds,
+                ["hitCount"] = bumped.HitCount,
+                ["originalCount"] = entry.OriginalCount,
+                ["note"] = $"Identical {toolName} call ran {ageSeconds}s ago in this MCP process — full results were returned then and remain in your earlier turn's context. Returning compact handles only to save tokens. Pass bypass_cache:true to force a fresh run.",
+                ["results"] = entry.Compact
+            };
+        }
+    }
+
+    private static void StoreMemo(string toolName, JObject args, string queryOverride, JArray fullResults)
+    {
+        // Build a token-cheap projection: id + title + score + tags only.
+        var compact = new JArray(fullResults.Select(r =>
+        {
+            var o = new JObject
+            {
+                ["id"] = r["id"]?.DeepClone(),
+                ["title"] = r["title"]?.DeepClone()
+            };
+            if (r["score"] != null) o["score"] = r["score"]!.DeepClone();
+            if (r["tags"] is JArray tags) o["tags"] = (JArray)tags.DeepClone();
+            return o;
+        }));
+
+        var key = MakeMemoKey(toolName, args, queryOverride);
+        lock (_memoLock)
+        {
+            if (_searchMemo.Count >= MemoMaxEntries)
+            {
+                // Evict the single oldest entry — simple LRU-ish bound.
+                var oldest = _searchMemo.OrderBy(kv => kv.Value.AtUtc).First().Key;
+                _searchMemo.Remove(oldest);
+            }
+            _searchMemo[key] = new MemoEntry(DateTime.UtcNow, compact, fullResults.Count, 0);
+        }
     }
 
     private static readonly object _accessLogLock = new();
