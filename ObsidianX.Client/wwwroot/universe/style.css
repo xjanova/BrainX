@@ -667,6 +667,12 @@ body.bg-nebula {
     background: rgba(108, 240, 255, 0.08);
 }
 
+.text-btn.active {
+    color: var(--accent);
+    background: rgba(108, 240, 255, 0.18);
+    box-shadow: inset 0 0 0 1px rgba(108, 240, 255, 0.45);
+}
+
 /* hide the bottom hint when overlapping the settings dial on narrow windows */
 @media (max-width: 720px) {
     #hud-bottom .hint { display: none; }

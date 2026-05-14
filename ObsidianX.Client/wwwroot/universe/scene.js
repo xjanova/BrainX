@@ -579,6 +579,14 @@ export function createScene(canvas, callbacks = {}) {
         pulseEdgeBoost = null;
         activeEdgeBoosts.clear();
         activePulses.clear();
+        // Drop component analysis — a new brain payload may have a totally
+        // different graph topology, so the snapshot and component map
+        // would be wrong. Recomputed lazily on next toggleIslands().
+        nodeComponent = null;
+        componentSize = null;
+        islandStats   = null;
+        islandBrightSnapshot = null;
+        islandsOn = false;
         starPosAttr = null;
         edgePosAttr = null;
         for (const s of sims) s.sim.stop();
@@ -1176,6 +1184,109 @@ export function createScene(canvas, callbacks = {}) {
         settings.size = clamp(v, 0.3, 3.0);
         applySettings();
     }
+    // ── Connected-component analysis ("Show islands") ────────────────
+    //
+    // The brain's wiki-link graph is treated as undirected for component
+    // detection (an edge is an edge regardless of direction). Union-find
+    // with path compression — O((N + E) · α(N)), one-shot on first toggle,
+    // memoised until the next mount(). Result tells the user "these notes
+    // are unreachable from your main knowledge cluster — link them or
+    // accept them as orphans".
+    let nodeComponent = null;       // Int32Array: nodeIdx → root
+    let componentSize = null;       // Map<root, size>
+    let islandStats   = null;       // {totalComponents, mainSize, islandCount, loneCount}
+    let islandBrightSnapshot = null;// original aBrightness, restored on toggle-off
+    let islandsOn = false;
+
+    function computeComponents() {
+        if (!universe) return null;
+        const N = universe.nodes.length;
+        const parent = new Int32Array(N);
+        for (let i = 0; i < N; i++) parent[i] = i;
+        function find(x) {
+            while (parent[x] !== x) {
+                parent[x] = parent[parent[x]];   // path compression
+                x = parent[x];
+            }
+            return x;
+        }
+        for (const e of universe.edges || []) {
+            const ra = find(e.a), rb = find(e.b);
+            if (ra !== rb) parent[ra] = rb;
+        }
+        const comp = new Int32Array(N);
+        const sz = new Map();
+        let mainSize = 0;
+        for (let i = 0; i < N; i++) {
+            const r = find(i);
+            comp[i] = r;
+            const next = (sz.get(r) || 0) + 1;
+            sz.set(r, next);
+            if (next > mainSize) mainSize = next;
+        }
+        let loneCount = 0;
+        let islandCount = 0;
+        for (const s of sz.values()) {
+            if (s === 1) loneCount++;
+            else if (s < mainSize) islandCount++;
+        }
+        nodeComponent = comp;
+        componentSize = sz;
+        islandStats = {
+            totalComponents: sz.size,
+            mainSize,
+            islandCount,    // small clusters (2..mainSize-1)
+            loneCount       // singletons (no edges at all)
+        };
+        return islandStats;
+    }
+
+    /**
+     * Toggle the islands highlight: dim main-component stars to 30% and
+     * boost any star NOT in the main component to 175% with the existing
+     * colour palette. No shader changes — just rewrites aBrightness in
+     * place. Returns the stats object so the caller can update status.
+     */
+    function toggleIslands(on) {
+        if (!starsObj) return null;
+        const brightAttr = starsObj.geometry.getAttribute('aBrightness');
+        if (!brightAttr) return null;
+
+        // First call: snapshot the original brightness so toggle-off can
+        // restore byte-for-byte (never trust GPU-side state).
+        if (!islandBrightSnapshot) {
+            islandBrightSnapshot = new Float32Array(brightAttr.array);
+        }
+
+        islandsOn = !!on;
+        const arr = brightAttr.array;
+        if (!islandsOn) {
+            arr.set(islandBrightSnapshot);
+            brightAttr.needsUpdate = true;
+            return islandStats || computeComponents();
+        }
+
+        if (!nodeComponent) computeComponents();
+        const mainRoot = (() => {
+            let bestR = -1, bestS = -1;
+            for (const [r, s] of componentSize) {
+                if (s > bestS) { bestS = s; bestR = r; }
+            }
+            return bestR;
+        })();
+        for (let i = 0; i < arr.length; i++) {
+            const inMain = nodeComponent[i] === mainRoot;
+            arr[i] = islandBrightSnapshot[i] * (inMain ? 0.30 : 1.75);
+        }
+        brightAttr.needsUpdate = true;
+        return islandStats;
+    }
+
+    function getIslandStats() {
+        if (!islandStats) computeComponents();
+        return islandStats;
+    }
+
     function setLightning(intensity, speed) {
         // Either argument may be undefined — preserves current value so a
         // single-arg call from the host is safe (e.g. only intensity slider
@@ -1271,6 +1382,8 @@ export function createScene(canvas, callbacks = {}) {
         setStarSize,
         setEdgeAlpha,
         setLightning,
+        toggleIslands,
+        getIslandStats,
         setDrift,
         setCameraMode,
         setBackground,

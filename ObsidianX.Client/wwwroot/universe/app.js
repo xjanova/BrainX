@@ -49,6 +49,7 @@ const $setResettle   = document.getElementById('set-resettle');
 const $setFullscreen = document.getElementById('set-fullscreen');
 const $setShowCase   = document.getElementById('set-showcase');
 const $setWallpaper  = document.getElementById('set-wallpaper');
+const $setIslands    = document.getElementById('set-islands');
 const $tokenChip     = document.getElementById('token-chip');
 const $tokenText     = document.getElementById('token-text');
 const $wpSetupBar    = document.getElementById('wp-setup-bar');
@@ -635,6 +636,27 @@ function wireSettingsPanel() {
         console.log('[Universe] wallpaper button clicked — posting toggleWallpaper');
         setStatus('Wallpaper toggle sent to host…');
         postToHost({ type: 'toggleWallpaper' });
+    });
+
+    // Islands = dim main galaxy, brighten orphans/small clusters. Pure
+    // visual diagnostic — answers "which notes haven't been linked yet?".
+    // Toggles the .active class so the user can see whether highlight is on.
+    let islandsState = false;
+    $setIslands?.addEventListener('click', () => {
+        islandsState = !islandsState;
+        $setIslands.classList.toggle('active', islandsState);
+        const stats = scene?.toggleIslands?.(islandsState);
+        if (!stats) return;
+        if (islandsState) {
+            const detached = stats.totalComponents - 1;
+            setStatus(
+                `Islands ON · ${stats.totalComponents} components · ` +
+                `main=${stats.mainSize} stars · ${stats.islandCount} small clusters · ` +
+                `${stats.loneCount} lone stars`
+            );
+        } else {
+            setStatus(`Islands OFF · main galaxy restored (${stats.mainSize} stars)`);
+        }
     });
 
     // Camera-mode picker (Free / Orbit / Follow). Pure JS — scene.js owns
