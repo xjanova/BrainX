@@ -85,14 +85,20 @@ const starFrag = /* glsl */`
         float ring = smoothstep(0.42, 0.46, d) - smoothstep(0.46, 0.5, d);
         // Pulse halo: a wider outer ring that explodes outward during the
         // peak of the flash. Adds a vivid corona that bloom amplifies.
+        // Lightning tint: pure white at low amplitudes, cool blue-white at
+        // peaks (>1.0 overshoot allowed by the envelope) — makes the eye
+        // read the flash as electrical rather than a generic glow.
         float pulseHalo = smoothstep(0.5, 0.05, d) * vPulse;
+        vec3 lightningCol = mix(vec3(1.0, 1.0, 1.0),
+                                vec3(0.82, 0.92, 1.30),
+                                smoothstep(0.45, 1.15, vPulse));
         vec3 col = vColor * (0.6 + 0.7 * vBrightness)
                  + ring * vSelected * vec3(1.0)
-                 + pulseHalo * vec3(1.0, 1.0, 1.0) * 0.8;
+                 + pulseHalo * lightningCol * 0.95;
 
         // uStarScale (slider) attenuates BOTH color brightness and alpha so
         // dimming visibly tames the bloom feed, not just the inner core.
-        float alpha = a * (0.55 + vBrightness * 0.55 + vPulse * 0.4) * uStarScale;
+        float alpha = a * (0.55 + vBrightness * 0.55 + vPulse * 0.55) * uStarScale;
         gl_FragColor = vec4(col * uStarScale, alpha);
     }
 `;
@@ -410,14 +416,16 @@ export function createScene(canvas, callbacks = {}) {
     // sims stop being touched so steady-state is zero-cost.
     let sims = [];
 
-    // MCP pulse state: when C# forwards a node-touch event, we set the
-    // matching star's pulse amplitude to 1.0; the loop decays it each
-    // frame so the corona fades over ~1.3 s. Same lifetime as the 2D
-    // BumpPulseForNode → Graph2DRenderer fade.
+    // MCP pulse state: when C# forwards a node-touch event, we record the
+    // start time and each frame compute the amplitude from a "lightning
+    // envelope" (sum of gaussian flashes). The result is multiple bright
+    // flickers over ~720 ms before going dark — like a real lightning
+    // bolt rather than a smooth fade. activePulses maps starIdx → t0_ms.
     let pulseAttr = null;
-    const PULSE_DECAY_PER_SEC = 0.85;   // → ~1.2 s lifetime (1.0 → ~0.005)
+    const LIGHTNING_STAR_DURATION_MS = 720;
+    const LIGHTNING_EDGE_DURATION_MS = 520;
     let idToIndex = null;
-    let activePulses = new Set();   // indices currently > 0
+    let activePulses = new Map();   // starIdx → t0_ms (performance.now())
 
     // Edge alpha pipeline (fixes B1 + B2 from the review).
     //
@@ -434,10 +442,42 @@ export function createScene(canvas, callbacks = {}) {
     // automatically — no "arc died and forgot to restore" bug.
     let edgeBaseAlpha = null;       // Float32Array length E
     let edgeIntra = null;           // Uint8Array length E — 1 if intra-galaxy
-    let pulseEdgeBoost = null;      // Float32Array length E
-    const activeEdgeBoosts = new Set();    // edge indices with boost > 0
-    const PULSE_EDGE_DECAY_PER_SEC = 1.6;  // a bit faster than star pulse
+    let pulseEdgeBoost = null;      // Float32Array length E (current envelope value)
+    const activeEdgeBoosts = new Map();    // edgeIdx → t0_ms (lightning envelope start)
     const MAX_ARCS_PER_PULSE = 8;
+
+    // ── Lightning envelope ─────────────────────────────────────────────
+    // Sum of gaussian flashes at staggered offsets, producing the
+    // characteristic "FLASH … flicker … flicker … fade" pattern that
+    // makes the eye read it as lightning rather than a smooth glow.
+    // Returns 0 outside the active window so the caller can detach.
+    function lightningAmpStar(elapsedMs) {
+        if (elapsedMs < 0 || elapsedMs >= LIGHTNING_STAR_DURATION_MS) return 0;
+        const t = elapsedMs;
+        // Each flash: amplitude × exp(-(t - centre)^2 / (2σ²))
+        let a = 0;
+        a += 1.00 * Math.exp(-((t -   0) * (t -   0)) / (2 *  30 *  30));   // initial blinding flash
+        a += 0.65 * Math.exp(-((t -  90) * (t -  90)) / (2 *  25 *  25));   // first flicker
+        a += 0.55 * Math.exp(-((t - 220) * (t - 220)) / (2 *  35 *  35));   // second flicker
+        a += 0.30 * Math.exp(-((t - 410) * (t - 410)) / (2 *  50 *  50));   // afterglow
+        // Tiny crackle so even the smooth shoulders feel chaotic.
+        a *= 1.0 + Math.sin(t * 0.21) * 0.07;
+        // Allow brief overshoot above 1.0 — the shader bloom turns this
+        // into a white-out at the peak, which sells the lightning feel.
+        return Math.max(0, Math.min(1.5, a));
+    }
+
+    function lightningAmpEdge(elapsedMs) {
+        if (elapsedMs < 0 || elapsedMs >= LIGHTNING_EDGE_DURATION_MS) return 0;
+        const t = elapsedMs;
+        // Edges fire ~20 ms behind the star and decay slightly faster —
+        // the bolt visibly travels outward from the star core.
+        let a = 0;
+        a += 1.00 * Math.exp(-((t -  20) * (t -  20)) / (2 *  25 *  25));
+        a += 0.55 * Math.exp(-((t - 120) * (t - 120)) / (2 *  28 *  28));
+        a += 0.40 * Math.exp(-((t - 280) * (t - 280)) / (2 *  40 *  40));
+        return Math.max(0, Math.min(1.4, a));
+    }
 
     // Diagnostics: rate-limited warn on pulse misses so a stale id stream
     // is visible during debug instead of failing silently.
@@ -1034,9 +1074,13 @@ export function createScene(canvas, callbacks = {}) {
             }
             return;
         }
-        pulseAttr.array[idx] = 1.0;
+        // Record the start time and seed the buffer with the t=0 amplitude.
+        // stepPulses will recompute every frame from the lightning envelope.
+        // Re-firing on a star already lit just resets t0 → fresh flash.
+        const now = performance.now();
+        pulseAttr.array[idx] = lightningAmpStar(0);
         pulseAttr.needsUpdate = true;
-        activePulses.add(idx);
+        activePulses.set(idx, now);
 
         // Camera-follow mode: when a pulse fires, the camera flies to that
         // star automatically — the "AI is reading your brain right now"
@@ -1045,55 +1089,58 @@ export function createScene(canvas, callbacks = {}) {
             focusNode(idx);
         }
 
-        // Edge arcs: pick up to MAX_ARCS_PER_PULSE incident edges and bump
-        // their pulse boost to 1.0. stepPulses will decay + composite into
-        // the GPU alpha buffer each frame.
+        // Edge arcs: pick up to MAX_ARCS_PER_PULSE incident edges and start
+        // their lightning envelope. stepPulses composites the per-frame
+        // amplitude into the GPU alpha buffer.
         if (!universe?.edges?.length || !pulseEdgeBoost) return;
         let count = 0;
         for (let i = 0; i < universe.edges.length && count < MAX_ARCS_PER_PULSE; i++) {
             const e = universe.edges[i];
             if (e.a !== idx && e.b !== idx) continue;
-            pulseEdgeBoost[i] = 1.0;
-            activeEdgeBoosts.add(i);
+            pulseEdgeBoost[i] = lightningAmpEdge(0);
+            activeEdgeBoosts.set(i, now);
             count++;
         }
     }
 
-    // Decay live pulses + recompute composited edge alpha. Called every
-    // frame; cheap when nothing is alive (one Set.size check + early exit).
-    function stepPulses(dt) {
+    // Re-evaluate live pulses against the lightning envelope and recompose
+    // edge alpha. Called every frame; cheap when nothing is alive (early
+    // exits via Map.size check). dt is unused now — the envelope is keyed
+    // off wall-clock elapsed-since-trigger, so frame jitter doesn't change
+    // the perceived flicker rhythm.
+    function stepPulses(/* dt */) {
         if (!pulseAttr) return;
+        const now = performance.now();
 
-        // 1) per-star pulse decay (size + corona on the star itself)
+        // 1) per-star: lookup t0, compute envelope amplitude, write to GPU.
+        //    Detach when the envelope returns 0 (window expired).
         if (activePulses.size > 0) {
-            const kStar = Math.exp(-PULSE_DECAY_PER_SEC * dt * 4);
             const toRemove = [];
-            for (const idx of activePulses) {
-                const v = pulseAttr.array[idx] * kStar;
-                if (v < 0.01) {
+            for (const [idx, t0] of activePulses) {
+                const amp = lightningAmpStar(now - t0);
+                if (amp <= 0) {
                     pulseAttr.array[idx] = 0;
                     toRemove.push(idx);
                 } else {
-                    pulseAttr.array[idx] = v;
+                    pulseAttr.array[idx] = amp;
                 }
             }
             for (const idx of toRemove) activePulses.delete(idx);
             pulseAttr.needsUpdate = true;
         }
 
-        // 2) per-edge pulse boost decay. When boost drops to 0 the edge
-        //    naturally returns to its selection/base alpha via
-        //    recomputeEdgeAlphas below — no "restore" bug.
+        // 2) per-edge: same envelope, slightly faster window. When an edge
+        //    drops out, recomputeEdgeAlphas restores its selection/base
+        //    contribution automatically — no "restore" bug.
         if (activeEdgeBoosts.size > 0 && pulseEdgeBoost) {
-            const kEdge = Math.exp(-PULSE_EDGE_DECAY_PER_SEC * dt);
             const toRemove = [];
-            for (const i of activeEdgeBoosts) {
-                const v = pulseEdgeBoost[i] * kEdge;
-                if (v < 0.01) {
+            for (const [i, t0] of activeEdgeBoosts) {
+                const amp = lightningAmpEdge(now - t0);
+                if (amp <= 0) {
                     pulseEdgeBoost[i] = 0;
                     toRemove.push(i);
                 } else {
-                    pulseEdgeBoost[i] = v;
+                    pulseEdgeBoost[i] = amp;
                 }
             }
             for (const i of toRemove) activeEdgeBoosts.delete(i);
