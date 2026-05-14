@@ -29,7 +29,12 @@ public class EmbeddingService
 {
     public string OllamaUrl { get; set; } = "http://localhost:11434";
     public string Model { get; set; } = "nomic-embed-text";
-    public int MaxChars { get; set; } = 8000;
+    // 4000 chars (~roughly 1500-2000 tokens for mixed Thai/English markdown)
+    // sits comfortably under nomic-embed-text's 8192-token context window.
+    // 8000 chars looked fine for English but tipped Thai notes over the
+    // limit and produced silent 400s on the embed call — see embed-all
+    // diagnosis 2026-05-07.
+    public int MaxChars { get; set; } = 4000;
 
     /// <summary>
     /// Embed every note that doesn't yet have a fresh sidecar file.

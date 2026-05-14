@@ -4,6 +4,7 @@ about: Suggest a new feature for ObsidianX
 title: "[FEATURE] "
 labels: enhancement
 assignees: ''
+tags: ["feature", "request", "design"]
 ---
 
 ## Description

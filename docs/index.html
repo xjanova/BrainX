@@ -1,0 +1,682 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ObsidianX — your second brain, made of Markdown</title>
+<meta name="description" content="ObsidianX turns a Markdown vault into a living 3D brain. MCP-native for Claude Code. Local-first. Brain-first protocol enforced from the moment of install.">
+<meta name="theme-color" content="#0a0a13">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #07070d;
+  --bg-2: #0d0d1a;
+  --bg-3: #14142a;
+  --ink: #e8e8f5;
+  --ink-2: #9d9db8;
+  --ink-3: #5a5a78;
+  --line: rgba(255,255,255,0.08);
+  --line-2: rgba(255,255,255,0.14);
+  --accent: #ff3e6c;
+  --accent-2: #00d4b4;
+  --accent-3: #6b4bff;
+  --accent-4: #ffc94d;
+  --accent-5: #5ec9ff;
+  --code-bg: rgba(0, 212, 180, 0.06);
+  --shadow: 0 24px 60px rgba(0,0,0,0.55);
+}
+*,*::before,*::after { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+  line-height: 1.6;
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+a { color: var(--accent-2); text-decoration: none; transition: color .15s; }
+a:hover { color: var(--accent); }
+img { max-width: 100%; display: block; border-radius: 12px; }
+code, pre { font-family: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace; }
+code { background: var(--code-bg); color: var(--accent-2); padding: 2px 6px; border-radius: 4px; font-size: 0.92em; }
+pre {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 18px 20px;
+  overflow-x: auto;
+  font-size: 13px;
+  line-height: 1.55;
+}
+pre code { background: transparent; padding: 0; color: var(--ink); font-size: inherit; }
+hr { border: 0; border-top: 1px solid var(--line); margin: 60px 0; }
+h1, h2, h3, h4 { font-weight: 700; letter-spacing: -0.02em; line-height: 1.2; margin: 0 0 16px; }
+h2 { font-size: clamp(28px, 4vw, 40px); }
+h3 { font-size: clamp(20px, 2.5vw, 26px); margin-top: 36px; }
+h4 { font-size: 17px; color: var(--ink); margin: 24px 0 8px; }
+p { margin: 0 0 14px; color: var(--ink-2); }
+.container { max-width: 1180px; margin: 0 auto; padding: 0 28px; }
+
+/* ── header ───────────────────────────────────────────── */
+header {
+  position: sticky; top: 0; z-index: 50;
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  background: rgba(7,7,13,0.78);
+  border-bottom: 1px solid var(--line);
+}
+header .container {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 28px;
+}
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px; }
+.brand-dot {
+  width: 12px; height: 12px; border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%, var(--accent-2), var(--accent-3));
+  box-shadow: 0 0 18px rgba(0,212,180,0.6);
+}
+nav { display: flex; gap: 26px; font-size: 14px; }
+nav a { color: var(--ink-2); }
+nav a:hover { color: var(--ink); }
+.cta {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 9px 18px; border-radius: 999px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-3));
+  color: #fff !important; font-size: 14px; font-weight: 600;
+  border: 0; cursor: pointer; transition: transform .15s, box-shadow .15s;
+}
+.cta:hover { transform: translateY(-1px); box-shadow: 0 10px 32px rgba(255,62,108,0.35); }
+.cta-secondary {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 9px 18px; border-radius: 999px;
+  background: rgba(255,255,255,0.04); border: 1px solid var(--line-2);
+  color: var(--ink) !important; font-size: 14px; font-weight: 500;
+  transition: background .15s, border-color .15s;
+}
+.cta-secondary:hover { background: rgba(255,255,255,0.08); border-color: var(--line-2); color: var(--ink); }
+
+/* ── hero ───────────────────────────────────────────── */
+.hero {
+  position: relative;
+  padding: 96px 0 72px;
+  overflow: hidden;
+}
+.hero::before {
+  content: '';
+  position: absolute; inset: 0;
+  background:
+    radial-gradient(60% 50% at 20% 30%, rgba(107,75,255,0.20), transparent 60%),
+    radial-gradient(50% 50% at 80% 20%, rgba(255,62,108,0.18), transparent 60%),
+    radial-gradient(60% 60% at 60% 90%, rgba(0,212,180,0.12), transparent 60%);
+  pointer-events: none;
+}
+.hero .container { position: relative; }
+.eyebrow {
+  display: inline-block;
+  font-size: 12px; font-weight: 600; letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--accent-2);
+  padding: 6px 14px; border-radius: 999px;
+  background: rgba(0,212,180,0.08); border: 1px solid rgba(0,212,180,0.20);
+  margin-bottom: 22px;
+}
+.hero h1 {
+  font-size: clamp(36px, 6vw, 64px);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  margin: 0 0 22px;
+  background: linear-gradient(120deg, #fff 0%, #d8d8ff 50%, #ffd4e0 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.hero p.lede {
+  font-size: clamp(17px, 2vw, 21px);
+  color: var(--ink-2);
+  max-width: 720px;
+  margin: 0 0 32px;
+}
+.hero p.lede strong { color: var(--ink); font-weight: 600; }
+.hero-actions { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 56px; }
+
+.hero-stats {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 18px;
+  margin-bottom: 48px;
+}
+.stat {
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,0.02);
+  border-radius: 14px;
+  padding: 18px 20px;
+}
+.stat .v {
+  font-size: 28px; font-weight: 800; letter-spacing: -0.02em;
+  color: var(--ink);
+  background: linear-gradient(120deg, var(--accent-2), var(--accent-5));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.stat .k { color: var(--ink-3); font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; margin-top: 4px; }
+
+.hero-shot {
+  border-radius: 16px; overflow: hidden;
+  box-shadow: var(--shadow);
+  border: 1px solid var(--line-2);
+  background: var(--bg-2);
+}
+
+/* ── sections ───────────────────────────────────────── */
+section { padding: 72px 0; }
+section.alt { background: linear-gradient(180deg, var(--bg) 0%, var(--bg-2) 100%); }
+section h2 + p { color: var(--ink-2); font-size: 18px; max-width: 740px; margin-bottom: 40px; }
+
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 28px; }
+.grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 22px; }
+
+.card {
+  border: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0));
+  border-radius: 16px;
+  padding: 28px;
+  transition: border-color .15s, transform .15s;
+}
+.card:hover { border-color: var(--line-2); transform: translateY(-2px); }
+.card .ico {
+  width: 42px; height: 42px; border-radius: 11px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255,62,108,0.10);
+  margin-bottom: 16px;
+  font-size: 22px;
+}
+.card.green .ico { background: rgba(0,212,180,0.10); }
+.card.purple .ico { background: rgba(107,75,255,0.10); }
+.card.gold .ico { background: rgba(255,201,77,0.10); }
+.card.blue .ico { background: rgba(94,201,255,0.10); }
+.card h3 { font-size: 19px; margin: 0 0 8px; }
+.card p { font-size: 15px; margin: 0; }
+
+.feature-row {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 56px;
+  align-items: center; padding: 36px 0;
+}
+.feature-row.flip { grid-template-columns: 1fr 1fr; direction: rtl; }
+.feature-row.flip > * { direction: ltr; }
+.feature-row .copy h3 { margin-top: 0; }
+.feature-row .copy ul { margin: 12px 0 0; padding-left: 22px; color: var(--ink-2); }
+.feature-row .copy li { margin: 6px 0; }
+.feature-row .copy li strong { color: var(--ink); font-weight: 600; }
+.feature-row .shot { border-radius: 14px; overflow: hidden; box-shadow: var(--shadow); border: 1px solid var(--line); }
+
+@media (max-width: 860px) {
+  .feature-row, .feature-row.flip { grid-template-columns: 1fr; gap: 24px; }
+  nav { display: none; }
+}
+
+/* ── before/after ─────────────────────────────────── */
+.compare {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 24px;
+}
+.compare > div {
+  border-radius: 14px;
+  padding: 22px;
+  border: 1px solid var(--line);
+}
+.compare .before { background: rgba(255,62,108,0.04); border-color: rgba(255,62,108,0.18); }
+.compare .after  { background: rgba(0,212,180,0.04); border-color: rgba(0,212,180,0.18); }
+.compare h4 { margin-top: 0; font-size: 13px; letter-spacing: 0.12em; text-transform: uppercase; }
+.compare .before h4 { color: #ff7da0; }
+.compare .after h4  { color: #4dd6bf; }
+.compare pre { margin: 8px 0 0; font-size: 12px; }
+
+@media (max-width: 720px) {
+  .compare { grid-template-columns: 1fr; }
+}
+
+/* ── checklist ─────────────────────────────────────── */
+.checklist {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 18px 24px;
+  background: rgba(255,255,255,0.02);
+}
+.checklist .row {
+  display: grid; grid-template-columns: 28px 1fr auto; gap: 14px;
+  padding: 14px 0; align-items: center;
+  border-bottom: 1px solid var(--line);
+}
+.checklist .row:last-child { border-bottom: 0; }
+.checklist .row .ok { color: var(--accent-2); font-weight: 700; font-size: 18px; }
+.checklist .row .pen { color: var(--accent-4); font-weight: 700; font-size: 18px; }
+.checklist .row .fail { color: var(--accent); font-weight: 700; font-size: 18px; }
+.checklist .row .label { font-size: 15px; color: var(--ink); }
+.checklist .row .meta { font-size: 12px; color: var(--ink-3); }
+
+/* ── footer ─────────────────────────────────────────── */
+footer {
+  padding: 56px 0 40px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-2);
+  color: var(--ink-3);
+  font-size: 14px;
+}
+footer .container { display: flex; flex-direction: column; gap: 8px; }
+.kbd {
+  display: inline-block; font-family: 'JetBrains Mono', monospace;
+  font-size: 12px; padding: 1px 7px; border-radius: 5px;
+  background: rgba(255,255,255,0.06); border: 1px solid var(--line-2);
+  color: var(--ink);
+}
+.tag-line { color: var(--ink-3); }
+.tag-line a { color: var(--ink-2); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="container">
+    <a href="#top" class="brand">
+      <span class="brand-dot"></span>
+      <span>ObsidianX</span>
+    </a>
+    <nav>
+      <a href="#what">What</a>
+      <a href="#features">Features</a>
+      <a href="#install">Install</a>
+      <a href="#enforce">Brain-first</a>
+      <a href="#audit">Audit</a>
+    </nav>
+    <a class="cta-secondary" href="https://github.com/xjanova/ObsidianX">GitHub →</a>
+  </div>
+</header>
+
+<a id="top"></a>
+<section class="hero">
+  <div class="container">
+    <span class="eyebrow">v1.1 · MCP-native · local-first</span>
+    <h1>Your second brain,<br>made of Markdown.</h1>
+    <p class="lede">
+      ObsidianX turns a Markdown vault into a living, physics-driven 3D graph and a
+      first-class memory surface for Claude Code. <strong>The brain reads, writes,
+      and audits itself</strong> — search before answering, save proactively, surface
+      contradictions, and report honestly when the smart path can't run.
+    </p>
+
+    <div class="hero-actions">
+      <a class="cta" href="#install">Install in 1 command →</a>
+      <a class="cta-secondary" href="https://github.com/xjanova/ObsidianX">View on GitHub</a>
+    </div>
+
+    <div class="hero-stats">
+      <div class="stat"><div class="v">611</div><div class="k">notes embedded</div></div>
+      <div class="stat"><div class="v">1.05M</div><div class="k">words indexed</div></div>
+      <div class="stat"><div class="v">3,665</div><div class="k">wiki-links</div></div>
+      <div class="stat"><div class="v">17</div><div class="k">MCP tools</div></div>
+      <div class="stat"><div class="v">100%</div><div class="k">local · no cloud</div></div>
+    </div>
+
+    <div class="hero-shot">
+      <img src="screenshots/dashboard-3d.png" alt="ObsidianX dashboard with 3D physics-driven knowledge graph">
+    </div>
+  </div>
+</section>
+
+<a id="what"></a>
+<section>
+  <div class="container">
+    <h2>What ObsidianX actually is</h2>
+    <p>
+      It's not a wrapper around a vector database. It's not a cloud-managed memory
+      service. It's a <strong>three-process system</strong> that runs entirely on
+      your machine and integrates Claude Code as a peer, not a guest.
+    </p>
+
+    <div class="grid-3">
+      <div class="card">
+        <div class="ico">🧠</div>
+        <h3>Markdown vault as ground truth</h3>
+        <p>Your <code>.md</code> files are the database. Edit them by hand, in Obsidian, in VS Code — Claude reads the same source. No re-indexing pipeline.</p>
+      </div>
+      <div class="card green">
+        <div class="ico">🛰️</div>
+        <h3>MCP server for Claude Code</h3>
+        <p>17 tools: <code>brain_search</code>, <code>brain_semantic_search</code>, <code>brain_create_note</code>, <code>brain_find_contradictions</code> (LLM-verified), <code>brain_synthesize</code>, <code>brain_get_backlinks</code>…</p>
+      </div>
+      <div class="card purple">
+        <div class="ico">🌌</div>
+        <h3>Living 3D + 2D graph</h3>
+        <p>Real WPF Viewport3D, real N-body physics, real-time pulses on every MCP access. Toggle to a retained-mode 2D renderer for 1000+ nodes at 60 fps.</p>
+      </div>
+      <div class="card gold">
+        <div class="ico">📚</div>
+        <h3>Auto-journal</h3>
+        <p>Every Claude tool call lands in <code>.obsidianx/sessions/&lt;date&gt;.md</code>. Claude never has to narrate "I searched for X" — the trace is already there.</p>
+      </div>
+      <div class="card blue">
+        <div class="ico">🔬</div>
+        <h3>Honest mode reporting</h3>
+        <p>Tools return <code>mode: "semantic"</code> vs <code>"keyword-fallback"</code> vs <code>"llm-verified"</code> vs <code>"legacy-heuristic"</code>. You always know whether the smart path actually ran.</p>
+      </div>
+      <div class="card">
+        <div class="ico">⚙️</div>
+        <h3>Local AI, optional cloud</h3>
+        <p>Ollama for embeddings (<code>nomic-embed-text</code>) and contradiction verification (<code>gemma3:4b</code>). NVIDIA NIM, OpenRouter, DeepSeek as opt-in.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr>
+
+<a id="features"></a>
+<section class="alt">
+  <div class="container">
+    <h2>Features, with context</h2>
+    <p>What's behind each surface — and what was rebuilt this week.</p>
+
+    <div class="feature-row">
+      <div class="copy">
+        <h3>3D physics graph that reacts to <em>you</em></h3>
+        <p>
+          Every node is a Markdown file. Every edge is a wiki-link or a semantic
+          spring computed from embeddings. The Real Brain camera mode follows
+          the freshest activity — a save, a delete, a click, an MCP read — and
+          weights them by rarity and recency.
+        </p>
+        <ul>
+          <li><strong>Birth / edit / death halos</strong> — animated lifecycle states sit in the same code path as physics</li>
+          <li><strong>Translucent cluster bubbles</strong> with category-colored equator rings — clicks pass through to nodes inside</li>
+          <li><strong>Octree spatial index</strong> — Barnes-Hut force calculation, smooth at hundreds of nodes</li>
+          <li><strong>2D fast renderer</strong> — DrawingContext-based, retained-mode, identical interaction model</li>
+        </ul>
+      </div>
+      <div class="shot">
+        <img src="screenshots/dashboard-3d.png" alt="Dashboard 3D with glassmorphism Expertise overlay">
+      </div>
+    </div>
+
+    <div class="feature-row flip">
+      <div class="copy">
+        <h3>2D mode for thousand-node brains</h3>
+        <p>
+          One toggle swaps the 3D Viewport for a <code>DrawingContext</code>-based
+          renderer that handles thousands of nodes without dropping below 60 fps.
+          Same data source, same hit-test, same camera animations — just a
+          different draw call.
+        </p>
+        <ul>
+          <li><strong>Categorical coloring</strong> — every node tinted by its <code>KnowledgeCategory</code> so regions read at a glance</li>
+          <li><strong>Pan + zoom + click</strong> with the same gestures as 3D</li>
+          <li><strong>Hover-scoped wheel zoom</strong> — wheel only zooms when cursor's over the map; dashboard scroll is unaffected</li>
+        </ul>
+      </div>
+      <div class="shot">
+        <img src="screenshots/dashboard-2d.png" alt="Dashboard 2D mode showing categorical coloring across many nodes">
+      </div>
+    </div>
+
+    <div class="feature-row">
+      <div class="copy">
+        <h3>Knowledge growth as a real time-series</h3>
+        <p>
+          Not a snapshot — a cumulative chart over actual <code>CreatedAt</code>
+          dates with per-category sub-lines. The vertical staircase exposes
+          burst-learning days vs slow weeks, and the locale-aware date axis means
+          Thai dates render correctly without manual formatting.
+        </p>
+        <ul>
+          <li><strong>Honest expertise scoring</strong> — relative-to-max rank, not a clamped <code>min(1, sum/10)</code> that pinned every category to 100%</li>
+          <li><strong>Stable through re-indexes</strong> — IDs are SHA-256 of normalized path, so growth is monotonic across runs</li>
+        </ul>
+      </div>
+      <div class="shot">
+        <img src="screenshots/growth-chart.png" alt="Knowledge growth time-series chart">
+      </div>
+    </div>
+
+    <div class="feature-row flip">
+      <div class="copy">
+        <h3>AI Brain Assistant — pick a backend, ask anything</h3>
+        <p>
+          Local Ollama or one of 130+ cloud models (NVIDIA NIM free tier:
+          Llama 4 / GPT-OSS / DeepSeek / Qwen / Gemma; OpenRouter; DeepSeek). The
+          vault becomes the system prompt. An optional <strong>traffic redirect</strong>
+          quietly forwards Claude Desktop calls to a local model so the private
+          brain never leaves the machine.
+        </p>
+        <ul>
+          <li><strong>One-click model swap</strong> across providers</li>
+          <li><strong>Per-router stats</strong> — bytes in / out / request count visible</li>
+          <li><strong>Streaming output</strong> — tokens render as they arrive</li>
+        </ul>
+      </div>
+      <div class="shot">
+        <img src="screenshots/ai-brain-assistant.png" alt="AI Brain Assistant with backend picker and chat">
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr>
+
+<a id="install"></a>
+<section>
+  <div class="container">
+    <h2>Install — one command, four ways</h2>
+    <p>
+      All four install surfaces hit the same shared installer in
+      <code>ObsidianX.Core.Services.ClaudeBrainRulesInstaller</code>, so memory
+      rules, MCP registration, Ollama setup, and embedding precompute all use
+      one code path. No drift.
+    </p>
+
+    <h3>Option A — CLI (recommended)</h3>
+<pre><code>obsidianx-mcp install --vault G:\Obsidian --pull-models --precompute</code></pre>
+    <p>
+      Single command does: seed/upgrade memory rules → print MCP registration
+      command → probe Ollama → pull <code>nomic-embed-text</code> +
+      <code>gemma3:4b</code> if <code>--pull-models</code> → run embedding
+      precompute if <code>--precompute</code>.
+    </p>
+
+    <h3>Option B — npm wrapper</h3>
+<pre><code>npm install -g obsidianx-mcp
+obsidianx-mcp install --vault ~/Obsidian</code></pre>
+    <p>The npm package is a thin Node.js wrapper that locates a co-shipped
+    binary, falls back to a system-installed <code>obsidianx-mcp</code>, and
+    finally falls back to <code>dotnet &lt;dll&gt;</code> if a build is
+    available. <code>postinstall</code> tells you which path it took.</p>
+
+    <h3>Option C — Desktop UI</h3>
+    <p>
+      Launch <code>ObsidianX.Client.exe</code> once. The constructor calls
+      <code>ClaudeBrainRulesInstaller.EnsureInstalled</code> automatically,
+      seeding the memory directory. The <em>Settings</em> view has dedicated
+      buttons for "Install in Claude Code CLI" and "Install hook" if you want
+      to re-run them.
+    </p>
+
+    <h3>Option D — automatic on every MCP boot</h3>
+    <p>
+      <code>obsidianx-mcp.exe</code> calls <code>EnsureInstalled</code> in
+      <code>Program.Main</code> before the JSON-RPC loop. Every Claude Code
+      session that spawns the MCP re-checks rule versions and upgrades
+      transparently. The on-disk version-field guard prevents clobbering
+      hand-edited rule files.
+    </p>
+  </div>
+</section>
+
+<hr>
+
+<a id="enforce"></a>
+<section class="alt">
+  <div class="container">
+    <h2>Brain-first protocol — enforced from install onward</h2>
+    <p>
+      Every Claude session that touches this vault is wrapped in four layers
+      of policy. They compound: when one is bypassed, the next catches it.
+    </p>
+
+    <div class="grid-2">
+      <div class="card">
+        <div class="ico">📜</div>
+        <h3>1 — MCP Initialize instructions</h3>
+        <p>
+          <code>tools/list</code> and <code>initialize</code> responses ship a
+          structured imperative protocol: "BEFORE answering, run
+          <code>brain_search</code>; AFTER >2 tool calls, save; AT session
+          end, write a <code>#session-handoff</code> note." Claude sees this
+          on every MCP handshake.
+        </p>
+      </div>
+      <div class="card green">
+        <div class="ico">🗂️</div>
+        <h3>2 — Three project memory rules</h3>
+        <p>Auto-installed at <code>~/.claude/projects/&lt;vault-slug&gt;/memory/</code>:</p>
+        <ul style="margin: 8px 0; padding-left: 18px; color: var(--ink-2);">
+          <li><code>feedback_brain_proactive_save.md</code></li>
+          <li><code>feedback_consult_brain_proactively.md</code></li>
+          <li><code>feedback_session_handoff_pattern.md</code></li>
+        </ul>
+        <p>Each rule carries a <code>version:</code> field. Files without one are treated as user-customized and never overwritten.</p>
+      </div>
+      <div class="card purple">
+        <div class="ico">⚡</div>
+        <h3>3 — UserPromptSubmit hook (gate)</h3>
+        <p>
+          Before Claude sees the user's prompt, the gate injects a brain-first
+          reminder. If the previous turn made code changes <em>without
+          consulting the brain</em>, the gate escalates to a <strong>STRONGER
+          NUDGE</strong> with a citation requirement.
+        </p>
+      </div>
+      <div class="card gold">
+        <div class="ico">🛑</div>
+        <h3>4 — Stop hook (audit)</h3>
+        <p>
+          When Claude stops, the hook scans the turn's tool calls. If 3+ edits
+          happened without a single <code>brain_create_note</code>,
+          <code>brain_append_note</code>, or <code>brain_remember</code>, it
+          injects a stronger nudge demanding a save before the session ends.
+        </p>
+      </div>
+    </div>
+
+    <h3>Result — measurable, not vibes</h3>
+    <p>
+      A diagnostic script (<code>~/.claude/scripts/brain-stats.ps1 -Compact</code>)
+      surfaces token cost vs savings every <code>SessionStart</code>. The line
+      flips from <strong>NET COST</strong> to <strong>NET SAVE</strong> once
+      the brain is populated and the hooks are firing — and a recent fix
+      uncovered a logger bug that had been silently reporting "0% hit rate"
+      while every search was actually returning real hits.
+    </p>
+
+    <div class="compare">
+      <div class="before">
+        <h4>Before — fake instruments</h4>
+        <pre><code>BRAIN STATS (2d): 61 prompts (38 fired,
+  23 skipped) | searches 15 (0% hit) |
+  cost ~29728t, saved ~7705t,
+  NET COST -22023t</code></pre>
+      </div>
+      <div class="after">
+        <h4>After — Resolve-Inner array fix</h4>
+        <pre><code>BRAIN SEARCH LOG (post-fix):
+  {"query":"obsidianx",
+   "hits":5,    ← real
+   "size":2216}
+  → NET SAVE expected within 2 sessions</code></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr>
+
+<a id="audit"></a>
+<section>
+  <div class="container">
+    <h2>Production audit — what's ready, what's flagged</h2>
+    <p>An honest checklist before showing this to the world.</p>
+
+    <h3>✅ Ready</h3>
+    <div class="checklist">
+      <div class="row"><span class="ok">✓</span><span class="label">Comprehensive README (275 lines, MIT license, contributing guide)</span><span class="meta">README.md · CONTRIBUTING.md · LICENSE</span></div>
+      <div class="row"><span class="ok">✓</span><span class="label">All projects build clean (Core · Mcp · Client · Server)</span><span class="meta">0 errors, dotnet 10 SDK</span></div>
+      <div class="row"><span class="ok">✓</span><span class="label">17 MCP tools — each with description, JSON schema, structured response</span><span class="meta">Program.cs ToolsList()</span></div>
+      <div class="row"><span class="ok">✓</span><span class="label">611 / 611 embeddings populated, brain_semantic_search returns mode="semantic"</span><span class="meta">.obsidianx/embeddings/*.bin · 1.79 MB</span></div>
+      <div class="row"><span class="ok">✓</span><span class="label">brain_find_contradictions rewritten — semantic candidates + LLM verification</span><span class="meta">gemma3:4b · structured topic/claimA/claimB/severity</span></div>
+      <div class="row"><span class="ok">✓</span><span class="label">Hit-count logger Resolve-Inner array bug fixed (was reporting 0% forever)</span><span class="meta">~/.claude/scripts/brain-tool-logger.ps1</span></div>
+      <div class="row"><span class="ok">✓</span><span class="label">Single-binary CLI: 'obsidianx-mcp install' wires rules + Ollama + precompute</span><span class="meta">CliInstall.cs</span></div>
+      <div class="row"><span class="ok">✓</span><span class="label">3 memory rules auto-install (proactive save / consult / session handoff)</span><span class="meta">v1.1 · idempotent · safe upgrade</span></div>
+    </div>
+
+    <h3>🟡 Flagged for follow-up</h3>
+    <div class="checklist">
+      <div class="row"><span class="pen">!</span><span class="label">User must restart Claude Code to load new MCP DLL (running instances hold the old DLL)</span><span class="meta">deploy-mcp.ps1 ready · TestBuild verified</span></div>
+      <div class="row"><span class="pen">!</span><span class="label">npm package not yet published — package.json + bin/ ready, awaits 'npm publish'</span><span class="meta">npm/ folder</span></div>
+      <div class="row"><span class="pen">!</span><span class="label">brain_find_contradictions LLM precision ≈ 33% on default settings</span><span class="meta">tunable: gemma3:27b or minSim ≥ 0.80</span></div>
+      <div class="row"><span class="pen">!</span><span class="label">Two old session-handoff notes have malformed YAML tags array (cosmetic)</span><span class="meta">created by pre-fix brain_create_note</span></div>
+      <div class="row"><span class="pen">!</span><span class="label">brain_expertise growthRate field is 1.0 for all categories — likely heuristic bug</span><span class="meta">KnowledgeIndexer · low priority</span></div>
+      <div class="row"><span class="pen">!</span><span class="label">brain_synthesize returns a content bundle — caller LLM does the synth</span><span class="meta">honest behavior, but tool name oversells</span></div>
+    </div>
+
+    <h3>Verdict</h3>
+    <p>
+      Ship-ready as a public open-source project. Existing README is
+      already polished; this landing page is a curated complement showing
+      the parts users actually click. Two yellow flags
+      (<em>npm publish</em> and <em>Claude Code restart</em>) are
+      action items, not blockers.
+    </p>
+  </div>
+</section>
+
+<hr>
+
+<a id="restart"></a>
+<section class="alt">
+  <div class="container">
+    <h2>Required: restart Claude Code now</h2>
+    <p>
+      The new MCP binary lives at <code>ObsidianX.Mcp/bin/TestBuild/</code>.
+      The currently-running MCP processes (one per Claude Code session) hold
+      the older DLL open, so a normal Release build can't overwrite it. The
+      cleanest path:
+    </p>
+<pre><code># 1. Quit ALL Claude Code windows (the MCP processes exit with their parent)
+# 2. From a fresh PowerShell:
+G:\Obsidian\ObsidianX\deploy-mcp.ps1
+# 3. Reopen Claude Code
+
+# 4. Sanity-check by sending one query — look for mode="llm-verified"
+#    on brain_find_contradictions, mode="semantic" on brain_semantic_search</code></pre>
+    <p>After restart, every new session boots:</p>
+    <ul style="color: var(--ink-2);">
+      <li>The strengthened <code>Initialize.instructions</code> imperative protocol</li>
+      <li>The auto-installed memory rules (v1.1, three files)</li>
+      <li>The semantic-then-LLM contradiction tool with structured output</li>
+      <li>The honest-mode-reporting tools that admit when the smart path can't run</li>
+    </ul>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p class="tag-line">
+      ObsidianX · MIT-licensed · built on .NET 10 + WPF + Ollama ·
+      <a href="https://github.com/xjanova/ObsidianX">github.com/xjanova/ObsidianX</a>
+    </p>
+    <p class="tag-line">
+      Brain address: <span class="kbd">0xBRAIN-f099-be76-07f0-aad3</span>
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

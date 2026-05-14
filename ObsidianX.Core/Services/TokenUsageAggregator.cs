@@ -42,8 +42,9 @@ public class TokenUsageAggregator
 
     public class HourBucket
     {
+        /// <summary>Bucket start time (UTC). Width = <see cref="Series.BucketMinutes"/>.</summary>
         public DateTime Hour { get; set; }
-        /// <summary>Tokens actually spent this hour (brain calls + tool calls).</summary>
+        /// <summary>Tokens actually spent in this bucket (brain calls + tool calls).</summary>
         public long ActualSpent { get; set; }
         /// <summary>Estimated tokens that brain calls saved (would have been
         /// extra Read/Grep work without the brain).</summary>
@@ -53,13 +54,21 @@ public class TokenUsageAggregator
         public long ProjectionWithoutBrain => ActualSpent + BrainSaved;
         public int BrainCalls { get; set; }
         public int OtherToolCalls { get; set; }
-        /// <summary>Dominant brain-mode this hour ("always"/"auto"/"off"/"mixed").</summary>
+        /// <summary>Dominant brain-mode this bucket ("always"/"auto"/"off"/"mixed").</summary>
         public string DominantMode { get; set; } = "unknown";
     }
 
     public class Series
     {
         public List<HourBucket> Buckets { get; set; } = [];
+        /// <summary>Width of each bucket in minutes. Used by the renderer to
+        /// label the X axis and to decide tick density.</summary>
+        public int BucketMinutes { get; set; } = 60;
+        /// <summary>Earliest timestamp the aggregator was asked to consider
+        /// (UTC). May be earlier than the first non-empty bucket.</summary>
+        public DateTime RangeStart { get; set; }
+        /// <summary>Now (UTC) at the moment Compute was called.</summary>
+        public DateTime RangeEnd { get; set; }
         public long TotalActual => Buckets.Sum(b => b.ActualSpent);
         public long TotalProjection => Buckets.Sum(b => b.ProjectionWithoutBrain);
         public long TotalSaved => Buckets.Sum(b => b.BrainSaved);
@@ -67,9 +76,11 @@ public class TokenUsageAggregator
             : (double)TotalSaved / TotalProjection * 100.0;
     }
 
-    public Series Compute(string vaultPath, int hoursBack = 24 * 14)
+    public Series Compute(string vaultPath, int hoursBack = 24 * 14, int bucketMinutes = 60)
     {
-        var since = DateTime.UtcNow.AddHours(-hoursBack);
+        if (bucketMinutes <= 0) bucketMinutes = 60;
+        var now = DateTime.UtcNow;
+        var since = now.AddHours(-hoursBack);
         var byHour = new Dictionary<DateTime, HourBucket>();
 
         // Brain calls — saved + spent attribution comes from TokenSavingsTracker.
@@ -80,7 +91,7 @@ public class TokenUsageAggregator
             {
                 if (!TryParseTs(line, out var ts, out var obj)) continue;
                 if (ts < since) continue;
-                var hour = new DateTime(ts.Year, ts.Month, ts.Day, ts.Hour, 0, 0, DateTimeKind.Utc);
+                var hour = RoundToBucket(ts, bucketMinutes);
                 var bucket = GetOrCreate(byHour, hour);
                 var op = obj["op"]?.ToString() ?? "";
                 bucket.BrainCalls++;
@@ -102,7 +113,7 @@ public class TokenUsageAggregator
             {
                 if (!TryParseTs(line, out var ts, out var obj)) continue;
                 if (ts < since) continue;
-                var hour = new DateTime(ts.Year, ts.Month, ts.Day, ts.Hour, 0, 0, DateTimeKind.Utc);
+                var hour = RoundToBucket(ts, bucketMinutes);
                 var bucket = GetOrCreate(byHour, hour);
                 var tool = obj["tool"]?.ToString() ?? "";
                 if (string.IsNullOrEmpty(tool)) continue;
@@ -130,8 +141,18 @@ public class TokenUsageAggregator
 
         return new Series
         {
-            Buckets = byHour.Values.OrderBy(b => b.Hour).ToList()
+            Buckets = byHour.Values.OrderBy(b => b.Hour).ToList(),
+            BucketMinutes = bucketMinutes,
+            RangeStart = since,
+            RangeEnd = now,
         };
+    }
+
+    private static DateTime RoundToBucket(DateTime ts, int bucketMinutes)
+    {
+        var ticksPerBucket = TimeSpan.FromMinutes(bucketMinutes).Ticks;
+        var bucketTicks = (ts.Ticks / ticksPerBucket) * ticksPerBucket;
+        return new DateTime(bucketTicks, DateTimeKind.Utc);
     }
 
     private static HourBucket GetOrCreate(Dictionary<DateTime, HourBucket> map, DateTime hour)

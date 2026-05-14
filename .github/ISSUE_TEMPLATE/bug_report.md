@@ -4,6 +4,7 @@ about: Report a bug in ObsidianX
 title: "[BUG] "
 labels: bug
 assignees: ''
+tags: ["bug", "report", "issue"]
 ---
 
 ## Description
