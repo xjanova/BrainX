@@ -21,7 +21,7 @@ internal static class Program
 {
     private const string ProtocolVersion = "2025-06-18";
     private const string ServerName = "obsidianx-brain";
-    private const string ServerVersion = "2.1.0";
+    private const string ServerVersion = "2.2.0";
 
     private static string _vaultPath = ResolveVault(Environment.GetCommandLineArgs());
 
@@ -145,12 +145,13 @@ internal static class Program
             "  → Write a #session-handoff note in Notes/Claude-Sessions/ with: branch, files touched, what shipped, what's pending, gotchas, deploy steps, open questions.\n" +
             "  → The SessionStart hook auto-injects the most recent #session-handoff into the next Claude's context — a good handoff means the next session starts at full context.\n\n" +
             "═══ TOOL MENU ════════════════════════════════════════════════\n\n" +
-            "READ:  brain_search (keyword) · brain_semantic_search (embeddings) · brain_walk (graph traversal — start at note(s), expand N hops via wiki-links, returns subgraph + edges) · brain_get_note · brain_get_backlinks · brain_list · brain_stats · brain_expertise · brain_synthesize (top-K bundle) · brain_suggest_links · brain_find_contradictions (LLM-verified) · brain_suggest_topics (gap analysis)\n" +
+            "READ:  brain_search (keyword) · brain_semantic_search (embeddings) · brain_walk (graph traversal — start at note(s), expand N hops via wiki-links, returns subgraph + edges) · brain_get_note · brain_get_backlinks · brain_list · brain_scope_list (enumerate folder namespaces) · brain_stats · brain_expertise · brain_synthesize (top-K bundle) · brain_suggest_links · brain_find_contradictions (LLM-verified) · brain_suggest_topics (gap analysis)\n" +
             "WRITE: brain_create_note · brain_append_note · brain_remember · brain_import_path\n" +
             "REVIEW QUEUE: submit_for_review · fetch_review_queue · post_review_verdict (Co-Pilot Arena bridge)\n\n" +
             "═══ EFFICIENCY ══════════════════════════════════════════════\n\n" +
             "Prefer brain_walk over chained brain_search + brain_get_backlinks when exploring 'what's near X'. One walk = one call = one logged event.\n" +
-            "If a tool response has cached=true, an identical call ran in this MCP process within the last 10 minutes — full results are still in your earlier turn. Do NOT re-narrate them; reference what you already saw. Pass bypass_cache:true to force a fresh run.\n\n" +
+            "If a tool response has cached=true, an identical call ran in this MCP process within the last 10 minutes — full results are still in your earlier turn. Do NOT re-narrate them; reference what you already saw. Pass bypass_cache:true to force a fresh run.\n" +
+            "When the user's question is clearly scoped to one project/area (mentions a project name, a folder, or 'in my X notes'), pass scope='Notes/...' or 'Programming/...' to brain_search/list/walk — this fences the result to that namespace. Use brain_scope_list first if you don't know what scopes exist.\n\n" +
             "═══ HONESTY ═════════════════════════════════════════════════\n\n" +
             "When a tool returns mode='keyword-fallback' or 'legacy-heuristic', the smart path degraded — tell the user briefly and suggest precompute. When mode='semantic' or 'llm-verified', that's the real thing.\n\n" +
             "Citing the owner's notes ALWAYS beats a generic answer — these notes represent first-hand experience the model otherwise has no access to."
@@ -173,7 +174,8 @@ internal static class Program
                         ["limit"] = new JObject { ["type"] = "integer", ["description"] = "max results (default 10)", ["default"] = 10 },
                         ["preview_chars"] = new JObject { ["type"] = "integer", ["description"] = "max chars per preview (default 200, set 0 for full preview)", ["default"] = 200 },
                         ["compact"] = new JObject { ["type"] = "boolean", ["description"] = "if true, drop preview/path/category; return id+title+score+tags only", ["default"] = false },
-                        ["bypass_cache"] = new JObject { ["type"] = "boolean", ["description"] = "if true, skip the 10-min memo cache and always re-run", ["default"] = false }
+                        ["bypass_cache"] = new JObject { ["type"] = "boolean", ["description"] = "if true, skip the 10-min memo cache and always re-run", ["default"] = false },
+                        ["scope"] = new JObject { ["type"] = "string", ["description"] = "optional folder-prefix namespace, e.g. 'Notes/Claude-Sessions' or 'Programming/CSharp' — restricts results to notes whose path starts here. Use brain_scope_list to discover scopes." }
                     },
                     ["required"] = new JArray { "query" }
                 }),
@@ -195,7 +197,7 @@ internal static class Program
                 "List the owner's knowledge domains ranked by depth. Returns category, score (0-1), note count, word count.",
                 new JObject { ["type"] = "object", ["properties"] = new JObject() }),
             Tool("brain_list",
-                "List notes, optionally filtered by category or tag. Returns id, title, category, path.",
+                "List notes, optionally filtered by category, tag, or scope (folder-prefix namespace). Returns id, title, category, path.",
                 new JObject
                 {
                     ["type"] = "object",
@@ -203,7 +205,19 @@ internal static class Program
                     {
                         ["category"] = new JObject { ["type"] = "string", ["description"] = "optional category filter (e.g. Programming)" },
                         ["tag"] = new JObject { ["type"] = "string", ["description"] = "optional tag filter" },
+                        ["scope"] = new JObject { ["type"] = "string", ["description"] = "optional folder-prefix scope, e.g. 'Notes/Claude-Sessions' (restricts to notes whose RelativePath starts here)" },
                         ["limit"] = new JObject { ["type"] = "integer", ["default"] = 50 }
+                    }
+                }),
+            Tool("brain_scope_list",
+                "List the brain's scope namespaces (top-level folders + their direct children) with note counts. Use BEFORE passing a scope arg to brain_search/brain_list/brain_walk so you know what scopes exist. Helps the user see how their brain is organised.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["depth"] = new JObject { ["type"] = "integer", ["default"] = 2, ["description"] = "how many path segments deep to enumerate (1 = top-level only, 2 = include immediate children, max 4)" },
+                        ["minSize"] = new JObject { ["type"] = "integer", ["default"] = 1, ["description"] = "skip scopes containing fewer than N notes" }
                     }
                 }),
             Tool("brain_stats",
@@ -425,7 +439,8 @@ internal static class Program
                         ["query"] = new JObject { ["type"] = "string", ["description"] = "optional — when rank='relevance', boost nodes that also keyword-match this query" },
                         ["include_seed"] = new JObject { ["type"] = "boolean", ["default"] = true, ["description"] = "include the seed note(s) in the result list" },
                         ["preview_chars"] = new JObject { ["type"] = "integer", ["default"] = 120 },
-                        ["compact"] = new JObject { ["type"] = "boolean", ["default"] = false, ["description"] = "if true, drop preview/path/category — id+title+score+distance only" }
+                        ["compact"] = new JObject { ["type"] = "boolean", ["default"] = false, ["description"] = "if true, drop preview/path/category — id+title+score+distance only" },
+                        ["scope"] = new JObject { ["type"] = "string", ["description"] = "optional folder-prefix scope — fences both seeds AND BFS traversal so the walk never spills outside the namespace" }
                     },
                     ["required"] = new JArray { "start" }
                 }),
@@ -512,6 +527,7 @@ internal static class Program
                 "brain_get_note"            => BrainGetNote(args),
                 "brain_expertise"           => BrainExpertise(),
                 "brain_list"                => BrainList(args),
+                "brain_scope_list"          => BrainScopeList(args),
                 "brain_stats"               => BrainStats(),
                 "brain_import_path"         => BrainImportPath(args),
                 "brain_create_note"         => BrainCreateNote(args),
@@ -574,20 +590,23 @@ internal static class Program
         var limit = args["limit"]?.ToObject<int>() ?? 10;
         var previewChars = args["preview_chars"]?.ToObject<int>() ?? 200;
         var compact = args["compact"]?.ToObject<bool>() ?? false;
+        var scope = NormaliseScope(args["scope"]?.ToString());
 
         var export = LoadExport()
             ?? throw new InvalidOperationException("brain-export.json not found — open ObsidianX → Settings → Export Brain Now");
 
         var ql = query.ToLowerInvariant();
-        var matches = export.Nodes.Select(n => new
-        {
-            Node = n,
-            Score = ScoreNode(n, ql)
-        })
-        .Where(x => x.Score > 0)
-        .OrderByDescending(x => x.Score)
-        .Take(limit)
-        .ToList();
+        var matches = export.Nodes
+            .Where(n => ScopeMatches(n.RelativePath, scope))
+            .Select(n => new
+            {
+                Node = n,
+                Score = ScoreNode(n, ql)
+            })
+            .Where(x => x.Score > 0)
+            .OrderByDescending(x => x.Score)
+            .Take(limit)
+            .ToList();
 
         // Log access for each hit so the 3D graph can pulse the matching nodes
         foreach (var m in matches) LogAccess(m.Node.Id, "search", query);
@@ -727,6 +746,7 @@ internal static class Program
     {
         var category = args["category"]?.ToString();
         var tag = args["tag"]?.ToString();
+        var scope = NormaliseScope(args["scope"]?.ToString());
         var limit = args["limit"]?.ToObject<int>() ?? 50;
 
         var export = LoadExport() ?? throw new InvalidOperationException("no brain-export");
@@ -736,6 +756,8 @@ internal static class Program
                           || n.SecondaryCategories.Any(c => c.Equals(category, StringComparison.OrdinalIgnoreCase)));
         if (!string.IsNullOrEmpty(tag))
             q = q.Where(n => n.Tags.Any(t => t.Equals(tag, StringComparison.OrdinalIgnoreCase)));
+        if (scope.Length > 0)
+            q = q.Where(n => ScopeMatches(n.RelativePath, scope));
 
         return new JArray(q.Take(limit).Select(n => new JObject
         {
@@ -746,6 +768,65 @@ internal static class Program
             ["path"] = n.RelativePath,
             ["wordCount"] = n.WordCount
         }));
+    }
+
+    /// <summary>
+    /// Enumerate scope namespaces — every distinct folder prefix up to
+    /// `depth` segments deep, with the count of notes living under each.
+    /// Lets callers see how the brain is partitioned before passing a
+    /// scope arg to brain_search/list/walk. Sorted by note count desc so
+    /// the largest scopes surface first.
+    /// </summary>
+    private static JToken BrainScopeList(JObject args)
+    {
+        var depth = Math.Clamp(args["depth"]?.ToObject<int>() ?? 2, 1, 4);
+        var minSize = Math.Max(0, args["minSize"]?.ToObject<int>() ?? 1);
+        var export = LoadExport() ?? throw new InvalidOperationException("no brain-export");
+
+        // Walk every node's RelativePath; for each prefix length 1..depth,
+        // count how many notes live there. Map<scope, (count, lastModified)>.
+        var counts = new Dictionary<string, (int Count, DateTime LastMod)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var n in export.Nodes)
+        {
+            if (string.IsNullOrEmpty(n.RelativePath)) continue;
+            var parts = n.RelativePath.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+            // The last segment is the file itself — scope is the directory chain.
+            var dirSegments = parts.Length - 1;
+            if (dirSegments == 0) continue;
+            for (int d = 1; d <= Math.Min(depth, dirSegments); d++)
+            {
+                var prefix = string.Join('/', parts.Take(d));
+                if (counts.TryGetValue(prefix, out var prev))
+                {
+                    counts[prefix] = (prev.Count + 1,
+                        n.ModifiedAt > prev.LastMod ? n.ModifiedAt : prev.LastMod);
+                }
+                else
+                {
+                    counts[prefix] = (1, n.ModifiedAt);
+                }
+            }
+        }
+
+        var rows = counts
+            .Where(kv => kv.Value.Count >= minSize)
+            .OrderByDescending(kv => kv.Value.Count)
+            .ThenBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(kv => new JObject
+            {
+                ["scope"] = kv.Key,
+                ["noteCount"] = kv.Value.Count,
+                ["depth"] = kv.Key.Count(c => c == '/') + 1,
+                ["lastModified"] = kv.Value.LastMod
+            });
+
+        return new JObject
+        {
+            ["depth"] = depth,
+            ["minSize"] = minSize,
+            ["totalScopes"] = counts.Count,
+            ["scopes"] = new JArray(rows)
+        };
     }
 
     private static JToken BrainStats()
@@ -957,7 +1038,8 @@ internal static class Program
         {
             "brain_search"      => $"q=\"{args["query"]?.ToString()}\"",
             "brain_get_note"    => $"id={args["id"]?.ToString()}",
-            "brain_list"        => $"category={args["category"]?.ToString() ?? "-"} tag={args["tag"]?.ToString() ?? "-"}",
+            "brain_list"        => $"category={args["category"]?.ToString() ?? "-"} tag={args["tag"]?.ToString() ?? "-"} scope={args["scope"]?.ToString() ?? "-"}",
+            "brain_scope_list"  => $"depth={args["depth"]?.ToString() ?? "2"}",
             "brain_import_path" => $"path={args["path"]?.ToString()}",
             "brain_create_note" => $"title=\"{args["title"]?.ToString()}\" folder={args["folder"]?.ToString() ?? "Notes"}",
             "brain_append_note" => $"id={args["id"]?.ToString() ?? args["path"]?.ToString()}",
@@ -1099,13 +1181,26 @@ internal static class Program
         var includeSeed = args["include_seed"]?.ToObject<bool>() ?? true;
         var previewChars = args["preview_chars"]?.ToObject<int>() ?? 120;
         var compact = args["compact"]?.ToObject<bool>() ?? false;
+        var scope = NormaliseScope(args["scope"]?.ToString());
 
         var export = LoadExport() ?? throw new InvalidOperationException("brain-export.json not found — open ObsidianX → Settings → Export Brain Now");
         var byId = export.Nodes.ToDictionary(n => n.Id, n => n);
 
-        var validSeeds = startIds.Where(byId.ContainsKey).ToList();
+        // Scope acts as a "fence" for the walk: out-of-scope nodes are
+        // invisible to BFS, even if reachable via wiki-links. Seeds must
+        // also pass the scope filter — refusing the request loudly is
+        // safer than silently returning {} when the user mistypes the
+        // scope.
+        bool InScope(NodeSummary n) => scope.Length == 0 || ScopeMatches(n.RelativePath, scope);
+
+        var validSeeds = startIds
+            .Where(id => byId.TryGetValue(id, out var sn) && InScope(sn))
+            .ToList();
         if (validSeeds.Count == 0)
-            throw new InvalidOperationException($"none of the start ids exist in the brain: {string.Join(", ", startIds)}");
+        {
+            var hint = scope.Length > 0 ? $" (scope='{scope}' — seeds may be out of scope)" : "";
+            throw new InvalidOperationException($"none of the start ids exist in the brain: {string.Join(", ", startIds)}{hint}");
+        }
 
         // ── BFS, recording min distance per node ──
         var distance = new Dictionary<string, int>();
@@ -1125,6 +1220,9 @@ internal static class Program
             foreach (var nid in neighbours)
             {
                 if (string.IsNullOrEmpty(nid) || distance.ContainsKey(nid)) continue;
+                // Scope fence: traversal stops at the namespace boundary so
+                // a project-scoped walk never spills into unrelated notes.
+                if (!byId.TryGetValue(nid, out var nn) || !InScope(nn)) continue;
                 distance[nid] = d + 1;
                 frontier.Enqueue(nid);
             }
@@ -2378,6 +2476,38 @@ internal static class Program
         catch { return null; }
     }
 
+    // ───────────── scope filter (path-prefix namespacing) ──────────────
+    //
+    // A "scope" is a folder path that segments the brain into namespaces
+    // (e.g. "Notes/projects/fortune-bot", "Programming/CSharp"). Tools
+    // that accept a scope arg restrict their results to notes whose
+    // RelativePath starts with that prefix — closing the gap with Mem0/
+    // Letta's per-agent/per-project memory while reusing the user's
+    // existing folder structure (no schema rework, no new frontmatter).
+    //
+    // Matching rules:
+    //   • Empty/null scope → no filter (return everything).
+    //   • Otherwise normalise both sides to forward slashes + lowercase
+    //     and require RelativePath to start with `<scope>/` OR equal it.
+    //   • Trailing slashes on the scope are tolerated.
+
+    private static string NormaliseScope(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
+        var s = raw.Trim().Replace('\\', '/');
+        while (s.EndsWith("/")) s = s[..^1];
+        return s.ToLowerInvariant();
+    }
+
+    private static bool ScopeMatches(string relativePath, string normalisedScope)
+    {
+        if (normalisedScope.Length == 0) return true;
+        if (string.IsNullOrEmpty(relativePath)) return false;
+        var p = relativePath.Replace('\\', '/').ToLowerInvariant();
+        if (p.Equals(normalisedScope, StringComparison.Ordinal)) return true;
+        return p.StartsWith(normalisedScope + "/", StringComparison.Ordinal);
+    }
+
     // ───────────── search-memo cache (token-economy guard) ──────────────
     //
     // Wraps brain_search + brain_semantic_search. If the exact same query
@@ -2414,7 +2544,11 @@ internal static class Program
         var limit = args["limit"]?.ToObject<int>() ?? 10;
         var preview = args["preview_chars"]?.ToObject<int>() ?? 200;
         var compact = (args["compact"]?.ToObject<bool>() ?? false) ? 1 : 0;
-        return $"{toolName}|mt={mtime}|q={q}|l={limit}|p={preview}|c={compact}";
+        // Scope MUST be part of the key — otherwise two different scopes
+        // with the same query collide and the second caller gets the first
+        // caller's results. Found via smoke test 2026-05-14.
+        var scope = NormaliseScope(args["scope"]?.ToString());
+        return $"{toolName}|mt={mtime}|q={q}|l={limit}|p={preview}|c={compact}|s={scope}";
     }
 
     private static JToken? TryGetMemoHit(string toolName, JObject args, string queryOverride)
