@@ -587,6 +587,7 @@ export function createScene(canvas, callbacks = {}) {
         islandStats   = null;
         islandBrightSnapshot = null;
         islandsOn = false;
+        adjacency = null;
         starPosAttr = null;
         edgePosAttr = null;
         for (const s of sims) s.sim.stop();
@@ -1044,6 +1045,17 @@ export function createScene(canvas, callbacks = {}) {
         if (idx >= 0) focusNode(idx);
         else if (selectedIndex !== -1) focusNode(-1);
     }
+    function onContextMenu(e) {
+        // Right-click a star → walk its 2-hop neighbourhood as a sequenced
+        // lightning wave. Suppress the browser context menu so the gesture
+        // is captured cleanly. Right-click on empty space falls through to
+        // OrbitControls (right-drag = pan), so we only preventDefault when
+        // we actually picked a star.
+        const idx = pickAtPointer(e.clientX, e.clientY);
+        if (idx < 0) return;
+        e.preventDefault();
+        walkFromHere(idx, 2);
+    }
     function onKey(e) {
         if (e.key === 'Escape') {
             if (selectedIndex !== -1) focusNode(-1);
@@ -1053,6 +1065,7 @@ export function createScene(canvas, callbacks = {}) {
     canvas.addEventListener('pointermove', onPointerMove);
     canvas.addEventListener('pointerleave', onPointerLeave);
     canvas.addEventListener('click', onClick);
+    canvas.addEventListener('contextmenu', onContextMenu);
     window.addEventListener('keydown', onKey);
 
     function destroy() {
@@ -1060,6 +1073,7 @@ export function createScene(canvas, callbacks = {}) {
         canvas.removeEventListener('pointermove', onPointerMove);
         canvas.removeEventListener('pointerleave', onPointerLeave);
         canvas.removeEventListener('click', onClick);
+        canvas.removeEventListener('contextmenu', onContextMenu);
         window.removeEventListener('keydown', onKey);
         dispose();
         composer.dispose?.();
@@ -1118,6 +1132,82 @@ export function createScene(canvas, callbacks = {}) {
             activeEdgeBoosts.set(i, now);
             count++;
         }
+    }
+
+    /**
+     * "Walk this concept" / "Trace this thought" — BFS from `start` (note
+     * id OR star idx), pulse the seed immediately, then schedule layered
+     * pulses outward at staggered delays so the eye reads it as a wave
+     * radiating through the wiki-link graph. Same lightning envelope per
+     * star — just sequenced.
+     *
+     * Returns a stats object the host UI can pipe into the status bar:
+     *   { startIdx, startTitle, hops, totalReached, perHop: [N0,N1,N2,...] }
+     */
+    function walkFromHere(start, hops = 2, layerDelayMs = 180) {
+        if (!universe || !pulseAttr) return null;
+
+        // Resolve start: accept either string (note id) or number (idx).
+        let startIdx = -1;
+        if (typeof start === 'number') {
+            startIdx = start;
+        } else if (typeof start === 'string' && idToIndex) {
+            const v = idToIndex.get(start);
+            if (typeof v === 'number') startIdx = v;
+        }
+        if (startIdx < 0 || startIdx >= universe.nodes.length) return null;
+
+        const adj = buildAdjacencyIfNeeded();
+        const maxHops = Math.max(1, Math.min(5, hops | 0));
+
+        // Layered BFS — collect indices reached at each hop distance.
+        const visited = new Map();
+        visited.set(startIdx, 0);
+        const layers = [[startIdx]];
+        let frontier = [startIdx];
+        for (let h = 1; h <= maxHops; h++) {
+            const next = [];
+            for (const i of frontier) {
+                const nb = adj[i];
+                if (!nb) continue;
+                for (const j of nb) {
+                    if (visited.has(j)) continue;
+                    visited.set(j, h);
+                    next.push(j);
+                }
+            }
+            if (next.length === 0) break;
+            layers.push(next);
+            frontier = next;
+        }
+
+        // Schedule the wave. Layer 0 fires synchronously so the source
+        // star lights up the same frame the user clicked. Subsequent
+        // layers cascade by layerDelayMs each — visible "current
+        // travelling outward" effect, perfectly synced with the
+        // lightning envelope's edge propagation delay.
+        for (let h = 0; h < layers.length; h++) {
+            const layerIdx = h;
+            const layerNodes = layers[h];
+            const fire = () => {
+                for (const idx of layerNodes) {
+                    const noteId = universe.nodes[idx]?.id;
+                    if (noteId) firePulse(noteId);
+                }
+            };
+            if (layerIdx === 0) fire();
+            else setTimeout(fire, layerIdx * layerDelayMs);
+        }
+
+        const stats = {
+            startIdx,
+            startTitle: universe.nodes[startIdx].title,
+            hops: layers.length - 1,
+            totalReached: visited.size,
+            perHop: layers.map(l => l.length)
+        };
+        callbacks.onWalk?.(stats);
+        return stats;
     }
 
     // Re-evaluate live pulses against the lightning envelope and recompose
@@ -1197,6 +1287,23 @@ export function createScene(canvas, callbacks = {}) {
     let islandStats   = null;       // {totalComponents, mainSize, islandCount, loneCount}
     let islandBrightSnapshot = null;// original aBrightness, restored on toggle-off
     let islandsOn = false;
+
+    // Lazy undirected adjacency list — built once per mount, used by
+    // walkFromHere. universe.edges has (a,b) once per pair so we expand
+    // both directions here so BFS treats wiki-links as undirected.
+    let adjacency = null;
+    function buildAdjacencyIfNeeded() {
+        if (adjacency || !universe) return adjacency;
+        const N = universe.nodes.length;
+        const adj = new Array(N);
+        for (let i = 0; i < N; i++) adj[i] = [];
+        for (const e of universe.edges || []) {
+            adj[e.a].push(e.b);
+            adj[e.b].push(e.a);
+        }
+        adjacency = adj;
+        return adj;
+    }
 
     function computeComponents() {
         if (!universe) return null;
@@ -1384,6 +1491,7 @@ export function createScene(canvas, callbacks = {}) {
         setLightning,
         toggleIslands,
         getIslandStats,
+        walkFromHere,
         setDrift,
         setCameraMode,
         setBackground,

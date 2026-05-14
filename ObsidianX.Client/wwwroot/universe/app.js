@@ -19,6 +19,7 @@ const $infoMeta = document.getElementById('info-meta');
 const $infoPrev = document.getElementById('info-preview');
 const $infoTags = document.getElementById('info-tags');
 const $infoEdit   = document.getElementById('info-edit');
+const $infoWalk   = document.getElementById('info-walk');
 const $infoSave   = document.getElementById('info-save');
 const $infoCancel = document.getElementById('info-cancel');
 const $infoOpen   = document.getElementById('info-open');
@@ -374,6 +375,14 @@ function wireInfoCard() {
     $infoCancel?.addEventListener('click', () => {
         if ($infoEditor.value && !confirm('Discard changes?')) return;
         exitEditUI();
+    });
+
+    // ⚡ Walk this concept — sequenced lightning across the 2-hop graph
+    // neighbourhood of the currently-selected note. Same effect as a
+    // right-click on the canvas, just discoverable from the info card.
+    $infoWalk?.addEventListener('click', () => {
+        if (!_infoCurrentNode) return;
+        scene?.walkFromHere?.(_infoCurrentNode.id, 2);
     });
 
     // ↗ Open in full WPF editor — leaves Universe entirely.
@@ -739,6 +748,16 @@ async function init() {
             },
             onGalaxies: galaxies => {
                 renderLegend(galaxies);
+            },
+            onWalk: stats => {
+                if (!stats) return;
+                // perHop[0] is the seed itself; per-layer counts read more
+                // naturally as "1-hop:N · 2-hop:M".
+                const layers = stats.perHop.slice(1)
+                    .map((n, i) => `${i + 1}-hop:${n}`).join(' · ');
+                setStatus(
+                    `Walking from "${stats.startTitle}" · ${stats.totalReached} stars · ${layers || '(isolated — no neighbours)'}`
+                );
             }
         });
     } catch (err) {
