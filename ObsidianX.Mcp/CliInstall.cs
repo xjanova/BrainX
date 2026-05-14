@@ -35,6 +35,8 @@ internal static class CliInstall
         Console.WriteLine("  obsidianx-mcp install [options]         Install brain-first rules + print MCP registration");
         Console.WriteLine("  obsidianx-mcp register-claude [--vault] Re-register this binary with Claude Code (auto-includes");
         Console.WriteLine("                                          OBSIDIANX_MCP_VERSION env so version shows in `claude mcp get`)");
+        Console.WriteLine("  obsidianx-mcp bake-bundles [options]    Pre-bake ~500-token context bundles for top topics so");
+        Console.WriteLine("                                          brain_bundle <topic> answers in ONE cheap MCP call");
         Console.WriteLine("  obsidianx-mcp --version | -v | version  Print version + binary path + build time");
         Console.WriteLine("  obsidianx-mcp help                      Show this help");
         Console.WriteLine();

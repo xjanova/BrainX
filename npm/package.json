@@ -1,6 +1,6 @@
 {
   "name": "obsidianx-mcp",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "description": "ObsidianX brain — local-first knowledge graph + MCP server for Claude Code. Brain-first protocol enforced via memory rules, hooks, and Initialize instructions. Includes brain_walk graph traversal, scoped namespaces, search-memo cache, and inline knowledge-hygiene daemon.",
   "bin": {
     "obsidianx-mcp": "bin/obsidianx-mcp.js"

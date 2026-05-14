@@ -21,7 +21,7 @@ internal static class Program
 {
     private const string ProtocolVersion = "2025-06-18";
     private const string ServerName = "obsidianx-brain";
-    internal const string ServerVersion = "2.3.0";
+    internal const string ServerVersion = "2.4.0";
 
     /// <summary>
     /// Build a one-line version string including the bound assembly's
@@ -73,6 +73,12 @@ internal static class Program
         {
             Console.OutputEncoding = new UTF8Encoding(false);
             return await CliInstall.RegisterClaudeAsync(args.Skip(1).ToArray()).ConfigureAwait(false);
+        }
+        if (args.Length > 0 && (args[0].Equals("bake-bundles", StringComparison.OrdinalIgnoreCase)
+                              || args[0].Equals("bake", StringComparison.OrdinalIgnoreCase)))
+        {
+            Console.OutputEncoding = new UTF8Encoding(false);
+            return BakeBundlesCli(args.Skip(1).ToArray());
         }
         if (args.Length > 0 && (args[0] == "--version" || args[0] == "-v" || args[0].Equals("version", StringComparison.OrdinalIgnoreCase)))
         {
@@ -191,11 +197,12 @@ internal static class Program
             "  → Write a #session-handoff note in Notes/Claude-Sessions/ with: branch, files touched, what shipped, what's pending, gotchas, deploy steps, open questions.\n" +
             "  → The SessionStart hook auto-injects the most recent #session-handoff into the next Claude's context — a good handoff means the next session starts at full context.\n\n" +
             "═══ TOOL MENU ════════════════════════════════════════════════\n\n" +
-            "READ:  brain_search (keyword) · brain_semantic_search (embeddings) · brain_walk (graph traversal — start at note(s), expand N hops via wiki-links, returns subgraph + edges) · brain_get_note · brain_get_backlinks · brain_list · brain_scope_list (enumerate folder namespaces) · brain_stats · brain_expertise · brain_synthesize (top-K bundle) · brain_suggest_links · brain_find_contradictions (LLM-verified) · brain_suggest_topics (gap analysis)\n" +
+            "READ:  brain_search (keyword) · brain_semantic_search (embeddings) · brain_walk (graph traversal — start at note(s), expand N hops via wiki-links, returns subgraph + edges) · brain_get_note · brain_get_backlinks · brain_list · brain_scope_list (enumerate folder namespaces) · brain_stats · brain_expertise · brain_synthesize (top-K full-content bundle) · brain_bundle (~500-token pre-built bundle by topic) · brain_bundles_list · brain_suggest_links · brain_find_contradictions (LLM-verified) · brain_suggest_topics (gap analysis)\n" +
             "WRITE: brain_create_note · brain_append_note · brain_remember · brain_import_path\n" +
             "REVIEW QUEUE: submit_for_review · fetch_review_queue · post_review_verdict (Co-Pilot Arena bridge)\n\n" +
             "═══ EFFICIENCY ══════════════════════════════════════════════\n\n" +
             "Prefer brain_walk over chained brain_search + brain_get_backlinks when exploring 'what's near X'. One walk = one call = one logged event.\n" +
+            "For known hot topics (top tags, recurring concepts), call brain_bundles_list first to see if a pre-baked ~500-token bundle exists; brain_bundle <topic> is way cheaper than brain_search + N×brain_get_note. brain_synthesize remains the on-demand full-content option (~8000 tokens).\n" +
             "If a tool response has cached=true, an identical call ran in this MCP process within the last 10 minutes — full results are still in your earlier turn. Do NOT re-narrate them; reference what you already saw. Pass bypass_cache:true to force a fresh run.\n" +
             "When the user's question is clearly scoped to one project/area (mentions a project name, a folder, or 'in my X notes'), pass scope='Notes/...' or 'Programming/...' to brain_search/list/walk — this fences the result to that namespace. Use brain_scope_list first if you don't know what scopes exist.\n\n" +
             "═══ HONESTY ═════════════════════════════════════════════════\n\n" +
@@ -268,6 +275,25 @@ internal static class Program
                 }),
             Tool("brain_stats",
                 "High-level stats: brain name, address, note/word counts, top tags, top categories.",
+                new JObject { ["type"] = "object", ["properties"] = new JObject() }),
+            Tool("brain_bundle",
+                "Load a PRE-BUILT context bundle for a hot topic. Each bundle is ~500 tokens — way cheaper than " +
+                "brain_synthesize's full-content packing (~8000 tokens). Bundle includes top 5-10 related notes " +
+                "with title + tags + short summary + ready-to-paste [[wiki-link]] block. Use this FIRST when the " +
+                "user asks about a known topic; fall back to brain_search/brain_synthesize if no bundle exists. " +
+                "Run `obsidianx-mcp bake-bundles` to (re)generate.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["topic"] = new JObject { ["type"] = "string", ["description"] = "topic name OR slug (e.g. 'mcp', 'obsidianx', 'csharp')" }
+                    },
+                    ["required"] = new JArray { "topic" }
+                }),
+            Tool("brain_bundles_list",
+                "Enumerate available pre-built context bundles (topic, type, note count, token estimate, last baked). " +
+                "Run BEFORE brain_bundle if you don't know what's available. Empty list = run `obsidianx-mcp bake-bundles`.",
                 new JObject { ["type"] = "object", ["properties"] = new JObject() }),
             Tool("brain_import_path",
                 "Run Resonance Scan on a filesystem path and import matching notes into the brain. " +
@@ -575,6 +601,8 @@ internal static class Program
                 "brain_list"                => BrainList(args),
                 "brain_scope_list"          => BrainScopeList(args),
                 "brain_stats"               => BrainStats(),
+                "brain_bundle"              => BrainBundle(args),
+                "brain_bundles_list"        => BrainBundlesList(),
                 "brain_import_path"         => BrainImportPath(args),
                 "brain_create_note"         => BrainCreateNote(args),
                 "brain_append_note"         => BrainAppendNote(args),
@@ -936,8 +964,426 @@ internal static class Program
                 ["misses"] = misses,
                 ["hitRate"] = hitRate,
                 ["ttlMinutes"] = (int)MemoTtl.TotalMinutes
-            }
+            },
+            ["bundles"] = BundleSummaryForStats()
         };
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //   PRE-BUILT CONTEXT BUNDLES (v2.4.0)
+    // ═══════════════════════════════════════════════════════════════
+    // A bundle is a ~500-token JSON snapshot of the top 5-10 notes for
+    // a hot topic. brain_synthesize is its on-demand cousin but costs
+    // ~8000 tokens per call (full content). Pre-bake → answer in ONE
+    // tool call with zero search/file-read overhead, at the cost of
+    // periodic re-baking when the brain grows.
+    //
+    // Bundle file format: <vault>/.obsidianx/bundles/<slug>.json
+    //
+    //   {
+    //     "topic": "MCP",
+    //     "topicSlug": "mcp",
+    //     "topicType": "tag" | "query" | "manual",
+    //     "generatedAt": "<utc>",
+    //     "exportGeneratedAt": "<utc>",   // for staleness checks
+    //     "noteCount": 7,
+    //     "tokenEstimate": 487,
+    //     "wikiLinkBlock": "[[A]] · [[B]] · [[C]]",
+    //     "notes": [{ id, title, tags, summary, wikiLink, wordCount, modifiedAt }, …]
+    //   }
+
+    /// <summary>Load a pre-baked bundle for a topic (tag or curated slug).</summary>
+    private static JToken BrainBundle(JObject args)
+    {
+        var topic = args["topic"]?.ToString() ?? throw new ArgumentException("topic is required");
+        var slug = SlugifyTopic(topic);
+        var bundleDir = Path.Combine(_vaultPath, ".obsidianx", "bundles");
+        var path = Path.Combine(bundleDir, slug + ".json");
+
+        if (!File.Exists(path))
+        {
+            // Soft failure — list what IS available so the caller can adjust
+            var available = Directory.Exists(bundleDir)
+                ? Directory.GetFiles(bundleDir, "*.json")
+                    .Select(f => Path.GetFileNameWithoutExtension(f))
+                    .OrderBy(x => x)
+                    .ToArray()
+                : Array.Empty<string>();
+            return new JObject
+            {
+                ["status"] = "not-found",
+                ["topic"] = topic,
+                ["topicSlug"] = slug,
+                ["availableBundles"] = new JArray(available),
+                ["hint"] = available.Length == 0
+                    ? "No bundles baked yet. Run `obsidianx-mcp bake-bundles` to generate bundles for top topics."
+                    : "Try one of the availableBundles, or call brain_search/brain_synthesize for ad-hoc topics."
+            };
+        }
+
+        try
+        {
+            var bundle = JObject.Parse(File.ReadAllText(path));
+            bundle["status"] = "ok";
+            // Log access so brain_suggest_topics can spot which bundles are useful
+            LogAccess(slug, "bundle-read", topic);
+            return bundle;
+        }
+        catch (Exception ex)
+        {
+            return new JObject
+            {
+                ["status"] = "parse-error",
+                ["topic"] = topic,
+                ["error"] = ex.Message,
+                ["hint"] = "Bundle file is malformed — re-run `obsidianx-mcp bake-bundles`."
+            };
+        }
+    }
+
+    /// <summary>Enumerate available bundles with metadata.</summary>
+    private static JToken BrainBundlesList()
+    {
+        var bundleDir = Path.Combine(_vaultPath, ".obsidianx", "bundles");
+        if (!Directory.Exists(bundleDir))
+        {
+            return new JObject
+            {
+                ["status"] = "no-bundle-dir",
+                ["count"] = 0,
+                ["bundles"] = new JArray(),
+                ["hint"] = "No bundles baked yet. Run `obsidianx-mcp bake-bundles` to create them."
+            };
+        }
+
+        var summaries = new JArray();
+        foreach (var file in Directory.GetFiles(bundleDir, "*.json").OrderBy(f => f))
+        {
+            try
+            {
+                var b = JObject.Parse(File.ReadAllText(file));
+                summaries.Add(new JObject
+                {
+                    ["topic"] = b["topic"],
+                    ["topicSlug"] = b["topicSlug"],
+                    ["topicType"] = b["topicType"],
+                    ["noteCount"] = b["noteCount"],
+                    ["tokenEstimate"] = b["tokenEstimate"],
+                    ["generatedAt"] = b["generatedAt"]
+                });
+            }
+            catch
+            {
+                // skip malformed bundles silently — bake will overwrite
+            }
+        }
+
+        return new JObject
+        {
+            ["status"] = summaries.Count == 0 ? "empty" : "ok",
+            ["count"] = summaries.Count,
+            ["bundles"] = summaries,
+            ["hint"] = summaries.Count == 0
+                ? "Bundle dir exists but no bundles. Run `obsidianx-mcp bake-bundles`."
+                : "Call brain_bundle topic=<topicSlug> to load a specific bundle."
+        };
+    }
+
+    /// <summary>Compact bundle stat for brain_stats.serverInfo readers.</summary>
+    private static JObject BundleSummaryForStats()
+    {
+        var bundleDir = Path.Combine(_vaultPath, ".obsidianx", "bundles");
+        if (!Directory.Exists(bundleDir))
+            return new JObject { ["count"] = 0, ["dir"] = bundleDir, ["status"] = "absent" };
+        var files = Directory.GetFiles(bundleDir, "*.json");
+        var newestAt = files.Length == 0
+            ? null
+            : (DateTime?)files.Max(f => new FileInfo(f).LastWriteTimeUtc);
+        return new JObject
+        {
+            ["count"] = files.Length,
+            ["dir"] = bundleDir,
+            ["status"] = files.Length == 0 ? "empty" : "ok",
+            ["newestAt"] = newestAt
+        };
+    }
+
+    /// <summary>
+    /// `obsidianx-mcp bake-bundles [--vault PATH] [--topics tag1,tag2,...] [--limit-per-topic N]`
+    /// Discovers hot topics from the brain export (top tags) and queries
+    /// (QueryGapAnalyzer) and bakes one JSON bundle per topic to
+    /// `.obsidianx/bundles/<slug>.json`. Idempotent — overwrites existing
+    /// bundles on each run. Aim: ~500 tokens per bundle.
+    /// </summary>
+    internal static int BakeBundlesCli(string[] args)
+    {
+        string? vaultArg = null;
+        string[]? topicsArg = null;
+        int limitPerTopic = 8;
+        int maxBundles = 25;
+
+        for (int i = 0; i < args.Length; i++)
+        {
+            switch (args[i])
+            {
+                case "--vault" when i + 1 < args.Length: vaultArg = args[++i]; break;
+                case "--topics" when i + 1 < args.Length:
+                    topicsArg = args[++i].Split(',', StringSplitOptions.RemoveEmptyEntries
+                                                  | StringSplitOptions.TrimEntries);
+                    break;
+                case "--limit-per-topic" when i + 1 < args.Length:
+                    int.TryParse(args[++i], out limitPerTopic);
+                    break;
+                case "--max-bundles" when i + 1 < args.Length:
+                    int.TryParse(args[++i], out maxBundles);
+                    break;
+                case "-h" or "--help" or "help":
+                    Console.WriteLine("Usage: obsidianx-mcp bake-bundles [options]");
+                    Console.WriteLine();
+                    Console.WriteLine("Options:");
+                    Console.WriteLine("  --vault PATH              Vault dir (default: env OBSIDIANX_VAULT or cwd)");
+                    Console.WriteLine("  --topics tag1,tag2,...    Comma-separated topic list. Default: auto-discover top tags.");
+                    Console.WriteLine("  --limit-per-topic N       Max notes per bundle (default 8)");
+                    Console.WriteLine("  --max-bundles N           Max total bundles to bake (default 25)");
+                    return 0;
+            }
+        }
+
+        // Resolve vault — same logic as MCP-server-mode startup
+        var vault = !string.IsNullOrWhiteSpace(vaultArg) && Directory.Exists(vaultArg)
+            ? Path.GetFullPath(vaultArg)
+            : (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("OBSIDIANX_VAULT"))
+                && Directory.Exists(Environment.GetEnvironmentVariable("OBSIDIANX_VAULT")!)
+                    ? Path.GetFullPath(Environment.GetEnvironmentVariable("OBSIDIANX_VAULT")!)
+                    : Path.GetFullPath(Environment.CurrentDirectory));
+
+        // Side-effect: rebind _vaultPath so LoadExport sees the right vault
+        _vaultPath = vault;
+
+        Console.WriteLine($"obsidianx-mcp bake-bundles · v{ServerVersion}");
+        Console.WriteLine($"  vault:           {vault}");
+        Console.WriteLine($"  limit-per-topic: {limitPerTopic}");
+        Console.WriteLine();
+
+        var export = LoadExport();
+        if (export == null)
+        {
+            Console.WriteLine("✗ brain-export.json not found at " + Path.Combine(vault, ".obsidianx", "brain-export.json"));
+            Console.WriteLine("  Open ObsidianX → Settings → Export Brain Now first.");
+            return 2;
+        }
+
+        // Discover topics: explicit list OR top tags filtered through IsGenericTag
+        List<(string topic, string topicType)> topics;
+        if (topicsArg != null && topicsArg.Length > 0)
+        {
+            topics = topicsArg.Select(t => (t.Trim(), "manual")).ToList();
+        }
+        else
+        {
+            topics = export.TopTags
+                .Where(t => !IsGenericBundleTag(t.Tag))
+                .Take(maxBundles)
+                .Select(t => (t.Tag, "tag"))
+                .ToList();
+        }
+
+        var bundleDir = Path.Combine(vault, ".obsidianx", "bundles");
+        Directory.CreateDirectory(bundleDir);
+        Console.WriteLine($"Baking {topics.Count} bundles to {bundleDir}");
+        Console.WriteLine();
+
+        int baked = 0, skipped = 0;
+        long totalBytes = 0;
+        foreach (var (topic, topicType) in topics)
+        {
+            var slug = SlugifyTopic(topic);
+            var path = Path.Combine(bundleDir, slug + ".json");
+
+            // Find matching notes
+            NodeSummary[] picks;
+            if (topicType == "tag")
+            {
+                picks = export.Nodes
+                    .Where(n => n.Tags.Any(t => t.Equals(topic, StringComparison.OrdinalIgnoreCase)))
+                    .OrderByDescending(n => n.Importance)
+                    .Take(limitPerTopic)
+                    .ToArray();
+            }
+            else
+            {
+                // Manual / query topic — fall back to full-text scoring
+                var ql = topic.ToLowerInvariant();
+                picks = export.Nodes
+                    .Select(n => (n, score: ScoreNode(n, ql)))
+                    .Where(x => x.score > 0)
+                    .OrderByDescending(x => x.score)
+                    .Take(limitPerTopic)
+                    .Select(x => x.n)
+                    .ToArray();
+            }
+
+            if (picks.Length < 3)
+            {
+                Console.WriteLine($"  ↷ {slug,-30} skipped (only {picks.Length} match — need ≥3)");
+                skipped++;
+                continue;
+            }
+
+            var bundle = BuildBundleJson(topic, slug, topicType, picks, export);
+            var serialized = bundle.ToString(Newtonsoft.Json.Formatting.Indented);
+            File.WriteAllText(path, serialized);
+            totalBytes += serialized.Length;
+            // ~4 chars/token rule of thumb
+            var tokenEst = (int)(serialized.Length / 4.0);
+            Console.WriteLine($"  ✓ {slug,-30} {picks.Length} notes · ~{tokenEst} tokens · {serialized.Length} bytes");
+            baked++;
+        }
+
+        Console.WriteLine();
+        Console.WriteLine($"Done: {baked} baked, {skipped} skipped · {totalBytes:N0} bytes total (~{totalBytes / 4:N0} tokens)");
+        Console.WriteLine($"Bundles available via brain_bundle topic=<slug> from inside Claude Code.");
+        return 0;
+    }
+
+    private static JObject BuildBundleJson(
+        string topic, string slug, string topicType,
+        NodeSummary[] notes, BrainExport export)
+    {
+        var notesArr = new JArray();
+        var wikiLinks = new List<string>();
+        foreach (var n in notes)
+        {
+            // Trim tags to the top 5 by alphabetical for stability — keeps
+            // the bundle compact while still hinting at the note's topic.
+            var topTags = n.Tags
+                .Where(t => !string.IsNullOrEmpty(t))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(5)
+                .ToArray();
+            notesArr.Add(new JObject
+            {
+                ["id"] = n.Id,
+                ["title"] = n.Title,
+                // wikiLink intentionally omitted — caller can build `[[title]]`
+                // from title in one line of JSON projection. Saves ~50 chars/note.
+                ["tags"] = new JArray(topTags),
+                ["wordCount"] = n.WordCount,
+                ["summary"] = MakeBundleSummary(n.Preview, n.Title, 160)
+            });
+            wikiLinks.Add($"[[{n.Title}]]");
+        }
+
+        var json = new JObject
+        {
+            ["topic"] = topic,
+            ["topicSlug"] = slug,
+            ["topicType"] = topicType,
+            ["generatedAt"] = DateTime.UtcNow,
+            ["exportGeneratedAt"] = export.GeneratedAt,
+            ["noteCount"] = notes.Length,
+            ["wikiLinkBlock"] = string.Join(" · ", wikiLinks),
+            ["notes"] = notesArr,
+            ["hint"] = "Pre-built bundle. Build [[title]] wiki-links from each note's title. wikiLinkBlock is ready to paste."
+        };
+        var dry = json.ToString(Newtonsoft.Json.Formatting.None);
+        json["tokenEstimate"] = (int)(dry.Length / 4.0);
+        return json;
+    }
+
+    /// <summary>
+    /// Compress a note's first ~300 chars (Preview) into a single-line
+    /// summary that AVOIDS duplicating the title — Preview typically
+    /// starts with `# Title` (sometimes twice) and frontmatter, which
+    /// would just bloat the bundle. We strip both, collapse whitespace,
+    /// then truncate at a word boundary.
+    /// </summary>
+    private static string MakeBundleSummary(string? preview, string title, int maxChars)
+    {
+        if (string.IsNullOrWhiteSpace(preview)) return "";
+        var s = preview.Trim();
+        // 1. Strip YAML frontmatter
+        if (s.StartsWith("---"))
+        {
+            var end = s.IndexOf("\n---", 3, StringComparison.Ordinal);
+            if (end > 0) s = s[(end + 4)..].TrimStart();
+        }
+        // 2. Strip up to two leading ATX headings that echo the title.
+        //    Some notes repeat their H1 (one inside frontmatter-adjacent,
+        //    one after), eating ~100 chars of preview budget.
+        for (int i = 0; i < 2; i++)
+        {
+            if (!s.StartsWith("#")) break;
+            var nl = s.IndexOf('\n');
+            if (nl < 0) break;
+            var line = s[..nl].TrimStart('#').Trim();
+            // Compare lower-cased prefixes — sometimes Preview has the
+            // title with extra trailing words.
+            var t = title?.Trim().ToLowerInvariant() ?? "";
+            var l = line.ToLowerInvariant();
+            if (t.Length > 0 && (l.StartsWith(t) || t.StartsWith(l) || l.Contains(t)))
+                s = s[(nl + 1)..].TrimStart();
+            else
+                break;
+        }
+        // 3. Collapse whitespace + truncate at word boundary
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"\s+", " ").Trim();
+        if (s.Length <= maxChars) return s;
+        var trunc = s[..maxChars];
+        var lastSpace = trunc.LastIndexOf(' ');
+        if (lastSpace > maxChars * 0.7) trunc = trunc[..lastSpace];
+        return trunc + "…";
+    }
+
+    /// <summary>
+    /// URL-safe topic slug. "MCP" → "mcp", "Brain-First Hooks" → "brain-first-hooks".
+    /// Lowercases, replaces non-alphanumeric with `-`, collapses runs.
+    /// </summary>
+    private static string SlugifyTopic(string topic)
+    {
+        if (string.IsNullOrWhiteSpace(topic)) return "untitled";
+        var s = topic.ToLowerInvariant();
+        var sb = new StringBuilder(s.Length);
+        bool prevDash = false;
+        foreach (var ch in s)
+        {
+            if (char.IsLetterOrDigit(ch))
+            {
+                sb.Append(ch);
+                prevDash = false;
+            }
+            else if (!prevDash && sb.Length > 0)
+            {
+                sb.Append('-');
+                prevDash = true;
+            }
+        }
+        return sb.ToString().Trim('-');
+    }
+
+    /// <summary>
+    /// Tags too noisy to be worth their own bundle: date stamps, generic
+    /// markers like 'imported', single-letter codes. Top tags filter on
+    /// this so we don't bake a 'imported' bundle with 485 random notes.
+    /// </summary>
+    private static bool IsGenericBundleTag(string tag)
+    {
+        if (string.IsNullOrWhiteSpace(tag)) return true;
+        if (tag.Length < 3) return true;
+        // Date stamps like 2026-05-08
+        if (System.Text.RegularExpressions.Regex.IsMatch(tag, @"^\d{4}-\d{2}-\d{2}$")) return true;
+        // Hex color codes (3, 4, 6, 8-digit), with or without leading '#'.
+        // The Universe theme / imported design files dump dozens of these
+        // into tag lists; they're meaningless as topic clusters and would
+        // spawn bundles of unrelated notes that happen to share a colour.
+        if (System.Text.RegularExpressions.Regex.IsMatch(tag, @"^#?[0-9a-fA-F]{3,8}$")) return true;
+        // Common low-signal tags
+        var generic = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "imported", "code", "note", "notes", "wip", "draft", "todo",
+            "untagged", "claude", "ai", "demo"
+        };
+        return generic.Contains(tag);
     }
 
     private static JToken BrainImportPath(JObject args)
