@@ -1,0 +1,776 @@
+// ObsidianX Universe — entry point.
+//
+// Wires the WebView2 host bridge (C# ↔ JS) to the three.js scene module.
+// All DOM panels (info card, legend, status) live here; scene.js stays
+// agnostic of the surrounding chrome.
+
+import { createScene } from './scene.js';
+
+const $status   = document.getElementById('status');
+const $stats    = document.getElementById('stats');
+const $size     = document.getElementById('size');
+const $canvas   = document.getElementById('universe-canvas');
+const $legend   = document.getElementById('legend');
+const $legendRows = document.getElementById('legend-rows');
+const $info     = document.getElementById('info-card');
+const $infoCat  = document.getElementById('info-category');
+const $infoTitle = document.getElementById('info-title');
+const $infoMeta = document.getElementById('info-meta');
+const $infoPrev = document.getElementById('info-preview');
+const $infoTags = document.getElementById('info-tags');
+const $infoEdit   = document.getElementById('info-edit');
+const $infoSave   = document.getElementById('info-save');
+const $infoCancel = document.getElementById('info-cancel');
+const $infoOpen   = document.getElementById('info-open');
+const $infoClose  = document.getElementById('info-close');
+const $infoFade   = document.getElementById('info-fade-bar');
+const $infoEditor = document.getElementById('info-editor');
+const $infoStatus = document.getElementById('info-status');
+const $settingsToggle = document.getElementById('settings-toggle');
+const $settingsPanel  = document.getElementById('settings-panel');
+const $setGlow   = document.getElementById('set-glow');
+const $setStars  = document.getElementById('set-stars');
+const $setSize   = document.getElementById('set-size');
+const $setEdges  = document.getElementById('set-edges');
+const $setDrift  = document.getElementById('set-drift');
+const $setMotion = document.getElementById('set-motion');
+const $setGlowV   = document.getElementById('set-glow-val');
+const $setStarsV  = document.getElementById('set-stars-val');
+const $setSizeV   = document.getElementById('set-size-val');
+const $setEdgesV  = document.getElementById('set-edges-val');
+const $setDriftV  = document.getElementById('set-drift-val');
+const $setMotionV = document.getElementById('set-motion-val');
+const $setReset      = document.getElementById('set-reset');
+const $setResettle   = document.getElementById('set-resettle');
+const $setFullscreen = document.getElementById('set-fullscreen');
+const $setShowCase   = document.getElementById('set-showcase');
+const $setWallpaper  = document.getElementById('set-wallpaper');
+const $tokenChip     = document.getElementById('token-chip');
+const $tokenText     = document.getElementById('token-text');
+const $wpSetupBar    = document.getElementById('wp-setup-bar');
+const $wpRandomize   = document.getElementById('wp-randomize');
+const $wpIcons       = document.getElementById('wp-icons');
+const $wpApply       = document.getElementById('wp-apply');
+const $wpCancel      = document.getElementById('wp-cancel');
+const $wpExitHint    = document.getElementById('wp-exit-hint');
+
+// localStorage key for the saved wallpaper preferences. Loaded as defaults
+// when ?mode=wallpaper-setup spawns so the user resumes their last setup.
+const WALLPAPER_PREFS_KEY = 'obsidianx.wallpaper.prefs.v1';
+
+function loadWallpaperPrefs() {
+    try {
+        const raw = localStorage.getItem(WALLPAPER_PREFS_KEY);
+        return raw ? JSON.parse(raw) : null;
+    } catch { return null; }
+}
+function saveWallpaperPrefs(prefs) {
+    try { localStorage.setItem(WALLPAPER_PREFS_KEY, JSON.stringify(prefs)); } catch {}
+}
+
+// v2 of the settings schema — adds size/edges/drift. Keys missing from a
+// v1 payload fall back to defaults on load (see loadSettings below).
+const SETTINGS_KEY = 'obsidianx.universe.settings.v2';
+const DEFAULT_SETTINGS = {
+    glow: 0.55, stars: 0.85, motion: 1.0,
+    size: 1.0, edges: 1.0, drift: 0.0,
+    background: 'nebula',   // 'nebula' | 'black'
+    lockSelected: true      // true = clicked star sticks to screen centre
+};
+
+function setStatus(text, isError = false) {
+    if (!$status) return;
+    $status.textContent = text;
+    $status.classList.toggle('error', isError);
+}
+
+function getViewport() {
+    return {
+        w: window.innerWidth,
+        h: window.innerHeight,
+        dpr: window.devicePixelRatio || 1
+    };
+}
+
+function applyCanvasSize() {
+    if (!$canvas) return;
+    const { w, h, dpr } = getViewport();
+    $canvas.style.width = w + 'px';
+    $canvas.style.height = h + 'px';
+    $canvas.width = Math.round(w * dpr);
+    $canvas.height = Math.round(h * dpr);
+}
+
+// ── overlay rendering ────────────────────────────────────────────────
+function renderStats(brain) {
+    if (!$stats) return;
+    const notes = brain.totalNotes ?? brain.TotalNotes ?? 0;
+    const words = brain.totalWords ?? brain.TotalWords ?? 0;
+    const edges = brain.totalEdges ?? brain.TotalEdges ?? 0;
+    const expertise = brain.expertise ?? brain.Expertise ?? [];
+    const address = brain.brainAddress ?? brain.BrainAddress ?? 'unknown';
+    const display = brain.displayName ?? brain.DisplayName ?? '';
+
+    setStatus(`Connected · ${display} · ${address}`);
+
+    $stats.innerHTML = `
+        <div>Notes</div><div class="num">${notes.toLocaleString()}</div>
+        <div>Words</div><div class="num">${words.toLocaleString()}</div>
+        <div>Wiki-links</div><div class="num">${edges.toLocaleString()}</div>
+        <div>Galaxies</div><div class="num">${expertise.length}</div>
+    `;
+}
+
+function renderLegend(galaxies) {
+    if (!$legend || !$legendRows) return;
+    if (!galaxies.length) {
+        $legend.hidden = true;
+        return;
+    }
+    $legend.hidden = false;
+    $legend.classList.add('fade-in');
+    $legendRows.innerHTML = '';
+    for (const g of galaxies) {
+        const row = document.createElement('div');
+        row.className = 'legend-row expertise-row';
+        row.dataset.category = g.category;
+        const hex = '#' + g.color.toString(16).padStart(6, '0');
+        // Expertise pct comes from brain.Expertise[].Score (0..1); fallback
+        // to a count-derived heuristic if the brain didn't ship one.
+        const pct = Math.round((g.score ?? 0) * 100);
+        const wordsK = g.totalWords ? (g.totalWords / 1000).toFixed(0) + 'k' : '';
+        row.innerHTML = `
+            <div class="expertise-head">
+                <span class="legend-swatch" style="background:${hex};color:${hex};"></span>
+                <span class="legend-label" title="${escapeHtml(g.label)}">${escapeHtml(g.label)}</span>
+                <span class="legend-count">${g.count}</span>
+            </div>
+            <div class="expertise-bar">
+                <div class="expertise-fill" style="width:${pct}%;background:${hex};"></div>
+            </div>
+            <div class="expertise-meta">
+                <span class="expertise-score">${pct}%</span>
+                ${wordsK ? `<span class="expertise-words">${wordsK} words</span>` : ''}
+            </div>
+        `;
+        row.addEventListener('click', () => scene.focusGalaxy(g.category));
+        $legendRows.appendChild(row);
+    }
+}
+
+function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+}
+
+function fmtDate(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toISOString().slice(0, 10);
+}
+
+// Info card auto-fade. 10 s no-hover → close. Mouse-enter cancels the
+// timer; mouse-leave restarts it. The fade-bar at the bottom of the card
+// is a visual countdown so the user sees how long they have.
+let _infoFadeTimer = null;
+let _infoCurrentNode = null;
+
+function startInfoFadeTimer() {
+    cancelInfoFadeTimer();
+    if (!$infoFade) return;
+    // restart the CSS countdown animation by removing + re-adding the class
+    $infoFade.classList.remove('tick');
+    void $infoFade.offsetWidth;  // force reflow so the animation re-runs
+    $infoFade.classList.add('tick');
+    _infoFadeTimer = setTimeout(() => {
+        scene?.focusNode?.(-1);   // deselect → showInfo(null) → hide card
+        _infoCurrentNode = null;
+    }, 10000);
+}
+
+function cancelInfoFadeTimer() {
+    if (_infoFadeTimer) clearTimeout(_infoFadeTimer);
+    _infoFadeTimer = null;
+    if ($infoFade) $infoFade.classList.remove('tick');
+}
+
+function showInfo(payload) {
+    if (!$info) return;
+    if (!payload) {
+        $info.hidden = true;
+        $info.classList.remove('fade-in');
+        cancelInfoFadeTimer();
+        _infoCurrentNode = null;
+        return;
+    }
+    const { node, related } = payload;
+    _infoCurrentNode = node;
+    const hex = '#' + node.color.toString(16).padStart(6, '0');
+    $info.hidden = false;
+    $info.classList.add('fade-in');
+    $infoCat.style.color = hex;
+    $infoCat.textContent = node.categoryLabel ?? node.category ?? '';
+    $infoTitle.textContent = node.title;
+    $infoMeta.innerHTML = `
+        <span><span class="meta-key">words</span>${node.wordCount.toLocaleString()}</span>
+        <span><span class="meta-key">links</span>${(related?.length ?? 0)}</span>
+        <span><span class="meta-key">modified</span>${fmtDate(node.modifiedAt)}</span>
+    `;
+    $infoPrev.textContent = node.preview || '(no preview available)';
+    $infoTags.innerHTML = '';
+    const tags = (node.tags || []).slice(0, 8);
+    for (const t of tags) {
+        const chip = document.createElement('span');
+        chip.className = 'tag-chip';
+        chip.textContent = '#' + t;
+        $infoTags.appendChild(chip);
+    }
+    startInfoFadeTimer();
+}
+
+// ── Inline note edit/save state machine ──────────────────────────────
+// view  → click ✎ Edit  → request content from host → wait → enter edit
+// edit  → click 💾 Save → post content → wait → ok status → back to view
+//        click Cancel   → back to view (preview restored)
+//        click ↗ Open   → open in WPF Markdown editor (full screen) — leaves Universe
+let _infoMode = 'view';     // 'view' | 'loading' | 'edit' | 'saving'
+
+function setInfoStatus(text, kind) {
+    if (!$infoStatus) return;
+    if (!text) { $infoStatus.hidden = true; return; }
+    $infoStatus.hidden = false;
+    $infoStatus.className = 'info-status ' + (kind || '');
+    $infoStatus.textContent = text;
+}
+
+function enterEditUI() {
+    _infoMode = 'edit';
+    $infoPrev.hidden = true;
+    $infoEditor.hidden = false;
+    $infoEdit.hidden = true;
+    $infoSave.hidden = false;
+    $infoCancel.hidden = false;
+    setInfoStatus(null);
+    cancelInfoFadeTimer();   // don't auto-close while user is typing
+    $infoEditor.focus();
+}
+
+function exitEditUI() {
+    _infoMode = 'view';
+    $infoPrev.hidden = false;
+    $infoEditor.hidden = true;
+    $infoEditor.value = '';
+    $infoEdit.hidden = false;
+    $infoSave.hidden = true;
+    $infoCancel.hidden = true;
+    setInfoStatus(null);
+    if (!$info.hidden) startInfoFadeTimer();
+}
+
+// ── Wallpaper setup bar ────────────────────────────────────────────
+// Shown when ?mode=wallpaper-setup. User configures interactively then
+// clicks Apply → posts wallpaperApply to C# which reparents to WorkerW.
+function wireWallpaperSetup() {
+    if (!$wpSetupBar) return;
+    $wpSetupBar.hidden = false;
+
+    // Restore last saved camera angle + settings if available — so user
+    // doesn't lose their previous setup when they reopen Wallpaper.
+    const saved = loadWallpaperPrefs();
+    if (saved) {
+        if (saved.settings) {
+            currentSettings = { ...currentSettings, ...saved.settings };
+            applySettingsToUI(currentSettings);
+            applySettingsToScene(currentSettings);
+            saveSettings(currentSettings);
+        }
+        if (saved.camera && scene?.restoreCamera) {
+            // Defer to next frame so scene/mount is ready.
+            requestAnimationFrame(() => scene.restoreCamera(saved.camera));
+        }
+    }
+
+    $wpRandomize?.addEventListener('click', () => {
+        scene?.randomizeCamera?.();
+    });
+
+    // Hide/Show desktop icons — C# handles SHELLDLL_DefView ShowWindow.
+    // Button label flips between "Hide" / "Show" so the action is clear.
+    $wpIcons?.addEventListener('click', () => {
+        const hidden = $wpIcons.dataset.hidden === 'true';
+        const nextHidden = !hidden;
+        $wpIcons.dataset.hidden = String(nextHidden);
+        $wpIcons.innerHTML = nextHidden
+            ? '\u{1F4F1} Show desktop icons'
+            : '\u{1F4F1} Hide desktop icons';
+        postToHost({ type: 'wallpaperToggleIcons', hide: nextHidden });
+    });
+
+    $wpApply?.addEventListener('click', () => {
+        // Bundle current settings + camera snapshot for next-time restore.
+        const cam = scene?.snapshotCamera?.() ?? null;
+        saveWallpaperPrefs({ settings: currentSettings, camera: cam });
+        setStatus('Applying wallpaper…');
+        postToHost({ type: 'wallpaperApply' });
+    });
+
+    $wpCancel?.addEventListener('click', () => {
+        setStatus('Cancelling…');
+        postToHost({ type: 'wallpaperCancel' });
+    });
+}
+
+function wireInfoCard() {
+    if (!$info) return;
+    // Hover cancels the auto-fade; leave restarts it.
+    $info.addEventListener('mouseenter', cancelInfoFadeTimer);
+    $info.addEventListener('mouseleave', () => {
+        // Don't restart fade while editing — user could lose unsaved typing.
+        if (!$info.hidden && _infoMode === 'view') startInfoFadeTimer();
+    });
+
+    $infoClose?.addEventListener('click', () => {
+        if (_infoMode === 'edit' && $infoEditor.value && !confirm('Discard changes?')) return;
+        exitEditUI();
+        scene?.focusNode?.(-1);
+    });
+
+    // Inline edit: fetch full note content from C#, then swap into textarea.
+    $infoEdit?.addEventListener('click', () => {
+        if (!_infoCurrentNode) return;
+        _infoMode = 'loading';
+        cancelInfoFadeTimer();
+        $infoEditor.hidden = false;
+        $infoEditor.value = '';
+        $infoEditor.placeholder = 'Loading note content…';
+        $infoPrev.hidden = true;
+        $infoEdit.hidden = true;
+        setInfoStatus('Loading…', 'loading');
+        postToHost({ type: 'requestNoteContent', noteId: _infoCurrentNode.id });
+    });
+
+    $infoSave?.addEventListener('click', () => {
+        if (!_infoCurrentNode || _infoMode !== 'edit') return;
+        _infoMode = 'saving';
+        setInfoStatus('Saving…', 'loading');
+        postToHost({
+            type: 'saveNote',
+            noteId: _infoCurrentNode.id,
+            content: $infoEditor.value
+        });
+    });
+
+    $infoCancel?.addEventListener('click', () => {
+        if ($infoEditor.value && !confirm('Discard changes?')) return;
+        exitEditUI();
+    });
+
+    // ↗ Open in full WPF editor — leaves Universe entirely.
+    $infoOpen?.addEventListener('click', () => {
+        if (!_infoCurrentNode) return;
+        postToHost({ type: 'editNote', noteId: _infoCurrentNode.id });
+    });
+
+    // Ctrl+S inside the textarea = Save
+    $infoEditor?.addEventListener('keydown', e => {
+        if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+            e.preventDefault();
+            $infoSave?.click();
+        }
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            $infoCancel?.click();
+        }
+    });
+}
+
+// ── bridge wiring ────────────────────────────────────────────────────
+function postToHost(msg) {
+    if (window.chrome && window.chrome.webview) {
+        window.chrome.webview.postMessage(msg);
+    } else {
+        console.warn('[Universe] Not running inside WebView2');
+    }
+}
+
+let scene = null;
+let pendingBrain = null;
+
+function onHostMessage(evt) {
+    const msg = evt.data;
+    if (!msg || typeof msg !== 'object') return;
+    switch (msg.type) {
+        case 'brain':
+            handleBrain(msg.payload);
+            break;
+        case 'pulse':
+            // C# forwards every MCP read/write touch as {noteId, op}.
+            // We just hand it to the scene, which flashes the matching
+            // star + fans out a few edge arcs.
+            if (scene && msg.noteId) scene.firePulse(msg.noteId, msg.op);
+            break;
+        case 'tokenStats':
+            // C# forwards TokenSavingsTracker.Compute output as
+            // { text: "💰 +12.3k tok", tooltip: "...multi-line..." }.
+            if ($tokenChip && $tokenText && msg.text) {
+                $tokenText.textContent = msg.text;
+                $tokenChip.title = msg.tooltip || '';
+                $tokenChip.hidden = false;
+            }
+            break;
+        case 'finalizeWallpaper':
+            // C# has just reparented us to WorkerW. Transition this page
+            // from setup → final wallpaper without reload: drop the setup
+            // chrome, hide HUD, disable mouse.
+            document.body.classList.remove('wallpaper-setup');
+            document.body.classList.add('wallpaper-mode');
+            if ($wpSetupBar) $wpSetupBar.hidden = true;
+            // Flash the exit hint briefly so the user remembers how to leave.
+            if ($wpExitHint) {
+                $wpExitHint.hidden = false;
+                setTimeout(() => { if ($wpExitHint) $wpExitHint.hidden = true; }, 6000);
+            }
+            break;
+        case 'wallpaperStatus':
+            // C# wallpaper steps streamed back as a status update. The WPF
+            // status bar at the bottom is easy to miss; surface it in the
+            // Universe HUD too.
+            if (msg.text) setStatus('Wallpaper: ' + msg.text);
+            break;
+        case 'viewState':
+            // C# notifies us when the WPF floating toggle switched the view.
+            // Re-sync our segmented control so it doesn't lie about state.
+            document.querySelectorAll('.cam-btn[data-view]').forEach(b => {
+                b.classList.toggle('active', b.dataset.view === msg.view);
+            });
+            break;
+        case 'noteContent':
+            // C# returned the full Markdown body of the note we asked for.
+            // Ignore if user clicked another star meanwhile (id mismatch).
+            if (_infoMode === 'loading' && _infoCurrentNode?.id === msg.noteId) {
+                $infoEditor.value = msg.content ?? '';
+                $infoEditor.placeholder = '';
+                enterEditUI();
+            }
+            break;
+        case 'noteContentError':
+            if (_infoMode === 'loading') {
+                setInfoStatus(msg.error || 'Failed to load', 'error');
+                _infoMode = 'view';
+                $infoEditor.hidden = true;
+                $infoPrev.hidden = false;
+                $infoEdit.hidden = false;
+            }
+            break;
+        case 'noteSaved':
+            if (_infoCurrentNode?.id === msg.noteId) {
+                setInfoStatus('Saved ✓', 'ok');
+                // brief flash, then back to view mode with the new preview.
+                if (_infoCurrentNode) _infoCurrentNode.preview = ($infoEditor.value || '').slice(0, 480);
+                $infoPrev.textContent = _infoCurrentNode?.preview || '';
+                setTimeout(exitEditUI, 700);
+            }
+            break;
+        case 'noteSaveError':
+            setInfoStatus(msg.error || 'Save failed', 'error');
+            _infoMode = 'edit';
+            break;
+        default:
+            console.log('[Universe] unknown message', msg);
+    }
+}
+
+function handleBrain(brain) {
+    renderStats(brain);
+    pendingBrain = brain;
+    if (scene) mountScene(brain);
+}
+
+function mountScene(brain) {
+    try {
+        const universe = scene.mount(brain);
+        if (universe.nodes.length === 0) {
+            setStatus('Brain has 0 notes yet — open ObsidianX and add some.');
+        } else {
+            setStatus(`Universe rendered · ${universe.nodes.length.toLocaleString()} stars · ${universe.edges.length.toLocaleString()} wiki-links · ${universe.galaxies.length} galaxies`);
+        }
+    } catch (err) {
+        console.error('[Universe] mount failed', err);
+        setStatus('Render failed — see DevTools (F12)', true);
+    }
+}
+
+// ── settings (Glow / Stars / Motion) ─────────────────────────────────
+function loadSettings() {
+    try {
+        const raw = localStorage.getItem(SETTINGS_KEY);
+        if (!raw) return { ...DEFAULT_SETTINGS };
+        const parsed = JSON.parse(raw);
+        const num = (v, def) => typeof v === 'number' ? v : def;
+        return {
+            glow:   num(parsed.glow,   DEFAULT_SETTINGS.glow),
+            stars:  num(parsed.stars,  DEFAULT_SETTINGS.stars),
+            motion: num(parsed.motion, DEFAULT_SETTINGS.motion),
+            size:   num(parsed.size,   DEFAULT_SETTINGS.size),
+            edges:  num(parsed.edges,  DEFAULT_SETTINGS.edges),
+            drift:  num(parsed.drift,  DEFAULT_SETTINGS.drift),
+            background: (parsed.background === 'black' || parsed.background === 'nebula')
+                ? parsed.background : DEFAULT_SETTINGS.background,
+            lockSelected: typeof parsed.lockSelected === 'boolean'
+                ? parsed.lockSelected : DEFAULT_SETTINGS.lockSelected
+        };
+    } catch {
+        return { ...DEFAULT_SETTINGS };
+    }
+}
+
+function saveSettings(s) {
+    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); }
+    catch { /* private mode / quota — silently drop */ }
+}
+
+function applySettingsToUI(s) {
+    if ($setGlow)   { $setGlow.value   = s.glow;   $setGlowV.textContent   = s.glow.toFixed(2); }
+    if ($setStars)  { $setStars.value  = s.stars;  $setStarsV.textContent  = s.stars.toFixed(2); }
+    if ($setSize)   { $setSize.value   = s.size;   $setSizeV.textContent   = s.size.toFixed(2); }
+    if ($setEdges)  { $setEdges.value  = s.edges;  $setEdgesV.textContent  = s.edges.toFixed(2); }
+    if ($setDrift)  { $setDrift.value  = s.drift;  $setDriftV.textContent  = s.drift.toFixed(2); }
+    if ($setMotion) { $setMotion.value = s.motion; $setMotionV.textContent = s.motion.toFixed(2); }
+    document.querySelectorAll('.cam-btn[data-bg]').forEach(b =>
+        b.classList.toggle('active', b.dataset.bg === s.background));
+    document.querySelectorAll('.cam-btn[data-lock]').forEach(b =>
+        b.classList.toggle('active', (b.dataset.lock === 'on') === s.lockSelected));
+}
+
+function applyBackground(which) {
+    // Drive BOTH the DOM body (so HUD glass + body bg behind canvas match)
+    // AND the three.js renderer.setClearColor / nebula / starfield via scene.
+    document.body.classList.toggle('bg-black',  which === 'black');
+    document.body.classList.toggle('bg-nebula', which !== 'black');
+    scene?.setBackground?.(which);
+}
+
+function applySettingsToScene(s) {
+    if (!scene) return;
+    scene.setGlow(s.glow);
+    scene.setStars(s.stars);
+    scene.setStarSize?.(s.size);
+    scene.setEdgeAlpha?.(s.edges);
+    scene.setDrift?.(s.drift);
+    scene.setMotion(s.motion);
+    scene.setLockSelected?.(s.lockSelected);
+    applyBackground(s.background);
+}
+
+let currentSettings = loadSettings();
+
+function wireSettingsPanel() {
+    if (!$settingsToggle || !$settingsPanel) return;
+    $settingsToggle.addEventListener('click', () => {
+        $settingsPanel.hidden = !$settingsPanel.hidden;
+        if (!$settingsPanel.hidden) $settingsPanel.classList.add('fade-in');
+    });
+
+    const onSlide = (which, slider, valEl) => () => {
+        const v = parseFloat(slider.value);
+        valEl.textContent = v.toFixed(2);
+        currentSettings = { ...currentSettings, [which]: v };
+        applySettingsToScene(currentSettings);
+        saveSettings(currentSettings);
+    };
+    $setGlow  ?.addEventListener('input', onSlide('glow',   $setGlow,   $setGlowV));
+    $setStars ?.addEventListener('input', onSlide('stars',  $setStars,  $setStarsV));
+    $setSize  ?.addEventListener('input', onSlide('size',   $setSize,   $setSizeV));
+    $setEdges ?.addEventListener('input', onSlide('edges',  $setEdges,  $setEdgesV));
+    $setDrift ?.addEventListener('input', onSlide('drift',  $setDrift,  $setDriftV));
+    $setMotion?.addEventListener('input', onSlide('motion', $setMotion, $setMotionV));
+
+    $setReset?.addEventListener('click', () => {
+        currentSettings = { ...DEFAULT_SETTINGS };
+        applySettingsToUI(currentSettings);
+        applySettingsToScene(currentSettings);
+        saveSettings(currentSettings);
+    });
+
+    // Replays the per-galaxy d3-force assembly animation. Pumps alpha
+    // back to 1 so the simulations heat up and settle again over ~3.5 s.
+    $setResettle?.addEventListener('click', () => {
+        scene?.resettle?.();
+    });
+
+    // Toggle WPF host fullscreen (covers the Windows taskbar). The C# side
+    // owns window bounds; we just nudge it via the existing message bridge.
+    $setFullscreen?.addEventListener('click', () => {
+        postToHost({ type: 'toggleFullscreen' });
+    });
+
+    // Show Case = hide all chrome (sidebar, title, status) — Universe only.
+    $setShowCase?.addEventListener('click', () => {
+        postToHost({ type: 'toggleShowCase' });
+    });
+
+    // Wallpaper = pin window behind desktop icons via WorkerW (multi-monitor).
+    // Console log + visible status so the user sees the click landed even if
+    // the WorkerW reparenting itself silently fails on some Windows builds.
+    $setWallpaper?.addEventListener('click', () => {
+        console.log('[Universe] wallpaper button clicked — posting toggleWallpaper');
+        setStatus('Wallpaper toggle sent to host…');
+        postToHost({ type: 'toggleWallpaper' });
+    });
+
+    // Camera-mode picker (Free / Orbit / Follow). Pure JS — scene.js owns
+    // the auto-drive logic; we just toggle settings.cameraMode + active class.
+    document.querySelectorAll('.cam-btn[data-mode]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const mode = btn.dataset.mode;
+            document.querySelectorAll('.cam-btn[data-mode]').forEach(b =>
+                b.classList.toggle('active', b === btn));
+            scene?.setCameraMode?.(mode);
+        });
+    });
+
+    // View toggle: 3D Universe (WebView2 default) ↔ 2D Graph (WPF Graph2DRenderer).
+    // The 2D renderer lives on the WPF side, so JS just posts; C# flips
+    // visibility of the WebView vs the embedded Graph2DRenderer.
+    document.querySelectorAll('.cam-btn[data-view]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const view = btn.dataset.view;
+            document.querySelectorAll('.cam-btn[data-view]').forEach(b =>
+                b.classList.toggle('active', b === btn));
+            postToHost({ type: 'switchView', view });
+        });
+    });
+
+    // Background picker: nebula gradient (default) vs pure black.
+    document.querySelectorAll('.cam-btn[data-bg]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const bg = btn.dataset.bg;
+            document.querySelectorAll('.cam-btn[data-bg]').forEach(b =>
+                b.classList.toggle('active', b === btn));
+            currentSettings = { ...currentSettings, background: bg };
+            applyBackground(bg);
+            saveSettings(currentSettings);
+        });
+    });
+
+    // Lock toggle: keep the selected star at screen centre even as the
+    // universe rotates / drifts. Default ON.
+    document.querySelectorAll('.cam-btn[data-lock]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const on = btn.dataset.lock === 'on';
+            document.querySelectorAll('.cam-btn[data-lock]').forEach(b =>
+                b.classList.toggle('active', b === btn));
+            currentSettings = { ...currentSettings, lockSelected: on };
+            scene?.setLockSelected?.(on);
+            saveSettings(currentSettings);
+        });
+    });
+}
+
+// ── boot ─────────────────────────────────────────────────────────────
+// Wallpaper has TWO modes:
+//   setup    — fullscreen child window, user configures camera + settings
+//              interactively then clicks Apply. HUD visible, mouse enabled.
+//   wallpaper — final state. SetParent'd to WorkerW, HUD hidden, mouse disabled.
+//
+// C# spawns in 'setup' first; when user clicks Apply, JS posts wallpaperApply
+// → C# reparents + JS adds wallpaper-mode class. Cancel → C# closes window.
+const URL_MODE = new URLSearchParams(location.search).get('mode');
+const IS_WALLPAPER_SETUP = URL_MODE === 'wallpaper-setup';
+const IS_WALLPAPER_MODE  = URL_MODE === 'wallpaper';
+if (IS_WALLPAPER_SETUP) document.body.classList.add('wallpaper-setup');
+if (IS_WALLPAPER_MODE)  document.body.classList.add('wallpaper-mode');
+
+async function init() {
+    applyCanvasSize();
+    handleResize();
+    window.addEventListener('resize', handleResize);
+
+    setStatus('Building scene…');
+
+    try {
+        scene = createScene($canvas, {
+            onHover: payload => {
+                $canvas.classList.toggle('hover-star', payload != null);
+            },
+            onSelect: payload => {
+                showInfo(payload);
+            },
+            onGalaxies: galaxies => {
+                renderLegend(galaxies);
+            }
+        });
+    } catch (err) {
+        console.error('[Universe] scene init failed', err);
+        setStatus(`three.js failed to load: ${err.message}. Check internet connectivity (CDN: unpkg.com).`, true);
+        return;
+    }
+
+    // restore persisted UI + push to scene so the user's last preference
+    // (e.g. low glow) survives a reload.
+    applySettingsToUI(currentSettings);
+    applySettingsToScene(currentSettings);
+    // Wallpaper mode (final state) = no interactive UI; skip the panel + card.
+    // Wallpaper setup = full interactivity + extra Apply/Cancel/Randomize bar.
+    if (!IS_WALLPAPER_MODE) {
+        wireSettingsPanel();
+        wireInfoCard();
+    }
+    if (IS_WALLPAPER_SETUP) {
+        wireWallpaperSetup();
+    }
+
+    // pointerdown/up flip the canvas cursor so grab/grabbing reads correctly
+    // through OrbitControls (which doesn't manage cursor itself).
+    $canvas.addEventListener('pointerdown', () => $canvas.classList.add('dragging'));
+    window.addEventListener('pointerup', () => $canvas.classList.remove('dragging'));
+
+    if (window.chrome && window.chrome.webview) {
+        window.chrome.webview.addEventListener('message', onHostMessage);
+        setStatus('Waiting for brain snapshot…');
+        postToHost({ type: 'ready' });
+    } else {
+        // Standalone preview path: try fetching the JSON directly so devs can
+        // open index.html from a static server (e.g. `npx serve`).
+        await tryStandaloneFetch();
+    }
+}
+
+async function tryStandaloneFetch() {
+    setStatus('Standalone mode — fetching brain-export.json…');
+    try {
+        const res = await fetch('../../../.obsidianx/brain-export.json');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const brain = await res.json();
+        handleBrain(brain);
+    } catch (err) {
+        setStatus('Open this page from inside ObsidianX (WebView2 host required).', true);
+        console.warn('[Universe] standalone fetch failed:', err);
+    }
+}
+
+function handleResize() {
+    applyCanvasSize();
+    if ($size) {
+        const { w, h, dpr } = getViewport();
+        $size.textContent = `${w} × ${h} @ ${dpr}×`;
+    }
+    if (scene) scene.setSize(window.innerWidth, window.innerHeight);
+}
+
+// kick off — DOMContentLoaded guard for the rare case the script lands
+// before the DOM is parsed (importmap can shuffle ordering).
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+} else {
+    init();
+}
+
+// Expose a tiny host API for future Phase 2 messages from C#.
+window.UniverseHost = {
+    viewport: getViewport,
+    canvas: () => $canvas,
+    refresh: () => pendingBrain && handleBrain(pendingBrain)
+};

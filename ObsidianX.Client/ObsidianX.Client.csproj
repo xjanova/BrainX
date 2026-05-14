@@ -7,6 +7,7 @@
   <ItemGroup>
     <PackageReference Include="AvalonEdit" Version="6.3.1.120" />
     <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="10.0.5" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2792.45" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
   </ItemGroup>
 
@@ -19,6 +20,14 @@
     <Resource Include="Assets\Logo.ico" />
     <Resource Include="Assets\bk1.png" />
     <Resource Include="Assets\bk2.png" />
+  </ItemGroup>
+
+  <!-- Universe view (WebView2 host) — html/js/css copied to bin so the
+       app can serve them via SetVirtualHostNameToFolderMapping. -->
+  <ItemGroup>
+    <None Update="wwwroot\**\*.*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
   <PropertyGroup>

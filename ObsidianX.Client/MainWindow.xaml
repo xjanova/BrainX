@@ -4,6 +4,7 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:ae="http://icsharpcode.net/sharpdevelop/avalonedit"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
         xmlns:services="clr-namespace:ObsidianX.Client.Services"
         mc:Ignorable="d"
         Title="ObsidianX — Neural Knowledge Engine"
@@ -14,6 +15,22 @@
         Icon="pack://application:,,,/Assets/Logo.ico"
         Loaded="Window_Loaded"
         Closing="Window_Closing">
+
+    <!-- WindowStyle=None + AllowsTransparency=True strips native chrome,
+         which also kills the invisible resize edges. WindowChrome restores
+         them via DWM hit-testing without bringing back the Aero title bar.
+         CaptionHeight=0 because we have a custom title bar (line 64+) with
+         TitleBar_MouseLeftButtonDown for drag-to-move — letting WindowChrome
+         claim the caption would double-handle drag. ResizeBorderThickness=6
+         gives 6px grabbable on every edge / corner; the user sees the cursor
+         flip to ↔ ↕ ⤡ as expected. -->
+    <WindowChrome.WindowChrome>
+        <WindowChrome CaptionHeight="0"
+                      GlassFrameThickness="0"
+                      CornerRadius="0"
+                      ResizeBorderThickness="6"
+                      UseAeroCaptionButtons="False"/>
+    </WindowChrome.WindowChrome>
 
     <Window.Resources>
         <Storyboard x:Key="PulseAnimation" RepeatBehavior="Forever">
@@ -33,6 +50,10 @@
             <!-- Subtle full-window nebula texture — barely visible but adds depth -->
             <Image x:Name="WindowBgTexture" Source="pack://application:,,,/Assets/bk2.png"
                    Stretch="UniformToFill" Opacity="0.09" IsHitTestVisible="False"/>
+
+            <!-- (Static snapshot of Universe removed — user wanted live, not a
+                 still image. Universe live = use the Wallpaper button instead,
+                 which spawns a real-time WebView2 reparented to WorkerW.) -->
             <!-- Background ambient glow -->
             <Ellipse Width="600" Height="600" HorizontalAlignment="Right" VerticalAlignment="Top"
                      Margin="0,-200,-200,0" Opacity="0.03">
@@ -53,17 +74,48 @@
                 </Ellipse.Fill>
             </Ellipse>
 
-            <Grid>
+            <!-- Phase 3 (Universe-as-full-window-bg) reverted: WebView2 is a
+                 native HWND that ALWAYS paints over WPF chrome regardless of
+                 z-order (Win32 airspace rule). Hosting it at outer level
+                 hides sidebar / title bar / status bar → can't navigate or
+                 drag. The WebView now lives back inside UniverseView's
+                 content cell where it only covers the area where chrome
+                 doesn't reach. -->
+
+            <Grid x:Name="RootShellGrid">
                 <Grid.RowDefinitions>
-                    <RowDefinition Height="44"/>
+                    <RowDefinition x:Name="TitleBarRow" Height="44"/>
                     <RowDefinition Height="*"/>
-                    <RowDefinition Height="32"/>
+                    <RowDefinition x:Name="StatusBarRow" Height="32"/>
                 </Grid.RowDefinitions>
 
                 <!-- TITLE BAR -->
-                <Border Grid.Row="0" Background="Transparent" MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
+                <Border x:Name="TitleBarBorder" Grid.Row="0" Background="Transparent" MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
                     <Grid>
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="16,0">
+                            <!-- Hamburger: collapses the sidebar (SidebarColumn.Width 220 ↔ 0).
+                                 Crucial when the sidebar is glass-translucent + sits over Universe —
+                                 user may want to hide it entirely. Esc or click again restores. -->
+                            <Button x:Name="SidebarToggleBtn" Width="28" Height="28"
+                                    Background="Transparent" BorderThickness="0" Cursor="Hand"
+                                    Click="SidebarToggle_Click" Margin="0,0,8,0"
+                                    ToolTip="Hide / show sidebar menu">
+                                <Button.Template>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border x:Name="Bd" CornerRadius="4" Background="Transparent">
+                                            <TextBlock Text="&#x2630;" FontSize="16"
+                                                       Foreground="{StaticResource TextSecondaryBrush}"
+                                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Bd" Property="Background" Value="#226CF0FF"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Button.Template>
+                            </Button>
+
                             <!-- Title-bar logo — seamless (no frame, no clip) so the glow bleeds into the bg -->
                             <Image Source="pack://application:,,,/Assets/Logo.png"
                                    Width="30" Height="30" Margin="0,0,10,0"
@@ -230,13 +282,27 @@
                 <!-- MAIN CONTENT -->
                 <Grid Grid.Row="1">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="220"/>
+                        <ColumnDefinition x:Name="SidebarColumn" Width="220"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
 
-                    <!-- LEFT SIDEBAR -->
-                    <Border Grid.Column="0" Background="{StaticResource SidebarGradient}"
-                            BorderBrush="{StaticResource SurfaceLightBrush}" BorderThickness="0,0,1,0">
+                    <!-- LEFT SIDEBAR — fully opaque gradient (Phase 3 glass effect
+                         can't work anyway because of WebView2 airspace). Keeps the
+                         coloured top edge + glow border for visual harmony. -->
+                    <Border x:Name="SidebarBorder" Grid.Column="0"
+                            BorderThickness="0,0,1,0">
+                        <Border.Background>
+                            <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                <GradientStop Color="#FF0A081C" Offset="0"/>
+                                <GradientStop Color="#FF060512" Offset="1"/>
+                            </LinearGradientBrush>
+                        </Border.Background>
+                        <Border.BorderBrush>
+                            <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                <GradientStop Color="#666CF0FF" Offset="0"/>
+                                <GradientStop Color="#22FFFFFF" Offset="1"/>
+                            </LinearGradientBrush>
+                        </Border.BorderBrush>
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -272,10 +338,17 @@
                                 <StackPanel Margin="0,8,0,8">
                                     <TextBlock Text="NAVIGATION" FontSize="10" Foreground="{StaticResource TextMutedBrush}"
                                                Margin="22,8,0,12" FontWeight="SemiBold"/>
-                                    <Button x:Name="NavDashboard" Content="&#x2B21;  Dashboard"
-                                            Style="{StaticResource NavButtonActive}" Click="Nav_Click" Tag="Dashboard"/>
+                                    <!-- Universe is the dashboard now. BrainGraph nav hidden
+                                         because the Universe HUD has a View toggle that flips
+                                         to 2D Graph inline. Dashboard nav also hidden (legacy). -->
+                                    <Button x:Name="NavUniverse" Content="&#x1F30C;  Universe"
+                                            Style="{StaticResource NavButtonActive}" Click="Nav_Click" Tag="Universe"/>
                                     <Button x:Name="NavBrainGraph" Content="&#x25C9;  Brain Graph"
-                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="BrainGraph"/>
+                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="BrainGraph"
+                                            Visibility="Collapsed"/>
+                                    <Button x:Name="NavDashboard" Content="&#x2B21;  Dashboard (legacy)"
+                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Dashboard"
+                                            Visibility="Collapsed"/>
                                     <Button x:Name="NavNetwork" Content="&#x2B22;  Network"
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Network"/>
                                     <Button x:Name="NavEditor" Content="&#x270F;  Editor"
@@ -330,8 +403,8 @@
 
                     <!-- CONTENT AREA -->
                     <Grid Grid.Column="1">
-                        <!-- Dashboard -->
-                        <Grid x:Name="DashboardView" Visibility="Visible">
+                        <!-- Dashboard (legacy — kept hidden; Universe replaces this) -->
+                        <Grid x:Name="DashboardView" Visibility="Collapsed">
                             <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="24,16">
                                 <StackPanel>
                                     <TextBlock Text="Dashboard" FontSize="24" FontWeight="Bold"
@@ -391,20 +464,20 @@
                                                            Foreground="{StaticResource TextMutedBrush}"
                                                            VerticalAlignment="Center"/>
                                                 <TextBlock Grid.Column="1" x:Name="DashHintText"
-                                                           Text="Drag=rotate | Hover map + scroll=zoom | Click=info | Right-click=kick"
+                                                           Text="Drag=pan | Hover map + scroll=zoom | Click=info | Right-click=kick"
                                                            FontSize="9" Foreground="{StaticResource TextMutedBrush}"
                                                            HorizontalAlignment="Right" Opacity="0.6"
                                                            VerticalAlignment="Center" Margin="0,0,12,0"/>
-                                                <!-- 2D / 3D view toggle. 2D path uses DrawingContext directly,
-                                                     much faster for hundreds of nodes. Default 3D matches the
-                                                     existing visual style. -->
+                                                <!-- 2D / 3D view toggle. 2D path uses WriteableBitmap and
+                                                     starts smoothly even with hundreds of nodes; 3D mode
+                                                     causes visible stutter on initial load, so default is 2D. -->
                                                 <StackPanel Grid.Column="2" Orientation="Horizontal">
                                                     <Button x:Name="DashView3DBtn" Content="3D"
-                                                            Style="{StaticResource NeonButtonFilled}"
+                                                            Style="{StaticResource NeonButton}"
                                                             Padding="10,3" FontSize="10"
                                                             Tag="3D" Click="DashViewMode_Click"/>
                                                     <Button x:Name="DashView2DBtn" Content="2D"
-                                                            Style="{StaticResource NeonButton}"
+                                                            Style="{StaticResource NeonButtonFilled}"
                                                             Padding="10,3" FontSize="10" Margin="4,0,0,0"
                                                             Tag="2D" Click="DashViewMode_Click"/>
                                                 </StackPanel>
@@ -415,6 +488,7 @@
                                                  the overlay's ScrollViewer captures wheel for its own scroll. -->
                                             <Grid Grid.Row="1" Margin="0,8,0,0">
                                                 <Border x:Name="DashView3DBorder" CornerRadius="8" ClipToBounds="True"
+                                                        Visibility="Collapsed"
                                                         MouseLeftButtonDown="Viewport_MouseDown"
                                                         MouseLeftButtonUp="Viewport_MouseUp"
                                                         MouseMove="Viewport_MouseMove"
@@ -451,9 +525,8 @@
                                                     </Viewport3D>
                                                 </Border>
 
-                                                <!-- 2D fallback view — same physics, lighter renderer. -->
+                                                <!-- 2D primary view — WriteableBitmap renderer, default. -->
                                                 <Border x:Name="DashView2DBorder" CornerRadius="8" ClipToBounds="True"
-                                                        Visibility="Collapsed"
                                                         MouseLeftButtonDown="Dash2D_MouseDown"
                                                         MouseLeftButtonUp="Dash2D_MouseUp"
                                                         MouseMove="Dash2D_MouseMove"
@@ -722,20 +795,26 @@
                                                     Padding="10,3" FontSize="10"
                                                     Click="BrainBypass_Click" Margin="0,0,12,0"
                                                     ToolTip="Cycle brain-mode: Always → Auto → Off → Always.&#x0a;Always = inject reminder every turn (best for long sessions, deep debug)&#x0a;Auto = skip reminder when prompt &lt; 60 chars (best general use)&#x0a;Off = no reminders (best for trivial chat / greenfield)"/>
+                                            <!-- 3D toggle hidden (legacy Viewport3D path soft-disabled).
+                                                 Universe view replaces 3D BrainGraph; 2D path stays as the
+                                                 primary Graph view with MCP pulse + flash overlay. -->
                                             <Button x:Name="GraphView3DBtn" Content="3D"
-                                                    Style="{StaticResource NeonButtonFilled}"
-                                                    Padding="10,3" FontSize="10"
-                                                    Tag="3D" Click="GraphViewMode_Click" Margin="0,0,4,0"/>
-                                            <Button x:Name="GraphView2DBtn" Content="2D"
                                                     Style="{StaticResource NeonButton}"
                                                     Padding="10,3" FontSize="10"
-                                                    Tag="2D" Click="GraphViewMode_Click"/>
+                                                    Tag="3D" Click="GraphViewMode_Click" Margin="0,0,4,0"
+                                                    Visibility="Collapsed"/>
+                                            <Button x:Name="GraphView2DBtn" Content="2D"
+                                                    Style="{StaticResource NeonButtonFilled}"
+                                                    Padding="10,3" FontSize="10"
+                                                    Tag="2D" Click="GraphViewMode_Click"
+                                                    Visibility="Collapsed"/>
                                         </StackPanel>
                                     </Grid>
 
                                     <!-- Transparent border catches mouse on empty space.
                                          bk2 nebula paints the skybox behind the graph viewport. -->
                                     <Border x:Name="GraphView3DBorder" Grid.Row="1" CornerRadius="6" ClipToBounds="True"
+                                            Visibility="Collapsed"
                                             MouseLeftButtonDown="FullGraph_MouseDown"
                                             MouseLeftButtonUp="FullGraph_MouseUp"
                                             MouseMove="FullGraph_MouseMove"
@@ -887,9 +966,8 @@
                                     </Grid>
                                     </Border>
 
-                                    <!-- 2D fallback for the full brain graph. Same physics, lighter draw. -->
+                                    <!-- 2D primary for the full brain graph. WriteableBitmap renderer, default. -->
                                     <Border x:Name="GraphView2DBorder" Grid.Row="1" CornerRadius="6" ClipToBounds="True"
-                                            Visibility="Collapsed"
                                             MouseLeftButtonDown="Graph2D_MouseDown"
                                             MouseLeftButtonUp="Graph2D_MouseUp"
                                             MouseMove="Graph2D_MouseMove"
@@ -1847,19 +1925,149 @@
                                 </Grid>
                                 <!-- Comparison chart -->
                                 <Border Grid.Row="2" Style="{StaticResource CardPanel}">
+                                    <Border.Resources>
+                                        <!-- Pill-style toggle used by range + view-mode buttons. -->
+                                        <Style x:Key="TokensChip" TargetType="ToggleButton">
+                                            <Setter Property="Background" Value="#1A1A2E"/>
+                                            <Setter Property="Foreground" Value="{StaticResource TextSecondaryBrush}"/>
+                                            <Setter Property="BorderBrush" Value="{StaticResource SurfaceLightBrush}"/>
+                                            <Setter Property="BorderThickness" Value="1"/>
+                                            <Setter Property="FontSize" Value="11"/>
+                                            <Setter Property="FontWeight" Value="SemiBold"/>
+                                            <Setter Property="Padding" Value="10,4"/>
+                                            <Setter Property="Margin" Value="0,0,4,0"/>
+                                            <Setter Property="Cursor" Value="Hand"/>
+                                            <Setter Property="Template">
+                                                <Setter.Value>
+                                                    <ControlTemplate TargetType="ToggleButton">
+                                                        <Border Background="{TemplateBinding Background}"
+                                                                BorderBrush="{TemplateBinding BorderBrush}"
+                                                                BorderThickness="{TemplateBinding BorderThickness}"
+                                                                Padding="{TemplateBinding Padding}"
+                                                                CornerRadius="11">
+                                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                        </Border>
+                                                    </ControlTemplate>
+                                                </Setter.Value>
+                                            </Setter>
+                                            <Style.Triggers>
+                                                <Trigger Property="IsChecked" Value="True">
+                                                    <Setter Property="Background" Value="{StaticResource NeonCyanBrush}"/>
+                                                    <Setter Property="Foreground" Value="#0B0B1A"/>
+                                                    <Setter Property="BorderBrush" Value="{StaticResource NeonCyanBrush}"/>
+                                                </Trigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Border.Resources>
                                     <Grid>
                                         <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
                                             <RowDefinition Height="*"/>
                                             <RowDefinition Height="Auto"/>
                                         </Grid.RowDefinitions>
-                                        <Canvas x:Name="TokensCanvas" Grid.Row="0" Margin="0,0,0,12"/>
-                                        <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Center">
+                                        <!-- Toolbar: time range + view mode -->
+                                        <Grid Grid.Row="0" Margin="0,0,0,10">
+                                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
+                                                <TextBlock Text="Range" FontSize="10" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource TextMutedBrush}"
+                                                           VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                                <ToggleButton x:Name="TokensRange1d" Content="1d"
+                                                              Style="{StaticResource TokensChip}" Tag="24"
+                                                              Click="TokensRange_Click"/>
+                                                <ToggleButton x:Name="TokensRange7d" Content="7d"
+                                                              Style="{StaticResource TokensChip}" Tag="168"
+                                                              Click="TokensRange_Click"/>
+                                                <ToggleButton x:Name="TokensRange14d" Content="14d"
+                                                              Style="{StaticResource TokensChip}" Tag="336" IsChecked="True"
+                                                              Click="TokensRange_Click"/>
+                                                <ToggleButton x:Name="TokensRange30d" Content="30d"
+                                                              Style="{StaticResource TokensChip}" Tag="720"
+                                                              Click="TokensRange_Click"/>
+                                                <ToggleButton x:Name="TokensRangeAll" Content="All"
+                                                              Style="{StaticResource TokensChip}" Tag="43800"
+                                                              Click="TokensRange_Click"/>
+                                            </StackPanel>
+                                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                                <TextBlock Text="View" FontSize="10" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource TextMutedBrush}"
+                                                           VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                                <ToggleButton x:Name="TokensViewBucket" Content="Per-bucket" IsChecked="True"
+                                                              Style="{StaticResource TokensChip}"
+                                                              Click="TokensViewMode_Click"/>
+                                                <ToggleButton x:Name="TokensViewCumulative" Content="Cumulative"
+                                                              Style="{StaticResource TokensChip}"
+                                                              Click="TokensViewMode_Click"/>
+                                            </StackPanel>
+                                        </Grid>
+                                        <!-- Chart canvas + hover overlay (overlay is hit-test invisible
+                                             so MouseMove falls through to TokensCanvas). -->
+                                        <Grid Grid.Row="1" Margin="0,0,0,12">
+                                            <Canvas x:Name="TokensCanvas" Background="Transparent"
+                                                    MouseMove="TokensCanvas_MouseMove"
+                                                    MouseLeave="TokensCanvas_MouseLeave"/>
+                                            <Canvas x:Name="TokensOverlay" IsHitTestVisible="False">
+                                                <Line x:Name="TokensCrosshair" Visibility="Collapsed"
+                                                      Stroke="#88FFFFFF" StrokeThickness="1"
+                                                      StrokeDashArray="2,2"/>
+                                                <Border x:Name="TokensTooltip" Visibility="Collapsed"
+                                                        Background="#EE0F1A2E"
+                                                        BorderBrush="{StaticResource NeonCyanBrush}" BorderThickness="1"
+                                                        CornerRadius="4" Padding="10,8" MaxWidth="240">
+                                                    <StackPanel>
+                                                        <TextBlock x:Name="TokensTooltipTime" FontSize="11" FontWeight="Bold"
+                                                                   Foreground="{StaticResource TextPrimaryBrush}"
+                                                                   FontFamily="{StaticResource MonoFont}" Margin="0,0,0,4"/>
+                                                        <TextBlock x:Name="TokensTooltipMode" FontSize="10"
+                                                                   Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,6"/>
+                                                        <Grid>
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="Auto"/>
+                                                                <ColumnDefinition Width="*"/>
+                                                            </Grid.ColumnDefinitions>
+                                                            <Grid.RowDefinitions>
+                                                                <RowDefinition Height="Auto"/>
+                                                                <RowDefinition Height="Auto"/>
+                                                                <RowDefinition Height="Auto"/>
+                                                                <RowDefinition Height="Auto"/>
+                                                                <RowDefinition Height="Auto"/>
+                                                            </Grid.RowDefinitions>
+                                                            <TextBlock Grid.Row="0" Grid.Column="0" Text="actual " FontSize="10"
+                                                                       Foreground="#5DFF9D" Margin="0,0,8,2"/>
+                                                            <TextBlock Grid.Row="0" Grid.Column="1" x:Name="TokensTooltipActual"
+                                                                       FontSize="10" Foreground="{StaticResource TextPrimaryBrush}"
+                                                                       FontFamily="{StaticResource MonoFont}" Margin="0,0,0,2"/>
+                                                            <TextBlock Grid.Row="1" Grid.Column="0" Text="saved " FontSize="10"
+                                                                       Foreground="#FF6B9D" Margin="0,0,8,2"/>
+                                                            <TextBlock Grid.Row="1" Grid.Column="1" x:Name="TokensTooltipSaved"
+                                                                       FontSize="10" Foreground="{StaticResource TextPrimaryBrush}"
+                                                                       FontFamily="{StaticResource MonoFont}" Margin="0,0,0,2"/>
+                                                            <TextBlock Grid.Row="2" Grid.Column="0" Text="proj. " FontSize="10"
+                                                                       Foreground="{StaticResource TextMutedBrush}" Margin="0,0,8,2"/>
+                                                            <TextBlock Grid.Row="2" Grid.Column="1" x:Name="TokensTooltipProj"
+                                                                       FontSize="10" Foreground="{StaticResource TextPrimaryBrush}"
+                                                                       FontFamily="{StaticResource MonoFont}" Margin="0,0,0,2"/>
+                                                            <TextBlock Grid.Row="3" Grid.Column="0" Text="brain " FontSize="10"
+                                                                       Foreground="{StaticResource TextMutedBrush}" Margin="0,4,8,0"/>
+                                                            <TextBlock Grid.Row="3" Grid.Column="1" x:Name="TokensTooltipBrainCalls"
+                                                                       FontSize="10" Foreground="{StaticResource TextPrimaryBrush}"
+                                                                       FontFamily="{StaticResource MonoFont}" Margin="0,4,0,0"/>
+                                                            <TextBlock Grid.Row="4" Grid.Column="0" Text="tools " FontSize="10"
+                                                                       Foreground="{StaticResource TextMutedBrush}" Margin="0,0,8,0"/>
+                                                            <TextBlock Grid.Row="4" Grid.Column="1" x:Name="TokensTooltipOtherCalls"
+                                                                       FontSize="10" Foreground="{StaticResource TextPrimaryBrush}"
+                                                                       FontFamily="{StaticResource MonoFont}"/>
+                                                        </Grid>
+                                                    </StackPanel>
+                                                </Border>
+                                            </Canvas>
+                                        </Grid>
+                                        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Center">
                                             <Border Width="14" Height="3" Background="#5DFF9D" VerticalAlignment="Center" Margin="0,0,6,0"/>
                                             <TextBlock Text="actual (with brain)" FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,16,0"/>
                                             <Border Width="14" Height="3" Background="#FF6B9D" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                                            <TextBlock Text="projection (without brain)" FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,16,0"/>
+                                            <TextBlock Text="saved (vs no-brain projection)" FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,16,0"/>
                                             <Border Width="14" Height="3" Background="#FFC040" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                                            <TextBlock Text="bypass-mode hour" FontSize="11" Foreground="{StaticResource TextSecondaryBrush}"/>
+                                            <TextBlock Text="bypass-mode bucket" FontSize="11" Foreground="{StaticResource TextSecondaryBrush}"/>
                                         </StackPanel>
                                     </Grid>
                                 </Border>
@@ -1961,6 +2169,10 @@
                                                        VerticalAlignment="Center" Margin="4,0,0,0"/>
                                         </StackPanel>
                                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                            <Button x:Name="EditorSaveBtn" Content="&#x1F4BE; Save"
+                                                    Style="{StaticResource NeonButtonFilled}" Click="EditorSave_Click"
+                                                    Padding="12,4" FontSize="11" Margin="2,0,8,0"
+                                                    ToolTip="Save current note (Ctrl+S)"/>
                                             <Button Content="New" Style="{StaticResource NavButton}" Click="EditorNew_Click"
                                                     Padding="10,4" FontSize="11" Margin="2,0"/>
                                             <Button Content="H1" Style="{StaticResource NavButton}" Click="EditorH1_Click"
@@ -2074,6 +2286,66 @@
                                     <StackPanel x:Name="SearchResults"/>
                                 </ScrollViewer>
                             </Grid>
+                        </Grid>
+
+                        <!-- ═══ UNIVERSE VIEW (WebView2 + three.js + embedded 2D) ═══
+                             Default startup view (replaces Dashboard). WebView2 lives
+                             inside this content cell so the WPF chrome (sidebar/title/
+                             status) stays visible and interactive — the airspace rule
+                             keeps the WebView out of the chrome's area. -->
+                        <Grid x:Name="UniverseView" Visibility="Visible">
+                            <!-- 3D Universe (WebView2 + three.js) — default visible -->
+                            <Border x:Name="UniverseWebBorder" Background="#FF000308" ClipToBounds="True">
+                                <wv2:WebView2 x:Name="UniverseWebView" DefaultBackgroundColor="Black"/>
+                            </Border>
+
+                            <!-- 2D Graph (WriteableBitmap renderer) — collapsed by default.
+                                 Shares _graphPhysics with the (hidden) BrainGraphView so
+                                 MCP pulse flashes here too. -->
+                            <Border x:Name="UniverseGraph2DBorder" CornerRadius="0" ClipToBounds="True"
+                                    Visibility="Collapsed"
+                                    MouseLeftButtonDown="Graph2D_MouseDown"
+                                    MouseLeftButtonUp="Graph2D_MouseUp"
+                                    MouseMove="Graph2D_MouseMove"
+                                    MouseWheel="Graph2D_MouseWheel"
+                                    MouseRightButtonDown="Graph2D_RightClick">
+                                <Border.Background>
+                                    <ImageBrush ImageSource="pack://application:,,,/Assets/bk1.png"
+                                                Stretch="UniformToFill" Opacity="0.3"/>
+                                </Border.Background>
+                                <services:Graph2DRenderer x:Name="UniverseGraph2D"/>
+                            </Border>
+
+                            <!-- WPF floating 3D/2D toggle — only inside Universe view. -->
+                            <Border x:Name="UniverseViewToggle"
+                                    HorizontalAlignment="Right" VerticalAlignment="Top"
+                                    Margin="0,18,18,0" Padding="0"
+                                    Panel.ZIndex="100"
+                                    CornerRadius="999"
+                                    Cursor="Hand"
+                                    MouseLeftButtonUp="UniverseViewToggle_Click">
+                                <Border.Background>
+                                    <SolidColorBrush Color="#CC0A081C"/>
+                                </Border.Background>
+                                <Border.BorderBrush>
+                                    <SolidColorBrush Color="#446CF0FF"/>
+                                </Border.BorderBrush>
+                                <Border.BorderThickness>1</Border.BorderThickness>
+                                <Border.Effect>
+                                    <DropShadowEffect BlurRadius="14" ShadowDepth="0"
+                                                      Color="#000000" Opacity="0.55"/>
+                                </Border.Effect>
+                                <StackPanel Orientation="Horizontal" Margin="4,3">
+                                    <TextBlock x:Name="UniverseViewLabel3D" Text="3D"
+                                               Padding="10,4" FontSize="11" FontWeight="SemiBold"
+                                               Foreground="#FF6CF0FF" />
+                                    <TextBlock Text="·" Padding="2,4" FontSize="11"
+                                               Foreground="#665A5680"/>
+                                    <TextBlock x:Name="UniverseViewLabel2D" Text="2D"
+                                               Padding="10,4" FontSize="11" FontWeight="SemiBold"
+                                               Foreground="#FF8A86B8" />
+                                </StackPanel>
+                            </Border>
                         </Grid>
 
                         <!-- ═══ SETTINGS VIEW ═══ -->
@@ -2645,8 +2917,14 @@
                      truncate gracefully when chips on the right grow long.
                      Old version used a single cell with HorizontalAlignment
                      and the three sections overlapped each other. -->
-                <Border Grid.Row="2" Background="{StaticResource DarkPanelBrush}"
-                        BorderBrush="{StaticResource SurfaceLightBrush}" BorderThickness="0,1,0,0">
+                <Border x:Name="StatusBarBorder" Grid.Row="2"
+                        BorderThickness="0,1,0,0">
+                    <Border.Background>
+                        <SolidColorBrush Color="#FF0A081C"/>
+                    </Border.Background>
+                    <Border.BorderBrush>
+                        <SolidColorBrush Color="#446CF0FF"/>
+                    </Border.BorderBrush>
                     <Grid Margin="16,0">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
@@ -2715,6 +2993,43 @@
                     </Grid>
                 </Border>
             </Grid>
+
+            <!-- ═══ Floating Exit chip — ONLY visible in Show Case / Fullscreen ═══
+                 The chrome (sidebar / title / status bar) is hidden in those
+                 modes, so without this the user has no visible way back. F10
+                 / Esc keyboard shortcuts also work but this is more
+                 discoverable. -->
+            <Border x:Name="ShowCaseExitChip"
+                    HorizontalAlignment="Left" VerticalAlignment="Top"
+                    Margin="18,18,0,0" Padding="0"
+                    Panel.ZIndex="200"
+                    CornerRadius="999"
+                    Cursor="Hand"
+                    Visibility="Collapsed"
+                    MouseLeftButtonUp="ShowCaseExitChip_Click"
+                    ToolTip="Exit Show Case (or press F10 / Esc)">
+                <Border.Background>
+                    <SolidColorBrush Color="#DD0A081C"/>
+                </Border.Background>
+                <Border.BorderBrush>
+                    <SolidColorBrush Color="#666CF0FF"/>
+                </Border.BorderBrush>
+                <Border.BorderThickness>1</Border.BorderThickness>
+                <Border.Effect>
+                    <DropShadowEffect BlurRadius="14" ShadowDepth="0"
+                                      Color="#000000" Opacity="0.55"/>
+                </Border.Effect>
+                <StackPanel Orientation="Horizontal" Margin="6,3">
+                    <TextBlock Text="&#x2190;" FontSize="14" Padding="6,2,4,2"
+                               Foreground="#FF6CF0FF" VerticalAlignment="Center"/>
+                    <TextBlock Text="Exit Show Case" Padding="0,4,10,4"
+                               FontSize="11" FontWeight="SemiBold"
+                               Foreground="#FFD8D6F0"/>
+                    <TextBlock Text="F10 / Esc" Padding="0,4,8,4"
+                               FontSize="9" Foreground="#995A5680"/>
+                </StackPanel>
+            </Border>
+
         </Grid>
     </Border>
 </Window>

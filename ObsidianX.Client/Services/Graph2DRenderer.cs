@@ -211,7 +211,8 @@ public class Graph2DRenderer : FrameworkElement
             if (Physics == null || Physics.Nodes.Count == 0)
             {
                 _bmp.AddDirtyRect(new Int32Rect(0, 0, pxW, pxH));
-                _bmp.Unlock();
+                // Don't unlock here — the finally below owns the unlock.
+                // Calling it twice throws "image is unlocked".
                 dc.DrawImage(_bmp, new Rect(0, 0, dipW, dipH));
                 return;
             }

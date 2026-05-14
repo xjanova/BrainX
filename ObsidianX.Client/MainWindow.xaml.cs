@@ -3,6 +3,7 @@ using System.IO;
 using System.Net.Http;
 using System.Windows;
 using System.Windows.Controls;
+using Microsoft.Web.WebView2.Core;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
@@ -199,6 +200,7 @@ public partial class MainWindow : Window
     {
         ["Dashboard"] = "DashboardView",
         ["BrainGraph"] = "BrainGraphView",
+        ["Universe"] = "UniverseView",
         ["Network"] = "NetworkView",
         ["Vault"] = "VaultView",
         ["Claude"] = "ClaudeView",
@@ -224,6 +226,522 @@ public partial class MainWindow : Window
         // user's Claude Code memory dir. Idempotent — silently skips if
         // the on-disk version is already current.
         ClaudeBrainRulesInstaller.EnsureInstalled(_vaultPath);
+
+        // F11 toggles a true-fullscreen mode that *covers* the taskbar.
+        // Standard WPF Maximize on a WindowStyle=None window only fills
+        // the work area; this mode manually overrides bounds + Topmost.
+        PreviewKeyDown += OnGlobalPreviewKeyDown;
+    }
+
+    // ── Fullscreen state ─────────────────────────────────────────────
+    private bool _isFullscreen;
+    private WindowState _preFullscreenState;
+    private double _preFullscreenLeft, _preFullscreenTop, _preFullscreenWidth, _preFullscreenHeight;
+
+    private void OnGlobalPreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == System.Windows.Input.Key.F11)
+        {
+            ToggleFullscreen();
+            e.Handled = true;
+        }
+        else if (e.Key == System.Windows.Input.Key.F10)
+        {
+            ToggleShowCase();
+            e.Handled = true;
+        }
+        else if (e.Key == System.Windows.Input.Key.Escape && (_isFullscreen || _isShowCase))
+        {
+            if (_isShowCase) ToggleShowCase();
+            if (_isFullscreen) ToggleFullscreen();
+            e.Handled = true;
+        }
+    }
+
+    // ── Live wallpaper (WorkerW reparenting + multi-monitor) ─────────
+    // Classic Windows trick: send 0x052C to Progman, which spawns a sibling
+    // WorkerW window between the desktop wallpaper and the icons. We
+    // SetParent our WPF window to WorkerW → we're now "behind icons".
+    //
+    // Multi-monitor: pre-size to the virtual screen (covers ALL monitors)
+    // before reparenting. Per-monitor mode is a follow-up — for now,
+    // "spanned" covers the request "ทุกจอภาพเดียว".
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto, SetLastError = true)]
+    private static extern IntPtr FindWindow(string lpClassName, string? lpWindowName);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam,
+        uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr FindWindowEx(IntPtr hwndParent, IntPtr hwndChildAfter, string? lpszClass, string? lpszWindow);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetClassName(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
+
+    // SetWindowPos already imported near the CluadeX dock helpers — reuse.
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+    // Wallpaper Engine constants for window styling + z-ordering.
+    private const int GWL_EXSTYLE = -20;
+    private const int WS_EX_TOOLWINDOW = 0x00000080;   // out of Alt-Tab + taskbar
+    private const int WS_EX_NOACTIVATE = 0x08000000;   // don't steal focus on click
+    private static readonly IntPtr HWND_BOTTOM    = new IntPtr(1);
+    private static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
+    private const uint SWP_NOSIZE      = 0x0001;
+    private const uint SWP_NOMOVE      = 0x0002;
+    private const uint SWP_FRAMECHANGED= 0x0020;
+    // SWP_NOACTIVATE (0x0010), SWP_SHOWWINDOW (0x0040), SWP_NOZORDER (0x0004)
+    // already declared near the CluadeX dock helpers — reusing those.
+
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    private bool _isWallpaperMode;
+    private bool _wallpaperFinalized;            // true after WorkerW reparent — i.e. it's a real wallpaper now
+    private Window? _wallpaperWindow;            // separate child window — has to be opaque (no AllowsTransparency)
+    private Microsoft.Web.WebView2.Wpf.WebView2? _wallpaperWebView;
+    private bool _desktopIconsHidden;            // remember so we can restore on exit
+
+    private const int SW_HIDE = 0;
+    private const int SW_SHOW = 5;
+
+    /// <summary>
+    /// Hide / show Windows desktop icons by finding the SHELLDLL_DefView
+    /// pane (under Progman OR the active WorkerW) and toggling its
+    /// visibility. The icons return automatically on app exit because we
+    /// restore SW_SHOW in CleanupWallpaperWindow.
+    /// </summary>
+    private bool ToggleDesktopIcons(bool hide)
+    {
+        var defView = IntPtr.Zero;
+        var progman = FindWindow("Progman", null);
+        if (progman != IntPtr.Zero)
+            defView = FindWindowEx(progman, IntPtr.Zero, "SHELLDLL_DefView", null);
+        if (defView == IntPtr.Zero)
+        {
+            // After 0x052C, SHELLDLL_DefView may have migrated under a WorkerW.
+            EnumWindows((tophandle, _) =>
+            {
+                var dv = FindWindowEx(tophandle, IntPtr.Zero, "SHELLDLL_DefView", null);
+                if (dv != IntPtr.Zero) defView = dv;
+                return true;
+            }, IntPtr.Zero);
+        }
+        if (defView == IntPtr.Zero) return false;
+        ShowWindow(defView, hide ? SW_HIDE : SW_SHOW);
+        _desktopIconsHidden = hide;
+        return true;
+    }
+
+    /// <summary>
+    /// Why a separate window: the MAIN MainWindow has AllowsTransparency=True
+    /// (needed for rounded corners), which forces WS_EX_LAYERED. Layered
+    /// windows survive SetParent → WorkerW but render BLACK because the
+    /// compositor short-circuits them when parented away from desktop. The
+    /// well-known fix is a second opaque window dedicated to wallpaper mode.
+    /// </summary>
+    public void ToggleWallpaper()
+    {
+        if (!_isWallpaperMode) EnterWallpaperMode();
+        else ExitWallpaperMode();
+    }
+
+    /// <summary>
+    /// Stage 1 of wallpaper: spawn an opaque fullscreen child window in
+    /// SETUP mode — user gets full HUD + mouse + sliders so they can
+    /// configure (camera angle, brightness, motion, etc.) before clicking
+    /// Apply. The reparent-to-WorkerW step happens in FinalizeWallpaper(),
+    /// triggered by the JS Apply button.
+    /// </summary>
+    private async void EnterWallpaperMode()
+    {
+        try
+        {
+            ReportWp("setup 1/4 — building preview window (Wallpaper Engine style)");
+            _wallpaperWebView = new Microsoft.Web.WebView2.Wpf.WebView2
+            {
+                DefaultBackgroundColor = System.Drawing.Color.Black
+            };
+            // Preview-size, NOT topmost, has a title bar with X + drag — user
+            // can move it, minimize it, click other apps freely. Apply will
+            // then resize to full virtual screen and reparent to WorkerW.
+            var primaryW = (int)SystemParameters.PrimaryScreenWidth;
+            var primaryH = (int)SystemParameters.PrimaryScreenHeight;
+            var setupW   = Math.Min(1200, primaryW - 200);
+            var setupH   = Math.Min(720,  primaryH - 200);
+            _wallpaperWindow = new Window
+            {
+                WindowStyle    = WindowStyle.ToolWindow,  // X + drag title bar
+                ResizeMode     = ResizeMode.CanResize,
+                ShowInTaskbar  = true,
+                AllowsTransparency = false,
+                Background     = System.Windows.Media.Brushes.Black,
+                Topmost        = false,                   // NOT blocking other apps
+                WindowStartupLocation = WindowStartupLocation.CenterScreen,
+                Width          = setupW,
+                Height         = setupH,
+                Title          = "ObsidianX Wallpaper — Preview (drag, tweak, then Apply)",
+                Content        = _wallpaperWebView
+            };
+            // If user closes setup window via X → treat as Cancel.
+            _wallpaperWindow.Closed += (_, _) =>
+            {
+                if (!_wallpaperFinalized) ExitWallpaperMode();
+            };
+
+            // SAFETY HATCH: Esc / Ctrl+Shift+W ALWAYS exits wallpaper, even
+            // before Apply. Without this the user could get stuck in a
+            // Topmost setup window with no visible exit.
+            _wallpaperWindow.PreviewKeyDown += (_, ke) =>
+            {
+                if (ke.Key == System.Windows.Input.Key.Escape
+                    || (ke.Key == System.Windows.Input.Key.W
+                        && (System.Windows.Input.Keyboard.Modifiers &
+                            System.Windows.Input.ModifierKeys.Control) != 0
+                        && (System.Windows.Input.Keyboard.Modifiers &
+                            System.Windows.Input.ModifierKeys.Shift) != 0))
+                {
+                    ke.Handled = true;
+                    ExitWallpaperMode();
+                }
+            };
+
+            ReportWp("setup 3/4 — Show() + EnsureHandle");
+            _wallpaperWindow.Show();
+            var helper = new System.Windows.Interop.WindowInteropHelper(_wallpaperWindow);
+            helper.EnsureHandle();
+            var hwnd = helper.Handle;
+            if (hwnd == IntPtr.Zero) { ReportWp("FAILED — couldn't get HWND"); return; }
+
+            ReportWp("setup 4/4 — initialising WebView2 with ?mode=wallpaper-setup");
+            await _wallpaperWebView.EnsureCoreWebView2Async();
+            var core = _wallpaperWebView.CoreWebView2;
+            var wwwroot = Path.Combine(AppContext.BaseDirectory, "wwwroot");
+            core.SetVirtualHostNameToFolderMapping(
+                "universe.local", wwwroot, CoreWebView2HostResourceAccessKind.Allow);
+            core.WebMessageReceived += OnWallpaperMessage;
+            _wallpaperWebView.Source = new Uri("https://universe.local/universe/index.html?mode=wallpaper-setup");
+
+            _isWallpaperMode = true;
+            _wallpaperFinalized = false;
+            ReportWp("SETUP mode — drag, tweak, then click Apply to lock as wallpaper");
+        }
+        catch (Exception ex)
+        {
+            ReportWp($"FAILED: {ex.Message}");
+            CleanupWallpaperWindow();
+        }
+    }
+
+    /// <summary>
+    /// Handle bridge messages from the wallpaper child WebView: 'ready' →
+    /// push the brain payload; 'wallpaperApply' → finalize (reparent to
+    /// WorkerW + tell JS to swap to wallpaper-mode CSS); 'wallpaperCancel'
+    /// → close the window without applying.
+    /// </summary>
+    private void OnWallpaperMessage(object? sender,
+        Microsoft.Web.WebView2.Core.CoreWebView2WebMessageReceivedEventArgs e)
+    {
+        try
+        {
+            var json = e.WebMessageAsJson;
+            var msg = Newtonsoft.Json.JsonConvert.DeserializeAnonymousType(json, new { type = "" });
+            if (msg?.type == "ready")
+            {
+                var path = Path.Combine(_vaultPath, ".obsidianx", "brain-export.json");
+                if (File.Exists(path))
+                    _wallpaperWebView?.CoreWebView2?.PostWebMessageAsJson(
+                        "{\"type\":\"brain\",\"payload\":" + File.ReadAllText(path) + "}");
+            }
+            else if (msg?.type == "wallpaperApply")
+            {
+                Dispatcher.BeginInvoke(new Action(FinalizeWallpaper));
+            }
+            else if (msg?.type == "wallpaperCancel")
+            {
+                Dispatcher.BeginInvoke(new Action(ExitWallpaperMode));
+            }
+            else if (msg?.type == "wallpaperToggleIcons")
+            {
+                var hidePayload = Newtonsoft.Json.JsonConvert.DeserializeAnonymousType(
+                    e.WebMessageAsJson, new { hide = false });
+                var hide = hidePayload?.hide ?? false;
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    var ok = ToggleDesktopIcons(hide);
+                    ReportWp(ok
+                        ? (hide ? "Desktop icons HIDDEN" : "Desktop icons SHOWN")
+                        : "Icon toggle failed (SHELLDLL_DefView not found)");
+                }));
+            }
+        }
+        catch (Exception ex) { Debug.WriteLine($"wallpaper bridge: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Stage 2: SetParent the setup window into WorkerW (or HWND_BOTTOM
+    /// fallback). Sends finalizeWallpaper back to JS so it drops the setup
+    /// bar + adds the wallpaper-mode CSS class.
+    /// </summary>
+    private async void FinalizeWallpaper()
+    {
+        if (_wallpaperWindow == null || _wallpaperFinalized) return;
+        try
+        {
+            var helper = new System.Windows.Interop.WindowInteropHelper(_wallpaperWindow);
+            var hwnd = helper.Handle;
+            if (hwnd == IntPtr.Zero) { ReportWp("FAILED — no HWND on finalize"); return; }
+
+            // SAFETY FIRST: drop Topmost via BOTH the WPF property AND an
+            // explicit Win32 SetWindowPos(HWND_NOTOPMOST). If anything below
+            // throws, the window won't be blocking other apps anymore.
+            ReportWp("apply 1/6 — dropping Topmost (safety first)");
+            _wallpaperWindow.Topmost = false;
+            SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
+            ReportWp("apply 2/6 — expand setup window → full virtual screen");
+            // Flip to chrome-less + expand to entire multi-monitor area.
+            _wallpaperWindow.WindowStyle    = WindowStyle.None;
+            _wallpaperWindow.ResizeMode     = ResizeMode.NoResize;
+            _wallpaperWindow.ShowInTaskbar  = false;
+            var vsLeft   = (int)SystemParameters.VirtualScreenLeft;
+            var vsTop    = (int)SystemParameters.VirtualScreenTop;
+            var vsWidth  = (int)SystemParameters.VirtualScreenWidth;
+            var vsHeight = (int)SystemParameters.VirtualScreenHeight;
+            _wallpaperWindow.Left   = vsLeft;
+            _wallpaperWindow.Top    = vsTop;
+            _wallpaperWindow.Width  = vsWidth;
+            _wallpaperWindow.Height = vsHeight;
+
+            // Add WS_EX_TOOLWINDOW + WS_EX_NOACTIVATE so we leave Alt-Tab.
+            var ex = GetWindowLong(hwnd, GWL_EXSTYLE);
+            SetWindowLong(hwnd, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
+
+            ReportWp("apply 3/6 — locating Progman");
+            var progman = FindWindow("Progman", null);
+            if (progman == IntPtr.Zero) { ReportWp("FAILED — Progman not found"); return; }
+
+            ReportWp("apply 4/6 — spawning WorkerW (0x052C) + 500ms wait");
+            SendMessageTimeout(progman, 0x052C, IntPtr.Zero, IntPtr.Zero, 0x0000, 1000, out _);
+            await Task.Delay(500);
+
+            ReportWp("apply 5/6 — scanning EnumWindows for WorkerW sibling");
+            IntPtr workerW = IntPtr.Zero;
+            EnumWindows((tophandle, _) =>
+            {
+                if (FindWindowEx(tophandle, IntPtr.Zero, "SHELLDLL_DefView", null) != IntPtr.Zero)
+                    workerW = FindWindowEx(IntPtr.Zero, tophandle, "WorkerW", null);
+                return true;
+            }, IntPtr.Zero);
+
+            if (workerW != IntPtr.Zero)
+            {
+                ReportWp("apply 6/6 — SetParent → WorkerW + SWP_FRAMECHANGED");
+                SetParent(hwnd, workerW);
+                SetWindowPos(hwnd, IntPtr.Zero, 0, 0, vsWidth, vsHeight,
+                    SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
+                ReportWp($"LIVE behind icons — {vsWidth}×{vsHeight}");
+            }
+            else
+            {
+                ReportWp("apply 6/6 — WorkerW missing, HWND_BOTTOM fallback");
+                SetWindowPos(hwnd, HWND_BOTTOM, vsLeft, vsTop, vsWidth, vsHeight,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                ReportWp($"LIVE bottom-Z — {vsWidth}×{vsHeight}");
+            }
+
+            // Tell JS to drop the setup chrome + add wallpaper-mode (HUD-less).
+            _wallpaperWebView?.CoreWebView2?.PostWebMessageAsJson(
+                "{\"type\":\"finalizeWallpaper\"}");
+
+            _wallpaperFinalized = true;
+        }
+        catch (Exception ex)
+        {
+            ReportWp($"Apply FAILED: {ex.Message}");
+        }
+    }
+
+    private void ExitWallpaperMode()
+    {
+        CleanupWallpaperWindow();
+        _isWallpaperMode = false;
+        _wallpaperFinalized = false;
+        ReportWp("Wallpaper mode exited");
+    }
+
+    private void CleanupWallpaperWindow()
+    {
+        // Always restore desktop icons on exit — otherwise the user is stuck
+        // with hidden icons until they right-click → View → Show.
+        if (_desktopIconsHidden)
+        {
+            try { ToggleDesktopIcons(false); }
+            catch (Exception ex) { Debug.WriteLine($"restore icons: {ex.Message}"); }
+        }
+        try { _wallpaperWindow?.Close(); }
+        catch (Exception ex) { Debug.WriteLine($"wallpaper close: {ex.Message}"); }
+        _wallpaperWindow = null;
+        _wallpaperWebView = null;
+    }
+
+    private void ReportWp(string text)
+    {
+        if (StatusText != null) StatusText.Text = "Wallpaper: " + text;
+        Debug.WriteLine("[Wallpaper] " + text);
+        // Push back into the Universe HUD too — easier to spot than the
+        // small WPF status bar at the bottom of the window.
+        try
+        {
+            UniverseWebView?.CoreWebView2?.PostWebMessageAsJson(
+                "{\"type\":\"wallpaperStatus\",\"text\":\"" + EscapeJson(text) + "\"}");
+        } catch (Exception ex) { Debug.WriteLine($"ReportWp post: {ex.Message}"); }
+    }
+
+    // ── SystemParametersInfo fallback (sets real Windows desktop wallpaper) ──
+    // Used when WorkerW reparenting fails. We save the latest Universe
+    // snapshot to a temp PNG and tell Windows to use it as the desktop
+    // background via SPI_SETDESKWALLPAPER. Not "live" — it changes whenever
+    // the snapshot timer fires (every 5s).
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto, SetLastError = true)]
+    private static extern int SystemParametersInfo(uint uAction, uint uParam, string lpvParam, uint fuWinIni);
+    private const uint SPI_SETDESKWALLPAPER = 0x0014;
+    private const uint SPIF_UPDATEINIFILE = 0x01;
+    private const uint SPIF_SENDCHANGE = 0x02;
+
+    private async Task<bool> SetDesktopWallpaperFromSnapshotAsync()
+    {
+        try
+        {
+            var core = UniverseWebView?.CoreWebView2;
+            if (core == null) return false;
+            var tmp = Path.Combine(Path.GetTempPath(), "obsidianx-universe-wallpaper.png");
+            using (var fs = File.Create(tmp))
+            {
+                await core.CapturePreviewAsync(
+                    Microsoft.Web.WebView2.Core.CoreWebView2CapturePreviewImageFormat.Png, fs);
+            }
+            var rc = SystemParametersInfo(SPI_SETDESKWALLPAPER, 0, tmp,
+                SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
+            return rc != 0;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"SetDesktopWallpaper: {ex.Message}");
+            return false;
+        }
+    }
+
+    // ── Sidebar collapse (hamburger toggle) ───────────────────────────
+    private bool _sidebarCollapsed;
+    private GridLength _sidebarSavedWidth = new GridLength(220);
+
+    private void SidebarToggle_Click(object s, RoutedEventArgs e)
+    {
+        if (SidebarColumn == null) return;
+        if (!_sidebarCollapsed)
+        {
+            _sidebarSavedWidth = SidebarColumn.Width;
+            SidebarColumn.Width = new GridLength(0);
+            if (SidebarBorder != null) SidebarBorder.Visibility = Visibility.Collapsed;
+            _sidebarCollapsed = true;
+        }
+        else
+        {
+            SidebarColumn.Width = _sidebarSavedWidth;
+            if (SidebarBorder != null) SidebarBorder.Visibility = Visibility.Visible;
+            _sidebarCollapsed = false;
+        }
+    }
+
+    // ── Show Case (chrome-less Universe) ──────────────────────────────
+    // Hides TitleBar/Sidebar/StatusBar so the WebView fills the entire
+    // window. Combined with F11 fullscreen this gives a true "presenter"
+    // view. Esc exits both modes if both are on.
+    private bool _isShowCase;
+    private GridLength _savedSidebarWidth;
+    private GridLength _savedTitleBarHeight;
+    private GridLength _savedStatusBarHeight;
+
+    public void ToggleShowCase()
+    {
+        if (!_isShowCase)
+        {
+            _savedSidebarWidth   = SidebarColumn?.Width  ?? new GridLength(220);
+            _savedTitleBarHeight = TitleBarRow?.Height   ?? new GridLength(44);
+            _savedStatusBarHeight= StatusBarRow?.Height  ?? new GridLength(32);
+
+            if (SidebarColumn   != null) SidebarColumn.Width   = new GridLength(0);
+            if (TitleBarRow     != null) TitleBarRow.Height    = new GridLength(0);
+            if (StatusBarRow    != null) StatusBarRow.Height   = new GridLength(0);
+            if (SidebarBorder   != null) SidebarBorder.Visibility   = Visibility.Collapsed;
+            if (TitleBarBorder  != null) TitleBarBorder.Visibility  = Visibility.Collapsed;
+            if (StatusBarBorder != null) StatusBarBorder.Visibility = Visibility.Collapsed;
+            // Critical: show the exit chip so user has a discoverable way out.
+            if (ShowCaseExitChip != null) ShowCaseExitChip.Visibility = Visibility.Visible;
+
+            _isShowCase = true;
+        }
+        else
+        {
+            if (SidebarColumn   != null) SidebarColumn.Width   = _savedSidebarWidth;
+            if (TitleBarRow     != null) TitleBarRow.Height    = _savedTitleBarHeight;
+            if (StatusBarRow    != null) StatusBarRow.Height   = _savedStatusBarHeight;
+            if (SidebarBorder   != null) SidebarBorder.Visibility   = Visibility.Visible;
+            if (TitleBarBorder  != null) TitleBarBorder.Visibility  = Visibility.Visible;
+            if (StatusBarBorder != null) StatusBarBorder.Visibility = Visibility.Visible;
+            if (ShowCaseExitChip != null) ShowCaseExitChip.Visibility = Visibility.Collapsed;
+
+            _isShowCase = false;
+        }
+    }
+
+    private void ShowCaseExitChip_Click(object sender, MouseButtonEventArgs e)
+    {
+        if (_isShowCase) ToggleShowCase();
+    }
+
+    public void ToggleFullscreen()
+    {
+        if (!_isFullscreen)
+        {
+            _preFullscreenState = WindowState;
+            _preFullscreenLeft = Left;
+            _preFullscreenTop = Top;
+            _preFullscreenWidth = Width;
+            _preFullscreenHeight = Height;
+
+            // Manual bounds = primary monitor size so we OVERFLOW the taskbar.
+            // (Standard Maximize would clip at the work area.)
+            WindowState = WindowState.Normal;
+            Left = 0; Top = 0;
+            Width = SystemParameters.PrimaryScreenWidth;
+            Height = SystemParameters.PrimaryScreenHeight;
+            Topmost = true;
+            _isFullscreen = true;
+        }
+        else
+        {
+            Topmost = false;
+            WindowState = _preFullscreenState;
+            Left = _preFullscreenLeft;
+            Top = _preFullscreenTop;
+            Width = _preFullscreenWidth;
+            Height = _preFullscreenHeight;
+            _isFullscreen = false;
+        }
     }
 
     private void Window_Loaded(object sender, RoutedEventArgs e)
@@ -282,6 +800,12 @@ public partial class MainWindow : Window
         Dispatcher.BeginInvoke(new Action(FitDashCamera),
             System.Windows.Threading.DispatcherPriority.ContextIdle);
 
+        // 2D-default fit: dashboard map starts in 2D mode now, so call the
+        // 2D fit on its renderer once layout is settled. (FitDashCamera
+        // above only adjusts the 3D camera distance.)
+        Dispatcher.BeginInvoke(new Action(() => DashGraph2D.FitToContent()),
+            System.Windows.Threading.DispatcherPriority.ContextIdle);
+
         // Wire 2D renderers to the same physics state so toggling is instant.
         // Nothing renders yet — the toggle button flips visibility, and only
         // then does OnRenderFrame call InvalidateVisual on the 2D element.
@@ -291,6 +815,11 @@ public partial class MainWindow : Window
         FullGraph2D.Physics = _graphPhysics;
         FullGraph2D.CategoryColorFn = GetCategoryColor;
         FullGraph2D.SetTheme(_themeAccent, _themeSecondary);
+        // Universe's embedded 2D renderer shares _graphPhysics with FullGraph2D
+        // so the same MCP pulse flashes appear on whichever surface is visible.
+        UniverseGraph2D.Physics = _graphPhysics;
+        UniverseGraph2D.CategoryColorFn = GetCategoryColor;
+        UniverseGraph2D.SetTheme(_themeAccent, _themeSecondary);
 
         // Populate UI
         UpdateUI();
@@ -304,6 +833,13 @@ public partial class MainWindow : Window
         PopulateCustomCategories();
         StartAccessLogWatcher();
         StartMcpStatusWatcher();
+
+        // Universe is the default view now — kick off WebView2 init eagerly
+        // (it loads three.js from CDN + the brain-export, taking 1-2 s).
+        // Deferred via Dispatcher.ContextIdle so the rest of Window_Loaded
+        // returns first and the splash visuals settle before WebView spins.
+        Dispatcher.BeginInvoke(new Action(() => _ = InitializeUniverseAsync()),
+            System.Windows.Threading.DispatcherPriority.ContextIdle);
         _ = LoadAiBackends();
         _ = RefreshAiKeyStatus();
         InitRedirectToggle();
@@ -403,9 +939,12 @@ public partial class MainWindow : Window
         // don't accumulate invisibly.
         bool dashVisible = DashboardView.Visibility == Visibility.Visible;
         bool graphVisible = BrainGraphView.Visibility == Visibility.Visible;
+        // Universe also runs 2D when its embedded Graph2DRenderer is showing.
+        bool universe2DVisible = UniverseView?.Visibility == Visibility.Visible
+                                 && UniverseGraph2DBorder?.Visibility == Visibility.Visible;
 
         if (dashVisible) _dashPhysics.Step();
-        if (graphVisible) _graphPhysics.Step();
+        if (graphVisible || universe2DVisible) _graphPhysics.Step();
 
         // Decay knowledge-pulse intensity each frame (~16ms)
         DecayPulses(_dashPhysics, 0.016);
@@ -460,14 +999,29 @@ public partial class MainWindow : Window
                 UpdateActivityLabels();
             }
         }
+
+        // Universe's 2D path: same arc/pulse data as BrainGraph since both
+        // share _graphPhysics. We just push it to the second renderer.
+        if (universe2DVisible)
+        {
+            UniverseGraph2D.SelectedIndex = _selectedNodeGraph;
+            var arcs = BuildArcSnapshot(_graphPhysics);
+            UniverseGraph2D.Arcs = arcs;
+            if (Needs2DRedraw(_graphPhysics, arcs) || UniverseGraph2D.HasActiveFade)
+                UniverseGraph2D.InvalidateVisual();
+        }
     }
 
     // ═══════════════════════════════════════
     // 2D / 3D VIEW MODE TOGGLE
     // ═══════════════════════════════════════
 
-    private bool _dashView2D = false;
-    private bool _graphView2D = false;
+    // Default to 2D on startup — 3D RebuildScene with hundreds of nodes was
+    // causing visible stutter for the first few seconds after Window_Loaded.
+    // 2D path is WriteableBitmap-based and starts smoothly. User can flip
+    // to 3D via the toolbar toggle anytime.
+    private bool _dashView2D = true;
+    private bool _graphView2D = true;
     private bool _dash2DDragging = false;
     private bool _graph2DDragging = false;
     private Point _dash2DLastMouse;
@@ -593,14 +1147,27 @@ public partial class MainWindow : Window
 
     // ── Brain Graph 2D mouse handlers ───────────────────────────────
 
+    /// <summary>
+    /// Resolve which Graph2DRenderer this mouse event is bound to. Universe
+    /// view embeds a second renderer that shares _graphPhysics with the
+    /// (hidden) BrainGraphView's FullGraph2D — same handlers, same physics,
+    /// different visuals. Sender Border's child tells us which surface.
+    /// </summary>
+    private Services.Graph2DRenderer ResolveGraph2D(object sender)
+    {
+        if (sender is Border b && b.Child is Services.Graph2DRenderer r) return r;
+        return FullGraph2D;
+    }
+
     private void Graph2D_MouseDown(object s, MouseButtonEventArgs e)
     {
-        var p = e.GetPosition(FullGraph2D);
+        var g = ResolveGraph2D(s);
+        var p = e.GetPosition(g);
         // First try a precise hit; if that misses, fall back to nearest
         // node within 60 px so a click in dense empty space still
         // triggers a pulse on the closest neighbour. Lets the edge-blink
         // demo work without pixel-perfect aim.
-        var hit = FullGraph2D.HitTest(p) ?? FindNearestNode2D(p, _graphPhysics, 60);
+        var hit = g.HitTest(p) ?? FindNearestNode2D(p, _graphPhysics, 60, g);
         if (hit.HasValue)
         {
             _selectedNodeGraph = hit;
@@ -631,14 +1198,16 @@ public partial class MainWindow : Window
     /// <paramref name="maxPx"/> screen pixels of <paramref name="screenPt"/>,
     /// or null if everything is too far away.
     /// </summary>
-    private int? FindNearestNode2D(Point screenPt, PhysicsEngine physics, double maxPx)
+    private int? FindNearestNode2D(Point screenPt, PhysicsEngine physics, double maxPx,
+        Services.Graph2DRenderer? graph = null)
     {
         if (physics.Nodes.Count == 0) return null;
+        var g = graph ?? FullGraph2D;
         int bestI = -1;
         double bestD2 = maxPx * maxPx;
         for (int i = 0; i < physics.Nodes.Count; i++)
         {
-            var sp = FullGraph2D.WorldToScreen(physics.Nodes[i].Position);
+            var sp = g.WorldToScreen(physics.Nodes[i].Position);
             var dx = sp.X - screenPt.X;
             var dy = sp.Y - screenPt.Y;
             var d2 = dx * dx + dy * dy;
@@ -660,34 +1229,37 @@ public partial class MainWindow : Window
     private void Graph2D_MouseMove(object s, MouseEventArgs e)
     {
         if (!_graph2DDragging) return;
+        var g = ResolveGraph2D(s);
         var pos = e.GetPosition((IInputElement)s);
         var dx = pos.X - _graph2DLastMouse.X;
         var dy = pos.Y - _graph2DLastMouse.Y;
-        FullGraph2D.ViewCenter = new Point(
-            FullGraph2D.ViewCenter.X - dx / FullGraph2D.Scale,
-            FullGraph2D.ViewCenter.Y + dy / FullGraph2D.Scale);
+        g.ViewCenter = new Point(
+            g.ViewCenter.X - dx / g.Scale,
+            g.ViewCenter.Y + dy / g.Scale);
         _graph2DLastMouse = pos;
         Mark2DDirty();
     }
 
     private void Graph2D_MouseWheel(object s, MouseWheelEventArgs e)
     {
-        var screenPos = e.GetPosition(FullGraph2D);
-        var worldBefore = FullGraph2D.ScreenToWorld(screenPos);
+        var g = ResolveGraph2D(s);
+        var screenPos = e.GetPosition(g);
+        var worldBefore = g.ScreenToWorld(screenPos);
         var factor = e.Delta > 0 ? 1.1 : 1.0 / 1.1;
-        FullGraph2D.Scale = Math.Clamp(FullGraph2D.Scale * factor, 4, 200);
-        var worldAfter = FullGraph2D.ScreenToWorld(screenPos);
-        FullGraph2D.ViewCenter = new Point(
-            FullGraph2D.ViewCenter.X + (worldBefore.X - worldAfter.X),
-            FullGraph2D.ViewCenter.Y + (worldBefore.Y - worldAfter.Y));
+        g.Scale = Math.Clamp(g.Scale * factor, 4, 200);
+        var worldAfter = g.ScreenToWorld(screenPos);
+        g.ViewCenter = new Point(
+            g.ViewCenter.X + (worldBefore.X - worldAfter.X),
+            g.ViewCenter.Y + (worldBefore.Y - worldAfter.Y));
         e.Handled = true;
         Mark2DDirty();
     }
 
     private void Graph2D_RightClick(object s, MouseButtonEventArgs e)
     {
-        var p = e.GetPosition(FullGraph2D);
-        var hit = FullGraph2D.HitTest(p);
+        var g = ResolveGraph2D(s);
+        var p = e.GetPosition(g);
+        var hit = g.HitTest(p);
         if (hit.HasValue) _graphPhysics.KickNode(hit.Value);
         else _graphPhysics.Disturb(0.8);
     }
@@ -5037,14 +5609,22 @@ public partial class MainWindow : Window
                 "auto" => "🤖",
                 _      => "💰"
             };
-            TokenSavingsText.Text = $"{prefix} {formatted} tok";
-            TokenSavingsChip.ToolTip =
+            var chipText = $"{prefix} {formatted} tok";
+            TokenSavingsText.Text = chipText;
+            var tooltip =
                 $"Brain net savings: {net:N0} tokens\n" +
                 $"Calls: {stats.TotalCalls} ({stats.GrossSaved:N0} avoided − {stats.GrossSpent:N0} spent)\n" +
                 $"Mode: {mode.ToUpperInvariant()} — click to cycle Always → Auto → Off\n" +
                 "\nBreakdown by op:\n" +
                 string.Join("\n", stats.CallsByOp.OrderByDescending(kv => kv.Value)
                     .Take(8).Select(kv => $"  {kv.Key}: {kv.Value}"));
+            TokenSavingsChip.ToolTip = tooltip;
+
+            // Mirror the chip into the Universe HUD so users on the Universe
+            // landing view see the same savings counter without switching
+            // back to BrainGraph. Tooltip relayed too so hover works the
+            // same in both surfaces.
+            BroadcastTokenStatsToUniverse(chipText, tooltip);
 
             // Tint matches the chip prefix so the user reads the mode
             // without having to expand the tooltip:
@@ -5150,7 +5730,7 @@ public partial class MainWindow : Window
             if (view != null) view.Visibility = Visibility.Visible;
         }
 
-        Button[] navButtons = [NavDashboard, NavBrainGraph, NavNetwork, NavEditor, NavVault, NavSearch, NavClaude, NavGrowth, NavTokens, NavInsights, NavPeers, NavSharing, NavSettings];
+        Button[] navButtons = [NavDashboard, NavBrainGraph, NavUniverse, NavNetwork, NavEditor, NavVault, NavSearch, NavClaude, NavGrowth, NavTokens, NavInsights, NavPeers, NavSharing, NavSettings];
         foreach (var nb in navButtons) nb.Style = (Style)FindResource("NavButton");
         btn.Style = (Style)FindResource("NavButtonActive");
 
@@ -5163,6 +5743,7 @@ public partial class MainWindow : Window
         if (tag == "Search") SearchBox.Focus();
         if (tag == "Network") _ = RefreshNetworkStats();
         if (tag == "Vault") RefreshVaultTree();
+        if (tag == "Universe") _ = InitializeUniverseAsync();
     }
 
     // ═══════════════════════════════════════
@@ -5405,6 +5986,316 @@ public partial class MainWindow : Window
         // Disconnect from network
         try { await _network.DisconnectAsync(); }
         catch (Exception ex) { Debug.WriteLine($"Disconnect error: {ex.Message}"); }
+    }
+
+    // ═══════════════════════════════════════
+    // UNIVERSE VIEW (WebView2 + three.js host, see wwwroot/universe/)
+    //
+    // The C# side is a thin shell:
+    //   • EnsureCoreWebView2Async + map wwwroot to https://universe.local
+    //   • on JS "ready" → push brain-export.json as a single WebMessage
+    //   • later phases relay MCP pulses, peer events, share-state changes
+    //
+    // Cross-origin trap: the brain JSON lives outside wwwroot (in
+    // <vault>/.obsidianx/), so it cannot be fetched cross-origin from
+    // https://universe.local. We post the file content via WebMessage
+    // instead — IPC has no CORS and no practical size cap for our 6 MB.
+    // ═══════════════════════════════════════
+    private bool _universeInitialized;
+
+    private async Task InitializeUniverseAsync()
+    {
+        if (_universeInitialized) return;
+
+        try
+        {
+            await UniverseWebView.EnsureCoreWebView2Async();
+            var core = UniverseWebView.CoreWebView2;
+
+            var wwwroot = Path.Combine(AppContext.BaseDirectory, "wwwroot");
+            if (!Directory.Exists(wwwroot))
+            {
+                MessageBox.Show(
+                    $"Universe assets folder missing:\n{wwwroot}\n\n" +
+                    "Rebuild the project so wwwroot is copied to bin/.",
+                    "Universe", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            core.SetVirtualHostNameToFolderMapping(
+                "universe.local", wwwroot,
+                CoreWebView2HostResourceAccessKind.Allow);
+            core.WebMessageReceived += OnUniverseMessage;
+            core.Settings.AreDevToolsEnabled = true;
+            core.Settings.AreDefaultContextMenusEnabled = true;
+
+            UniverseWebView.Source = new Uri("https://universe.local/universe/index.html");
+            _universeInitialized = true;
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                $"WebView2 init failed: {ex.Message}\n\n" +
+                "If the WebView2 Runtime is missing, install it from:\n" +
+                "https://developer.microsoft.com/microsoft-edge/webview2/",
+                "Universe", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void OnUniverseMessage(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
+    {
+        try
+        {
+            var json = e.WebMessageAsJson;
+            var msg = Newtonsoft.Json.JsonConvert.DeserializeAnonymousType(
+                json, new { type = "" });
+            if (msg?.type == "ready")
+            {
+                // Always push on ready (no one-shot guard) — JS sends `ready`
+                // again after Ctrl+R reload, F5, or page navigation. Without
+                // re-push the JS stays stuck on "Waiting for brain snapshot".
+                PushBrainSnapshotToUniverse();
+            }
+            else if (msg?.type == "toggleFullscreen")
+            {
+                // JS settings panel button → fullscreen-with-taskbar-cover.
+                Dispatcher.BeginInvoke(new Action(ToggleFullscreen));
+            }
+            else if (msg?.type == "toggleShowCase")
+            {
+                // JS Show-Case button → hide all chrome, Universe-only canvas.
+                Dispatcher.BeginInvoke(new Action(ToggleShowCase));
+            }
+            else if (msg?.type == "toggleWallpaper")
+            {
+                // JS Wallpaper button → reparent under WorkerW (multi-monitor).
+                // Immediate visible ack so user knows the click reached C#
+                // even if WorkerW lookup fails later.
+                if (StatusText != null) StatusText.Text = "Wallpaper button received — preparing…";
+                Debug.WriteLine("[Wallpaper] toggleWallpaper message received");
+                Dispatcher.BeginInvoke(new Action(ToggleWallpaper));
+            }
+            else if (msg?.type == "switchView")
+            {
+                // JS view picker → flip Universe 3D ↔ 2D inside the SAME
+                // UniverseView grid (both borders are siblings).
+                var json2 = e.WebMessageAsJson;
+                var view = Newtonsoft.Json.JsonConvert.DeserializeAnonymousType(
+                    json2, new { view = "3d" })?.view ?? "3d";
+                Dispatcher.BeginInvoke(new Action(() => SwitchUniverseView(view)));
+            }
+            else if (msg?.type == "editNote")
+            {
+                // JS info card → open the note in the WPF Markdown editor.
+                // Resolves noteId via _graph; falls back to a status message
+                // if the note id is stale (rare — happens right after a
+                // re-export).
+                var json3 = e.WebMessageAsJson;
+                var noteId = Newtonsoft.Json.JsonConvert.DeserializeAnonymousType(
+                    json3, new { noteId = "" })?.noteId;
+                if (!string.IsNullOrEmpty(noteId))
+                    Dispatcher.BeginInvoke(new Action(() => OpenNoteInEditor(noteId)));
+            }
+            else if (msg?.type == "requestNoteContent")
+            {
+                // Inline edit Step 1: JS asks for the full Markdown content
+                // of a note by id; we read from disk and post it back.
+                var json4 = e.WebMessageAsJson;
+                var noteId = Newtonsoft.Json.JsonConvert.DeserializeAnonymousType(
+                    json4, new { noteId = "" })?.noteId;
+                if (!string.IsNullOrEmpty(noteId))
+                    Dispatcher.BeginInvoke(new Action(() => SendNoteContentToUniverse(noteId)));
+            }
+            else if (msg?.type == "saveNote")
+            {
+                // Inline edit Step 2: JS posts the new content back; we
+                // write to disk + nudge the watcher to re-index. Errors
+                // go back as noteSaveError so the user sees them in-card.
+                var json5 = e.WebMessageAsJson;
+                var payload = Newtonsoft.Json.JsonConvert.DeserializeAnonymousType(
+                    json5, new { noteId = "", content = "" });
+                if (payload != null && !string.IsNullOrEmpty(payload.noteId))
+                    Dispatcher.BeginInvoke(new Action(
+                        () => SaveNoteFromUniverse(payload.noteId, payload.content ?? "")));
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"OnUniverseMessage: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Toggle UniverseView's child: WebView2 (3D) ↔ Graph2DRenderer (2D).
+    /// Both share UniverseView's grid cell; only one is visible at a time.
+    /// Also recolors the floating WPF toggle and notifies the JS panel so
+    /// the in-WebView segmented control stays in sync.
+    /// </summary>
+    private void SwitchUniverseView(string view)
+    {
+        var to2D = view == "2d";
+        if (UniverseWebBorder != null)
+            UniverseWebBorder.Visibility = to2D ? Visibility.Collapsed : Visibility.Visible;
+        if (UniverseGraph2DBorder != null)
+            UniverseGraph2DBorder.Visibility = to2D ? Visibility.Visible : Visibility.Collapsed;
+
+        // Highlight the active label in the WPF toggle (cyan = active, dim = idle).
+        if (UniverseViewLabel3D != null)
+            UniverseViewLabel3D.Foreground = new System.Windows.Media.SolidColorBrush(
+                to2D ? System.Windows.Media.Color.FromRgb(0x8A, 0x86, 0xB8)
+                     : System.Windows.Media.Color.FromRgb(0x6C, 0xF0, 0xFF));
+        if (UniverseViewLabel2D != null)
+            UniverseViewLabel2D.Foreground = new System.Windows.Media.SolidColorBrush(
+                to2D ? System.Windows.Media.Color.FromRgb(0x6C, 0xF0, 0xFF)
+                     : System.Windows.Media.Color.FromRgb(0x8A, 0x86, 0xB8));
+
+        // Mirror back to JS so its segmented control reflects the actual state
+        // (matters when WPF chrome triggered the switch — JS didn't know).
+        try
+        {
+            UniverseWebView?.CoreWebView2?.PostWebMessageAsJson(
+                "{\"type\":\"viewState\",\"view\":\"" + (to2D ? "2d" : "3d") + "\"}");
+        }
+        catch { /* WebView not initialized yet — fine */ }
+
+        if (to2D)
+        {
+            // Fit on first show — ActualWidth/Height available after Dispatcher tick.
+            Dispatcher.BeginInvoke(new Action(() => UniverseGraph2D?.FitToContent()),
+                System.Windows.Threading.DispatcherPriority.ContextIdle);
+        }
+    }
+
+    /// <summary>
+    /// WPF floating toggle (always-on-top, outside the WebView). The user's
+    /// lifeline back from 2D — the JS settings panel is unreachable while
+    /// the WebView is collapsed.
+    /// </summary>
+    private void UniverseViewToggle_Click(object s, MouseButtonEventArgs e)
+    {
+        var currently2D = UniverseGraph2DBorder?.Visibility == Visibility.Visible;
+        SwitchUniverseView(currently2D ? "3d" : "2d");
+    }
+
+    /// <summary>
+    /// Inline-edit Step 1: read the note's Markdown body from disk and
+    /// push it back to JS so the textarea can be populated. Posts
+    /// noteContentError if the id or file is missing.
+    /// </summary>
+    private void SendNoteContentToUniverse(string noteId)
+    {
+        var core = UniverseWebView?.CoreWebView2;
+        if (core == null) return;
+        try
+        {
+            var node = _graph.Nodes.FirstOrDefault(n => n.Id == noteId);
+            if (node == null || string.IsNullOrEmpty(node.FilePath) || !File.Exists(node.FilePath))
+            {
+                core.PostWebMessageAsJson(
+                    "{\"type\":\"noteContentError\",\"noteId\":\"" + EscapeJson(noteId) +
+                    "\",\"error\":\"Note file not found on disk\"}");
+                return;
+            }
+            var content = File.ReadAllText(node.FilePath);
+            core.PostWebMessageAsJson(
+                "{\"type\":\"noteContent\",\"noteId\":\"" + EscapeJson(noteId) +
+                "\",\"content\":\"" + EscapeJson(content) + "\"}");
+        }
+        catch (Exception ex)
+        {
+            core.PostWebMessageAsJson(
+                "{\"type\":\"noteContentError\",\"noteId\":\"" + EscapeJson(noteId) +
+                "\",\"error\":\"" + EscapeJson(ex.Message) + "\"}");
+        }
+    }
+
+    /// <summary>
+    /// Inline-edit Step 2: write the new content back to disk. The vault
+    /// watcher already picks up the change and re-indexes; we just nudge
+    /// the UI thread with a status update and reply to JS.
+    /// </summary>
+    private void SaveNoteFromUniverse(string noteId, string content)
+    {
+        var core = UniverseWebView?.CoreWebView2;
+        if (core == null) return;
+        try
+        {
+            var node = _graph.Nodes.FirstOrDefault(n => n.Id == noteId);
+            if (node == null || string.IsNullOrEmpty(node.FilePath))
+            {
+                core.PostWebMessageAsJson(
+                    "{\"type\":\"noteSaveError\",\"noteId\":\"" + EscapeJson(noteId) +
+                    "\",\"error\":\"Note id not found in graph\"}");
+                return;
+            }
+            // Normalize line endings to the platform default — saves us from
+            // a vault that mixes CRLF/LF after every edit.
+            var normalized = content.Replace("\r\n", "\n").Replace("\r", "\n");
+            if (Environment.NewLine == "\r\n") normalized = normalized.Replace("\n", "\r\n");
+            File.WriteAllText(node.FilePath, normalized);
+
+            if (StatusText != null)
+                StatusText.Text = $"Saved: {Path.GetFileName(node.FilePath)}";
+
+            core.PostWebMessageAsJson(
+                "{\"type\":\"noteSaved\",\"noteId\":\"" + EscapeJson(noteId) + "\"}");
+        }
+        catch (Exception ex)
+        {
+            core.PostWebMessageAsJson(
+                "{\"type\":\"noteSaveError\",\"noteId\":\"" + EscapeJson(noteId) +
+                "\",\"error\":\"" + EscapeJson(ex.Message) + "\"}");
+        }
+    }
+
+    /// <summary>
+    /// Universe info card "Edit" button → load the note in the WPF Markdown
+    /// editor. Looks up the node by id in <see cref="_graph"/>; if the id is
+    /// stale (re-export drift) we surface that in StatusText instead of
+    /// silently no-op'ing.
+    /// </summary>
+    private void OpenNoteInEditor(string noteId)
+    {
+        var node = _graph.Nodes.FirstOrDefault(n => n.Id == noteId);
+        if (node == null)
+        {
+            if (StatusText != null)
+                StatusText.Text = $"Note id '{noteId}' not found — brain-export may be stale";
+            return;
+        }
+        if (string.IsNullOrEmpty(node.FilePath) || !File.Exists(node.FilePath))
+        {
+            if (StatusText != null)
+                StatusText.Text = $"Note file missing on disk: {node.FilePath}";
+            return;
+        }
+        OpenFileInEditor(node.FilePath);
+    }
+
+    // (CaptureUniverseSnapshot + timer removed — user wanted live, not a still
+    // image. Wallpaper mode spawns its own WebView2 child reparented to
+    // WorkerW which is genuinely real-time. SetDesktopWallpaperFromSnapshotAsync
+    // below is only used as a one-shot fallback when WorkerW reparent fails.)
+
+    private void PushBrainSnapshotToUniverse()
+    {
+        try
+        {
+            var path = Path.Combine(_vaultPath, ".obsidianx", "brain-export.json");
+            if (!File.Exists(path))
+            {
+                var fallback = "{\"type\":\"brain\",\"payload\":{\"DisplayName\":\"(no brain-export.json yet)\",\"TotalNotes\":0,\"TotalWords\":0,\"TotalEdges\":0,\"Expertise\":[]}}";
+                UniverseWebView.CoreWebView2.PostWebMessageAsJson(fallback);
+                return;
+            }
+            var brainJson = File.ReadAllText(path);
+            var envelope = "{\"type\":\"brain\",\"payload\":" + brainJson + "}";
+            UniverseWebView.CoreWebView2.PostWebMessageAsJson(envelope);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"PushBrainSnapshotToUniverse: {ex.Message}");
+        }
     }
 
     // ═══════════════════════════════════════
@@ -6777,6 +7668,32 @@ public partial class MainWindow : Window
     // ── Token Economy chart ──
     private bool _tokenChartHooked;
 
+    /// <summary>Selected time range, in hours back from now.</summary>
+    private int _tokenChartHoursBack = 24 * 14;
+
+    /// <summary>True = cumulative (running sum) · false = per-bucket (each bucket
+    /// independent). Default per-bucket so each event is visible.</summary>
+    private bool _tokenChartCumulative;
+
+    /// <summary>One drawn point per bucket — populated at render time, consumed
+    /// by MouseMove to find the nearest bucket and show its tooltip.</summary>
+    private sealed class TokenChartPoint
+    {
+        public TokenUsageAggregator.HourBucket Bucket = null!;
+        /// <summary>Pixel X centre of the bucket on the canvas.</summary>
+        public double X;
+        /// <summary>Pixel Y of the actual line/bar top (cumulative = running actual).</summary>
+        public double ActualY;
+        /// <summary>Pixel Y of the projection line/bar top (cumulative = running projection).</summary>
+        public double ProjY;
+        /// <summary>Running cumulative actual up to and including this bucket.</summary>
+        public long ActualCum;
+        /// <summary>Running cumulative projection up to and including this bucket.</summary>
+        public long ProjCum;
+    }
+    private List<TokenChartPoint>? _tokenChartPoints;
+    private double _tokenChartPlotTop, _tokenChartPlotBottom;
+
     private void RenderTokenEconomyChart()
     {
         if (TokensCanvas == null) return;
@@ -6789,14 +7706,33 @@ public partial class MainWindow : Window
             System.Windows.Threading.DispatcherPriority.Render);
     }
 
+    /// <summary>Picks bucket width from the visible range so we always
+    /// land in the ~50–150 buckets sweet spot — readable per-bucket bars
+    /// without hairline-wide bars at long ranges.</summary>
+    private static int PickBucketMinutes(int hoursBack) => hoursBack switch
+    {
+        <= 24       => 15,    //  1d → 96 buckets of 15 min
+        <= 24 * 3   => 30,    //  3d → 144 buckets of 30 min
+        <= 24 * 7   => 60,    //  7d → 168 buckets of 1 h
+        <= 24 * 14  => 180,   // 14d → ~112 buckets of 3 h
+        <= 24 * 30  => 360,   // 30d → 120 buckets of 6 h
+        _           => 720,   //  >30d → 12-h buckets
+    };
+
     private void DrawTokenEconomyCore()
     {
         try
         {
             TokensCanvas.Children.Clear();
-            var series = _tokenUsage.Compute(_vaultPath, hoursBack: 24 * 14);
+            HideTokenTooltip();
+            _tokenChartPoints = null;
 
-            // Top-line stat cards
+            int bucketMinutes = PickBucketMinutes(_tokenChartHoursBack);
+            var series = _tokenUsage.Compute(_vaultPath,
+                hoursBack: _tokenChartHoursBack,
+                bucketMinutes: bucketMinutes);
+
+            // Top-line stat cards (always reflect the visible range)
             TokensActualText.Text     = $"{series.TotalActual:N0}";
             TokensProjectionText.Text = $"{series.TotalProjection:N0}";
             TokensSavedText.Text      = $"{series.TotalSaved:N0}";
@@ -6830,31 +7766,48 @@ public partial class MainWindow : Window
             var chartW = w - padL - padR;
             var chartH = h - padT - padB;
             if (chartW < 40 || chartH < 40) return;
+            _tokenChartPlotTop = padT;
+            _tokenChartPlotBottom = padT + chartH;
 
-            var first = series.Buckets[0].Hour;
-            var last = series.Buckets[^1].Hour;
+            // X axis covers the FULL requested range, not just the buckets that
+            // happen to have data. That way buckets stay anchored to wall-clock
+            // time when you switch ranges, instead of squashing to fit.
+            var first = series.RangeStart;
+            var last  = series.RangeEnd;
             var span = (last - first).TotalHours;
             if (span <= 0) span = 1;
 
-            // Cumulative both lines so the gap is the eye-grabbing
-            // "saved" area. Per-bucket would be jaggier and harder to
-            // read at a glance.
-            var actualPts = new List<Point>();
-            var projPts = new List<Point>();
+            double XForBucket(DateTime bucketStart)
+            {
+                var t = (bucketStart - first).TotalHours / span;
+                return padL + chartW * t;
+            }
+
+            // Compute cumulative running totals once — used by tooltip in
+            // both modes, and as the Y series in cumulative mode.
+            var points = new List<TokenChartPoint>(series.Buckets.Count);
             long actualSum = 0, projSum = 0;
             foreach (var b in series.Buckets)
             {
                 actualSum += b.ActualSpent;
-                projSum += b.ProjectionWithoutBrain;
-                var t = (b.Hour - first).TotalHours / span;
-                actualPts.Add(new Point(padL + chartW * t, 0));
-                projPts.Add(new Point(padL + chartW * t, 0));
+                projSum   += b.ProjectionWithoutBrain;
+                points.Add(new TokenChartPoint
+                {
+                    Bucket = b,
+                    X = XForBucket(b.Hour),
+                    ActualCum = actualSum,
+                    ProjCum   = projSum,
+                });
             }
-            long maxY = Math.Max(projSum, 1);
 
-            // Y axis grid + labels
+            // Y-axis scale depends on which view we're rendering.
+            long maxY = _tokenChartCumulative
+                ? Math.Max(projSum, 1)
+                : Math.Max(series.Buckets.Max(b => b.ProjectionWithoutBrain), 1);
+
+            // Y axis grid + labels (shared by both views)
             var muted = (SolidColorBrush)FindResource("TextMutedBrush");
-            var grid = (SolidColorBrush)FindResource("SurfaceLightBrush");
+            var grid  = (SolidColorBrush)FindResource("SurfaceLightBrush");
             for (int i = 0; i <= 4; i++)
             {
                 var y = padT + chartH * (1 - i / 4.0);
@@ -6875,58 +7828,17 @@ public partial class MainWindow : Window
                 TokensCanvas.Children.Add(label);
             }
 
-            // Plot cumulative — recompute Y now that we know maxY
-            actualSum = 0; projSum = 0;
-            for (int i = 0; i < series.Buckets.Count; i++)
-            {
-                var b = series.Buckets[i];
-                actualSum += b.ActualSpent;
-                projSum += b.ProjectionWithoutBrain;
-                var ty = (double)actualSum / maxY;
-                var py = (double)projSum / maxY;
-                actualPts[i] = new Point(actualPts[i].X, padT + chartH * (1 - ty));
-                projPts[i] = new Point(projPts[i].X, padT + chartH * (1 - py));
-            }
-
-            // Shaded "savings" band — fill the gap between projection
-            // and actual so the eye reads the difference instantly.
-            var fill = new System.Windows.Shapes.Polygon
-            {
-                Fill = new SolidColorBrush(Color.FromArgb(0x22, 0x5D, 0xFF, 0x9D)),
-                Stroke = null
-            };
-            var fillPts = new System.Windows.Media.PointCollection();
-            foreach (var p in projPts) fillPts.Add(p);
-            for (int i = actualPts.Count - 1; i >= 0; i--) fillPts.Add(actualPts[i]);
-            fill.Points = fillPts;
-            TokensCanvas.Children.Add(fill);
-
-            // Projection line — pink dashed
-            var projLine = new System.Windows.Shapes.Polyline
-            {
-                Stroke = new SolidColorBrush(Color.FromRgb(0xFF, 0x6B, 0x9D)),
-                StrokeThickness = 2,
-                StrokeDashArray = new DoubleCollection { 4, 3 }
-            };
-            foreach (var p in projPts) projLine.Points.Add(p);
-            TokensCanvas.Children.Add(projLine);
-
-            // Actual line — green solid
-            var actualLine = new System.Windows.Shapes.Polyline
-            {
-                Stroke = new SolidColorBrush(Color.FromRgb(0x5D, 0xFF, 0x9D)),
-                StrokeThickness = 2.5
-            };
-            foreach (var p in actualPts) actualLine.Points.Add(p);
-            TokensCanvas.Children.Add(actualLine);
+            if (_tokenChartCumulative)
+                DrawCumulative(points, maxY, padT, chartH);
+            else
+                DrawPerBucket(points, maxY, padL, padR, padT, chartW, chartH, w, series.Buckets.Count);
 
             // Mode markers — small dot per bucket coloured by dominant
-            // mode that hour. Lets the user see "the gap is bigger when
-            // brain mode was always-on, smaller when it was off".
-            for (int i = 0; i < series.Buckets.Count; i++)
+            // brain-mode that hour. Lets the user see "the gap is bigger
+            // when brain mode was always-on, smaller when it was off".
+            foreach (var p in points)
             {
-                var b = series.Buckets[i];
-                Color dot = b.DominantMode switch
+                Color dot = p.Bucket.DominantMode switch
                 {
                     "always" => Color.FromRgb(0x5D, 0xFF, 0x9D),
                     "auto"   => Color.FromRgb(0x40, 0xC0, 0xFF),
@@ -6938,22 +7850,26 @@ public partial class MainWindow : Window
                     Width = 5, Height = 5,
                     Fill = new SolidColorBrush(dot)
                 };
-                Canvas.SetLeft(ell, actualPts[i].X - 2.5);
-                Canvas.SetTop(ell, actualPts[i].Y - 2.5);
+                Canvas.SetLeft(ell, p.X - 2.5);
+                Canvas.SetTop(ell, p.ActualY - 2.5);
                 TokensCanvas.Children.Add(ell);
             }
 
-            // X axis date labels — sparse so they don't crowd
-            int labelCount = Math.Min(6, series.Buckets.Count);
+            // X axis labels — evenly spaced across the visible range, not
+            // pegged to bucket positions. That way "1d" reads as hours,
+            // "30d" reads as dates, regardless of where data clusters.
+            int labelCount = 6;
+            var fmt = _tokenChartHoursBack <= 48 ? "HH:mm"
+                    : _tokenChartHoursBack <= 24 * 7 ? "ddd HH:mm"
+                    : "MMM d";
             for (int i = 0; i < labelCount; i++)
             {
-                var idx = (int)((series.Buckets.Count - 1) * (i / (double)Math.Max(1, labelCount - 1)));
-                var b = series.Buckets[idx];
-                var t = (b.Hour - first).TotalHours / span;
+                var t = i / (double)(labelCount - 1);
                 var x = padL + chartW * t;
+                var ts = first.AddHours(span * t).ToLocalTime();
                 var label = new TextBlock
                 {
-                    Text = b.Hour.ToLocalTime().ToString("MMM d HH:mm"),
+                    Text = ts.ToString(fmt),
                     FontSize = 9, Foreground = muted,
                     FontFamily = (FontFamily)FindResource("MonoFont")
                 };
@@ -6961,6 +7877,26 @@ public partial class MainWindow : Window
                 Canvas.SetTop(label, h - 24);
                 TokensCanvas.Children.Add(label);
             }
+
+            // Bucket-width readout, so the user understands what each
+            // bar/point represents at the current zoom level.
+            var bucketLabel = new TextBlock
+            {
+                Text = $"bucket = {FormatBucketWidth(bucketMinutes)}",
+                FontSize = 9,
+                Foreground = muted,
+                FontFamily = (FontFamily)FindResource("MonoFont"),
+                FontStyle = FontStyles.Italic
+            };
+            Canvas.SetLeft(bucketLabel, padL);
+            Canvas.SetTop(bucketLabel, h - 12);
+            TokensCanvas.Children.Add(bucketLabel);
+
+            _tokenChartPoints = points;
+
+            // Crosshair line height tracks the plot area
+            TokensCrosshair.Y1 = _tokenChartPlotTop;
+            TokensCrosshair.Y2 = _tokenChartPlotBottom;
         }
         catch (Exception ex)
         {
@@ -6968,10 +7904,218 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>Cumulative view — running-sum lines, savings band as fill.
+    /// Shows long-term ROI but hides per-event behaviour.</summary>
+    private void DrawCumulative(List<TokenChartPoint> points, long maxY,
+        double padT, double chartH)
+    {
+        foreach (var p in points)
+        {
+            p.ActualY = padT + chartH * (1 - (double)p.ActualCum / maxY);
+            p.ProjY   = padT + chartH * (1 - (double)p.ProjCum   / maxY);
+        }
+
+        // Shaded "savings" band — fill the gap between projection and
+        // actual so the eye reads the difference instantly.
+        var fill = new System.Windows.Shapes.Polygon
+        {
+            Fill = new SolidColorBrush(Color.FromArgb(0x22, 0x5D, 0xFF, 0x9D)),
+            Stroke = null
+        };
+        var fillPts = new System.Windows.Media.PointCollection();
+        foreach (var p in points) fillPts.Add(new Point(p.X, p.ProjY));
+        for (int i = points.Count - 1; i >= 0; i--)
+            fillPts.Add(new Point(points[i].X, points[i].ActualY));
+        fill.Points = fillPts;
+        TokensCanvas.Children.Add(fill);
+
+        var projLine = new System.Windows.Shapes.Polyline
+        {
+            Stroke = new SolidColorBrush(Color.FromRgb(0xFF, 0x6B, 0x9D)),
+            StrokeThickness = 2,
+            StrokeDashArray = new DoubleCollection { 4, 3 }
+        };
+        foreach (var p in points) projLine.Points.Add(new Point(p.X, p.ProjY));
+        TokensCanvas.Children.Add(projLine);
+
+        var actualLine = new System.Windows.Shapes.Polyline
+        {
+            Stroke = new SolidColorBrush(Color.FromRgb(0x5D, 0xFF, 0x9D)),
+            StrokeThickness = 2.5
+        };
+        foreach (var p in points) actualLine.Points.Add(new Point(p.X, p.ActualY));
+        TokensCanvas.Children.Add(actualLine);
+    }
+
+    /// <summary>Per-bucket view — each bucket renders as a stacked bar:
+    /// green = tokens actually spent that bucket, pink = tokens estimated
+    /// saved that bucket. Bar total = projection-without-brain.</summary>
+    private void DrawPerBucket(List<TokenChartPoint> points, long maxY,
+        double padL, double padR, double padT, double chartW, double chartH,
+        double w, int bucketCount)
+    {
+        // Bar width: divide the plot by bucket count, leave a tiny gap.
+        var barW = Math.Max(1.5, chartW / Math.Max(1, bucketCount) - 1);
+        var barFillActual = new SolidColorBrush(Color.FromRgb(0x5D, 0xFF, 0x9D));
+        var barFillSaved  = new SolidColorBrush(Color.FromArgb(0xCC, 0xFF, 0x6B, 0x9D));
+
+        foreach (var p in points)
+        {
+            var actualH = chartH * ((double)p.Bucket.ActualSpent / maxY);
+            var savedH  = chartH * ((double)p.Bucket.BrainSaved  / maxY);
+            var actualTop = padT + chartH - actualH;
+            var savedTop  = actualTop - savedH;
+
+            if (actualH > 0.5)
+            {
+                var rActual = new System.Windows.Shapes.Rectangle
+                {
+                    Width = barW, Height = actualH,
+                    Fill = barFillActual, RadiusX = 0.5, RadiusY = 0.5
+                };
+                Canvas.SetLeft(rActual, p.X - barW / 2);
+                Canvas.SetTop(rActual, actualTop);
+                TokensCanvas.Children.Add(rActual);
+            }
+            if (savedH > 0.5)
+            {
+                var rSaved = new System.Windows.Shapes.Rectangle
+                {
+                    Width = barW, Height = savedH,
+                    Fill = barFillSaved, RadiusX = 0.5, RadiusY = 0.5
+                };
+                Canvas.SetLeft(rSaved, p.X - barW / 2);
+                Canvas.SetTop(rSaved, savedTop);
+                TokensCanvas.Children.Add(rSaved);
+            }
+
+            // ActualY = top of green bar, used for the mode dot above.
+            p.ActualY = actualH > 0.5 ? actualTop : padT + chartH - 1;
+            p.ProjY   = savedTop;
+        }
+    }
+
+    private static string FormatBucketWidth(int minutes) =>
+        minutes >= 60
+            ? (minutes % 60 == 0 ? $"{minutes / 60}h" : $"{minutes / 60.0:F1}h")
+            : $"{minutes}m";
+
     private static string FormatTokens(long n) =>
         n >= 1_000_000 ? $"{n / 1_000_000.0:F1}M" :
         n >= 1_000     ? $"{n / 1_000.0:F1}k" :
         n.ToString("N0");
+
+    // ── Token chart toolbar handlers ──
+
+    private void TokensRange_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.Primitives.ToggleButton tb) return;
+        // Make the chips behave as a radio group — exactly one stays checked.
+        foreach (var other in new[] { TokensRange1d, TokensRange7d, TokensRange14d, TokensRange30d, TokensRangeAll })
+            other.IsChecked = ReferenceEquals(other, tb);
+        if (int.TryParse(tb.Tag?.ToString(), out var hours))
+            _tokenChartHoursBack = hours;
+        RenderTokenEconomyChart();
+    }
+
+    private void TokensViewMode_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.Primitives.ToggleButton tb) return;
+        bool cumulative = ReferenceEquals(tb, TokensViewCumulative);
+        TokensViewBucket.IsChecked = !cumulative;
+        TokensViewCumulative.IsChecked = cumulative;
+        _tokenChartCumulative = cumulative;
+        RenderTokenEconomyChart();
+    }
+
+    // ── Hover crosshair + tooltip ──
+
+    private void TokensCanvas_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (_tokenChartPoints == null || _tokenChartPoints.Count == 0)
+        {
+            HideTokenTooltip();
+            return;
+        }
+        var pos = e.GetPosition(TokensCanvas);
+
+        // Snap to nearest bucket by X — bisect since points are already sorted.
+        int lo = 0, hi = _tokenChartPoints.Count - 1;
+        while (lo < hi)
+        {
+            int mid = (lo + hi) >> 1;
+            if (_tokenChartPoints[mid].X < pos.X) lo = mid + 1;
+            else hi = mid;
+        }
+        int idx = lo;
+        if (idx > 0 && Math.Abs(_tokenChartPoints[idx - 1].X - pos.X)
+                     < Math.Abs(_tokenChartPoints[idx].X - pos.X))
+            idx--;
+
+        var p = _tokenChartPoints[idx];
+        ShowTokenTooltip(p, pos);
+    }
+
+    private void TokensCanvas_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
+        => HideTokenTooltip();
+
+    private void HideTokenTooltip()
+    {
+        if (TokensCrosshair != null) TokensCrosshair.Visibility = Visibility.Collapsed;
+        if (TokensTooltip != null)   TokensTooltip.Visibility   = Visibility.Collapsed;
+    }
+
+    private void ShowTokenTooltip(TokenChartPoint p, Point cursor)
+    {
+        // Crosshair
+        TokensCrosshair.X1 = TokensCrosshair.X2 = p.X;
+        TokensCrosshair.Y1 = _tokenChartPlotTop;
+        TokensCrosshair.Y2 = _tokenChartPlotBottom;
+        TokensCrosshair.Visibility = Visibility.Visible;
+
+        // Tooltip text — show per-bucket numbers always, plus running totals
+        // when in cumulative mode (so the chart's Y value matches the popup).
+        var localStart = p.Bucket.Hour.ToLocalTime();
+        var bucketLen = (_tokenChartPoints!.Count > 1
+            ? _tokenChartPoints[1].Bucket.Hour - _tokenChartPoints[0].Bucket.Hour
+            : TimeSpan.FromMinutes(60));
+        var localEnd = (p.Bucket.Hour + bucketLen).ToLocalTime();
+        TokensTooltipTime.Text = $"{localStart:MMM d HH:mm} → {localEnd:HH:mm}";
+        TokensTooltipMode.Text = $"mode: {p.Bucket.DominantMode}";
+
+        if (_tokenChartCumulative)
+        {
+            TokensTooltipActual.Text = $"{p.Bucket.ActualSpent:N0}  (Σ {p.ActualCum:N0})";
+            TokensTooltipSaved.Text  = $"{p.Bucket.BrainSaved:N0}  (Σ {p.ProjCum - p.ActualCum:N0})";
+            TokensTooltipProj.Text   = $"{p.Bucket.ProjectionWithoutBrain:N0}  (Σ {p.ProjCum:N0})";
+        }
+        else
+        {
+            TokensTooltipActual.Text = $"{p.Bucket.ActualSpent:N0}";
+            TokensTooltipSaved.Text  = $"{p.Bucket.BrainSaved:N0}";
+            TokensTooltipProj.Text   = $"{p.Bucket.ProjectionWithoutBrain:N0}";
+        }
+        TokensTooltipBrainCalls.Text = p.Bucket.BrainCalls.ToString();
+        TokensTooltipOtherCalls.Text = p.Bucket.OtherToolCalls.ToString();
+
+        // Position tooltip near the cursor, but keep it inside the overlay
+        // so it never clips against the right/bottom edges. Force a measure
+        // pass first so DesiredSize is fresh after the text we just set.
+        TokensTooltip.Visibility = Visibility.Visible;
+        TokensTooltip.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        var tw = TokensTooltip.DesiredSize.Width;
+        var th = TokensTooltip.DesiredSize.Height;
+        var ow = TokensOverlay.ActualWidth;
+        var oh = TokensOverlay.ActualHeight;
+        var tx = cursor.X + 14;
+        var ty = cursor.Y + 14;
+        if (tx + tw > ow) tx = cursor.X - tw - 14;
+        if (ty + th > oh) ty = cursor.Y - th - 14;
+        if (tx < 0) tx = 4;
+        if (ty < 0) ty = 4;
+        Canvas.SetLeft(TokensTooltip, tx);
+        Canvas.SetTop(TokensTooltip, ty);
+    }
 
     // ── Brain Insights (active learning loop) ──
     private const int InsightsWindowDays = 14;
@@ -8737,6 +9881,11 @@ public partial class MainWindow : Window
             var bumped = BumpPulseForNode(_dashPhysics, nodeId, op)
                        | BumpPulseForNode(_graphPhysics, nodeId, op);
 
+            // Mirror the pulse into the Universe WebView (Phase 1.2 — same
+            // bright "current flowing" effect as the 2D dash, but rendered
+            // by three.js as a transient star bloom + edge arc burst).
+            BroadcastPulseToUniverse(nodeId, op, obj["context"]?.ToString());
+
             // Fallback: if the access-log carries a stale id (e.g. the
             // brain was re-exported with different ids since the log was
             // written), try matching via the context field which carries
@@ -8793,8 +9942,85 @@ public partial class MainWindow : Window
 
         BumpPulseForNode(_dashPhysics, gnode.Id);
         BumpPulseForNode(_graphPhysics, gnode.Id);
+        BroadcastPulseToUniverse(gnode.Id, op, Path.GetFileName(filePath));
         try { _storage?.LogAccess(gnode.Id, op, Path.GetFileName(filePath)); }
         catch { /* best-effort */ }
+    }
+
+    /// <summary>
+    /// Post a {type:"pulse", noteId, op, ...} envelope to UniverseWebView so
+    /// the three.js scene can flash the corresponding star. No-ops cleanly
+    /// when WebView isn't initialised yet (user hasn't visited Universe).
+    /// </summary>
+    private void BroadcastPulseToUniverse(string noteId, string op, string? context)
+    {
+        if (!_universeInitialized && _wallpaperWebView == null) return;
+        try
+        {
+            // Hand-rolled JSON so we don't pull a serializer for a 4-field
+            // envelope. JsonEncodedText would also work but this is hot path.
+            var sb = new System.Text.StringBuilder(160);
+            sb.Append("{\"type\":\"pulse\",\"noteId\":\"")
+              .Append(EscapeJson(noteId)).Append("\",\"op\":\"")
+              .Append(EscapeJson(op ?? "mcp")).Append("\"");
+            if (!string.IsNullOrEmpty(context))
+                sb.Append(",\"context\":\"").Append(EscapeJson(context)).Append("\"");
+            sb.Append('}');
+            var json = sb.ToString();
+            // Fan out to BOTH WebView surfaces so the wallpaper window stays
+            // perfectly synced with the main app — every MCP touch flashes
+            // on both the in-program Universe and the desktop wallpaper.
+            try { UniverseWebView?.CoreWebView2?.PostWebMessageAsJson(json); }
+            catch (Exception ex) { Debug.WriteLine($"main pulse: {ex.Message}"); }
+            try { _wallpaperWebView?.CoreWebView2?.PostWebMessageAsJson(json); }
+            catch (Exception ex) { Debug.WriteLine($"wallpaper pulse: {ex.Message}"); }
+        }
+        catch (Exception ex) { Debug.WriteLine($"BroadcastPulseToUniverse: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Forward TokenSavingsTracker output to the Universe HUD. Same envelope
+    /// shape as the pulse message: {type, text, tooltip}.
+    /// </summary>
+    private void BroadcastTokenStatsToUniverse(string text, string tooltip)
+    {
+        if (!_universeInitialized && _wallpaperWebView == null) return;
+        try
+        {
+            var json = "{\"type\":\"tokenStats\",\"text\":\"" +
+                       EscapeJson(text) + "\",\"tooltip\":\"" +
+                       EscapeJson(tooltip) + "\"}";
+            // Token chip is hidden in wallpaper mode (CSS), but we still
+            // post for completeness — JS handler is a no-op when the
+            // element is display:none.
+            try { UniverseWebView?.CoreWebView2?.PostWebMessageAsJson(json); }
+            catch (Exception ex) { Debug.WriteLine($"main tokenStats: {ex.Message}"); }
+            try { _wallpaperWebView?.CoreWebView2?.PostWebMessageAsJson(json); }
+            catch (Exception ex) { Debug.WriteLine($"wallpaper tokenStats: {ex.Message}"); }
+        }
+        catch (Exception ex) { Debug.WriteLine($"BroadcastTokenStatsToUniverse: {ex.Message}"); }
+    }
+
+    private static string EscapeJson(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return string.Empty;
+        var sb = new System.Text.StringBuilder(s.Length + 8);
+        foreach (var c in s)
+        {
+            switch (c)
+            {
+                case '\\': sb.Append("\\\\"); break;
+                case '"':  sb.Append("\\\""); break;
+                case '\n': sb.Append("\\n");  break;
+                case '\r': sb.Append("\\r");  break;
+                case '\t': sb.Append("\\t");  break;
+                default:
+                    if (c < 0x20) sb.Append($"\\u{(int)c:X4}");
+                    else sb.Append(c);
+                    break;
+            }
+        }
+        return sb.ToString();
     }
 
     private bool BumpPulseForNode(PhysicsEngine physics, string nodeId, string op = "mcp")
@@ -9042,6 +10268,25 @@ public partial class MainWindow : Window
     // ═══════════════════════════════════════
 
     private void EditorNew_Click(object s, RoutedEventArgs e) => CreateNewNote();
+
+    /// <summary>
+    /// Explicit save from the editor toolbar (was Ctrl+S only). Pulls the
+    /// dirty indicator down to "saved" if the editor was tracking changes.
+    /// </summary>
+    private void EditorSave_Click(object s, RoutedEventArgs e)
+    {
+        try
+        {
+            _mdEditor?.Save();
+            if (EditorDirtyIndicator != null) EditorDirtyIndicator.Text = "";
+            if (StatusText != null) StatusText.Text = "Saved";
+        }
+        catch (Exception ex)
+        {
+            if (StatusText != null) StatusText.Text = $"Save failed: {ex.Message}";
+        }
+    }
+
     private void EditorH1_Click(object s, RoutedEventArgs e) => _mdEditor.InsertHeading(1);
     private void EditorH2_Click(object s, RoutedEventArgs e) => _mdEditor.InsertHeading(2);
     private void EditorBold_Click(object s, RoutedEventArgs e) => _mdEditor.ToggleBold();
@@ -9064,7 +10309,7 @@ public partial class MainWindow : Window
             if (v != null) v.Visibility = Visibility.Collapsed;
         }
         EditorView.Visibility = Visibility.Visible;
-        Button[] navButtons = [NavDashboard, NavBrainGraph, NavNetwork, NavEditor, NavVault, NavSearch, NavClaude, NavGrowth, NavTokens, NavInsights, NavPeers, NavSharing, NavSettings];
+        Button[] navButtons = [NavDashboard, NavBrainGraph, NavUniverse, NavNetwork, NavEditor, NavVault, NavSearch, NavClaude, NavGrowth, NavTokens, NavInsights, NavPeers, NavSharing, NavSettings];
         foreach (var nb in navButtons) nb.Style = (Style)FindResource("NavButton");
         NavEditor.Style = (Style)FindResource("NavButtonActive");
     }
