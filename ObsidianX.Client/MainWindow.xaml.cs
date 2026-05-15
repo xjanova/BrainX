@@ -293,6 +293,12 @@ public partial class MainWindow : Window
     [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
     private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr GetParent(IntPtr hWnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern bool IsWindow(IntPtr hWnd);
+
     // Wallpaper Engine constants for window styling + z-ordering.
     private const int GWL_EXSTYLE = -20;
     private const int WS_EX_TOOLWINDOW = 0x00000080;   // out of Alt-Tab + taskbar
@@ -312,6 +318,15 @@ public partial class MainWindow : Window
     private Window? _wallpaperWindow;            // separate child window — has to be opaque (no AllowsTransparency)
     private Microsoft.Web.WebView2.Wpf.WebView2? _wallpaperWebView;
     private bool _desktopIconsHidden;            // remember so we can restore on exit
+    // Survives standby/lock/screensaver: Win11 DWM rebuilds desktop window
+    // tree on session resume → back-WorkerW we parented into may be gone, or
+    // composition is silently dropped. We watch for that and re-attach. The
+    // icons-host HWND is captured at attach time so the watchdog can detect
+    // drift (GetParent ≠ saved host = need re-attach).
+    private IntPtr _wallpaperIconsHost = IntPtr.Zero;
+    private DispatcherTimer? _wallpaperWatchdog;
+    private bool _wallpaperReattachInFlight;     // re-entry guard for AttachWallpaperToShell
+    private bool _wallpaperEventsHooked;         // prevent double-subscribing SystemEvents
 
     private const int SW_HIDE = 0;
     private const int SW_SHOW = 5;
@@ -423,6 +438,17 @@ public partial class MainWindow : Window
     {
         try
         {
+            // Idempotent guard: if a previous wallpaper window is still around
+            // (e.g. user toggled off after a standby-induced invisible state
+            // and the OS-side window/HWND wasn't fully destroyed) clean it up
+            // before spawning a new one. Without this we'd have two render
+            // loops running — the visible new one + an orphaned one parented
+            // somewhere in the WorkerW chain still consuming GPU.
+            if (_wallpaperWindow != null || _wallpaperWebView != null)
+            {
+                ReportWp("setup 0/4 — cleaning up zombie wallpaper before re-entering");
+                CleanupWallpaperWindow();
+            }
             ReportWp("setup 1/4 — building preview window (Wallpaper Engine style)");
             _wallpaperWebView = new Microsoft.Web.WebView2.Wpf.WebView2
             {
@@ -584,9 +610,47 @@ public partial class MainWindow : Window
             var ex = GetWindowLong(hwnd, GWL_EXSTYLE);
             SetWindowLong(hwnd, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
 
-            ReportWp("apply 3/6 — locating Progman");
+            // The WorkerW spawn + SetParent dance is its own helper because
+            // it needs to re-run after standby / session unlock / display
+            // change — the back-WorkerW we parent into is recreated by DWM
+            // and our HWND silently loses composition.
+            await AttachWallpaperToShell(hwnd, vsLeft, vsTop, vsWidth, vsHeight, isReattach: false);
+
+            // Tell JS to drop the setup chrome + add wallpaper-mode (HUD-less).
+            _wallpaperWebView?.CoreWebView2?.PostWebMessageAsJson(
+                "{\"type\":\"finalizeWallpaper\"}");
+
+            _wallpaperFinalized = true;
+            StartWallpaperWatchdog();
+            HookWallpaperSystemEvents();
+        }
+        catch (Exception ex)
+        {
+            ReportWp($"Apply FAILED: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// The 0x052C → EnumWindows → SetParent dance that puts our WPF wallpaper
+    /// into the desktop's icons-host (Strategy A) or back-WorkerW (Strategy B)
+    /// or as last-ditch HWND_BOTTOM. Extracted from FinalizeWallpaper so it
+    /// can re-run on session resume / display change without rebuilding the
+    /// WebView2 surface.
+    ///
+    /// `isReattach=true` flips the status messages from "apply N/6" to
+    /// "re-attach" so the user can tell from the HUD whether this is initial
+    /// Apply or a recovery.
+    /// </summary>
+    private async Task AttachWallpaperToShell(IntPtr hwnd, int vsLeft, int vsTop, int vsWidth, int vsHeight, bool isReattach)
+    {
+        if (_wallpaperReattachInFlight) return;
+        _wallpaperReattachInFlight = true;
+        var prefix = isReattach ? "re-attach" : "apply";
+        try
+        {
+            ReportWp($"{prefix} — locating Progman");
             var progman = FindWindow("Progman", null);
-            if (progman == IntPtr.Zero) { ReportWp("FAILED — Progman not found"); return; }
+            if (progman == IntPtr.Zero) { ReportWp($"{prefix} FAILED — Progman not found"); return; }
 
             // 0x052C (undocumented) tells Progman to spawn a sibling WorkerW
             // behind itself. Two-call pattern is the Lively/Wallpaper-Engine
@@ -594,16 +658,12 @@ public partial class MainWindow : Window
             // to reliably end up with the desktop split into:
             //   WorkerW (front) ← contains SHELLDLL_DefView with icons
             //   WorkerW (back)  ← empty, where we put our wallpaper
-            // Sending only once with wParam=0 (the previous code) was a
-            // no-op on modern Windows: no back-WorkerW spawned, so the
-            // SetParent fallback fired HWND_BOTTOM, which doesn't go behind
-            // the taskbar — wallpaper ended up covering icons + taskbar.
-            ReportWp("apply 4/6 — spawning WorkerW (0x052C ×2) + 800ms wait");
+            ReportWp($"{prefix} — spawning WorkerW (0x052C ×2) + 800ms wait");
             SendMessageTimeout(progman, 0x052C, new IntPtr(0xD), new IntPtr(0x1), 0x0000, 1000, out _);
             SendMessageTimeout(progman, 0x052C, new IntPtr(0xD), new IntPtr(0x0), 0x0000, 1000, out _);
             await Task.Delay(800);
 
-            ReportWp("apply 5/6 — scanning EnumWindows for WorkerW sibling");
+            ReportWp($"{prefix} — scanning EnumWindows for WorkerW sibling");
             IntPtr workerW = IntPtr.Zero;
             // Retry the scan a few times — on slow boots / shell-restart races
             // the back-WorkerW can take a beat to appear after 0x052C.
@@ -612,23 +672,15 @@ public partial class MainWindow : Window
                 if (attempt > 0) await Task.Delay(250);
                 EnumWindows((tophandle, _) =>
                 {
-                    // Skip windows that DON'T have SHELLDLL_DefView — those
-                    // aren't the icons-WorkerW.
                     if (FindWindowEx(tophandle, IntPtr.Zero, "SHELLDLL_DefView", null) == IntPtr.Zero)
                         return true;
-                    // tophandle holds the icons. Walk WorkerW siblings until
-                    // we find one that does NOT have SHELLDLL_DefView — that's
-                    // the empty back-WorkerW we want to parent into. Without
-                    // this guard we'd sometimes pick a WorkerW that ALSO holds
-                    // icons (Win11 multi-WorkerW), putting our wallpaper as a
-                    // sibling of the icons → wallpaper covers them.
                     IntPtr candidate = FindWindowEx(IntPtr.Zero, tophandle, "WorkerW", null);
                     while (candidate != IntPtr.Zero)
                     {
                         if (FindWindowEx(candidate, IntPtr.Zero, "SHELLDLL_DefView", null) == IntPtr.Zero)
                         {
                             workerW = candidate;
-                            return false; // stop enumeration
+                            return false;
                         }
                         candidate = FindWindowEx(IntPtr.Zero, candidate, "WorkerW", null);
                     }
@@ -638,63 +690,172 @@ public partial class MainWindow : Window
 
             // Strategy A (primary): SetParent INTO the icons-host (the same
             // top-level window that contains SHELLDLL_DefView — Progman or a
-            // front-WorkerW). Then HWND_TOP within that host puts us at the
-            // top of its children → RaiseDesktopIcons moves SHELLDLL_DefView
-            // above us so icons render on top of our wallpaper. This works
-            // because both windows are siblings in the same parent, and
-            // SetWindowPos z-order is unambiguous within a single parent.
-            //
-            // Why this beats the back-WorkerW approach on Win11: the user's
-            // build composites the back-WorkerW IN FRONT of the icons-host
-            // (reversed from convention), so even at HWND_TOP we were
-            // covering icons. Putting wallpaper INSIDE the icons-host
-            // sidesteps that — z-order is decided by parent children alone.
+            // front-WorkerW). See FinalizeWallpaper's original commentary for
+            // why this beats the back-WorkerW approach on Win11.
             var iconsHost = FindIconsHost();
             if (iconsHost != IntPtr.Zero)
             {
-                ReportWp("apply 6/6 — SetParent → icons-host + HWND_TOP, then raise icons");
+                ReportWp($"{prefix} — SetParent → icons-host + HWND_TOP, then raise icons");
                 SetParent(hwnd, iconsHost);
                 SetWindowPos(hwnd, IntPtr.Zero, 0, 0, vsWidth, vsHeight,
                     SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
+                _wallpaperIconsHost = iconsHost;
                 if (!_desktopIconsHidden)
                 {
                     try { RaiseDesktopIcons(); }
                     catch (Exception iconEx) { Debug.WriteLine($"post-apply raise icons: {iconEx.Message}"); }
                 }
-                ReportWp($"LIVE behind icons — {vsWidth}×{vsHeight}");
+                ReportWp(isReattach
+                    ? $"RE-ATTACHED behind icons — {vsWidth}×{vsHeight}"
+                    : $"LIVE behind icons — {vsWidth}×{vsHeight}");
             }
             else if (workerW != IntPtr.Zero)
             {
-                // Strategy B (fallback): back-WorkerW approach. Used when
-                // FindIconsHost returns null (very unusual — would mean no
-                // SHELLDLL_DefView exists). Keeps the old WorkerW logic for
-                // diagnostic value; expected to be unreachable in practice.
-                ReportWp("apply 6/6 — fallback: SetParent → back-WorkerW + HWND_TOP");
+                ReportWp($"{prefix} — fallback: SetParent → back-WorkerW + HWND_TOP");
                 SetParent(hwnd, workerW);
                 SetWindowPos(hwnd, IntPtr.Zero, 0, 0, vsWidth, vsHeight,
                     SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
+                _wallpaperIconsHost = workerW;
                 ReportWp($"LIVE behind icons (back-WorkerW fallback) — {vsWidth}×{vsHeight}");
             }
             else
             {
-                // Last-ditch: top-level HWND_BOTTOM. Wallpaper renders but
-                // probably covers icons + taskbar. Better than vanishing.
-                ReportWp("apply 6/6 — last-ditch: top-level HWND_BOTTOM");
+                ReportWp($"{prefix} — last-ditch: top-level HWND_BOTTOM");
                 SetWindowPos(hwnd, HWND_BOTTOM, vsLeft, vsTop, vsWidth, vsHeight,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                _wallpaperIconsHost = IntPtr.Zero;
                 ReportWp($"LIVE bottom-Z fallback — {vsWidth}×{vsHeight}");
             }
+        }
+        finally
+        {
+            _wallpaperReattachInFlight = false;
+        }
+    }
 
-            // Tell JS to drop the setup chrome + add wallpaper-mode (HUD-less).
-            _wallpaperWebView?.CoreWebView2?.PostWebMessageAsJson(
-                "{\"type\":\"finalizeWallpaper\"}");
-
-            _wallpaperFinalized = true;
+    /// <summary>
+    /// Re-run the WorkerW reparent dance for the EXISTING wallpaper window.
+    /// Called from SystemEvents (resume/unlock/display change) and from the
+    /// watchdog when GetParent drifts. Cheap when nothing's wrong (the
+    /// SetParent on the same parent is a no-op + the 0x052C spawn is
+    /// idempotent because Progman already has its sibling WorkerW).
+    /// </summary>
+    private async Task ReattachWallpaperAsync(string reason)
+    {
+        if (!_isWallpaperMode || !_wallpaperFinalized || _wallpaperWindow == null) return;
+        try
+        {
+            var helper = new System.Windows.Interop.WindowInteropHelper(_wallpaperWindow);
+            var hwnd = helper.Handle;
+            if (hwnd == IntPtr.Zero || !IsWindow(hwnd))
+            {
+                ReportWp($"re-attach skipped ({reason}) — wallpaper HWND gone");
+                return;
+            }
+            ReportWp($"re-attach ({reason}) — reapplying WorkerW reparent");
+            // Re-clamp size to current virtual screen — DPI / monitor changes
+            // can shift bounds while we were invisible.
+            var vsLeft   = (int)SystemParameters.VirtualScreenLeft;
+            var vsTop    = (int)SystemParameters.VirtualScreenTop;
+            var vsWidth  = (int)SystemParameters.VirtualScreenWidth;
+            var vsHeight = (int)SystemParameters.VirtualScreenHeight;
+            _wallpaperWindow.Left   = vsLeft;
+            _wallpaperWindow.Top    = vsTop;
+            _wallpaperWindow.Width  = vsWidth;
+            _wallpaperWindow.Height = vsHeight;
+            await AttachWallpaperToShell(hwnd, vsLeft, vsTop, vsWidth, vsHeight, isReattach: true);
         }
         catch (Exception ex)
         {
-            ReportWp($"Apply FAILED: {ex.Message}");
+            ReportWp($"re-attach failed ({reason}): {ex.Message}");
         }
+    }
+
+    // ── Watchdog + SystemEvents wiring ──────────────────────────────
+    // The wallpaper survives the WPF process — but its OS-level parent
+    // (back-WorkerW or icons-host) gets recreated on standby resume,
+    // session unlock, screensaver dismissal, and DPI/monitor changes.
+    // When that happens our HWND is still alive but no longer composited
+    // into the desktop layer → user sees a blank wallpaper. SystemEvents
+    // covers the well-known triggers; the watchdog catches the cases where
+    // Windows doesn't fire an event we can hook (e.g. silent shell restart).
+
+    private void StartWallpaperWatchdog()
+    {
+        if (_wallpaperWatchdog != null) return;
+        _wallpaperWatchdog = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromSeconds(10)
+        };
+        _wallpaperWatchdog.Tick += async (_, _) =>
+        {
+            if (!_isWallpaperMode || !_wallpaperFinalized || _wallpaperWindow == null) return;
+            try
+            {
+                var helper = new System.Windows.Interop.WindowInteropHelper(_wallpaperWindow);
+                var hwnd = helper.Handle;
+                if (hwnd == IntPtr.Zero || !IsWindow(hwnd)) return;
+                var currentParent = GetParent(hwnd);
+                // No saved host (Strategy C / fallback) → nothing to compare.
+                if (_wallpaperIconsHost == IntPtr.Zero) return;
+                // Parent-drift OR the saved host has been destroyed → reattach.
+                if (currentParent != _wallpaperIconsHost || !IsWindow(_wallpaperIconsHost))
+                    await ReattachWallpaperAsync("watchdog");
+            }
+            catch (Exception ex) { Debug.WriteLine($"wallpaper watchdog: {ex.Message}"); }
+        };
+        _wallpaperWatchdog.Start();
+    }
+
+    private void StopWallpaperWatchdog()
+    {
+        _wallpaperWatchdog?.Stop();
+        _wallpaperWatchdog = null;
+    }
+
+    private void HookWallpaperSystemEvents()
+    {
+        if (_wallpaperEventsHooked) return;
+        Microsoft.Win32.SystemEvents.PowerModeChanged += OnPowerModeChanged;
+        Microsoft.Win32.SystemEvents.SessionSwitch += OnSessionSwitch;
+        Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+        _wallpaperEventsHooked = true;
+    }
+
+    private void UnhookWallpaperSystemEvents()
+    {
+        if (!_wallpaperEventsHooked) return;
+        try { Microsoft.Win32.SystemEvents.PowerModeChanged -= OnPowerModeChanged; } catch { }
+        try { Microsoft.Win32.SystemEvents.SessionSwitch -= OnSessionSwitch; } catch { }
+        try { Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged; } catch { }
+        _wallpaperEventsHooked = false;
+    }
+
+    private async void OnPowerModeChanged(object? sender, Microsoft.Win32.PowerModeChangedEventArgs e)
+    {
+        if (e.Mode != Microsoft.Win32.PowerModes.Resume) return;
+        // Give shell ~1.2s to settle after resume — DWM / Explorer rebuild
+        // their window tree asynchronously and a too-early SetParent can land
+        // on a transient WorkerW that disappears moments later.
+        await Task.Delay(1200);
+        await ReattachWallpaperAsync("power-resume");
+    }
+
+    private async void OnSessionSwitch(object? sender, Microsoft.Win32.SessionSwitchEventArgs e)
+    {
+        if (e.Reason != Microsoft.Win32.SessionSwitchReason.SessionUnlock
+            && e.Reason != Microsoft.Win32.SessionSwitchReason.ConsoleConnect
+            && e.Reason != Microsoft.Win32.SessionSwitchReason.SessionLogon)
+            return;
+        await Task.Delay(1200);
+        await ReattachWallpaperAsync($"session-{e.Reason}");
+    }
+
+    private async void OnDisplaySettingsChanged(object? sender, EventArgs e)
+    {
+        // Display change can shift virtual-screen bounds; re-clamp + reattach.
+        await Task.Delay(500);
+        await ReattachWallpaperAsync("display-changed");
     }
 
     private void ExitWallpaperMode()
@@ -707,6 +868,11 @@ public partial class MainWindow : Window
 
     private void CleanupWallpaperWindow()
     {
+        // Stop watchdog + unhook system events FIRST so a pending tick / late
+        // resume callback doesn't try to re-attach a window we're closing.
+        StopWallpaperWatchdog();
+        UnhookWallpaperSystemEvents();
+
         // Always restore desktop icons on exit — otherwise the user is stuck
         // with hidden icons until they right-click → View → Show.
         if (_desktopIconsHidden)
@@ -714,10 +880,38 @@ public partial class MainWindow : Window
             try { ToggleDesktopIcons(false); }
             catch (Exception ex) { Debug.WriteLine($"restore icons: {ex.Message}"); }
         }
+
+        // Reparent back to top-level (HWND_DESKTOP) BEFORE Close. Once a WPF
+        // Window has been SetParent'd into a native Win32 host (WorkerW /
+        // Progman / icons-host), the WPF dispatcher loses message routing —
+        // a plain _wallpaperWindow.Close() may leave the HWND alive,
+        // including the hosted WebView2 process, which then renders a zombie
+        // copy somewhere in the desktop layer. Detaching first restores
+        // normal WPF window semantics so Close + WebView2 disposal happen
+        // cleanly and reclaim GPU/RAM.
+        if (_wallpaperWindow != null)
+        {
+            try
+            {
+                var helper = new System.Windows.Interop.WindowInteropHelper(_wallpaperWindow);
+                var hwnd = helper.Handle;
+                if (hwnd != IntPtr.Zero && IsWindow(hwnd))
+                {
+                    var currentParent = GetParent(hwnd);
+                    if (currentParent != IntPtr.Zero)
+                        SetParent(hwnd, IntPtr.Zero);
+                }
+            }
+            catch (Exception ex) { Debug.WriteLine($"wallpaper detach: {ex.Message}"); }
+        }
+
+        try { _wallpaperWebView?.Dispose(); }
+        catch (Exception ex) { Debug.WriteLine($"wallpaper webview dispose: {ex.Message}"); }
         try { _wallpaperWindow?.Close(); }
         catch (Exception ex) { Debug.WriteLine($"wallpaper close: {ex.Message}"); }
         _wallpaperWindow = null;
         _wallpaperWebView = null;
+        _wallpaperIconsHost = IntPtr.Zero;
     }
 
     private void ReportWp(string text)
@@ -6101,6 +6295,23 @@ public partial class MainWindow : Window
 
         // Unsubscribe render loop
         CompositionTarget.Rendering -= OnRenderFrame;
+
+        // Tear down wallpaper engine cleanly — stops watchdog, unhooks
+        // SystemEvents (static events leak if not unsubscribed), reparents
+        // wallpaper HWND back to top-level so WPF Close disposes WebView2.
+        // CleanupWallpaperWindow is safe when no wallpaper is active.
+        if (_isWallpaperMode || _wallpaperWindow != null)
+        {
+            try { CleanupWallpaperWindow(); }
+            catch (Exception ex) { Debug.WriteLine($"wallpaper teardown on close: {ex.Message}"); }
+        }
+        else
+        {
+            // Even when wallpaper isn't active, make sure we never leave
+            // SystemEvents handlers attached (defensive — should be a no-op).
+            UnhookWallpaperSystemEvents();
+            StopWallpaperWatchdog();
+        }
 
         // Tear down the CluadeX named-pipe bridge so we don't leak a
         // pipe handle / reader / writer on app exit.
