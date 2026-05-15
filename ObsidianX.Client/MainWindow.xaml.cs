@@ -6241,6 +6241,14 @@ public partial class MainWindow : Window
                     Dispatcher.BeginInvoke(new Action(
                         () => SaveNoteFromUniverse(payload.noteId, payload.content ?? "")));
             }
+            else if (msg?.type == "importObsidianVault")
+            {
+                // Universe settings button → run the one-click Obsidian
+                // migration wizard. C# handles the folder picker + confirm
+                // dialog on the WPF dispatcher; the heavy file walk runs
+                // on a background task so the UI stays responsive.
+                Dispatcher.BeginInvoke(new Action(StartObsidianVaultImport));
+            }
         }
         catch (Exception ex)
         {
@@ -10936,4 +10944,127 @@ public partial class MainWindow : Window
     }
 
     private void RefreshVaultTree() => PopulateVaultTree();
+
+    // ── Obsidian vault import (one-click migration) ──────────────────────
+    //
+    // Launches the folder picker, probes the chosen folder for Obsidian
+    // markers, shows a confirmation MessageBox with the note count, then
+    // runs the importer on a background task. Default strategy is CopyInto
+    // so the user's original Obsidian vault stays untouched as a backup;
+    // user can hit Cancel + re-launch the app with the source folder on the
+    // command line to use it as the active vault instead. Phase 2 will add
+    // the UI affordance for that flow.
+
+    private async void StartObsidianVaultImport()
+    {
+        try
+        {
+            // Folder picker. OpenFolderDialog is the modern API (WPF .NET 8+);
+            // falls back to the old WinForms dialog if for some reason it's
+            // unavailable on this build.
+            var dlg = new Microsoft.Win32.OpenFolderDialog
+            {
+                Title = "Pick your Obsidian vault folder",
+                Multiselect = false,
+                ValidateNames = true
+            };
+            if (dlg.ShowDialog(this) != true) return;
+            var sourcePath = dlg.FolderName;
+
+            if (StatusText != null) StatusText.Text = "Probing Obsidian vault…";
+            var detector = new ObsidianVaultDetector();
+            var info = await Task.Run(() => detector.Probe(sourcePath));
+
+            if (info == null)
+            {
+                System.Windows.MessageBox.Show(this,
+                    $"Couldn't read {sourcePath}.",
+                    "Obsidian import", System.Windows.MessageBoxButton.OK,
+                    System.Windows.MessageBoxImage.Warning);
+                if (StatusText != null) StatusText.Text = "Obsidian import cancelled.";
+                return;
+            }
+
+            if (!info.LikelyVault)
+            {
+                var go = System.Windows.MessageBox.Show(this,
+                    $"\"{info.Name}\" doesn't look like an Obsidian vault " +
+                    $"({info.MarkdownNoteCount} markdown files, no [[wikilinks]] detected).\n\n" +
+                    "Import anyway?",
+                    "Not a vault?", System.Windows.MessageBoxButton.YesNo,
+                    System.Windows.MessageBoxImage.Question);
+                if (go != System.Windows.MessageBoxResult.Yes)
+                {
+                    if (StatusText != null) StatusText.Text = "Obsidian import cancelled.";
+                    return;
+                }
+            }
+
+            var sizeMb = info.TotalBytes / (1024.0 * 1024.0);
+            var pluginLine = info.CommunityPluginsEnabled.Count > 0
+                ? $"\nCommunity plugins: {info.CommunityPluginsEnabled.Count} (not migrated — Obsidian-only)."
+                : "";
+            var prompt = $"Import \"{info.Name}\"?\n\n" +
+                         $"• {info.MarkdownNoteCount} notes\n" +
+                         $"• {info.AttachmentCount} attachments\n" +
+                         $"• {sizeMb:F1} MB total\n" +
+                         $"• Last edit: {(info.LastModified?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "—")}" +
+                         pluginLine + "\n\n" +
+                         $"Files will be copied into:\n  {Path.Combine(_vaultPath, "Imported", info.Name)}\n\n" +
+                         "Original vault stays untouched.";
+            var confirm = System.Windows.MessageBox.Show(this, prompt,
+                "Import Obsidian vault", System.Windows.MessageBoxButton.OKCancel,
+                System.Windows.MessageBoxImage.Information);
+            if (confirm != System.Windows.MessageBoxResult.OK)
+            {
+                if (StatusText != null) StatusText.Text = "Obsidian import cancelled.";
+                return;
+            }
+
+            if (StatusText != null) StatusText.Text = $"Importing {info.MarkdownNoteCount} notes…";
+            var importer = new ObsidianVaultImporter();
+            var summary = await Task.Run(() => importer.Import(new ObsidianVaultImporter.Options
+            {
+                SourceVault = info.Path,
+                TargetVault = _vaultPath,
+                Strategy = ObsidianVaultImporter.ImportStrategy.CopyInto,
+                IncludeAttachments = true,
+                PreserveFolderStructure = true,
+                SkipObsidianMeta = true
+            }));
+
+            var doneMsg = $"Import done in {summary.Elapsed.TotalSeconds:F1} s\n\n" +
+                          $"• {summary.NotesCopied} notes copied\n" +
+                          $"• {summary.AttachmentsCopied} attachments copied\n" +
+                          $"• {summary.Skipped} unchanged (skipped)\n" +
+                          $"• {summary.Errors.Count} errors";
+            if (StatusText != null)
+                StatusText.Text = $"Imported {summary.NotesCopied} notes from {info.Name}.";
+            System.Windows.MessageBox.Show(this, doneMsg,
+                "Obsidian import complete", System.Windows.MessageBoxButton.OK,
+                System.Windows.MessageBoxImage.Information);
+
+            // Re-index so the new notes show up in the universe + brain export.
+            try
+            {
+                _categories ??= new CategoryRegistry(_vaultPath);
+                _graph = _indexer.IndexVault(_vaultPath);
+                _exporter.Export(_vaultPath, _identity, _graph);
+                PushBrainSnapshotToUniverse();
+            }
+            catch (Exception reindexEx)
+            {
+                Debug.WriteLine($"Post-import reindex failed: {reindexEx.Message}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"StartObsidianVaultImport: {ex}");
+            if (StatusText != null) StatusText.Text = $"Obsidian import failed: {ex.Message}";
+            System.Windows.MessageBox.Show(this,
+                "Import failed: " + ex.Message,
+                "Obsidian import", System.Windows.MessageBoxButton.OK,
+                System.Windows.MessageBoxImage.Error);
+        }
+    }
 }

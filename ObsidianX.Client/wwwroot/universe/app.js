@@ -48,6 +48,7 @@ const $setLightningSpeedV = document.getElementById('set-lightning-speed-val');
 const $setReset      = document.getElementById('set-reset');
 const $setResettle   = document.getElementById('set-resettle');
 const $setFit        = document.getElementById('set-fit');
+const $setImportObsidian = document.getElementById('set-import-obsidian');
 const $setFullscreen = document.getElementById('set-fullscreen');
 const $setShowCase   = document.getElementById('set-showcase');
 const $setWallpaper  = document.getElementById('set-wallpaper');
@@ -692,6 +693,14 @@ function wireSettingsPanel() {
     $setFit?.addEventListener('click', () => {
         scene?.fitToScreen?.();
         setStatus('Fit · reframed to current node positions');
+    });
+
+    // Import Obsidian: ask the host to open the folder picker + run the
+    // one-click migration wizard. C# handles the actual file ops and shows
+    // its own confirmation dialog; we just kick the door.
+    $setImportObsidian?.addEventListener('click', () => {
+        setStatus('Opening Obsidian vault picker…');
+        postToHost({ type: 'importObsidianVault' });
     });
 
     // Toggle WPF host fullscreen (covers the Windows taskbar). The C# side
