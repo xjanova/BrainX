@@ -299,6 +299,41 @@ public partial class MainWindow : Window
     [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
     private static extern bool IsWindow(IntPtr hWnd);
 
+    // ── Auto-pause when wallpaper is covered (fullscreen game etc.) ──
+    // SetWinEventHook fires a callback in our process on foreground-window
+    // changes. We then compare the foreground window's rect to each
+    // wallpaper monitor — if a single foreground window fully covers a
+    // monitor, that instance is paused. Saves 30-60% of WebView2 GPU/CPU
+    // while a fullscreen app is on top. Resumes the moment the foreground
+    // window moves / minimizes / closes.
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr SetWinEventHook(uint eventMin, uint eventMax,
+        IntPtr hmodWinEventProc, WinEventDelegate lpfnWinEventProc,
+        uint idProcess, uint idThread, uint dwFlags);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool UnhookWinEvent(IntPtr hWinEventHook);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    // GetWindowRect already imported at the CluadeX dock helpers using
+    // struct W32Rect; reuse that one instead of declaring a second overload.
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    private delegate void WinEventDelegate(IntPtr hWinEventHook, uint eventType,
+        IntPtr hwnd, int idObject, int idChild, uint dwEventThread, uint dwmsEventTime);
+
+    private const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
+    private const uint EVENT_SYSTEM_MINIMIZESTART = 0x0016;
+    private const uint EVENT_SYSTEM_MINIMIZEEND = 0x0017;
+    private const uint EVENT_OBJECT_LOCATIONCHANGE = 0x800B;
+    private const uint WINEVENT_OUTOFCONTEXT = 0x0000;
+    private const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
+
     // Per-monitor wallpaper enumeration. EnumDisplayMonitors gives us a
     // RECT per physical monitor (in physical pixels), GetMonitorInfo
     // returns work area + primary flag. We use this instead of WPF's
@@ -313,17 +348,18 @@ public partial class MainWindow : Window
     private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFOEX lpmi);
 
     private delegate bool MonitorEnumProc(IntPtr hMonitor, IntPtr hdcMonitor,
-        ref RECT lprcMonitor, IntPtr dwData);
+        ref W32Rect lprcMonitor, IntPtr dwData);
 
-    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
-    private struct RECT { public int Left, Top, Right, Bottom; }
+    // RECT struct (Left/Top/Right/Bottom) is W32Rect (declared near the
+    // CluadeX dock helpers ~line 5732). Reusing that one keeps a single
+    // shape for every Win32 rect P/Invoke in this file.
 
     [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, CharSet = System.Runtime.InteropServices.CharSet.Auto)]
     private struct MONITORINFOEX
     {
         public int cbSize;
-        public RECT rcMonitor;
-        public RECT rcWork;
+        public W32Rect rcMonitor;
+        public W32Rect rcWork;
         public uint dwFlags;
         [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.ByValTStr, SizeConst = 32)]
         public string szDevice;
@@ -359,7 +395,7 @@ public partial class MainWindow : Window
         var list = new List<MonitorBounds>();
         try
         {
-            EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (IntPtr hMon, IntPtr _, ref RECT _, IntPtr _) =>
+            EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (IntPtr hMon, IntPtr _, ref W32Rect _, IntPtr _) =>
             {
                 var info = new MONITORINFOEX();
                 info.cbSize = System.Runtime.InteropServices.Marshal.SizeOf<MONITORINFOEX>();
@@ -437,6 +473,7 @@ public partial class MainWindow : Window
         public IntPtr IconsHost;        // saved at attach for watchdog drift detection
         public int Left, Top, Width, Height;   // monitor bounds in physical pixels
         public string MonitorId = "";   // for HUD logs
+        public bool RenderPaused;       // tracked so we don't spam pauseRender messages
     }
 
     // SETUP-only preview window. After Apply this is null — the window
@@ -458,6 +495,16 @@ public partial class MainWindow : Window
     // does benign WorkerW reshuffling.
     private DateTime _lastWallpaperAttachUtc = DateTime.MinValue;
     private static readonly TimeSpan WatchdogCooldown = TimeSpan.FromSeconds(30);
+
+    // Auto-pause subsystem state. _foregroundHook = SetWinEventHook handle
+    // (must be kept alive + unhooked on cleanup). _winEventDelegate must
+    // be a field, not a local — otherwise GC eats it and the callback
+    // crashes the process when Windows fires the event. _pauseEvalTimer
+    // debounces rapid foreground-window changes (e.g. switching apps
+    // burst-fires events) so we don't re-evaluate every keystroke.
+    private IntPtr _foregroundHook = IntPtr.Zero;
+    private WinEventDelegate? _winEventDelegate;
+    private DispatcherTimer? _pauseEvalTimer;
 
     private const int SW_HIDE = 0;
     private const int SW_SHOW = 5;
@@ -1197,15 +1244,166 @@ public partial class MainWindow : Window
         Microsoft.Win32.SystemEvents.SessionSwitch += OnSessionSwitch;
         Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
         _wallpaperEventsHooked = true;
+        HookForegroundChange();
     }
 
     private void UnhookWallpaperSystemEvents()
     {
+        UnhookForegroundChange();
         if (!_wallpaperEventsHooked) return;
         try { Microsoft.Win32.SystemEvents.PowerModeChanged -= OnPowerModeChanged; } catch { }
         try { Microsoft.Win32.SystemEvents.SessionSwitch -= OnSessionSwitch; } catch { }
         try { Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged; } catch { }
         _wallpaperEventsHooked = false;
+    }
+
+    // ── Foreground change → auto-pause render ────────────────────────
+    // Hooks EVENT_SYSTEM_FOREGROUND so Windows tells us whenever the user
+    // alt-tabs / launches a game / clicks another window. We then check
+    // whether the new foreground window fully covers any of our wallpaper
+    // monitors and pause that instance's animation loop accordingly.
+    // Debounced (150ms) because launching an app fires multiple events.
+
+    private void HookForegroundChange()
+    {
+        if (_foregroundHook != IntPtr.Zero) return;
+        // Field-bound delegate — local would be GC'd and crash the process.
+        _winEventDelegate = OnForegroundWinEvent;
+        _foregroundHook = SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
+            IntPtr.Zero, _winEventDelegate, 0, 0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+
+        _pauseEvalTimer ??= new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromMilliseconds(150)
+        };
+        _pauseEvalTimer.Tick -= OnPauseEvalTick;
+        _pauseEvalTimer.Tick += OnPauseEvalTick;
+
+        // Do one immediate eval so initial state is correct (e.g. wallpaper
+        // applied while a fullscreen window is already foreground).
+        EvaluatePauseState();
+    }
+
+    private void UnhookForegroundChange()
+    {
+        if (_foregroundHook != IntPtr.Zero)
+        {
+            try { UnhookWinEvent(_foregroundHook); } catch { }
+            _foregroundHook = IntPtr.Zero;
+        }
+        _winEventDelegate = null;
+        if (_pauseEvalTimer != null)
+        {
+            _pauseEvalTimer.Stop();
+            _pauseEvalTimer.Tick -= OnPauseEvalTick;
+            _pauseEvalTimer = null;
+        }
+        // Best-effort resume on unhook so paused surfaces don't stay frozen
+        // if the user toggles wallpaper off while something was covering it.
+        foreach (var inst in _wallpapers)
+        {
+            if (inst.RenderPaused) SendResumeToInstance(inst);
+        }
+    }
+
+    private void OnForegroundWinEvent(IntPtr hWinEventHook, uint eventType,
+        IntPtr hwnd, int idObject, int idChild, uint dwEventThread, uint dwmsEventTime)
+    {
+        // Filter: only top-level window events matter (idObject==0=OBJID_WINDOW).
+        if (idObject != 0) return;
+        // Marshal back to UI thread via the debounce timer. Restart resets
+        // the countdown so a burst of N events does ONE evaluation 150ms
+        // after the LAST event.
+        try
+        {
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                _pauseEvalTimer?.Stop();
+                _pauseEvalTimer?.Start();
+            }));
+        }
+        catch (Exception ex) { Debug.WriteLine($"foreground hook dispatch: {ex.Message}"); }
+    }
+
+    private void OnPauseEvalTick(object? sender, EventArgs e)
+    {
+        _pauseEvalTimer?.Stop();
+        EvaluatePauseState();
+    }
+
+    /// <summary>
+    /// For each wallpaper instance, decide whether it should be paused
+    /// based on whether the foreground window FULLY COVERS its monitor.
+    /// "Fully covers" = foreground window rect contains the monitor rect
+    /// (within a small tolerance) AND the foreground window is visible
+    /// AND it's not the desktop / our own app. This is the heuristic for
+    /// "fullscreen game on this monitor".
+    /// </summary>
+    private void EvaluatePauseState()
+    {
+        if (_wallpapers.Count == 0) return;
+        try
+        {
+            var fg = GetForegroundWindow();
+            if (fg == IntPtr.Zero || !IsWindow(fg) || !IsWindowVisible(fg))
+            {
+                // No foreground window → resume all.
+                foreach (var inst in _wallpapers)
+                    if (inst.RenderPaused) SendResumeToInstance(inst);
+                return;
+            }
+            if (!GetWindowRect(fg, out var fgRect)) return;
+            // Reject the desktop itself + our own app windows (Progman,
+            // WorkerW, our MainWindow). Those should never cause a pause.
+            // Our app windows are excluded by WINEVENT_SKIPOWNPROCESS at
+            // hook time; the desktop check is a defensive belt.
+            var fgClass = new System.Text.StringBuilder(64);
+            GetClassName(fg, fgClass, fgClass.Capacity);
+            var className = fgClass.ToString();
+            if (className == "Progman" || className == "WorkerW") return;
+
+            foreach (var inst in _wallpapers)
+            {
+                bool covered = RectFullyCovers(fgRect, inst.Left, inst.Top, inst.Width, inst.Height);
+                if (covered && !inst.RenderPaused) SendPauseToInstance(inst);
+                else if (!covered && inst.RenderPaused) SendResumeToInstance(inst);
+            }
+        }
+        catch (Exception ex) { Debug.WriteLine($"EvaluatePauseState: {ex.Message}"); }
+    }
+
+    private static bool RectFullyCovers(W32Rect fg, int monLeft, int monTop, int monW, int monH)
+    {
+        // Allow 2px slack on each edge — Windows often reports fullscreen
+        // game rects with off-by-one rounding.
+        return fg.Left   <= monLeft + 2
+            && fg.Top    <= monTop  + 2
+            && fg.Right  >= monLeft + monW - 2
+            && fg.Bottom >= monTop  + monH - 2;
+    }
+
+    private void SendPauseToInstance(WallpaperInstance inst)
+    {
+        try
+        {
+            inst.WebView?.CoreWebView2?.PostWebMessageAsJson("{\"type\":\"pauseRender\"}");
+            inst.RenderPaused = true;
+            ReportWp($"PAUSED[{inst.MonitorId}] — covered by fullscreen window");
+        }
+        catch (Exception ex) { Debug.WriteLine($"SendPauseToInstance[{inst.MonitorId}]: {ex.Message}"); }
+    }
+
+    private void SendResumeToInstance(WallpaperInstance inst)
+    {
+        try
+        {
+            inst.WebView?.CoreWebView2?.PostWebMessageAsJson("{\"type\":\"resumeRender\"}");
+            inst.RenderPaused = false;
+            ReportWp($"RESUMED[{inst.MonitorId}] — coverage cleared");
+        }
+        catch (Exception ex) { Debug.WriteLine($"SendResumeToInstance[{inst.MonitorId}]: {ex.Message}"); }
     }
 
     private async void OnPowerModeChanged(object? sender, Microsoft.Win32.PowerModeChangedEventArgs e)

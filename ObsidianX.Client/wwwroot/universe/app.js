@@ -494,6 +494,20 @@ function onHostMessage(evt) {
             // Universe HUD too.
             if (msg.text) setStatus('Wallpaper: ' + msg.text);
             break;
+        case 'pauseRender':
+            // C# detected our wallpaper is fully covered (fullscreen game,
+            // browser maximized over us, RDP, etc.) → stop the rAF loop to
+            // give the foreground app the GPU. scene.pauseAnimation cancels
+            // the in-flight rAF + sets a flag so tick() stops re-scheduling.
+            if (scene) scene.pauseAnimation?.();
+            break;
+        case 'resumeRender':
+            // C# detected the wallpaper is visible again → restart rAF.
+            // scene.resumeAnimation resets THREE.Clock so the first frame
+            // doesn't attribute the full pause duration as elapsed dt
+            // (which would jump-rotate the universe by hours of motion).
+            if (scene) scene.resumeAnimation?.();
+            break;
         case 'viewState':
             // C# notifies us when the WPF floating toggle switched the view.
             // Re-sync our segmented control so it doesn't lie about state.

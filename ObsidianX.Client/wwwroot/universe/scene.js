@@ -410,6 +410,13 @@ export function createScene(canvas, callbacks = {}) {
     let nebulaObj = null;
     let hoverIndex = -1;
     let selectedIndex = -1;
+    // Animation-loop control. _rafHandle = current requestAnimationFrame id
+    // (so pauseAnimation can cancel it); _animationPaused gates the
+    // re-schedule at the end of tick(). See pauseAnimation/resumeAnimation
+    // exported below — used by the host to auto-pause when a fullscreen
+    // window covers the wallpaper.
+    let _rafHandle = 0;
+    let _animationPaused = false;
     let edgeAlphaAttr = null;   // direct reference for fast updates
     let starPosAttr = null;     // direct reference to upload settled positions
     let edgePosAttr = null;
@@ -1029,9 +1036,13 @@ export function createScene(canvas, callbacks = {}) {
         stepFly(performance.now() / 1000);
         controls.update();
         composer.render(dt);
-        requestAnimationFrame(tick);
+        // Honor the host pause flag — when the wallpaper is fully covered
+        // (e.g. fullscreen game on top of our monitor) the host sends
+        // {type:'pauseRender'} → we set _animationPaused = true → the
+        // rAF chain stops here. resumeAnimation() re-kicks it.
+        if (!_animationPaused) _rafHandle = requestAnimationFrame(tick);
     }
-    requestAnimationFrame(tick);
+    _rafHandle = requestAnimationFrame(tick);
 
     // events: hover/click. Both translate into index → callback.
     function onPointerMove(e) {
@@ -1602,6 +1613,27 @@ export function createScene(canvas, callbacks = {}) {
 
     function getSettings() { return { ...settings }; }
 
+    // Auto-pause: when the host says the wallpaper is fully covered (e.g.
+    // fullscreen game), stop the rAF loop. Saves ~30-60% of the WebView2
+    // process's GPU/CPU on idle. resumeAnimation() restarts the loop;
+    // because animation state lives in module-level closures + three.js
+    // scene graph (not destroyed), resume picks up smoothly without
+    // re-initialization.
+    function pauseAnimation() {
+        if (_animationPaused) return;
+        _animationPaused = true;
+        if (_rafHandle) { cancelAnimationFrame(_rafHandle); _rafHandle = 0; }
+    }
+    function resumeAnimation() {
+        if (!_animationPaused) return;
+        _animationPaused = false;
+        // Reset THREE.Clock so the first post-resume frame doesn't
+        // attribute the full pause duration as elapsed time → universe
+        // wouldn't jump-rotate by hours of "missed" motion in one frame.
+        clock.start();
+        _rafHandle = requestAnimationFrame(tick);
+    }
+
     return {
         mount,
         setSize,
@@ -1628,6 +1660,8 @@ export function createScene(canvas, callbacks = {}) {
         restoreCamera,
         fitToScreen,
         getSettings,
+        pauseAnimation,
+        resumeAnimation,
         destroy
     };
 }
