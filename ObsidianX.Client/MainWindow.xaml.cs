@@ -709,6 +709,11 @@ public partial class MainWindow : Window
             core.SetVirtualHostNameToFolderMapping(
                 "universe.local", wwwroot, CoreWebView2HostResourceAccessKind.Allow);
             core.WebMessageReceived += OnWallpaperMessage;
+            // Diagnostic: log to HUD when the WebView2 host process dies so
+            // we can tell zombie WPF Windows (HWND alive, content gone) apart
+            // from normal teardown. Especially important for Separate mode
+            // where multiple per-monitor processes can fail independently.
+            core.ProcessFailed += OnWallpaperWebViewProcessFailed;
             webView.Source = new Uri("https://universe.local/universe/index.html?mode=wallpaper-setup");
 
             _setupInstance = new WallpaperInstance
@@ -727,6 +732,37 @@ public partial class MainWindow : Window
             ReportWp($"FAILED: {ex.Message}");
             CleanupWallpaperWindow();
         }
+    }
+
+    /// <summary>
+    /// Fired by CoreWebView2 when its host process dies (browser-process
+    /// exit, renderer crash, GPU process gone, etc.). The WPF Window
+    /// remains alive but the content is dead — the "Separate mode runs
+    /// briefly then dies, program is zombie" symptom. Without this hook,
+    /// failures were silent and only visible as a blank monitor.
+    ///
+    /// We log every detail to the HUD so the user (and us) can tell what
+    /// killed the process. We DO NOT dispose the WebView2 inside the
+    /// handler (would deadlock the event); cleanup happens normally when
+    /// the wallpaper is toggled off, and broadcast posts in
+    /// BroadcastPulseToUniverse/etc. already wrap each PostWebMessageAsJson
+    /// in try/catch so the dead instance is harmless to other surfaces.
+    /// </summary>
+    private void OnWallpaperWebViewProcessFailed(object? sender,
+        Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedEventArgs e)
+    {
+        try
+        {
+            var inst = FindInstanceByWebView(sender);
+            var monitorId = inst?.MonitorId ?? "unknown";
+            var kind = e.ProcessFailedKind;
+            var reason = e.Reason;
+            var exitCode = e.ExitCode;
+            var desc = e.ProcessDescription ?? "";
+            ReportWp($"WEBVIEW2 PROCESS FAILED[{monitorId}] kind={kind} reason={reason} exit={exitCode}{(string.IsNullOrEmpty(desc) ? "" : " desc=\"" + desc + "\"")}");
+            Debug.WriteLine($"[Wallpaper-WebView2-Failure] monitor={monitorId} kind={kind} reason={reason} exit={exitCode} desc={desc}");
+        }
+        catch (Exception ex) { Debug.WriteLine($"OnWallpaperWebViewProcessFailed: {ex.Message}"); }
     }
 
     /// <summary>
@@ -1101,6 +1137,11 @@ public partial class MainWindow : Window
             core.SetVirtualHostNameToFolderMapping(
                 "universe.local", wwwroot, CoreWebView2HostResourceAccessKind.Allow);
             core.WebMessageReceived += OnWallpaperMessage;
+            // Diagnostic: same ProcessFailed hook as the setup window —
+            // surfaces clone-process crashes (the "Separate mode dies but
+            // WPF Window stays as zombie" symptom) into the HUD so we can
+            // see the exit kind / reason / code instead of guessing.
+            core.ProcessFailed += OnWallpaperWebViewProcessFailed;
             // Load directly in wallpaper-mode (no setup chrome) since clones
             // skip the setup phase entirely.
             webView.Source = new Uri("https://universe.local/universe/index.html?mode=wallpaper");
