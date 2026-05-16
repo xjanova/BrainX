@@ -211,7 +211,8 @@ public partial class MainWindow : Window
         ["Insights"] = "InsightsView",
         ["Settings"] = "SettingsView",
         ["Editor"] = "EditorView",
-        ["Search"] = "SearchView"
+        ["Search"] = "SearchView",
+        ["Import"] = "ImportView"
     };
 
     public MainWindow()
@@ -7030,7 +7031,7 @@ public partial class MainWindow : Window
             if (view != null) view.Visibility = Visibility.Visible;
         }
 
-        Button[] navButtons = [NavDashboard, NavBrainGraph, NavUniverse, NavNetwork, NavEditor, NavVault, NavSearch, NavClaude, NavGrowth, NavTokens, NavInsights, NavPeers, NavSharing, NavSettings];
+        Button[] navButtons = [NavDashboard, NavBrainGraph, NavUniverse, NavNetwork, NavEditor, NavVault, NavSearch, NavClaude, NavGrowth, NavTokens, NavInsights, NavPeers, NavSharing, NavImport, NavSettings];
         foreach (var nb in navButtons) nb.Style = (Style)FindResource("NavButton");
         btn.Style = (Style)FindResource("NavButtonActive");
 
@@ -11652,7 +11653,7 @@ public partial class MainWindow : Window
             if (v != null) v.Visibility = Visibility.Collapsed;
         }
         EditorView.Visibility = Visibility.Visible;
-        Button[] navButtons = [NavDashboard, NavBrainGraph, NavUniverse, NavNetwork, NavEditor, NavVault, NavSearch, NavClaude, NavGrowth, NavTokens, NavInsights, NavPeers, NavSharing, NavSettings];
+        Button[] navButtons = [NavDashboard, NavBrainGraph, NavUniverse, NavNetwork, NavEditor, NavVault, NavSearch, NavClaude, NavGrowth, NavTokens, NavInsights, NavPeers, NavSharing, NavImport, NavSettings];
         foreach (var nb in navButtons) nb.Style = (Style)FindResource("NavButton");
         NavEditor.Style = (Style)FindResource("NavButtonActive");
     }
@@ -12167,6 +12168,60 @@ public partial class MainWindow : Window
     // command line to use it as the active vault instead. Phase 2 will add
     // the UI affordance for that flow.
 
+    // Click target for the new sidebar Import tab's "Pick Obsidian vault…"
+    // button. Just forwards to the existing async import flow.
+    private void ImportObsidianButton_Click(object sender, RoutedEventArgs e)
+        => StartObsidianVaultImport();
+
+    // Cancel button on the Import view. Currently a no-op for Phase 1
+    // (ObsidianVaultImporter doesn't support cancellation tokens yet) —
+    // wired so the button is real, just disabled until the importer
+    // grows a CancellationToken plumb.
+    private void ImportCancelButton_Click(object sender, RoutedEventArgs e)
+    {
+        // TODO Phase 2: pass a CancellationTokenSource into the importer
+        // and cancel it here. For now this is a visual placeholder.
+    }
+
+    // Helpers that flip the Import view's progress card between idle and
+    // working states. UI safe to call from any thread — they marshal
+    // back to the dispatcher.
+    private void SetImportProgress(string message, bool running)
+    {
+        void Apply()
+        {
+            if (ImportProgressCard != null)
+                ImportProgressCard.Visibility = running ? Visibility.Visible : Visibility.Collapsed;
+            if (ImportProgressText != null)
+                ImportProgressText.Text = message;
+            if (ImportProgressBar != null)
+                ImportProgressBar.IsIndeterminate = running;
+            if (ImportObsidianButton != null)
+                ImportObsidianButton.IsEnabled = !running;
+        }
+        if (Dispatcher.CheckAccess()) Apply();
+        else Dispatcher.BeginInvoke((Action)Apply);
+    }
+
+    private void SetImportSummary(string text, bool success)
+    {
+        void Apply()
+        {
+            if (ImportLastSummary == null) return;
+            ImportLastSummary.Children.Clear();
+            var tb = new TextBlock
+            {
+                Text = text,
+                FontSize = 12,
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = (Brush)FindResource(success ? "TextPrimaryBrush" : "TextSecondaryBrush")
+            };
+            ImportLastSummary.Children.Add(tb);
+        }
+        if (Dispatcher.CheckAccess()) Apply();
+        else Dispatcher.BeginInvoke((Action)Apply);
+    }
+
     private async void StartObsidianVaultImport()
     {
         try
@@ -12184,6 +12239,7 @@ public partial class MainWindow : Window
             var sourcePath = dlg.FolderName;
 
             if (StatusText != null) StatusText.Text = "Probing Obsidian vault…";
+            SetImportProgress("Probing Obsidian vault…", running: true);
             var detector = new ObsidianVaultDetector();
             var info = await Task.Run(() => detector.Probe(sourcePath));
 
@@ -12194,6 +12250,8 @@ public partial class MainWindow : Window
                     "Obsidian import", System.Windows.MessageBoxButton.OK,
                     System.Windows.MessageBoxImage.Warning);
                 if (StatusText != null) StatusText.Text = "Obsidian import cancelled.";
+                SetImportProgress("", running: false);
+                SetImportSummary($"Couldn't read folder: {sourcePath}", success: false);
                 return;
             }
 
@@ -12208,6 +12266,8 @@ public partial class MainWindow : Window
                 if (go != System.Windows.MessageBoxResult.Yes)
                 {
                     if (StatusText != null) StatusText.Text = "Obsidian import cancelled.";
+                    SetImportProgress("", running: false);
+                    SetImportSummary("Cancelled — not a vault.", success: false);
                     return;
                 }
             }
@@ -12230,10 +12290,13 @@ public partial class MainWindow : Window
             if (confirm != System.Windows.MessageBoxResult.OK)
             {
                 if (StatusText != null) StatusText.Text = "Obsidian import cancelled.";
+                SetImportProgress("", running: false);
+                SetImportSummary($"Cancelled \"{info.Name}\" before copy.", success: false);
                 return;
             }
 
             if (StatusText != null) StatusText.Text = $"Importing {info.MarkdownNoteCount} notes…";
+            SetImportProgress($"Importing \"{info.Name}\" — {info.MarkdownNoteCount} notes + {info.AttachmentCount} attachments…", running: true);
             var importer = new ObsidianVaultImporter();
             var summary = await Task.Run(() => importer.Import(new ObsidianVaultImporter.Options
             {
@@ -12252,6 +12315,12 @@ public partial class MainWindow : Window
                           $"• {summary.Errors.Count} errors";
             if (StatusText != null)
                 StatusText.Text = $"Imported {summary.NotesCopied} notes from {info.Name}.";
+            SetImportProgress("", running: false);
+            SetImportSummary(
+                $"✓ \"{info.Name}\" imported in {summary.Elapsed.TotalSeconds:F1}s — " +
+                $"{summary.NotesCopied} notes, {summary.AttachmentsCopied} attachments, " +
+                $"{summary.Skipped} unchanged, {summary.Errors.Count} errors.",
+                success: summary.Errors.Count == 0);
             System.Windows.MessageBox.Show(this, doneMsg,
                 "Obsidian import complete", System.Windows.MessageBoxButton.OK,
                 System.Windows.MessageBoxImage.Information);
@@ -12273,6 +12342,8 @@ public partial class MainWindow : Window
         {
             Debug.WriteLine($"StartObsidianVaultImport: {ex}");
             if (StatusText != null) StatusText.Text = $"Obsidian import failed: {ex.Message}";
+            SetImportProgress("", running: false);
+            SetImportSummary($"✗ Failed: {ex.Message}", success: false);
             System.Windows.MessageBox.Show(this,
                 "Import failed: " + ex.Message,
                 "Obsidian import", System.Windows.MessageBoxButton.OK,

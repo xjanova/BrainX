@@ -48,7 +48,6 @@ const $setLightningSpeedV = document.getElementById('set-lightning-speed-val');
 const $setReset      = document.getElementById('set-reset');
 const $setResettle   = document.getElementById('set-resettle');
 const $setFit        = document.getElementById('set-fit');
-const $setImportObsidian = document.getElementById('set-import-obsidian');
 const $setFullscreen = document.getElementById('set-fullscreen');
 const $setShowCase   = document.getElementById('set-showcase');
 const $setWallpaper  = document.getElementById('set-wallpaper');
@@ -915,13 +914,11 @@ function wireSettingsPanel() {
         setStatus('Fit · reframed to current node positions');
     });
 
-    // Import Obsidian: ask the host to open the folder picker + run the
-    // one-click migration wizard. C# handles the actual file ops and shows
-    // its own confirmation dialog; we just kick the door.
-    $setImportObsidian?.addEventListener('click', () => {
-        setStatus('Opening Obsidian vault picker…');
-        postToHost({ type: 'importObsidianVault' });
-    });
+    // (Import Obsidian moved out of Universe Settings to the main app's
+    // "Import / Scan" nav tab — see MainWindow.xaml's ImportView. The
+    // host-side `importObsidianVault` message handler is still wired in
+    // case any other code path posts it, but the in-Universe button is
+    // gone.)
 
     // Toggle WPF host fullscreen (covers the Windows taskbar). The C# side
     // owns window bounds; we just nudge it via the existing message bridge.

@@ -379,6 +379,8 @@
 
                                     <TextBlock Text="SYSTEM" FontSize="10" Foreground="{StaticResource TextMutedBrush}"
                                                Margin="22,24,0,12" FontWeight="SemiBold"/>
+                                    <Button x:Name="NavImport" Content="&#x1F4E5;  Import / Scan"
+                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Import"/>
                                     <Button x:Name="NavSettings" Content="&#x2699;  Settings"
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Settings"/>
                                 </StackPanel>
@@ -1824,6 +1826,81 @@
                                                    Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,10"/>
                                         <StackPanel x:Name="ShareHistoryList">
                                             <TextBlock Text="No sharing history yet" FontSize="12"
+                                                       Foreground="{StaticResource TextMutedBrush}" FontStyle="Italic"/>
+                                        </StackPanel>
+                                    </StackPanel>
+                                </Border>
+                            </Grid>
+                        </Grid>
+
+                        <!-- ═══ IMPORT / SCAN VIEW ═══
+                             Moved out of the Universe Settings panel so the
+                             import / scan flows live in their own first-class
+                             tab. Phase 1: Obsidian vault import + indeterminate
+                             progress + last-run summary. Phase 2 (deferred):
+                             generic folder scan, recent imports history. -->
+                        <Grid x:Name="ImportView" Visibility="Collapsed">
+                            <Grid Margin="24,16">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <StackPanel Margin="0,0,0,16">
+                                    <TextBlock Text="Import / Scan" FontSize="24" FontWeight="Bold"
+                                               Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,4"/>
+                                    <TextBlock Text="Bring external knowledge into this ObsidianX vault. Original sources stay untouched."
+                                               FontSize="12" Foreground="{StaticResource TextSecondaryBrush}"/>
+                                </StackPanel>
+
+                                <!-- Obsidian Vault Import card -->
+                                <Border Grid.Row="1" Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                    <StackPanel>
+                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                            <TextBlock Text="&#x1F5C2;" FontSize="20" Margin="0,0,8,0" VerticalAlignment="Center"
+                                                       Foreground="{StaticResource NeonCyanBrush}"/>
+                                            <TextBlock Text="OBSIDIAN VAULT" FontSize="11" FontWeight="SemiBold"
+                                                       Foreground="{StaticResource NeonCyanBrush}" VerticalAlignment="Center"/>
+                                        </StackPanel>
+                                        <TextBlock TextWrapping="Wrap" FontSize="12"
+                                                   Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,12">
+                                            Pick an existing Obsidian vault folder. Markdown notes and attachments will
+                                            be copied into <Run FontWeight="SemiBold">Imported/&lt;vault-name&gt;</Run> here,
+                                            preserving folder structure. <Run FontStyle="Italic">[[Wikilinks]]</Run> remain valid.
+                                        </TextBlock>
+                                        <StackPanel Orientation="Horizontal">
+                                            <Button x:Name="ImportObsidianButton" Content="&#x1F4C2;  Pick Obsidian vault…"
+                                                    Style="{StaticResource NeonButtonFilled}" Click="ImportObsidianButton_Click"
+                                                    Padding="14,8" Margin="0,0,8,0" FontSize="12"/>
+                                            <Button x:Name="ImportCancelButton" Content="&#x2715;  Cancel"
+                                                    Style="{StaticResource NavButton}" Click="ImportCancelButton_Click"
+                                                    Padding="14,8" FontSize="12" IsEnabled="False" Visibility="Collapsed"/>
+                                        </StackPanel>
+                                    </StackPanel>
+                                </Border>
+
+                                <!-- Progress card — visible only while an import is running. -->
+                                <Border Grid.Row="2" Style="{StaticResource CardPanel}" Margin="0,0,0,12"
+                                        x:Name="ImportProgressCard" Visibility="Collapsed">
+                                    <StackPanel>
+                                        <TextBlock Text="IN PROGRESS" FontSize="11" FontWeight="SemiBold"
+                                                   Foreground="{StaticResource NeonPinkBrush}" Margin="0,0,0,8"/>
+                                        <TextBlock x:Name="ImportProgressText" Text="Working…" FontSize="13"
+                                                   Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,8"/>
+                                        <ProgressBar x:Name="ImportProgressBar" Height="6" IsIndeterminate="True"
+                                                     Background="{StaticResource SurfaceBrush}"
+                                                     Foreground="{StaticResource NeonCyanBrush}" BorderThickness="0"/>
+                                    </StackPanel>
+                                </Border>
+
+                                <!-- Last summary card — populated after each import. -->
+                                <Border Grid.Row="3" Style="{StaticResource CardPanel}" VerticalAlignment="Top">
+                                    <StackPanel>
+                                        <TextBlock Text="LAST IMPORT" FontSize="11" FontWeight="SemiBold"
+                                                   Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,10"/>
+                                        <StackPanel x:Name="ImportLastSummary">
+                                            <TextBlock Text="No imports yet." FontSize="12"
                                                        Foreground="{StaticResource TextMutedBrush}" FontStyle="Italic"/>
                                         </StackPanel>
                                     </StackPanel>
