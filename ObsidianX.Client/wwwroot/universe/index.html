@@ -31,11 +31,38 @@
             <span class="wp-setup-hint">drag to orbit &middot; wheel to zoom &middot; adjust settings &#x2935;</span>
         </div>
         <div class="wp-setup-actions">
+            <div id="wp-layout-toggle" class="wp-seg-group" role="radiogroup" aria-label="Wallpaper layout">
+                <button id="wp-layout-span"     type="button" class="wp-seg-btn" data-mode="span"
+                        title="Stretch one continuous Universe across all monitors. Galaxy bleeds across screen edges. Uses 1 WebView2 (lower RAM, recommended).">&#x1F310; Span</button>
+                <button id="wp-layout-mirror"   type="button" class="wp-seg-btn" data-mode="mirror"
+                        title="Every monitor shows the SAME Universe view, synchronized via host broadcast (master &rarr; slaves at ~10fps).">&#x1FA9E; Mirror</button>
+                <button id="wp-layout-separate" type="button" class="wp-seg-btn" data-mode="separate"
+                        title="Each monitor has its OWN camera angle + settings, configured independently. Per-monitor preferences are remembered.">&#x1F5A5; Separate</button>
+            </div>
             <button id="wp-randomize" type="button" class="wp-btn" data-on="false"
                     title="Toggle ON = camera keeps cycling random shots (fly to nodes, zoom out, orbit) every 9-14 seconds. Toggle OFF = camera stays still.">&#x1F3B2; Random camera</button>
             <button id="wp-icons"     type="button" class="wp-btn" data-hidden="false">&#x1F4F1; Hide desktop icons</button>
             <button id="wp-apply"     type="button" class="wp-btn primary">&#x2713; Apply wallpaper</button>
             <button id="wp-cancel"    type="button" class="wp-btn">&#x2715; Cancel</button>
+        </div>
+
+        <!-- Resource warning shown when Mirror or Separate is selected. Each
+             non-primary monitor spawns its own WebView2 process (~250 MB
+             RAM + 1 GPU context) so we want users to know the cost. -->
+        <div id="wp-resource-warn" class="wp-warn-row" hidden>
+            <span class="wp-warn-icon">&#x26A0;</span>
+            <span id="wp-resource-warn-text">Heavy: N&times;~250 MB RAM + N GPU contexts. Span uses only 1.</span>
+        </div>
+
+        <!-- Per-monitor setup selector — only visible in Separate mode and
+             only when there's more than one monitor. Each chip switches the
+             setup preview to that monitor's saved settings + camera. -->
+        <div id="wp-monitor-bar" class="wp-monitor-bar" hidden>
+            <span class="wp-monitor-label">Configuring:</span>
+            <div id="wp-monitor-chips" class="wp-monitor-chips" role="radiogroup" aria-label="Monitor to configure">
+                <!-- Chips injected by app.js once host reports monitor count. -->
+            </div>
+            <span class="wp-monitor-hint">edits auto-save per monitor</span>
         </div>
     </div>
 

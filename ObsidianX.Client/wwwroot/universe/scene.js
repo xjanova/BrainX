@@ -922,6 +922,40 @@ export function createScene(canvas, callbacks = {}) {
 
     // ── camera flyTo ─────────────────────────────────────────────────
     let fly = null;
+    // Home state captured when entering 'follow' mode. When the user
+    // toggles follow OFF (mode → free/orbit/random), the camera flies
+    // back to this exact position so they don't end up stranded on the
+    // last pulsed star. Null when not in follow mode.
+    let _followHomeTarget = null;
+    let _followHomeCam = null;
+
+    // Mirror-mode sync state.
+    //   _mirrorBroadcastTimer : master-side. ~100 ms interval that posts
+    //     current camera target+position back through the host bridge so
+    //     C# can fan it out to slave wallpaper instances.
+    //   _mirrorIsSlave        : slave-side. When true, this instance is
+    //     receiving state from the master and must NOT broadcast.
+    let _mirrorBroadcastTimer = null;
+    let _mirrorIsSlave = false;
+
+    // Follow-mode idle return: after a pulse-triggered fly, wait this many
+    // ms with no NEW pulse before drifting back to the home pose. New
+    // pulses reset the timer (chain behaviour). On mode-exit the timer is
+    // cleared so the mode-exit handler's flyTo doesn't get clobbered.
+    let _followIdleTimer = null;
+    const FOLLOW_IDLE_RETURN_MS = 3000;
+    function scheduleFollowIdleReturn() {
+        if (_followIdleTimer) clearTimeout(_followIdleTimer);
+        _followIdleTimer = setTimeout(() => {
+            _followIdleTimer = null;
+            // Only return if STILL in follow mode AND we have a home pose
+            // recorded. If the user changed mode meanwhile, setCameraMode's
+            // exit handler already flew us home — don't double-fly.
+            if (settings.cameraMode === 'follow' && _followHomeTarget && _followHomeCam) {
+                flyTo(_followHomeTarget, _followHomeCam, 0.7);
+            }
+        }, FOLLOW_IDLE_RETURN_MS);
+    }
     function flyTo(targetVec, camVec, durationSec) {
         if (durationSec <= 0) {
             controls.target.copy(targetVec);
@@ -1127,8 +1161,12 @@ export function createScene(canvas, callbacks = {}) {
         // Camera-follow mode: when a pulse fires, the camera flies to that
         // star automatically — the "AI is reading your brain right now"
         // framing. Limited to one fly at a time (overwrites any in-flight).
+        // Plus schedule an auto-return to home pose after FOLLOW_IDLE_RETURN_MS
+        // of no new pulse activity — so the camera doesn't get stranded on
+        // the last pulsed star forever.
         if (settings.cameraMode === 'follow') {
             focusNode(idx);
+            scheduleFollowIdleReturn();
         }
 
         // Edge arcs: pick up to MAX_ARCS_PER_PULSE incident edges and start
@@ -1433,6 +1471,24 @@ export function createScene(canvas, callbacks = {}) {
         // where the user wants the universe to drift on its own.
         if (prev === 'random' && m !== 'random') stopRandomMode();
         if (m === 'random') startRandomMode();
+
+        // 'follow' = camera flies to each pulsed star. Snapshot the
+        // camera's current pose when ENTERING follow so we can restore it
+        // when the user toggles follow OFF — otherwise the camera is
+        // stranded on whichever star last pulsed.
+        if (prev !== 'follow' && m === 'follow') {
+            _followHomeTarget = controls.target.clone();
+            _followHomeCam    = camera.position.clone();
+        } else if (prev === 'follow' && m !== 'follow') {
+            // Clear any pending idle-return timer so it doesn't fire after
+            // we've already flown home via this mode-exit handler.
+            if (_followIdleTimer) { clearTimeout(_followIdleTimer); _followIdleTimer = null; }
+            if (_followHomeTarget && _followHomeCam) {
+                flyTo(_followHomeTarget, _followHomeCam, 0.7);
+            }
+            _followHomeTarget = null;
+            _followHomeCam    = null;
+        }
     }
 
     // ── Random camera mode ──────────────────────────────────────────────
@@ -1634,6 +1690,61 @@ export function createScene(canvas, callbacks = {}) {
         _rafHandle = requestAnimationFrame(tick);
     }
 
+    // ── Mirror-mode sync ───────────────────────────────────────────────
+    // Mirror mode: ONE master WebView2 (primary monitor) broadcasts its
+    // camera state to the host every ~100 ms. The host fans it out to
+    // every OTHER wallpaper WebView2 (the slaves), which apply the state
+    // directly so all monitors stay visually in sync.
+    //
+    // Trade-offs:
+    //   • 10 fps update rate is plenty for the Universe's slow drift /
+    //     fly-to motion — human eye doesn't notice the discretization at
+    //     this scale.
+    //   • All randomness (Random camera mode, drift) runs on the master
+    //     and gets pushed to slaves, so slaves don't independently make
+    //     different decisions.
+
+    /**
+     * Slave-side: apply broadcast state from the master directly. No lerp
+     * — we want the next render to show the new pose immediately so the
+     * mirror feels "tight" rather than "trailing".
+     */
+    function applyMirrorState(targetVec, camVec) {
+        _mirrorIsSlave = true;
+        if (!targetVec || !camVec) return;
+        controls.target.set(targetVec.x, targetVec.y, targetVec.z);
+        camera.position.set(camVec.x, camVec.y, camVec.z);
+        controls.update();
+        // Any in-flight flyTo is now stale — kill it so it doesn't
+        // re-overwrite our applied pose on the next stepFly tick.
+        fly = null;
+    }
+
+    /**
+     * Master-side: start a 100 ms timer that posts the current camera
+     * pose via the supplied `postFn` callback. Caller passes the host
+     * bridge wrapper from app.js so scene.js stays platform-agnostic.
+     * Calling again replaces the previous interval (no double-fire).
+     */
+    function startMirrorBroadcast(postFn) {
+        stopMirrorBroadcast();
+        if (typeof postFn !== 'function') return;
+        _mirrorBroadcastTimer = setInterval(() => {
+            try {
+                postFn({
+                    target:   { x: controls.target.x, y: controls.target.y, z: controls.target.z },
+                    position: { x: camera.position.x, y: camera.position.y, z: camera.position.z },
+                });
+            } catch (e) { console.warn('[mirror] broadcast failed', e); }
+        }, 100);
+    }
+    function stopMirrorBroadcast() {
+        if (_mirrorBroadcastTimer) {
+            clearInterval(_mirrorBroadcastTimer);
+            _mirrorBroadcastTimer = null;
+        }
+    }
+
     return {
         mount,
         setSize,
@@ -1662,6 +1773,9 @@ export function createScene(canvas, callbacks = {}) {
         getSettings,
         pauseAnimation,
         resumeAnimation,
+        applyMirrorState,
+        startMirrorBroadcast,
+        stopMirrorBroadcast,
         destroy
     };
 }

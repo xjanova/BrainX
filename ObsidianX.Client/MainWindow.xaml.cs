@@ -478,10 +478,25 @@ public partial class MainWindow : Window
     // SETUP-only preview window. After Apply this is null — the window
     // it owned has been promoted into _wallpapers[0].
     private WallpaperInstance? _setupInstance;
-    // All active wallpaper surfaces — one per monitor in per-monitor mode,
-    // or [primary] only on single-monitor setups. SystemEvents + watchdog
+    // All active wallpaper surfaces — one per monitor in mirror mode, or
+    // one virtual-screen-spanning entry in span mode. SystemEvents + watchdog
     // iterate this list; CleanupWallpaperWindow tears each one down.
     private readonly List<WallpaperInstance> _wallpapers = new();
+    // Layout chosen at Apply time:
+    //   "span"     = single window covering the virtual screen — one
+    //                continuous Universe stretched across all monitors
+    //                (1 WebView2, default, pre-fa49312 behavior).
+    //   "mirror"   = N WebView2, all showing the SAME view, sync'd via
+    //                host master→slave broadcast (~10 fps).
+    //   "separate" = N WebView2, each monitor has its OWN settings/camera
+    //                (per-monitor prefs map in _pendingMonitorPrefs).
+    private string _wallpaperLayout = "span";
+
+    // Per-monitor preferences received from wallpaperApply (Separate mode).
+    // Keyed by monitor index (0 = primary). Value = pre-built JSON message
+    // ready to PostWebMessageAsJson to that monitor's clone on its 'ready'.
+    // Null when not in Separate mode or no prefs were supplied.
+    private Dictionary<int, string>? _pendingMonitorPrefs;
 
     private DispatcherTimer? _wallpaperWatchdog;
     private bool _wallpaperReattachInFlight;     // re-entry guard for AttachWallpaperToShell
@@ -754,10 +769,119 @@ public partial class MainWindow : Window
                 if (File.Exists(path) && instance?.WebView?.CoreWebView2 != null)
                     instance.WebView.CoreWebView2.PostWebMessageAsJson(
                         "{\"type\":\"brain\",\"payload\":" + File.ReadAllText(path) + "}");
+                // Also report current monitor count so the wallpaper-setup
+                // UI can render its per-monitor selector + resource warning.
+                // Single-monitor users still get 1 here (selector stays hidden).
+                if (instance?.WebView?.CoreWebView2 != null)
+                {
+                    try
+                    {
+                        var monCount = EnumerateMonitors().Count;
+                        instance.WebView.CoreWebView2.PostWebMessageAsJson(
+                            $"{{\"type\":\"monitorCount\",\"count\":{monCount}}}");
+                    }
+                    catch (Exception ex) { Debug.WriteLine($"monitorCount post: {ex.Message}"); }
+                }
+                // Per-monitor settings handoff: if this instance is a Separate-mode
+                // clone with a pending per-monitor pref slot, push it now so the
+                // clone applies the right camera/settings on boot. Also marks
+                // mirror-mode role (master/slave) so JS knows whether to broadcast.
+                if (instance != null && _pendingMonitorPrefs != null
+                    && instance.WebView?.CoreWebView2 != null)
+                {
+                    // Find this instance's index in _wallpapers — that's its
+                    // monitor index for the per-monitor map.
+                    var idx = _wallpapers.IndexOf(instance);
+                    if (idx >= 0 && _pendingMonitorPrefs.TryGetValue(idx, out var perMon))
+                    {
+                        try
+                        {
+                            instance.WebView.CoreWebView2.PostWebMessageAsJson(perMon);
+                        }
+                        catch (Exception ex) { Debug.WriteLine($"applyMonitorSettings[{idx}]: {ex.Message}"); }
+                    }
+                    else if (_wallpaperLayout == "mirror")
+                    {
+                        // No per-monitor slot, but Mirror mode → tell the
+                        // instance its role so master starts broadcasting
+                        // and slaves are silent.
+                        var role = (idx == 0) ? "master" : "slave";
+                        try
+                        {
+                            instance.WebView.CoreWebView2.PostWebMessageAsJson(
+                                $"{{\"type\":\"applyMonitorSettings\",\"mirrorRole\":\"{role}\"}}");
+                        }
+                        catch (Exception ex) { Debug.WriteLine($"mirror role[{idx}]: {ex.Message}"); }
+                    }
+                }
             }
             else if (msg?.type == "wallpaperApply")
             {
+                // Layout = 'span' | 'mirror' | 'separate'. Default span if
+                // missing/unknown — matches the original pre-fa49312 mode.
+                var layoutPayload = Newtonsoft.Json.JsonConvert.DeserializeAnonymousType(
+                    e.WebMessageAsJson, new { layout = "" });
+                var layout = (layoutPayload?.layout ?? "").ToLowerInvariant();
+                _wallpaperLayout = (layout == "mirror" || layout == "separate") ? layout : "span";
+
+                // For Separate mode: parse the per-monitor preference map
+                // and stash it. FinalizeWallpaper will push each entry to
+                // the matching clone after it fires 'ready'.
+                _pendingMonitorPrefs = null;
+                if (_wallpaperLayout == "separate")
+                {
+                    try
+                    {
+                        var monPayload = Newtonsoft.Json.JsonConvert.DeserializeObject<
+                            Newtonsoft.Json.Linq.JObject>(e.WebMessageAsJson);
+                        var monNode = monPayload?["monitors"] as Newtonsoft.Json.Linq.JObject;
+                        if (monNode != null)
+                        {
+                            _pendingMonitorPrefs = new Dictionary<int, string>();
+                            foreach (var prop in monNode.Properties())
+                            {
+                                if (int.TryParse(prop.Name, out var idx))
+                                {
+                                    // Build the applyMonitorSettings message body for
+                                    // this monitor. JS receives settings + camera
+                                    // (and applies them on boot).
+                                    var settings = prop.Value?["settings"]?.ToString(
+                                        Newtonsoft.Json.Formatting.None) ?? "null";
+                                    var camera = prop.Value?["camera"]?.ToString(
+                                        Newtonsoft.Json.Formatting.None) ?? "null";
+                                    _pendingMonitorPrefs[idx] =
+                                        "{\"type\":\"applyMonitorSettings\",\"settings\":" + settings
+                                        + ",\"camera\":" + camera + "}";
+                                }
+                            }
+                            ReportWp($"separate mode — parsed {_pendingMonitorPrefs.Count} monitor pref slot(s)");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"separate-mode prefs parse: {ex.Message}");
+                        ReportWp($"separate prefs parse FAILED: {ex.Message}");
+                    }
+                }
+
                 Dispatcher.BeginInvoke(new Action(FinalizeWallpaper));
+            }
+            else if (msg?.type == "mirrorState")
+            {
+                // Master WebView2 broadcasts camera state — rebroadcast to
+                // every OTHER wallpaper instance. We don't echo back to the
+                // sender (it's already the source of truth). Only active in
+                // Mirror mode; ignored otherwise.
+                if (_wallpaperLayout == "mirror" && _wallpapers.Count > 1)
+                {
+                    foreach (var inst in _wallpapers)
+                    {
+                        if (inst.WebView?.CoreWebView2 == null) continue;
+                        if (ReferenceEquals(inst.WebView.CoreWebView2, sender)) continue; // skip sender
+                        try { inst.WebView.CoreWebView2.PostWebMessageAsJson(e.WebMessageAsJson); }
+                        catch (Exception ex) { Debug.WriteLine($"mirror rebroadcast[{inst.MonitorId}]: {ex.Message}"); }
+                    }
+                }
             }
             else if (msg?.type == "wallpaperCancel")
             {
@@ -783,45 +907,89 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Stage 2: enumerate monitors, then for each one either reuse the
-    /// SETUP window (monitor[0] → primary) or spawn a clone (additional
-    /// monitors). Each instance gets resized to its monitor bounds and
-    /// reparented under the icons-host (or back-WorkerW fallback).
+    /// Build the list of surfaces FinalizeWallpaper / ReattachWallpaperAsync
+    /// will render to. Span = one virtual-screen-spanning entry (Universe
+    /// stretches continuously across all monitors). Mirror = one entry per
+    /// physical monitor (each monitor renders its own full Universe).
     ///
-    /// Per-monitor design: each WebView2 loads the same wallpaper URL but
-    /// renders independently — one Universe scene per physical display.
-    /// Single-monitor users get exactly the previous behavior (one
-    /// instance covering one screen). Multi-monitor users get the
-    /// equivalent of Wallpaper Engine's "every monitor" mode.
+    /// Span mode computes the bounding box of all monitors in PHYSICAL px
+    /// so the single window covers everything including negative coords
+    /// (secondary monitor to the left of primary). Falls back to WPF
+    /// SystemParameters.VirtualScreen* if EnumDisplayMonitors fails.
+    /// </summary>
+    private List<MonitorBounds> GetWallpaperSurfaces()
+    {
+        var monitors = EnumerateMonitors();
+        // Mirror and Separate both spawn one surface per monitor — they
+        // differ only in CONTENT (mirror = sync'd identical view; separate
+        // = per-monitor settings). Span collapses to a single big surface.
+        if (_wallpaperLayout == "mirror" || _wallpaperLayout == "separate") return monitors;
+
+        // Span: collapse to one entry covering bounding box of all monitors.
+        int minLeft = int.MaxValue, minTop = int.MaxValue;
+        int maxRight = int.MinValue, maxBottom = int.MinValue;
+        foreach (var m in monitors)
+        {
+            if (m.Left          < minLeft)   minLeft   = m.Left;
+            if (m.Top           < minTop)    minTop    = m.Top;
+            if (m.Left + m.Width  > maxRight)  maxRight  = m.Left + m.Width;
+            if (m.Top  + m.Height > maxBottom) maxBottom = m.Top  + m.Height;
+        }
+        return new List<MonitorBounds>
+        {
+            new MonitorBounds
+            {
+                Left       = minLeft,
+                Top        = minTop,
+                Width      = maxRight  - minLeft,
+                Height     = maxBottom - minTop,
+                DeviceName = "virtual-screen-span",
+                IsPrimary  = true
+            }
+        };
+    }
+
+    /// <summary>
+    /// Stage 2: build wallpaper surfaces (1 spanned in span mode, N in
+    /// mirror mode), then for each one either reuse the SETUP window
+    /// (surfaces[0]) or spawn a clone (additional surfaces). Each instance
+    /// gets resized to its surface bounds and reparented under the
+    /// icons-host (or back-WorkerW fallback).
+    ///
+    /// Span mode (default): one continuous Universe stretches across the
+    /// virtual screen — galaxy bleeds across monitor edges. Lightweight
+    /// (1 WebView2 ≈ 250 MB). Matches the original pre-fa49312 behavior.
+    ///
+    /// Mirror mode: one independent WebView2 per monitor, each rendering
+    /// a full Universe. Heavier (N × 250 MB) but every monitor shows a
+    /// complete scene instead of a slice.
     /// </summary>
     private async void FinalizeWallpaper()
     {
         if (_setupInstance == null || _wallpaperFinalized) return;
         try
         {
-            // Enumerate monitors NOW (not at EnterWallpaperMode) — covers
+            // Build surface list NOW (not at EnterWallpaperMode) — covers
             // the case where the user plugs/unplugs displays between Setup
             // and Apply.
-            var monitors = EnumerateMonitors();
-            ReportWp($"apply 1/4 — found {monitors.Count} monitor(s): {string.Join(" | ", monitors)}");
+            var surfaces = GetWallpaperSurfaces();
+            ReportWp($"apply 1/4 — layout={_wallpaperLayout}, {surfaces.Count} surface(s): {string.Join(" | ", surfaces)}");
 
-            // Promote the setup instance to be wallpaper #0 (primary
-            // monitor). This avoids tearing down + recreating the WebView2
-            // (slow) for the user's main display.
+            // Promote the setup instance to be wallpaper #0 (primary).
+            // This avoids tearing down + recreating the WebView2 (slow).
             var setup = _setupInstance;
             _setupInstance = null;
-            setup.MonitorId = monitors[0].DeviceName;
-            await PrepareInstanceForWallpaper(setup, monitors[0]);
+            setup.MonitorId = surfaces[0].DeviceName;
+            await PrepareInstanceForWallpaper(setup, surfaces[0]);
             await AttachWallpaperToShell(setup, isReattach: false);
             _wallpapers.Add(setup);
 
-            // Clone an instance per ADDITIONAL monitor. Each gets its own
-            // Window + WebView2 + bridge. Brain payload is pushed when
-            // each WebView2 fires `ready`.
-            for (int i = 1; i < monitors.Count; i++)
+            // Clone an instance per ADDITIONAL surface (mirror mode only —
+            // span mode has exactly one surface and skips this loop).
+            for (int i = 1; i < surfaces.Count; i++)
             {
-                var mon = monitors[i];
-                ReportWp($"apply 2/4 — cloning wallpaper for monitor {i + 1}/{monitors.Count} ({mon.DeviceName})");
+                var mon = surfaces[i];
+                ReportWp($"apply 2/4 — cloning wallpaper for monitor {i + 1}/{surfaces.Count} ({mon.DeviceName})");
                 var clone = await SpawnWallpaperClone(mon);
                 if (clone != null)
                 {
@@ -964,6 +1132,27 @@ public partial class MainWindow : Window
     /// "re-attach" so the user can tell from the HUD whether this is initial
     /// Apply or a recovery.
     /// </summary>
+    /// <summary>
+    /// Convert SCREEN coords (what EnumDisplayMonitors and the user see)
+    /// to coords relative to a parent window's CLIENT AREA. SetParent
+    /// makes the wallpaper a child of icons-host / WorkerW, and child
+    /// windows are positioned relative to their parent rather than the
+    /// screen. On layouts where the virtual screen origin ≠ (0,0) (e.g.
+    /// secondary monitor placed to the LEFT of the primary), the parent
+    /// sits at the virtual screen origin and passing raw screen coords
+    /// would land the wallpaper on the wrong monitor — that's the
+    /// "all monitors end up rendering on one screen" bug from fa49312.
+    ///
+    /// Returns the screen coords unchanged when parent is IntPtr.Zero
+    /// (top-level positioning, used for the HWND_BOTTOM last-ditch path).
+    /// </summary>
+    private (int x, int y) ToChildCoords(IntPtr parent, int screenX, int screenY)
+    {
+        if (parent == IntPtr.Zero) return (screenX, screenY);
+        if (!GetWindowRect(parent, out var parentRect)) return (screenX, screenY);
+        return (screenX - parentRect.Left, screenY - parentRect.Top);
+    }
+
     private async Task AttachWallpaperToShell(WallpaperInstance inst, bool isReattach)
     {
         if (_wallpaperReattachInFlight) return;
@@ -990,6 +1179,12 @@ public partial class MainWindow : Window
                     if (parentChanged)
                         SetParent(hwnd, existingHost);
 
+                    // After SetParent, SetWindowPos uses PARENT-RELATIVE
+                    // coords — translate screen coords accordingly so the
+                    // surface lands on the right monitor when virtual
+                    // screen origin ≠ (0,0).
+                    var (childX, childY) = ToChildCoords(existingHost, inst.Left, inst.Top);
+
                     // Bounds didn't change → skip the resize-frame work
                     // entirely. Only resize when monitor bounds actually
                     // shifted (display-changed event). Cuts the SWP_FRAMECHANGED
@@ -999,8 +1194,8 @@ public partial class MainWindow : Window
                         ? (SWP_FRAMECHANGED | SWP_SHOWWINDOW)
                         : (SWP_NOMOVE | SWP_NOSIZE));
                     SetWindowPos(hwnd, IntPtr.Zero,
-                        boundsChanged ? inst.Left : 0,
-                        boundsChanged ? inst.Top  : 0,
+                        boundsChanged ? childX     : 0,
+                        boundsChanged ? childY     : 0,
                         boundsChanged ? inst.Width  : 0,
                         boundsChanged ? inst.Height : 0,
                         flags);
@@ -1073,9 +1268,22 @@ public partial class MainWindow : Window
             var iconsHost = FindIconsHost();
             if (iconsHost != IntPtr.Zero)
             {
+                // Diagnostic: log icons-host rect so we can tell from HUD
+                // whether it actually spans the virtual screen. If it
+                // doesn't (e.g. Progman is anchored to primary monitor on
+                // some Windows configurations), child windows that extend
+                // into secondary monitors will get CLIPPED — that's the
+                // "black on secondary monitor" bug.
+                if (GetWindowRect(iconsHost, out var hostRect))
+                {
+                    var hw = hostRect.Right - hostRect.Left;
+                    var hh = hostRect.Bottom - hostRect.Top;
+                    ReportWp($"{prefix}[{inst.MonitorId}] — icons-host rect {hw}×{hh} @ {hostRect.Left},{hostRect.Top}");
+                }
                 ReportWp($"{prefix}[{inst.MonitorId}] — SetParent → icons-host + position");
                 SetParent(hwnd, iconsHost);
-                SetWindowPos(hwnd, IntPtr.Zero, inst.Left, inst.Top, inst.Width, inst.Height,
+                var (childX, childY) = ToChildCoords(iconsHost, inst.Left, inst.Top);
+                SetWindowPos(hwnd, IntPtr.Zero, childX, childY, inst.Width, inst.Height,
                     SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
                 inst.IconsHost = iconsHost;
                 if (!_desktopIconsHidden)
@@ -1084,20 +1292,28 @@ public partial class MainWindow : Window
                     catch (Exception iconEx) { Debug.WriteLine($"post-apply raise icons: {iconEx.Message}"); }
                 }
                 ReportWp(isReattach
-                    ? $"HARD-REATTACHED[{inst.MonitorId}] behind icons — {inst.Width}×{inst.Height} @ {inst.Left},{inst.Top}"
-                    : $"LIVE[{inst.MonitorId}] behind icons — {inst.Width}×{inst.Height} @ {inst.Left},{inst.Top}");
+                    ? $"HARD-REATTACHED[{inst.MonitorId}] behind icons — {inst.Width}×{inst.Height} @ screen {inst.Left},{inst.Top} (child {childX},{childY})"
+                    : $"LIVE[{inst.MonitorId}] behind icons — {inst.Width}×{inst.Height} @ screen {inst.Left},{inst.Top} (child {childX},{childY})");
             }
             else if (workerW != IntPtr.Zero)
             {
+                if (GetWindowRect(workerW, out var wwRect))
+                {
+                    var ww = wwRect.Right - wwRect.Left;
+                    var wh = wwRect.Bottom - wwRect.Top;
+                    ReportWp($"{prefix}[{inst.MonitorId}] — back-WorkerW rect {ww}×{wh} @ {wwRect.Left},{wwRect.Top}");
+                }
                 ReportWp($"{prefix}[{inst.MonitorId}] — fallback: SetParent → back-WorkerW");
                 SetParent(hwnd, workerW);
-                SetWindowPos(hwnd, IntPtr.Zero, inst.Left, inst.Top, inst.Width, inst.Height,
+                var (childX, childY) = ToChildCoords(workerW, inst.Left, inst.Top);
+                SetWindowPos(hwnd, IntPtr.Zero, childX, childY, inst.Width, inst.Height,
                     SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
                 inst.IconsHost = workerW;
-                ReportWp($"LIVE[{inst.MonitorId}] (back-WorkerW fallback) — {inst.Width}×{inst.Height}");
+                ReportWp($"LIVE[{inst.MonitorId}] (back-WorkerW fallback) — {inst.Width}×{inst.Height} @ screen {inst.Left},{inst.Top} (child {childX},{childY})");
             }
             else
             {
+                // Top-level fallback — no SetParent, so screen coords go in as-is.
                 ReportWp($"{prefix}[{inst.MonitorId}] — last-ditch: top-level HWND_BOTTOM");
                 SetWindowPos(hwnd, HWND_BOTTOM, inst.Left, inst.Top, inst.Width, inst.Height,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
@@ -1125,14 +1341,56 @@ public partial class MainWindow : Window
         if (_wallpapers.Count == 0) return;
         try
         {
-            ReportWp($"re-attach ({reason}) — reapplying WorkerW reparent for {_wallpapers.Count} surface(s)");
-
-            // Re-enumerate monitors — display-changed events may have added,
-            // removed, or repositioned a screen. We DON'T spawn/destroy
+            // Re-build surface list — display-changed events may have
+            // added/removed/repositioned a screen. We DON'T spawn/destroy
             // instances here (Phase 1 limitation); instead each existing
-            // instance gets re-clamped to the closest monitor, or to its
-            // last-known bounds if no match exists.
-            var monitors = EnumerateMonitors();
+            // instance gets re-clamped to the matching surface, or to its
+            // last-known bounds if no match exists. Span mode collapses
+            // to one surface so the single window always re-clamps to the
+            // (possibly resized) virtual screen.
+            var monitors = GetWallpaperSurfaces();
+
+            // ── PRE-CHECK: bail out if NOTHING needs to change ─────────
+            // The previous version did WPF setters + AttachWallpaperToShell
+            // unconditionally on every reattach call. Even when the SOFT
+            // path correctly skipped its work (parent unchanged + bounds
+            // unchanged), the WPF `Window.Left = mon.Left` setter still
+            // fired WM_WINDOWPOSCHANGING + can briefly repaint, showing as
+            // a periodic flicker if the watchdog or SystemEvents fired
+            // benignly. This pre-check confirms parent + bounds are still
+            // valid for EVERY instance — if so, log + return, zero work
+            // beyond the GetParent/GetWindowRect queries.
+            var iconsHostCheck = FindIconsHost();
+            bool allClean = iconsHostCheck != IntPtr.Zero;
+            if (allClean)
+            {
+                for (int i = 0; i < _wallpapers.Count && allClean; i++)
+                {
+                    var inst = _wallpapers[i];
+                    if (inst.Hwnd == IntPtr.Zero || !IsWindow(inst.Hwnd)) { allClean = false; break; }
+                    var p = GetParent(inst.Hwnd);
+                    if (p == IntPtr.Zero || !IsWindow(p) || p != iconsHostCheck) { allClean = false; break; }
+
+                    // Bounds drift check — if our surface bounds differ
+                    // from what the OS thinks the monitor is, we need to
+                    // reattach to re-size. Match by index (mirror order).
+                    MonitorBounds? mon = (i < monitors.Count) ? monitors[i] : null;
+                    if (mon == null) continue;
+                    if (mon.Left != inst.Left || mon.Top != inst.Top
+                        || mon.Width != inst.Width || mon.Height != inst.Height)
+                    {
+                        allClean = false;
+                        break;
+                    }
+                }
+            }
+            if (allClean)
+            {
+                ReportWp($"re-attach ({reason}) — NO-OP, all {_wallpapers.Count} surface(s) already attached + sized correctly");
+                return;
+            }
+
+            ReportWp($"re-attach ({reason}) — reapplying WorkerW reparent for {_wallpapers.Count} surface(s)");
 
             for (int i = 0; i < _wallpapers.Count; i++)
             {
@@ -1153,7 +1411,15 @@ public partial class MainWindow : Window
                 if (i < monitors.Count) mon = monitors[i];
                 if (mon == null)
                     mon = monitors.Find(m => m.DeviceName == inst.MonitorId);
-                if (mon != null)
+                // Only call WPF setters when bounds actually changed. WPF
+                // Window.Left setter fires WM_WINDOWPOSCHANGING even when
+                // the new value equals the old one (DependencyProperty
+                // short-circuit doesn't always apply for Window position),
+                // and that benign re-position is visible as flicker when
+                // the watchdog reattaches on a stable desktop.
+                if (mon != null
+                    && (mon.Left != inst.Left || mon.Top != inst.Top
+                        || mon.Width != inst.Width || mon.Height != inst.Height))
                 {
                     inst.Window.Left   = mon.Left;
                     inst.Window.Top    = mon.Top;
@@ -1533,6 +1799,61 @@ public partial class MainWindow : Window
 
         _wallpapers.Clear();
         _setupInstance = null;
+
+        // CRITICAL: force Windows to repaint the real desktop wallpaper.
+        // 0x052C spawned an empty back-WorkerW that spans the virtual screen;
+        // it sits BEHIND Progman, and on multi-monitor setups Progman often
+        // covers only the primary display. Result: secondary monitors see
+        // the EMPTY (black) back-WorkerW instead of the real wallpaper.
+        // After our windows close, that black layer persists until Explorer
+        // restarts OR something triggers a wallpaper repaint. Without this
+        // call, users were forced to reboot to recover their wallpaper.
+        RestoreSystemWallpaper();
+    }
+
+    /// <summary>
+    /// Force Windows to re-read and re-apply the current desktop wallpaper
+    /// from the registry. This triggers DWM/Explorer to repaint the desktop
+    /// on ALL monitors — flushing any leftover black areas left behind by
+    /// the back-WorkerW we spawned via 0x052C. Idempotent and side-effect
+    /// free when no wallpaper engine is active.
+    ///
+    /// Mirrors what Lively / Wallpaper Engine do on exit.
+    /// </summary>
+    private void RestoreSystemWallpaper()
+    {
+        try
+        {
+            string? path = null;
+            using (var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop"))
+            {
+                path = key?.GetValue("Wallpaper") as string;
+            }
+
+            // Prefer the TranscodedImageCache path-equivalent (registry's
+            // "Wallpaper" value). If it's a real file, re-apply it — Windows
+            // will broadcast WM_SETTINGCHANGE and DWM repaints every monitor.
+            if (!string.IsNullOrEmpty(path) && File.Exists(path))
+            {
+                var rc = SystemParametersInfo(SPI_SETDESKWALLPAPER, 0, path,
+                    SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
+                ReportWp($"restore: re-applied wallpaper '{Path.GetFileName(path)}' (rc={rc})");
+                return;
+            }
+
+            // No usable path (could be a slideshow, solid color, or themed
+            // wallpaper). Pass empty string — on most Windows versions this
+            // still triggers a settings-change broadcast which repaints the
+            // desktop using whatever Windows considers the current wallpaper.
+            var rc2 = SystemParametersInfo(SPI_SETDESKWALLPAPER, 0, "",
+                SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
+            ReportWp($"restore: forced wallpaper refresh (no path in registry, rc={rc2})");
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"RestoreSystemWallpaper: {ex.Message}");
+            ReportWp($"restore wallpaper FAILED: {ex.Message}");
+        }
     }
 
     private void ReportWp(string text)

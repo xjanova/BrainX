@@ -61,14 +61,42 @@ const $wpIcons       = document.getElementById('wp-icons');
 const $wpApply       = document.getElementById('wp-apply');
 const $wpCancel      = document.getElementById('wp-cancel');
 const $wpExitHint    = document.getElementById('wp-exit-hint');
+const $wpLayoutSpan     = document.getElementById('wp-layout-span');
+const $wpLayoutMirror   = document.getElementById('wp-layout-mirror');
+const $wpLayoutSeparate = document.getElementById('wp-layout-separate');
+const $wpResourceWarn      = document.getElementById('wp-resource-warn');
+const $wpResourceWarnText  = document.getElementById('wp-resource-warn-text');
+const $wpMonitorBar        = document.getElementById('wp-monitor-bar');
+const $wpMonitorChips      = document.getElementById('wp-monitor-chips');
 
-// localStorage key for the saved wallpaper preferences. Loaded as defaults
-// when ?mode=wallpaper-setup spawns so the user resumes their last setup.
-const WALLPAPER_PREFS_KEY = 'obsidianx.wallpaper.prefs.v1';
+// localStorage key for the saved wallpaper preferences. v2 adds:
+//   - layout: 'span' | 'mirror' | 'separate'
+//   - monitors: { 0: {settings, camera}, 1: {settings, camera}, ... }
+//     populated only in 'separate' mode; each monitor remembers its own
+//     setup so the user can have e.g. galaxy-centered view on monitor 1
+//     and a wide-angle shot on monitor 2.
+// v1 saves auto-upgrade: missing layout → 'span'; missing monitors → seeded
+// from top-level settings/camera so the first switch into separate mode
+// starts with sensible defaults instead of empty slots.
+const WALLPAPER_PREFS_KEY = 'obsidianx.wallpaper.prefs.v2';
+const WALLPAPER_PREFS_KEY_V1 = 'obsidianx.wallpaper.prefs.v1';
+const WALLPAPER_LAYOUT_DEFAULT = 'span';
+let _wpLayout = WALLPAPER_LAYOUT_DEFAULT;
+// Number of physical monitors as reported by the host. Set on `monitorCount`
+// message during wallpaper-setup boot. Default = 1 so single-monitor users
+// don't see a monitor selector pop up.
+let _wpMonitorCount = 1;
+// Index of the monitor currently being edited in Separate mode. 0 = primary.
+let _wpEditingMonitor = 0;
+// Per-monitor saved prefs in Separate mode. Shape: { 0: {settings, camera}, ... }
+// Persisted as part of the prefs object on every edit.
+let _wpMonitorPrefs = {};
 
 function loadWallpaperPrefs() {
     try {
-        const raw = localStorage.getItem(WALLPAPER_PREFS_KEY);
+        // Try v2 first; fall back to v1 for migration.
+        let raw = localStorage.getItem(WALLPAPER_PREFS_KEY);
+        if (!raw) raw = localStorage.getItem(WALLPAPER_PREFS_KEY_V1);
         return raw ? JSON.parse(raw) : null;
     } catch { return null; }
 }
@@ -320,6 +348,124 @@ function wireWallpaperSetup() {
             // Defer to next frame so scene/mount is ready.
             requestAnimationFrame(() => scene.restoreCamera(saved.camera));
         }
+        if (saved.layout === 'span' || saved.layout === 'mirror' || saved.layout === 'separate') {
+            _wpLayout = saved.layout;
+        }
+        if (saved.monitors && typeof saved.monitors === 'object') {
+            _wpMonitorPrefs = saved.monitors;
+        }
+    }
+    applyLayoutToUI(_wpLayout);
+
+    // Layout segmented toggle (Span / Mirror / Separate).
+    //   • Span     = 1 WebView2, stretched across virtual screen.
+    //   • Mirror   = N WebView2, every monitor renders the SAME view
+    //                (sync'd via host master→slave broadcast).
+    //   • Separate = N WebView2, each monitor has its OWN setup
+    //                (different camera + settings, remembered per monitor).
+    function applyLayoutToUI(mode) {
+        $wpLayoutSpan?.classList.toggle('active',     mode === 'span');
+        $wpLayoutMirror?.classList.toggle('active',   mode === 'mirror');
+        $wpLayoutSeparate?.classList.toggle('active', mode === 'separate');
+        // Resource warning row — only shown for heavy modes. Span = 1 process,
+        // free of charge; Mirror/Separate spawn N. Update text with current
+        // monitor count so the user sees "Heavy: 3×~250 MB" not just "N×".
+        if ($wpResourceWarn) {
+            const heavy = (mode === 'mirror' || mode === 'separate') && _wpMonitorCount > 1;
+            $wpResourceWarn.hidden = !heavy;
+            if (heavy && $wpResourceWarnText) {
+                const procs = _wpMonitorCount;
+                $wpResourceWarnText.textContent =
+                    `Heavy: ${procs}×~250 MB RAM + ${procs} GPU contexts. Span uses only 1.`;
+            }
+        }
+        // Per-monitor selector — Separate mode only, multi-monitor only.
+        const showMonitorBar = (mode === 'separate' && _wpMonitorCount > 1);
+        if ($wpMonitorBar) $wpMonitorBar.hidden = !showMonitorBar;
+        if (showMonitorBar) renderMonitorChips();
+    }
+
+    // Wire all three layout chips. Switching mode rebuilds the per-monitor
+    // chip bar visibility but does NOT mutate per-monitor saved prefs.
+    $wpLayoutSpan?.addEventListener('click', () => {
+        if (_wpLayout === 'separate') flushEditingMonitorPrefs();
+        _wpLayout = 'span';
+        applyLayoutToUI(_wpLayout);
+    });
+    $wpLayoutMirror?.addEventListener('click', () => {
+        if (_wpLayout === 'separate') flushEditingMonitorPrefs();
+        _wpLayout = 'mirror';
+        applyLayoutToUI(_wpLayout);
+    });
+    $wpLayoutSeparate?.addEventListener('click', () => {
+        _wpLayout = 'separate';
+        applyLayoutToUI(_wpLayout);
+        // Entering Separate: ensure the currently-edited monitor's slot has
+        // SOMETHING in it (the current live settings/camera) so the chip
+        // looks "filled". Other slots seed from live values lazily on click.
+        flushEditingMonitorPrefs();
+    });
+
+    // Host reports monitor count after wallpaper-setup boots. Re-run
+    // applyLayoutToUI so the warning + chip row react to the actual count.
+    window.addEventListener('wpMonitorCountChanged', () => applyLayoutToUI(_wpLayout));
+
+    // Persist the currently-shown live settings/camera into the slot for
+    // the monitor currently being edited (Separate mode only). Called
+    // when the user switches monitors so edits don't get lost.
+    function flushEditingMonitorPrefs() {
+        if (_wpLayout !== 'separate') return;
+        const cam = scene?.snapshotCamera?.() ?? null;
+        _wpMonitorPrefs[_wpEditingMonitor] = {
+            settings: { ...currentSettings },
+            camera:   cam,
+        };
+    }
+
+    // Build the per-monitor chip row. One chip per detected monitor,
+    // labelled "1 (primary)", "2", "3", ... The active chip is the one
+    // currently being edited in the preview window.
+    function renderMonitorChips() {
+        if (!$wpMonitorChips) return;
+        $wpMonitorChips.innerHTML = '';
+        for (let i = 0; i < _wpMonitorCount; i++) {
+            const chip = document.createElement('button');
+            chip.type = 'button';
+            chip.className = 'wp-mon-chip' + (i === _wpEditingMonitor ? ' active' : '');
+            chip.dataset.idx = String(i);
+            chip.textContent = (i === 0) ? `${i + 1} (primary)` : String(i + 1);
+            chip.title = `Edit monitor ${i + 1}'s wallpaper setup`;
+            chip.addEventListener('click', () => switchEditingMonitor(i));
+            $wpMonitorChips.appendChild(chip);
+        }
+    }
+
+    // Switch which monitor is being edited. Saves current live state into
+    // the OLD monitor's slot, then loads the NEW monitor's slot into the
+    // live preview (settings + camera). If the new slot is empty, the
+    // current live state becomes the seed for that monitor.
+    function switchEditingMonitor(newIdx) {
+        if (newIdx === _wpEditingMonitor) return;
+        // Save current edits to the OLD slot.
+        flushEditingMonitorPrefs();
+        _wpEditingMonitor = newIdx;
+        const slot = _wpMonitorPrefs[newIdx];
+        if (slot) {
+            if (slot.settings) {
+                currentSettings = { ...currentSettings, ...slot.settings };
+                applySettingsToUI(currentSettings);
+                applySettingsToScene(currentSettings);
+                saveSettings(currentSettings);
+            }
+            if (slot.camera && scene?.restoreCamera) {
+                requestAnimationFrame(() => scene.restoreCamera(slot.camera));
+            }
+        } else {
+            // No saved slot — seed it from current live values so the
+            // chip "remembers" what was on screen the moment we landed.
+            flushEditingMonitorPrefs();
+        }
+        renderMonitorChips();
     }
 
     // Random camera = persistent showcase mode. Toggle ON keeps cycling
@@ -356,11 +502,30 @@ function wireWallpaperSetup() {
     });
 
     $wpApply?.addEventListener('click', () => {
-        // Bundle current settings + camera snapshot for next-time restore.
+        // Save current edits one last time before Apply so the active
+        // monitor's slot is up-to-date.
+        if (_wpLayout === 'separate') flushEditingMonitorPrefs();
+
+        // Bundle live settings/camera (= primary monitor's view for
+        // Span/Mirror, or the currently-edited monitor for Separate)
+        // PLUS the per-monitor prefs map (Separate only) for the host
+        // to fan out to each clone.
         const cam = scene?.snapshotCamera?.() ?? null;
-        saveWallpaperPrefs({ settings: currentSettings, camera: cam });
+        const prefs = {
+            settings: currentSettings,
+            camera: cam,
+            layout: _wpLayout,
+            monitors: _wpMonitorPrefs,
+        };
+        saveWallpaperPrefs(prefs);
         setStatus('Applying wallpaper…');
-        postToHost({ type: 'wallpaperApply' });
+        postToHost({
+            type: 'wallpaperApply',
+            layout: _wpLayout,
+            // Host uses this map to push per-monitor settings to each
+            // clone's WebView2 after they fire 'ready'. Empty in Span/Mirror.
+            monitors: (_wpLayout === 'separate') ? _wpMonitorPrefs : null,
+        });
     });
 
     $wpCancel?.addEventListener('click', () => {
@@ -493,6 +658,47 @@ function onHostMessage(evt) {
             // status bar at the bottom is easy to miss; surface it in the
             // Universe HUD too.
             if (msg.text) setStatus('Wallpaper: ' + msg.text);
+            break;
+        case 'monitorCount':
+            // Host reports how many physical monitors it sees. Drives the
+            // resource warning text + the per-monitor chip count in
+            // Separate mode. Re-render the wallpaper-setup UI if it's
+            // already visible.
+            if (typeof msg.count === 'number' && msg.count >= 1) {
+                _wpMonitorCount = msg.count;
+                // If the layout-toggle hook captured an apply function,
+                // re-run it so the warning + chips reflect the new count.
+                window.dispatchEvent(new CustomEvent('wpMonitorCountChanged'));
+            }
+            break;
+        case 'mirrorState':
+            // Slave-side: master WebView2 broadcasts camera state to all
+            // mirror-mode siblings via the host. Apply directly (no lerp)
+            // so every monitor shows the same view within one frame.
+            if (scene && msg.target && msg.position) {
+                scene.applyMirrorState?.(msg.target, msg.position);
+            }
+            break;
+        case 'applyMonitorSettings':
+            // Per-monitor bootstrap (Separate mode only): host sends each
+            // clone its monitor-specific settings + camera right after the
+            // 'ready' handshake. Single-shot — just apply and forget.
+            if (msg.settings) {
+                currentSettings = { ...currentSettings, ...msg.settings };
+                applySettingsToUI?.(currentSettings);
+                applySettingsToScene?.(currentSettings);
+                saveSettings?.(currentSettings);
+            }
+            if (msg.camera && scene?.restoreCamera) {
+                requestAnimationFrame(() => scene.restoreCamera(msg.camera));
+            }
+            // If host marks us as a mirror master, start broadcasting
+            // camera state to siblings at ~10 fps.
+            if (msg.mirrorRole === 'master' && scene?.startMirrorBroadcast) {
+                scene.startMirrorBroadcast((state) => {
+                    postToHost({ type: 'mirrorState', target: state.target, position: state.position });
+                });
+            }
             break;
         case 'pauseRender':
             // C# detected our wallpaper is fully covered (fullscreen game,

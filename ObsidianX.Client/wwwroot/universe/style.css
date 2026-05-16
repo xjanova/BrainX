@@ -779,6 +779,117 @@ body.bg-nebula {
     box-shadow: 0 0 18px rgba(108, 240, 255, 0.45);
 }
 
+/* Segmented toggle for Wallpaper layout (Span ↔ Mirror). Two buttons
+   visually glued together as a single pill — the .active one looks
+   like .wp-btn.primary, the other one is dimmed. */
+.wp-seg-group {
+    display: inline-flex;
+    border: 1px solid rgba(108, 240, 255, 0.22);
+    border-radius: 999px;
+    padding: 2px;
+    background: rgba(108, 240, 255, 0.04);
+    gap: 2px;
+}
+.wp-seg-btn {
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--ink);
+    font-size: 11px;
+    font-weight: 500;
+    padding: 5px 12px;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    letter-spacing: 0.3px;
+    opacity: 0.7;
+}
+.wp-seg-btn:hover {
+    color: var(--accent);
+    opacity: 1;
+}
+.wp-seg-btn.active {
+    background: rgba(108, 240, 255, 0.30);
+    border-color: rgba(108, 240, 255, 0.55);
+    color: var(--accent);
+    font-weight: 600;
+    box-shadow: 0 0 10px rgba(108, 240, 255, 0.25);
+    opacity: 1;
+}
+
+/* Resource warning row — shown when Mirror or Separate is selected so
+   the user knows N WebView2 processes will spawn (one per monitor). */
+.wp-warn-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-radius: 10px;
+    background: rgba(255, 196, 64, 0.10);
+    border: 1px solid rgba(255, 196, 64, 0.30);
+    color: rgba(255, 220, 140, 0.95);
+    font-size: 11px;
+    letter-spacing: 0.2px;
+}
+.wp-warn-row[hidden] {
+    display: none;
+}
+.wp-warn-icon {
+    font-size: 13px;
+}
+
+/* Per-monitor chips for Separate mode — one chip per detected monitor.
+   Active chip = monitor currently being edited in the setup preview. */
+.wp-monitor-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 10px;
+    border-radius: 10px;
+    background: rgba(108, 240, 255, 0.04);
+    border: 1px solid rgba(108, 240, 255, 0.18);
+    font-size: 11px;
+}
+.wp-monitor-bar[hidden] {
+    display: none;
+}
+.wp-monitor-label {
+    color: var(--ink-mute, rgba(220, 230, 240, 0.65));
+    font-weight: 500;
+}
+.wp-monitor-hint {
+    color: var(--ink-mute, rgba(220, 230, 240, 0.55));
+    font-size: 10px;
+    font-style: italic;
+    margin-left: auto;
+}
+.wp-monitor-chips {
+    display: inline-flex;
+    gap: 4px;
+}
+.wp-mon-chip {
+    background: transparent;
+    border: 1px solid rgba(108, 240, 255, 0.22);
+    color: var(--ink);
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    opacity: 0.7;
+}
+.wp-mon-chip:hover {
+    color: var(--accent);
+    opacity: 1;
+    border-color: rgba(108, 240, 255, 0.45);
+}
+.wp-mon-chip.active {
+    background: rgba(108, 240, 255, 0.30);
+    border-color: rgba(108, 240, 255, 0.55);
+    color: var(--accent);
+    font-weight: 600;
+    opacity: 1;
+}
+
 /* In setup mode, push the existing settings panel up so the setup bar
    doesn't overlap with it. */
 body.wallpaper-setup #settings-panel {
