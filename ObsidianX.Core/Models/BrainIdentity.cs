@@ -101,11 +101,10 @@ public class BrainIdentity
         // On-disk shape: a sibling object so the JSON file stays
         // human-readable for debugging.
         //
-        // TODO(threat-model C4): a backup taken of identity.json BEFORE
-        // first migration still contains plaintext key bytes. Best-effort
-        // mitigation: also do `File.WriteAllText(path, new string('0', oldSize))`
-        // before the real write to overwrite old slack, and prompt the user
-        // to regenerate identity if they suspect any backup exists.
+        // Caller note (C4): if migrating from a legacy plaintext file, use
+        // SaveAndWipeLegacy(path) instead — it overwrites the existing
+        // bytes with random data before writing the new content so the
+        // plaintext key doesn't linger in the same disk sectors.
         var dto = new IdentityDto
         {
             Address = Address,
@@ -117,6 +116,40 @@ public class BrainIdentity
         };
         var json = JsonConvert.SerializeObject(dto, Formatting.Indented);
         File.WriteAllText(path, json);
+    }
+
+    /// <summary>
+    /// C4 fix: best-effort overwrite of an existing file's bytes with random
+    /// data BEFORE writing the new content. Used when migrating a legacy
+    /// plaintext identity file to the DPAPI-wrapped shape — without this
+    /// the plaintext private key could still be recoverable from the same
+    /// logical file position (or, on some filesystems, the same physical
+    /// sectors). Caveats: SSD wear-leveling, snapshot filesystems, and
+    /// system backups can preserve the original bytes regardless; this is
+    /// a defense-in-depth measure, not a guarantee. UI should still tell
+    /// the user to regenerate identity if they suspect any backup exists.
+    /// </summary>
+    private void SaveAndWipeLegacy(string path)
+    {
+        try
+        {
+            var origSize = new FileInfo(path).Length;
+            if (origSize > 0 && origSize < 1_000_000) // sanity cap
+            {
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Write);
+                var rng = RandomNumberGenerator.GetBytes((int)origSize);
+                fs.Position = 0;
+                fs.Write(rng, 0, rng.Length);
+                fs.Flush(flushToDisk: true);
+            }
+        }
+        catch (Exception ex)
+        {
+            // Best-effort — log and continue. The new save below still
+            // gives us a clean DPAPI-wrapped file on disk.
+            Console.Error.WriteLine($"[BrainIdentity] WARNING: legacy wipe failed ({ex.Message}); proceeding with re-save");
+        }
+        SaveToFile(path);
     }
 
     public static BrainIdentity LoadFromFile(string path)
@@ -147,8 +180,18 @@ public class BrainIdentity
         }
         else if (!string.IsNullOrEmpty(dto.PrivateKey))
         {
-            // Legacy plaintext — accept it so existing users aren't locked out.
+            // Legacy plaintext detected. Load it so existing users aren't
+            // locked out, then IMMEDIATELY wipe + re-save (C4 fix) so the
+            // plaintext bytes don't linger in the same file location for
+            // future backups or disk-forensic recovery to find.
             identity.PrivateKey = dto.PrivateKey;
+            try { identity.SaveAndWipeLegacy(path); }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine(
+                    $"[BrainIdentity] WARNING: legacy migration save failed ({ex.Message}); " +
+                    "identity is usable in memory but file is still plaintext");
+            }
         }
 
         return identity;

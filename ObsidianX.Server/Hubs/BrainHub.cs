@@ -34,14 +34,34 @@ public class BrainHub : Hub
     private readonly record struct PendingChallenge(string Nonce, DateTime IssuedAt);
     private static readonly TimeSpan ChallengeTtl = TimeSpan.FromSeconds(30);
 
-    // PR #6 — seen-nonce cache for ShareRequest replay defense. Process-wide
-    // (one peer can't replay across connections either). Bounded: oldest
-    // 10k entries evicted; nonces older than the clock-skew window
-    // (ClockSkew) are auto-expired during checks. Memory budget < 1 MB.
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> SeenNonces = new();
+    // PR #6 — seen-nonce cache for ShareRequest replay defense.
+    //
+    // H1 fix: sharded BY FromAddress (each peer gets its own bounded window),
+    // not a single global cap. Closes the flood-eviction attack where a
+    // noisy peer could push a victim's still-valid nonce out of a shared
+    // cache within the 5-min replay window. Since RequestShare already
+    // requires caller == request.FromAddress (server-enforced after
+    // challenge-response register), a peer can only fill THEIR OWN bucket;
+    // a victim's bucket is untouchable.
+    //
+    // Memory budget: 200 nonces × ~32 bytes × N_connected_peers. At 10k
+    // peers (way beyond realistic for a hub) ≈ 60 MB worst case.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, AddrNonceWindow> NoncesByAddr = new();
+    private const int PerAddrNonceCap = 200;
     private static readonly TimeSpan ClockSkew = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan NonceTtl = TimeSpan.FromMinutes(5);
-    private const int NonceCacheCap = 10_000;
+
+    /// <summary>
+    /// Bounded per-address nonce window. Order is a FIFO queue used for TTL
+    /// eviction and overflow trimming; Set is the O(1) replay-check lookup.
+    /// Both are kept in sync under <see cref="Gate"/>.
+    /// </summary>
+    private sealed class AddrNonceWindow
+    {
+        public readonly LinkedList<(string Nonce, DateTime At)> Order = new();
+        public readonly HashSet<string> Set = new(StringComparer.Ordinal);
+        public readonly object Gate = new();
+    }
 
     private const int MaxPendingRequests = 10_000;
     private const int MaxKeywords = 50;
@@ -152,16 +172,29 @@ public class BrainHub : Hub
             return;
         }
 
-        // TODO(threat-model M1): reject if EndpointToAddress already has an
-        // entry for this ConnectionId — calling Register twice on one
-        // connection silently re-binds and leaks the old ConnectedPeers row.
-
         if (peerInfo == null
             || string.IsNullOrWhiteSpace(peerInfo.BrainAddress)
             || string.IsNullOrWhiteSpace(peerInfo.DisplayName)
             || string.IsNullOrWhiteSpace(peerInfo.PublicKey))
         {
             await Clients.Caller.SendAsync("Error", "Invalid peer info: address, name, and publicKey required");
+            return;
+        }
+
+        // M1 fix — refuse a second RegisterBrain on the same connection.
+        // Otherwise calling Register again would silently re-bind
+        // EndpointToAddress and leak the previous ConnectedPeers row
+        // (still marked online until disconnect). If a client genuinely
+        // needs to switch identity, it must reconnect — OnDisconnectedAsync
+        // is the only path that correctly clears all per-connection state.
+        bool alreadyRegistered;
+        lock (ConnectedPeers)
+        {
+            alreadyRegistered = EndpointToAddress.ContainsKey(Context.ConnectionId);
+        }
+        if (alreadyRegistered)
+        {
+            await FailAuth("connection already registered — reconnect to switch identity", peerInfo.BrainAddress);
             return;
         }
 
@@ -235,27 +268,35 @@ public class BrainHub : Hub
     }
 
     /// <summary>
-    /// Drop nonces past their TTL, and trim the dict if it's grown above
-    /// <see cref="NonceCacheCap"/>. Cheap O(N) sweep — fine at our scale
-    /// (the cap is 10k entries and we touch this once per RequestShare).
-    ///
-    /// TODO(threat-model H1): replace global LRU with per-FromAddress LRU
-    /// so a flood from one peer can't push genuine nonces of another peer
-    /// out of the cache within the 5-min TTL window.
+    /// H1 fix — per-FromAddress nonce check. Returns false on replay, true
+    /// when the nonce is fresh and now recorded. Each address has its own
+    /// bounded window (<see cref="PerAddrNonceCap"/>) — flooding only
+    /// evicts the flooder's own old nonces.
     /// </summary>
-    private static void EvictOldNonces()
+    private static bool TryConsumeNonce(string fromAddress, string nonce, DateTime now)
     {
-        var cutoff = DateTime.UtcNow - NonceTtl;
-        foreach (var (k, v) in SeenNonces)
-            if (v < cutoff) SeenNonces.TryRemove(k, out _);
-
-        if (SeenNonces.Count > NonceCacheCap)
+        var window = NoncesByAddr.GetOrAdd(fromAddress, _ => new AddrNonceWindow());
+        var cutoff = now - NonceTtl;
+        lock (window.Gate)
         {
-            // Hard cap: evict the 1000 oldest. Worst-case lets a tiny replay
-            // window open after a flood, but the alternative (unbounded
-            // growth) is a slow OOM.
-            var victims = SeenNonces.OrderBy(kv => kv.Value).Take(1000).Select(kv => kv.Key).ToList();
-            foreach (var v in victims) SeenNonces.TryRemove(v, out _);
+            // 1. Drop entries past TTL from the FIFO head (Order is in
+            //    insertion-time order, so all expired entries are at the front).
+            while (window.Order.First is { } head && head.Value.At < cutoff)
+            {
+                window.Set.Remove(head.Value.Nonce);
+                window.Order.RemoveFirst();
+            }
+            // 2. Replay check + record.
+            if (!window.Set.Add(nonce)) return false;
+            window.Order.AddLast((nonce, now));
+            // 3. Cap — evict the oldest remaining if we've blown past the cap.
+            //    Only the flooder's own bucket is affected.
+            while (window.Set.Count > PerAddrNonceCap && window.Order.First is { } over)
+            {
+                window.Set.Remove(over.Value.Nonce);
+                window.Order.RemoveFirst();
+            }
+            return true;
         }
     }
 
@@ -332,10 +373,15 @@ public class BrainHub : Hub
         }
 
         // PR #6 — rate limit before doing any expensive work.
-        // TODO(threat-model M4): audit-log this denial too — currently a
-        // rate-limited flood is invisible to forensics.
         if (!RateLimiter.TryConsume(Context.ConnectionId, "RequestShare", 20, TimeSpan.FromMinutes(1)))
+        {
+            // M4 fix — audit rate-limit denials so flood attacks aren't
+            // invisible to forensics. CallerBrainAddress is cheap (lock +
+            // dict lookup) and gracefully empty when the connection hasn't
+            // registered yet.
+            AuditLog.Record("rate.limit", CallerBrainAddress(), "method=RequestShare");
             throw new HubException("rate limited — slow down");
+        }
 
         // PR #6 — sender must be authenticated AND must match request.FromAddress
         // (no impersonating other peers even after a valid login).
@@ -351,11 +397,10 @@ public class BrainHub : Hub
         if (string.IsNullOrWhiteSpace(request.Nonce))
             throw new HubException("Nonce is required");
 
-        // Bounded seen-nonce check. Compound key with FromAddress prevents
-        // a peer's nonce from blocking another peer's same-string nonce.
-        var nonceKey = request.FromAddress + "|" + request.Nonce;
-        EvictOldNonces();
-        if (!SeenNonces.TryAdd(nonceKey, now))
+        // H1 fix — per-FromAddress nonce window. A peer can only fill their
+        // own bucket (caller==FromAddress is server-enforced), so flooding
+        // can't evict another peer's still-valid nonce.
+        if (!TryConsumeNonce(request.FromAddress, request.Nonce, now))
             throw new HubException("nonce replay detected");
 
         // PR #6 — verify ECDSA signature with the caller's registered pubkey.
@@ -464,7 +509,10 @@ public class BrainHub : Hub
     public Task SetScope(ShareScope? scope)
     {
         if (!RateLimiter.TryConsume(Context.ConnectionId, "SetScope", 10, TimeSpan.FromMinutes(1)))
+        {
+            AuditLog.Record("rate.limit", CallerBrainAddress(), "method=SetScope");
             throw new HubException("rate limited — slow down");
+        }
 
         if (scope == null) throw new HubException("scope is required");
         var caller = CallerBrainAddress();
@@ -546,7 +594,10 @@ public class BrainHub : Hub
     public async Task SendShareContent(ShareEnvelope? envelope)
     {
         if (!RateLimiter.TryConsume(Context.ConnectionId, "SendShareContent", 60, TimeSpan.FromMinutes(1)))
+        {
+            AuditLog.Record("rate.limit", CallerBrainAddress(), "method=SendShareContent");
             throw new HubException("rate limited — slow down");
+        }
 
         if (envelope == null
             || string.IsNullOrWhiteSpace(envelope.FromAddress)
@@ -653,6 +704,12 @@ public class BrainHub : Hub
 
         if (!string.IsNullOrEmpty(disconnected))
         {
+            // H1 — drop this address's nonce window so the per-address dict
+            // doesn't grow unbounded across connect/disconnect churn. Fresh
+            // bucket on reconnect is fine — TTL would have expired old
+            // nonces anyway by the time they reconnect.
+            NoncesByAddr.TryRemove(disconnected, out _);
+
             await Clients.All.SendAsync("PeerLeft", disconnected);
             var shortAddr = disconnected.Length > 18 ? disconnected[..18] + "..." : disconnected;
             LogActivity($"Brain left: {shortAddr}");

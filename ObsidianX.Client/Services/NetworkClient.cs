@@ -21,13 +21,13 @@ public sealed class NetworkClientOptions
     /// hole that PR #4 closed.</summary>
     public bool AllowInsecureSchemes { get; set; }
 
-    /// <summary>SHA-256 hex (lowercase) of the server's SubjectPublicKeyInfo.
-    /// If non-empty, the server cert MUST hash to one of these — defeats
-    /// any rogue CA / proxy interception. Empty = use the platform trust
-    /// store, no pinning.
-    /// TODO(threat-model H3): validate pin format (64 hex chars, lowercase
-    /// after colon-strip) at config time so a typo fails loudly rather than
-    /// silently never matching.</summary>
+    /// <summary>SHA-256 hex of the server's SubjectPublicKeyInfo (64 hex
+    /// chars, colons optional, case-insensitive). If non-empty, the server
+    /// cert MUST hash to one of these — defeats any rogue CA / proxy
+    /// interception. Empty = use the platform trust store, no pinning.
+    /// Format is validated at <c>ConnectAsync</c> entry (H3 fix); a malformed
+    /// pin throws <see cref="ArgumentException"/> rather than silently
+    /// blocking every connection.</summary>
     public IReadOnlyCollection<string> PinnedServerSpkiSha256 { get; set; } = [];
 }
 
@@ -106,6 +106,18 @@ public class NetworkClient : IAsyncDisposable
         {
             StatusChanged?.Invoke($"Connection blocked: {urlError}");
             return false;
+        }
+
+        // H3 fix — validate every pin's format up-front. Previously a typo
+        // (wrong length, non-hex chars) silently fell through to "no pin
+        // matches" and every TLS connection failed with a generic error.
+        // Throw a clear ArgumentException now so the operator notices.
+        foreach (var pin in _options.PinnedServerSpkiSha256)
+        {
+            if (!IsValidSpkiPin(pin))
+                throw new ArgumentException(
+                    $"NetworkClientOptions.PinnedServerSpkiSha256 contains invalid pin '{pin}'. " +
+                    "Expected 64 hex chars (SHA-256 of SubjectPublicKeyInfo), colons optional.");
         }
 
         _identity = identity;
@@ -511,6 +523,28 @@ public class NetworkClient : IAsyncDisposable
         // HTTP negotiation phase. Log loudly so the operator notices.
         StatusChanged?.Invoke($"WARNING: cannot pin HTTP handler of type {inner.GetType().Name} — WS pinning still active");
         return inner;
+    }
+
+    /// <summary>
+    /// H3 — true if the pin is a syntactically valid SHA-256 SPKI hash:
+    /// exactly 64 hex chars after stripping optional colons. Case-insensitive
+    /// (the runtime comparison in <see cref="ValidatePinnedCert"/> lowercases
+    /// both sides). Reject empty/null/whitespace so an accidentally blank
+    /// entry doesn't slip through.
+    /// </summary>
+    private static bool IsValidSpkiPin(string? pin)
+    {
+        if (string.IsNullOrWhiteSpace(pin)) return false;
+        var stripped = pin.Replace(":", "").Trim();
+        if (stripped.Length != 64) return false;
+        foreach (var c in stripped)
+        {
+            var isHex = (c >= '0' && c <= '9')
+                     || (c >= 'a' && c <= 'f')
+                     || (c >= 'A' && c <= 'F');
+            if (!isHex) return false;
+        }
+        return true;
     }
 
     private bool ValidatePinnedCert(

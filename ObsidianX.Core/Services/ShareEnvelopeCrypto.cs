@@ -11,13 +11,22 @@ namespace ObsidianX.Core.Services;
 /// pair (generated per request by the requester) combined with the
 /// owner's long-term ECDSA key via ECDH.
 ///
-/// Curve: NIST P-256 (matches <see cref="BrainIdentity"/>).
-/// AEAD:  AES-256-GCM.
-/// KDF:   HKDF-SHA256 with the GCM nonce as salt + a fixed "obsidianx-share-v1" info tag.
+/// Curve: NIST P-256 (matches <see cref="BrainIdentity"/>). Both sides
+/// reject any other curve at <see cref="Encrypt"/>/<see cref="Decrypt"/>
+/// entry so a confused-deputy curve mismatch fails fast and loudly.
+/// AEAD:  AES-256-GCM (12-byte nonce, 16-byte tag).
+/// KDF:   Single-block HMAC-SHA256 via <c>DeriveKeyFromHmac</c> — portable
+///        across Windows / Linux / macOS .NET runtimes, unlike the older
+///        <c>DeriveRawSecretAgreement</c> which is provider-dependent.
+///        Output = HMAC-SHA256(salt=nonce, agreement || "obsidianx-share-v1").
 /// </summary>
 public static class ShareEnvelopeCrypto
 {
-    private static readonly byte[] HkdfInfo = Encoding.UTF8.GetBytes("obsidianx-share-v1");
+    private static readonly byte[] DomainInfo = Encoding.UTF8.GetBytes("obsidianx-share-v1");
+
+    /// <summary>NIST P-256 OID — used to validate that every key going
+    /// into ECDH is on the curve we agreed on.</summary>
+    private const string P256Oid = "1.2.840.10045.3.1.7";
 
     /// <summary>
     /// Generate a fresh ephemeral ECDH keypair on P-256. Use the public half
@@ -51,17 +60,16 @@ public static class ShareEnvelopeCrypto
             throw new InvalidOperationException("owner identity has no private key");
 
         // Import the requester's ephemeral pub + the owner's long-term priv
-        // and derive the shared secret. Both must be on the same curve
-        // (P-256) — BrainIdentity.Generate enforces this server-side.
+        // and derive the shared secret. L4 fix: explicitly verify both are
+        // on P-256 before agreement — otherwise a curve-mismatch surfaces
+        // as a confusing generic CryptographicException deep in the KDF.
         using var ownerEcdh = ECDiffieHellman.Create();
         ownerEcdh.ImportECPrivateKey(Convert.FromBase64String(ownerIdentity.PrivateKey), out _);
+        RequireP256(ownerEcdh, "owner private key");
 
         using var requesterPub = ECDiffieHellman.Create();
         requesterPub.ImportSubjectPublicKeyInfo(Convert.FromBase64String(requesterEphemeralPublicKey), out _);
-        // TODO(threat-model L4): verify requesterPub is on P-256 — currently
-        // ImportSubjectPublicKeyInfo accepts any supported curve, and a
-        // curve mismatch surfaces as a generic CryptographicException at
-        // DeriveRawSecretAgreement instead of a clear "wrong curve" error.
+        RequireP256(requesterPub, "requester ephemeral public key");
 
         var ad = BuildAssociatedData(ownerIdentity.Address, requesterAddress, nodeId, requesterEphemeralPublicKey);
         var nonce = RandomNumberGenerator.GetBytes(12);
@@ -106,9 +114,11 @@ public static class ShareEnvelopeCrypto
 
         using var requesterEcdh = ECDiffieHellman.Create();
         requesterEcdh.ImportECPrivateKey(Convert.FromBase64String(ephemeralPrivateKeyBase64), out _);
+        RequireP256(requesterEcdh, "requester ephemeral private key");
 
         using var ownerPub = ECDiffieHellman.Create();
         ownerPub.ImportSubjectPublicKeyInfo(Convert.FromBase64String(ownerPublicKeyBase64), out _);
+        RequireP256(ownerPub, "owner public key");
 
         var nonce = Convert.FromBase64String(envelope.NonceBase64);
         var tag = Convert.FromBase64String(envelope.TagBase64);
@@ -133,24 +143,48 @@ public static class ShareEnvelopeCrypto
 
     private static byte[] DeriveKey(ECDiffieHellman ourEcdh, ECDiffieHellmanPublicKey theirPub, byte[] salt)
     {
-        // ECDH agreement → HKDF-SHA256 → 32-byte AES-GCM key.
-        // Using the GCM nonce as HKDF salt is the standard cheap-binding
-        // trick: same ECDH pair gives a different key per envelope.
+        // C1 fix: DeriveKeyFromHmac is implemented on every .NET runtime
+        // (Windows CNG, OpenSSL on Linux/macOS), unlike DeriveRawSecretAgreement
+        // which is provider-dependent and throws PlatformNotSupportedException
+        // on some Linux configurations.
         //
-        // TODO(threat-model C1): DeriveRawSecretAgreement may throw
-        // PlatformNotSupportedException on non-Windows .NET runtimes
-        // depending on which provider Create() picked. Tested OK on
-        // Windows .NET 9; if we ever ship a Linux server consider
-        // DeriveKeyFromHash(SHA256) as a portable fallback.
-        var shared = ourEcdh.DeriveRawSecretAgreement(theirPub);
+        // Output is exactly HMAC-SHA256(hmacKey=salt, message=agreement || info):
+        //   - hmacKey = per-envelope GCM nonce → fresh key for every share
+        //   - secretAppend = "obsidianx-share-v1" → domain-separates from any
+        //     other protocol that might (someday) reuse the same ECDH keys
+        // 32-byte output (SHA-256 digest length) — drop-in AES-256-GCM key.
+        // Cryptographically equivalent to single-block HKDF-Extract for
+        // high-entropy ECDH input + fixed-size output.
+        return ourEcdh.DeriveKeyFromHmac(
+            otherPartyPublicKey: theirPub,
+            hashAlgorithm: HashAlgorithmName.SHA256,
+            hmacKey: salt,
+            secretPrepend: null,
+            secretAppend: DomainInfo);
+    }
+
+    /// <summary>
+    /// L4 fix: bail out before agreement if a key is on the wrong curve.
+    /// .NET's ImportSubjectPublicKeyInfo accepts any supported curve and the
+    /// mismatch only surfaces later as a generic CryptographicException —
+    /// here we throw a clear error naming the offending side.
+    /// </summary>
+    private static void RequireP256(ECDiffieHellman ecdh, string context)
+    {
+        string? oid = null;
         try
         {
-            return HKDF.DeriveKey(HashAlgorithmName.SHA256, shared, outputLength: 32, salt: salt, info: HkdfInfo);
+            var curve = ecdh.ExportParameters(false).Curve;
+            if (curve.IsNamed) oid = curve.Oid?.Value;
         }
-        finally
+        catch (CryptographicException)
         {
-            CryptographicOperations.ZeroMemory(shared);
+            // Some providers refuse parameter export; the curve check below
+            // will then fail loudly with our message.
         }
+        if (oid != P256Oid)
+            throw new InvalidOperationException(
+                $"{context}: expected NIST P-256 (OID {P256Oid}), got '{oid ?? "(unknown)"}'");
     }
 
     /// <summary>
