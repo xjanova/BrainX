@@ -1803,6 +1803,7 @@
                                     <Grid.RowDefinitions>
                                         <RowDefinition Height="Auto"/> <!-- header -->
                                         <RowDefinition Height="Auto"/> <!-- my address -->
+                                        <RowDefinition Height="Auto"/> <!-- demo peer join -->
                                         <RowDefinition Height="Auto"/> <!-- peers list card -->
                                         <RowDefinition Height="Auto"/> <!-- incoming -->
                                         <RowDefinition Height="Auto"/> <!-- activity / audit -->
@@ -1839,8 +1840,38 @@
                                         </StackPanel>
                                     </Border>
 
-                                    <!-- ─── PEERS WITH ACCESS ─── -->
+                                    <!-- ─── DEMO: simulate peers joining ───
+                                         No-op without a hub: the button fakes three
+                                         PeerJoined events locally so the user can
+                                         see how the Universe view reacts when peers
+                                         appear on the orbit ring. Auto-switches to
+                                         the Universe tab so the visual effect is
+                                         immediately visible. Self-cleaning — fake
+                                         peers fade out after 8 seconds. -->
                                     <Border Grid.Row="2" Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                        <StackPanel>
+                                            <TextBlock Text="LIVE PREVIEW" FontSize="11" FontWeight="SemiBold"
+                                                       Foreground="{StaticResource NeonGreenBrush}" Margin="0,0,0,8"/>
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Grid.Column="0"
+                                                           Text="See what a peer joining your brain looks like — 3 simulated peers will appear on the orbit ring around your galaxy, then fade out after 8 seconds. No hub required."
+                                                           FontSize="11" TextWrapping="Wrap"
+                                                           Foreground="{StaticResource TextSecondaryBrush}"
+                                                           VerticalAlignment="Center" Margin="0,0,12,0"/>
+                                                <Button Grid.Column="1" x:Name="SharingDemoPeersBtn"
+                                                        Content="&#x1F3AC;  Demo peer join"
+                                                        Style="{StaticResource NeonButtonFilled}"
+                                                        Click="SharingDemoPeersBtn_Click" Padding="14,6"/>
+                                            </Grid>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- ─── PEERS WITH ACCESS ─── -->
+                                    <Border Grid.Row="3" Style="{StaticResource CardPanel}" Margin="0,0,0,12">
                                         <StackPanel>
                                             <Grid Margin="0,0,0,10">
                                                 <Grid.ColumnDefinitions>
@@ -1884,7 +1915,7 @@
                                     </Border>
 
                                     <!-- ─── INCOMING REQUESTS ─── -->
-                                    <Border Grid.Row="3" Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                    <Border Grid.Row="4" Style="{StaticResource CardPanel}" Margin="0,0,0,12">
                                         <StackPanel>
                                             <TextBlock Text="INCOMING REQUESTS" FontSize="11" FontWeight="SemiBold"
                                                        Foreground="{StaticResource ElectricPurpleBrush}" Margin="0,0,0,10"/>
@@ -1896,7 +1927,7 @@
                                     </Border>
 
                                     <!-- ─── ACTIVITY / AUDIT LOG ─── -->
-                                    <Border Grid.Row="4" Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                    <Border Grid.Row="5" Style="{StaticResource CardPanel}" Margin="0,0,0,12">
                                         <StackPanel>
                                             <Grid Margin="0,0,0,10">
                                                 <Grid.ColumnDefinitions>

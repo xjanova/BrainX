@@ -8789,12 +8789,43 @@ public partial class MainWindow : Window
     {
         StatusText.Text = $"Peer joined: {peer.DisplayName}";
         RefreshPeersList();
+        BroadcastPeerJoinedToUniverse(peer.BrainAddress, peer.DisplayName);
     }
 
     private void OnPeerLeft(string address)
     {
         StatusText.Text = $"Peer left: {address[..20]}...";
         RefreshPeersList();
+        BroadcastPeerLeftToUniverse(address);
+    }
+
+    /// <summary>
+    /// Forward a PeerJoined hub event to the Universe scene so it drops a
+    /// glowing halo on the orbit ring for this peer. Per-monitor wallpaper
+    /// clones get the same message broadcast via the existing pulse fan-out
+    /// pattern. Safe to call before the WebView2 has finished loading —
+    /// CoreWebView2 will be null and we no-op silently.
+    /// </summary>
+    private void BroadcastPeerJoinedToUniverse(string address, string displayName)
+    {
+        var core = UniverseWebView?.CoreWebView2;
+        if (core == null) return;
+        var json = "{\"type\":\"peerJoined\",\"address\":\""
+                 + EscapeJson(address)
+                 + "\",\"displayName\":\""
+                 + EscapeJson(displayName ?? "")
+                 + "\"}";
+        try { core.PostWebMessageAsJson(json); }
+        catch { /* WebView torn down mid-event — drop */ }
+    }
+
+    private void BroadcastPeerLeftToUniverse(string address)
+    {
+        var core = UniverseWebView?.CoreWebView2;
+        if (core == null) return;
+        var json = "{\"type\":\"peerLeft\",\"address\":\"" + EscapeJson(address) + "\"}";
+        try { core.PostWebMessageAsJson(json); }
+        catch { /* see above */ }
     }
 
     private void OnShareRequested(ShareRequest request)
@@ -9302,6 +9333,54 @@ public partial class MainWindow : Window
         try { Clipboard.SetText(_identity.Address); }
         catch { /* clipboard can be locked by other apps — ignore */ }
         StatusText.Text = "Brain address copied";
+    }
+
+    // ── Demo: simulate peer joins so the user can see the Universe react ─
+
+    /// <summary>Fake addresses used by the demo button — kept stable across
+    /// runs so the same colors / positions appear each time the user hits
+    /// "Demo". Real PeerInfo broadcasts use the same JSON shape so the
+    /// Universe scene code path is identical.</summary>
+    private static readonly (string Address, string DisplayName)[] _demoPeers =
+    {
+        ("0xBRAIN-demo-a17e-c0de-2026", "Alice's Brain"),
+        ("0xBRAIN-demo-b0b5-1010-2026", "Bob's Lab"),
+        ("0xBRAIN-demo-c4ar-l1e5-2026", "Charlie Workshop")
+    };
+
+    private async void SharingDemoPeersBtn_Click(object sender, RoutedEventArgs e)
+    {
+        SharingDemoPeersBtn.IsEnabled = false;
+        SharingDemoPeersBtn.Content = "🎬 Showing demo…";
+
+        // Switch to Universe so the user actually sees the halos appear.
+        // The Nav_Click call also kicks InitializeUniverseAsync if it's
+        // the first visit, so the WebView2 is up before we start posting.
+        Nav_Click(NavUniverse, new RoutedEventArgs());
+
+        // Universe init isn't instant on first open — wait for the WebView
+        // to settle. 600 ms is plenty for the hot-cache path; cold is rare.
+        await Task.Delay(600);
+
+        // Staggered join — 1 peer every 450 ms so the user's eye can pick
+        // up each halo appearing instead of a confusing all-at-once burst.
+        foreach (var p in _demoPeers)
+        {
+            BroadcastPeerJoinedToUniverse(p.Address, p.DisplayName);
+            _shareHistory.Add($"[DEMO peer joined] {p.DisplayName}");
+            await Task.Delay(450);
+        }
+
+        // Let them admire the scene for a moment, then fade them out.
+        await Task.Delay(8000);
+        foreach (var p in _demoPeers)
+        {
+            BroadcastPeerLeftToUniverse(p.Address);
+            await Task.Delay(300);
+        }
+
+        SharingDemoPeersBtn.IsEnabled = true;
+        SharingDemoPeersBtn.Content = "🎬  Demo peer join";
     }
 
     // ── Action: open Add dialog ──────────────────────────────────────────

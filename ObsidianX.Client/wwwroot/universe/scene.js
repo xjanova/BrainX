@@ -1051,6 +1051,11 @@ export function createScene(canvas, callbacks = {}) {
         // Decay live MCP pulses + edge arcs (no-op when none active).
         stepPulses(dt);
 
+        // Peer halos — scale-in / fade-out / activity pulses (no-op when
+        // no peers connected). Cheap: linear in peers.size, no GPU work
+        // beyond the standard sprite material update.
+        stepPeers(now * 1000);
+
         // Lock selected star to screen center (no-op when nothing selected
         // or a flyTo is steering). Orbit mode is owned by OrbitControls.
         stepTrackSelected();
@@ -1127,6 +1132,249 @@ export function createScene(canvas, callbacks = {}) {
 
     function resettle() {
         for (const ps of sims) ps.sim.alpha(1.0);
+    }
+
+    // ── Peer halos (Join Brain visualization) ────────────────────────────
+    //
+    // Each remote peer connected to the hub is drawn as a glowing halo
+    // sprite on a "join ring" orbiting outside the main note galaxy. The
+    // ring sits in the X-Z plane at PEER_RING_RADIUS so peers float
+    // around the user's brain like nearby stars. Layer is attached to the
+    // top-level scene (not universeGroup) so peers DON'T spin with the
+    // notes — that way the user's perspective on "who's here" stays
+    // visually stable even when the camera rotates the brain.
+    //
+    // Color: deterministic per address (HSL hue from address hash) so the
+    // same peer always lights the same color. Size: ~6 world units —
+    // small enough that the brain stays the focal point, big enough that
+    // peers register on first glance. Bloom does the heavy lifting for
+    // "glow".
+    const PEER_RING_RADIUS = 240;
+    const PEER_RING_Y_JITTER = 28;
+    const peerLayer = new THREE.Group();
+    peerLayer.name = 'peerLayer';
+    scene.add(peerLayer);
+    const peers = new Map(); // address → { sprite, color, joinedAt, fading, scaleTarget, scaleCurrent }
+
+    function _hashStrToUnit(s) {
+        // Cheap deterministic 0..1 from a string. xor-fold 32-bit FNV variant —
+        // enough quality for visual placement, not for crypto.
+        let h = 2166136261 >>> 0;
+        for (let i = 0; i < s.length; i++) {
+            h ^= s.charCodeAt(i);
+            h = Math.imul(h, 16777619) >>> 0;
+        }
+        return (h >>> 0) / 0xFFFFFFFF;
+    }
+
+    function _peerColorFromAddress(addr) {
+        // HSL → RGB via THREE.Color. Vivid (S=0.85, L=0.6) so each peer
+        // pops against the deep-space background.
+        const hue = _hashStrToUnit(addr);
+        const c = new THREE.Color().setHSL(hue, 0.85, 0.6);
+        return c;
+    }
+
+    function _peerPositionFromAddress(addr) {
+        // Two independent hashes: one for angle on the ring, one for Y
+        // jitter so peers don't all sit on a perfect line.
+        const angle = _hashStrToUnit(addr) * Math.PI * 2;
+        const yPhase = _hashStrToUnit(addr + '|y') * 2 - 1; // -1..1
+        return new THREE.Vector3(
+            Math.cos(angle) * PEER_RING_RADIUS,
+            yPhase * PEER_RING_Y_JITTER,
+            Math.sin(angle) * PEER_RING_RADIUS
+        );
+    }
+
+    // Build the halo sprite texture once and share across all peers — much
+    // cheaper than per-peer textures, and the per-peer color comes from
+    // sprite.material.color which multiplies into the texture's white.
+    function _buildHaloTexture() {
+        const size = 128;
+        const cnv = document.createElement('canvas');
+        cnv.width = cnv.height = size;
+        const ctx = cnv.getContext('2d');
+        // Radial gradient: hot white core → color falloff → transparent.
+        const grad = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+        grad.addColorStop(0.0, 'rgba(255,255,255,1.0)');
+        grad.addColorStop(0.25, 'rgba(255,255,255,0.85)');
+        grad.addColorStop(0.55, 'rgba(255,255,255,0.35)');
+        grad.addColorStop(1.0, 'rgba(255,255,255,0)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, size, size);
+        const tex = new THREE.CanvasTexture(cnv);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        return tex;
+    }
+    const _peerHaloTexture = _buildHaloTexture();
+
+    // Label sprite: per-peer canvas texture with display name + short
+    // address. Floats next to the halo, billboarded so it always faces
+    // the camera.
+    function _buildPeerLabel(displayName, shortAddr, color) {
+        const w = 320, h = 96;
+        const cnv = document.createElement('canvas');
+        cnv.width = w; cnv.height = h;
+        const ctx = cnv.getContext('2d');
+        // Pill-shaped background for legibility against the nebula.
+        ctx.fillStyle = 'rgba(8,4,18,0.78)';
+        ctx.beginPath();
+        const r = 18;
+        ctx.moveTo(r, 0);
+        ctx.lineTo(w - r, 0); ctx.quadraticCurveTo(w, 0, w, r);
+        ctx.lineTo(w, h - r); ctx.quadraticCurveTo(w, h, w - r, h);
+        ctx.lineTo(r, h); ctx.quadraticCurveTo(0, h, 0, h - r);
+        ctx.lineTo(0, r); ctx.quadraticCurveTo(0, 0, r, 0);
+        ctx.closePath(); ctx.fill();
+        // Coloured stripe so the label visually ties to the halo.
+        ctx.fillStyle = '#' + color.getHexString();
+        ctx.fillRect(0, 0, 6, h);
+        // Display name + address.
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = 'bold 26px "Segoe UI", Arial';
+        ctx.textBaseline = 'top';
+        ctx.fillText(displayName || '(brain)', 18, 12);
+        ctx.fillStyle = '#B7A6D8';
+        ctx.font = '18px "Cascadia Code", Consolas, monospace';
+        ctx.fillText(shortAddr, 18, 52);
+        const tex = new THREE.CanvasTexture(cnv);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+        const spr = new THREE.Sprite(mat);
+        spr.scale.set(40, 12, 1); // world units; sized to read at ring distance
+        return spr;
+    }
+
+    /**
+     * Add (or re-add) a peer halo. Idempotent — calling twice with the
+     * same address just refreshes the display name / color and re-triggers
+     * the scale-in animation so the user gets visual confirmation.
+     */
+    function addPeer(peerInfo) {
+        if (!peerInfo || !peerInfo.address) return;
+        const addr = String(peerInfo.address);
+        const color = _peerColorFromAddress(addr);
+        const pos = _peerPositionFromAddress(addr);
+
+        let entry = peers.get(addr);
+        if (!entry) {
+            // Glow sprite — bigger, color-tinted halo.
+            const haloMat = new THREE.SpriteMaterial({
+                map: _peerHaloTexture,
+                color,
+                transparent: true,
+                depthWrite: false,
+                blending: THREE.AdditiveBlending
+            });
+            const halo = new THREE.Sprite(haloMat);
+            halo.scale.set(0.01, 0.01, 0.01);
+            halo.position.copy(pos);
+
+            const shortAddr = addr.length > 22 ? addr.slice(0, 22) + '…' : addr;
+            const label = _buildPeerLabel(peerInfo.displayName, shortAddr, color);
+            label.position.copy(pos);
+            label.position.y += 14; // float above the halo
+
+            peerLayer.add(halo);
+            peerLayer.add(label);
+            entry = {
+                halo, label, color,
+                joinedAt: performance.now(),
+                scaleCurrent: 0.01,
+                scaleTarget: 14,    // final halo scale (world units)
+                fading: false,
+                pulseUntil: 0
+            };
+            peers.set(addr, entry);
+        } else {
+            // Re-join: refresh visuals + retrigger the scale-in pop so the
+            // user sees a clear "they're back" cue. Reset scaleTarget too
+            // in case the peer was mid-fade (which decays scaleTarget toward 0).
+            entry.color = color;
+            entry.halo.material.color.copy(color);
+            entry.scaleCurrent = entry.scaleCurrent * 0.5; // ease back a bit so the pop reads
+            entry.scaleTarget = 14;
+            entry.fading = false;
+            entry.joinedAt = performance.now();
+        }
+        // Brief scale-pop so even on the first frame the user notices
+        // something appeared.
+        entry.pulseUntil = performance.now() + 350;
+    }
+
+    /**
+     * Remove a peer. Fades out smoothly over ~450 ms in stepPeers and then
+     * disposes the resources — preserves a "they left" cue without a
+     * jarring pop. If a peer with the same address rejoins during the
+     * fade, addPeer() cancels the fading flag and they come back.
+     */
+    function removePeer(address) {
+        const entry = peers.get(String(address));
+        if (entry) entry.fading = true;
+    }
+
+    /**
+     * Brief flash on a peer's halo — used when a share request to/from this
+     * peer succeeds (or fails — caller picks color via overrideColor).
+     * Visualizes data flow without redrawing the universe.
+     */
+    function pulsePeerActivity(address, overrideColor) {
+        const entry = peers.get(String(address));
+        if (!entry) return;
+        if (overrideColor) {
+            // Temporary color flash (e.g. red for share-denied). Restored
+            // on the next pulse cycle by step's color-lerp.
+            try { entry.halo.material.color.set(overrideColor); } catch {}
+        }
+        entry.pulseUntil = performance.now() + 500;
+    }
+
+    // Per-frame peer animation — scale-in on join, fade-out on leave,
+    // scale-pop during activity pulses. Called from the main render loop
+    // (stepPeers is hooked into the animate() function below).
+    function stepPeers(now) {
+        if (peers.size === 0) return;
+        const PULSE_SCALE = 1.6;
+        for (const [addr, entry] of peers) {
+            // Pulse amplitude — eases up then down between pulseUntil-500 and pulseUntil.
+            const remaining = entry.pulseUntil - now;
+            let pulse = 0;
+            if (remaining > 0) {
+                // tri-wave: 0 → 1 → 0 across the 500 ms window
+                const t = 1 - remaining / 500;
+                pulse = Math.sin(t * Math.PI);
+            }
+            // Smoothly approach scaleTarget; ease-out so the join pop is
+            // snappy without being jittery.
+            entry.scaleCurrent += (entry.scaleTarget - entry.scaleCurrent) * 0.18;
+            const s = entry.scaleCurrent * (1 + pulse * (PULSE_SCALE - 1));
+
+            // Fade-out: shrink target to 0, then dispose when small.
+            if (entry.fading) {
+                entry.scaleTarget *= 0.86;
+                entry.halo.material.opacity *= 0.88;
+                entry.label.material.opacity *= 0.88;
+                if (entry.scaleCurrent < 0.5) {
+                    peerLayer.remove(entry.halo);
+                    peerLayer.remove(entry.label);
+                    entry.halo.material.dispose();
+                    if (entry.label.material.map) entry.label.material.map.dispose();
+                    entry.label.material.dispose();
+                    peers.delete(addr);
+                    continue;
+                }
+            } else {
+                entry.halo.material.opacity = 0.92;
+                entry.label.material.opacity = 0.95;
+            }
+
+            entry.halo.scale.set(s, s, s);
+            // Label scale stays constant (it's read as text, not visual mass);
+            // its position floats slightly with the halo so the pair tracks
+            // together but the label doesn't balloon during pulses.
+            entry.label.position.y = entry.halo.position.y + 14 + pulse * 1.2;
+        }
     }
 
     /**
@@ -1753,6 +2001,11 @@ export function createScene(canvas, callbacks = {}) {
         resetView,
         resettle,
         firePulse,
+        // Peer-halo API — see addPeer / removePeer / pulsePeerActivity
+        // declarations above. Idempotent + safe to call before brain mount.
+        addPeer,
+        removePeer,
+        pulsePeerActivity,
         setMotion,
         setGlow,
         setStars,

@@ -608,6 +608,25 @@ function onHostMessage(evt) {
             // star + fans out a few edge arcs.
             if (scene && msg.noteId) scene.firePulse(msg.noteId, msg.op);
             break;
+        case 'peerJoined':
+            // Join Brain demo / live: C# forwards every PeerJoined hub
+            // event as {address, displayName}. Scene drops a colored halo
+            // on the orbit ring + plays the scale-in pop.
+            if (scene && msg.address) {
+                scene.addPeer({ address: msg.address, displayName: msg.displayName });
+            }
+            break;
+        case 'peerLeft':
+            // Peer disconnected — scene fades the halo out over ~450 ms
+            // then disposes its GPU resources.
+            if (scene && msg.address) scene.removePeer(msg.address);
+            break;
+        case 'peerActivity':
+            // Future hook: hub forwards share-allow / share-deny / scope-set
+            // events so the halo flashes (color override available for
+            // denied = red). Currently only triggered from the demo button.
+            if (scene && msg.address) scene.pulsePeerActivity(msg.address, msg.color);
+            break;
         case 'tokenStats':
             // C# forwards TokenSavingsTracker.Compute output as
             // { text: "💰 +12.3k tok", tooltip: "...multi-line..." }.
