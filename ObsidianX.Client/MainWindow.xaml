@@ -376,6 +376,8 @@
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Peers"/>
                                     <Button x:Name="NavSharing" Content="&#x1F504;  Sharing"
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Sharing"/>
+                                    <Button x:Name="NavSsh" Content="&#x1F5A5;  SSH"
+                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Ssh"/>
 
                                     <TextBlock Text="SYSTEM" FontSize="10" Foreground="{StaticResource TextMutedBrush}"
                                                Margin="22,24,0,12" FontWeight="SemiBold"/>
@@ -2764,6 +2766,505 @@
                                                Padding="10,4" FontSize="11" FontWeight="SemiBold"
                                                Foreground="#FF8A86B8" />
                                 </StackPanel>
+                            </Border>
+                        </Grid>
+
+                        <!-- ═══ SSH VIEW ═══
+                             Owner-realm SSH gateway settings. The brain holds
+                             whitelisted SSH profiles + audit log; this page
+                             shows what's configured AND teaches the owner how
+                             to set up the server side step by step.
+
+                             3-realm model:
+                               • Owner-Claude (this MCP server)  → guarded run
+                               • Owner-interactive (future)      → no guard
+                               • Peers (BrainHub)                → no SSH at all
+                             See [[Join Brain v2 + Brain-as-SSH-Gateway —
+                             realm separation threat surface]] in the brain. -->
+                        <Grid x:Name="SshView" Visibility="Collapsed">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                                <StackPanel Margin="24,16,24,40" MaxWidth="980" HorizontalAlignment="Left">
+
+                                    <!-- HEADER -->
+                                    <TextBlock Text="SSH Tools" FontSize="24" FontWeight="Bold"
+                                               Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,4"/>
+                                    <TextBlock TextWrapping="Wrap"
+                                               Text="Owner-realm SSH gateway so Claude (via MCP) can grep server logs, check Exim queue, read WP config — without prompting you each time. Whitelisted commands only, audited to the brain."
+                                               FontSize="13" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,20"/>
+
+                                    <!-- STATUS CARD -->
+                                    <Border Style="{StaticResource CardPanel}" Margin="0,0,0,16">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0">
+                                                <TextBlock Text="STATUS" FontSize="11" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,8"/>
+                                                <TextBlock x:Name="SshStatusLine" Text="Loading profiles…" FontSize="14"
+                                                           Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,4"/>
+                                                <TextBlock x:Name="SshConfigPathText" Text="—" FontSize="11"
+                                                           Foreground="{StaticResource TextMutedBrush}"
+                                                           FontFamily="{StaticResource MonoFont}" TextWrapping="NoWrap"/>
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                                <Button Content="&#x1F4DD; Open profiles.json" Style="{StaticResource NavButton}"
+                                                        Padding="14,6" Click="SshOpenProfiles_Click" Margin="0,0,8,0"/>
+                                                <Button Content="&#x1F511; Open known_hosts" Style="{StaticResource NavButton}"
+                                                        Padding="14,6" Click="SshOpenKnownHosts_Click" Margin="0,0,8,0"/>
+                                                <Button Content="&#x1F4DC; Open audit log" Style="{StaticResource NavButton}"
+                                                        Padding="14,6" Click="SshOpenAuditLog_Click"/>
+                                            </StackPanel>
+                                        </Grid>
+                                    </Border>
+
+                                    <!-- REGISTERED PROFILES -->
+                                    <Border Style="{StaticResource CardPanel}" Margin="0,0,0,16">
+                                        <StackPanel>
+                                            <Grid Margin="0,0,0,12">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Text="REGISTERED PROFILES" FontSize="11" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource TextMutedBrush}" VerticalAlignment="Center"/>
+                                                <Button Grid.Column="1" x:Name="SshAddProfileBtn" Content="&#x2795;  Add profile"
+                                                        Style="{StaticResource NeonButtonFilled}" Click="SshAddProfile_Click"
+                                                        Padding="14,6" FontSize="11"/>
+                                            </Grid>
+                                            <StackPanel x:Name="SshProfilesList"/>
+                                            <Border x:Name="SshProfilesEmpty" Background="{StaticResource SurfaceBrush}"
+                                                    Padding="20" CornerRadius="6" Visibility="Collapsed">
+                                                <StackPanel HorizontalAlignment="Center">
+                                                    <TextBlock Text="No profiles yet" FontSize="14" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource TextSecondaryBrush}"
+                                                               HorizontalAlignment="Center" Margin="0,0,0,6"/>
+                                                    <TextBlock TextWrapping="Wrap" HorizontalAlignment="Center"
+                                                               Text="Follow the 7-step setup below to register your first host. A template will be created automatically on first MCP call."
+                                                               FontSize="12" Foreground="{StaticResource TextMutedBrush}"
+                                                               TextAlignment="Center"/>
+                                                </StackPanel>
+                                            </Border>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- HOW IT WORKS -->
+                                    <Border Style="{StaticResource CardPanel}" Margin="0,0,0,16">
+                                        <StackPanel>
+                                            <TextBlock Text="HOW IT WORKS" FontSize="11" FontWeight="SemiBold"
+                                                       Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,12"/>
+                                            <TextBlock TextWrapping="Wrap" FontSize="13" LineHeight="20"
+                                                       Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,10"
+                                                       Text="Claude (running through obsidianx-mcp) asks the brain to run a command on your behalf. The brain checks the profile's allow_patterns. If the command matches, it dials the host using the profile's SSH key and returns the output. If it doesn't match, the request is denied without dialing. Every call — allowed, denied, or MITM-flagged — is logged to .obsidianx/access-log.ndjson and pulses on the Universe graph."/>
+                                            <TextBlock TextWrapping="Wrap" FontSize="13" LineHeight="20"
+                                                       Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"
+                                                       Text="Defense in depth: the client-side allow_patterns catch programmer mistakes; the server-side command=&quot;...&quot; pin in authorized_keys (Step 3-4 below) catches MCP-server compromise. Use both — they protect against different attacker models."/>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- SETUP GUIDE HEADER -->
+                                    <TextBlock Text="Server setup — 7 steps" FontSize="18" FontWeight="Bold"
+                                               Foreground="{StaticResource TextPrimaryBrush}" Margin="0,16,0,4"/>
+                                    <TextBlock TextWrapping="Wrap" Margin="0,0,0,16"
+                                               Text="Do these once per server. Steps 1, 5, 6 are local (your laptop). Steps 2, 3, 4 are on the remote host. Copy buttons next to each block."
+                                               FontSize="12" Foreground="{StaticResource TextMutedBrush}"/>
+
+                                    <!-- STEP 1 -->
+                                    <Border Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                        <StackPanel>
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                                <Border Background="{StaticResource NeonCyanBrush}" CornerRadius="3" Padding="6,2" Margin="0,0,8,0">
+                                                    <TextBlock Text="STEP 1" FontSize="10" FontWeight="Bold" Foreground="Black"/>
+                                                </Border>
+                                                <TextBlock Text="Generate a dedicated SSH key (local — PowerShell)" FontSize="14" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource TextPrimaryBrush}"/>
+                                            </StackPanel>
+                                            <TextBlock TextWrapping="Wrap" FontSize="12" LineHeight="18" Margin="0,0,0,8"
+                                                       Foreground="{StaticResource TextSecondaryBrush}"
+                                                       Text="One key per (host, intent). Don't reuse your personal SSH key — if Claude's key leaks, you want a small blast radius. ED25519 is small, fast, and modern."/>
+                                            <Border Background="#0D000000" Padding="12" CornerRadius="4">
+                                                <TextBox x:Name="SshSetupCode1" IsReadOnly="True" BorderThickness="0" Background="Transparent"
+                                                         FontFamily="{StaticResource MonoFont}" FontSize="12" TextWrapping="Wrap"
+                                                         Foreground="{StaticResource TextPrimaryBrush}"
+                                                         Text="ssh-keygen -t ed25519 -f $HOME\.ssh\claude_xman4289_readonly_ed25519 -C &quot;claude-readonly-xman4289&quot; -N &quot;&quot;"/>
+                                            </Border>
+                                            <Button Content="&#x1F4CB; Copy" Style="{StaticResource NavButton}" Padding="12,6"
+                                                    HorizontalAlignment="Right" Margin="0,8,0,0"
+                                                    Click="SshCopyStep_Click" Tag="SshSetupCode1"/>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- STEP 2 -->
+                                    <Border Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                        <StackPanel>
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                                <Border Background="{StaticResource NeonCyanBrush}" CornerRadius="3" Padding="6,2" Margin="0,0,8,0">
+                                                    <TextBlock Text="STEP 2" FontSize="10" FontWeight="Bold" Foreground="Black"/>
+                                                </Border>
+                                                <TextBlock Text="Upload public key to the server (local — PowerShell)" FontSize="14" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource TextPrimaryBrush}"/>
+                                            </StackPanel>
+                                            <TextBlock TextWrapping="Wrap" FontSize="12" LineHeight="18" Margin="0,0,0,8"
+                                                       Foreground="{StaticResource TextSecondaryBrush}"
+                                                       Text="Pipe the public key over your existing SSH connection. Replace HOST/USER. If you already use ssh-copy-id (WSL/Git Bash), that works too."/>
+                                            <Border Background="#0D000000" Padding="12" CornerRadius="4">
+                                                <TextBox x:Name="SshSetupCode2" IsReadOnly="True" BorderThickness="0" Background="Transparent"
+                                                         FontFamily="{StaticResource MonoFont}" FontSize="12" TextWrapping="Wrap"
+                                                         Foreground="{StaticResource TextPrimaryBrush}"
+                                                         Text="type $HOME\.ssh\claude_xman4289_readonly_ed25519.pub | ssh admin@123.253.62.251 &quot;mkdir -p ~/.ssh; chmod 700 ~/.ssh; tee -a ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys&quot;"/>
+                                            </Border>
+                                            <Button Content="&#x1F4CB; Copy" Style="{StaticResource NavButton}" Padding="12,6"
+                                                    HorizontalAlignment="Right" Margin="0,8,0,0"
+                                                    Click="SshCopyStep_Click" Tag="SshSetupCode2"/>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- STEP 3 -->
+                                    <Border Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                        <StackPanel>
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                                <Border Background="{StaticResource NeonPinkBrush}" CornerRadius="3" Padding="6,2" Margin="0,0,8,0">
+                                                    <TextBlock Text="STEP 3" FontSize="10" FontWeight="Bold" Foreground="White"/>
+                                                </Border>
+                                                <TextBlock Text="Pin the key to a forced command (remote — SSH in and edit)" FontSize="14" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource TextPrimaryBrush}"/>
+                                            </StackPanel>
+                                            <TextBlock TextWrapping="Wrap" FontSize="12" LineHeight="18" Margin="0,0,0,8"
+                                                       Foreground="{StaticResource TextSecondaryBrush}"
+                                                       Text="SSH into the server and edit ~/.ssh/authorized_keys. Find the line you just appended (it ends with the comment claude-readonly-xman4289) and prepend the restrictions below. This is the second layer of defense — even if the brain's allow_patterns are bypassed, the server itself refuses unlisted commands."/>
+                                            <Border Background="#0D000000" Padding="12" CornerRadius="4">
+                                                <TextBox x:Name="SshSetupCode3" IsReadOnly="True" BorderThickness="0" Background="Transparent"
+                                                         FontFamily="{StaticResource MonoFont}" FontSize="12" TextWrapping="Wrap"
+                                                         Foreground="{StaticResource TextPrimaryBrush}"
+                                                         Text="command=&quot;/home/admin/bin/claude-readonly-shell&quot;,no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ssh-ed25519 AAAA...PASTE_PUBLIC_KEY... claude-readonly-xman4289"/>
+                                            </Border>
+                                            <Button Content="&#x1F4CB; Copy" Style="{StaticResource NavButton}" Padding="12,6"
+                                                    HorizontalAlignment="Right" Margin="0,8,0,0"
+                                                    Click="SshCopyStep_Click" Tag="SshSetupCode3"/>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- STEP 4 -->
+                                    <Border Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                        <StackPanel>
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                                <Border Background="{StaticResource NeonPinkBrush}" CornerRadius="3" Padding="6,2" Margin="0,0,8,0">
+                                                    <TextBlock Text="STEP 4" FontSize="10" FontWeight="Bold" Foreground="White"/>
+                                                </Border>
+                                                <TextBlock Text="Create the server-side allowlist shell (remote)" FontSize="14" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource TextPrimaryBrush}"/>
+                                            </StackPanel>
+                                            <TextBlock TextWrapping="Wrap" FontSize="12" LineHeight="18" Margin="0,0,0,8"
+                                                       Foreground="{StaticResource TextSecondaryBrush}"
+                                                       Text="The pinned `command=` from Step 3 points here. This script reads $SSH_ORIGINAL_COMMAND (what Claude tried to run) and re-checks it against the same allowlist on the server. Add new case patterns when you grow the profile."/>
+                                            <Border Background="#0D000000" Padding="12" CornerRadius="4">
+                                                <TextBox x:Name="SshSetupCode4" IsReadOnly="True" BorderThickness="0" Background="Transparent"
+                                                         FontFamily="{StaticResource MonoFont}" FontSize="12" TextWrapping="Wrap" AcceptsReturn="True"
+                                                         Foreground="{StaticResource TextPrimaryBrush}"
+                                                         Text="mkdir -p ~/bin&#x0A;cat &gt; ~/bin/claude-readonly-shell &lt;&lt;'SHELL'&#x0A;#!/bin/bash&#x0A;case &quot;$SSH_ORIGINAL_COMMAND&quot; in&#x0A;  &quot;exim -bpc&quot;|&quot;df -h&quot;|&quot;free -m&quot;|&quot;uptime&quot;) exec bash -c &quot;$SSH_ORIGINAL_COMMAND&quot; ;;&#x0A;  &quot;tail -n &quot;[0-9]*&quot; /var/log/&quot;*) exec bash -c &quot;$SSH_ORIGINAL_COMMAND&quot; ;;&#x0A;  &quot;wp option get &quot;*&quot; --path=/home/admin/domains/&quot;*) exec bash -c &quot;$SSH_ORIGINAL_COMMAND&quot; ;;&#x0A;  *) echo &quot;denied by claude-readonly-shell: $SSH_ORIGINAL_COMMAND&quot; &gt;&amp;2; exit 1 ;;&#x0A;esac&#x0A;SHELL&#x0A;chmod +x ~/bin/claude-readonly-shell"/>
+                                            </Border>
+                                            <Button Content="&#x1F4CB; Copy" Style="{StaticResource NavButton}" Padding="12,6"
+                                                    HorizontalAlignment="Right" Margin="0,8,0,0"
+                                                    Click="SshCopyStep_Click" Tag="SshSetupCode4"/>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- STEP 5 -->
+                                    <Border Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                        <StackPanel>
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                                <Border Background="{StaticResource NeonCyanBrush}" CornerRadius="3" Padding="6,2" Margin="0,0,8,0">
+                                                    <TextBlock Text="STEP 5" FontSize="10" FontWeight="Bold" Foreground="Black"/>
+                                                </Border>
+                                                <TextBlock Text="Register the profile in ssh-profiles.json (local)" FontSize="14" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource TextPrimaryBrush}"/>
+                                            </StackPanel>
+                                            <TextBlock TextWrapping="Wrap" FontSize="12" LineHeight="18" Margin="0,0,0,8"
+                                                       Foreground="{StaticResource TextSecondaryBrush}"
+                                                       Text="Click 'Open profiles.json' at the top, then paste this profile object inside the &quot;profiles&quot; array (replace the example-readonly placeholder if it's still there). The allow_patterns here MUST be a subset of (or equal to) the server-side cases in Step 4 — keep them in sync or you'll get unexpected denies."/>
+                                            <Border Background="#0D000000" Padding="12" CornerRadius="4">
+                                                <TextBox x:Name="SshSetupCode5" IsReadOnly="True" BorderThickness="0" Background="Transparent"
+                                                         FontFamily="{StaticResource MonoFont}" FontSize="12" TextWrapping="Wrap" AcceptsReturn="True"
+                                                         Foreground="{StaticResource TextPrimaryBrush}"
+                                                         Text="{}{&#x0A;  &quot;id&quot;: &quot;xman4289-readonly&quot;,&#x0A;  &quot;description&quot;: &quot;DirectAdmin host — log tails, exim queue, WP option reads. command= pinned on server.&quot;,&#x0A;  &quot;host&quot;: &quot;123.253.62.251&quot;,&#x0A;  &quot;port&quot;: 22,&#x0A;  &quot;user&quot;: &quot;admin&quot;,&#x0A;  &quot;key_path&quot;: &quot;C:\\\\Users\\\\xman\\\\.ssh\\\\claude_xman4289_readonly_ed25519&quot;,&#x0A;  &quot;allow_patterns&quot;: [&#x0A;    &quot;^exim -bpc$&quot;,&#x0A;    &quot;^df -h$&quot;,&#x0A;    &quot;^free -m$&quot;,&#x0A;    &quot;^uptime$&quot;,&#x0A;    &quot;^tail -n \\\\d+ /var/log/[\\\\w./-]+$&quot;,&#x0A;    &quot;^wp option get [\\\\w_-]+ --path=/home/admin/domains/[\\\\w.-]+/public_html$&quot;&#x0A;  ],&#x0A;  &quot;deny_patterns&quot;: [&quot;;&quot;, &quot;&amp;&amp;&quot;, &quot;\\\\|&quot;, &quot;&gt;&quot;, &quot;&gt;&gt;&quot;, &quot;\\\\$\\\\(&quot;, &quot;`&quot;, &quot;\\\\\\\\&quot;],&#x0A;  &quot;max_runtime_sec&quot;: 30,&#x0A;  &quot;audit_to_brain&quot;: true&#x0A;}"/>
+                                            </Border>
+                                            <Button Content="&#x1F4CB; Copy" Style="{StaticResource NavButton}" Padding="12,6"
+                                                    HorizontalAlignment="Right" Margin="0,8,0,0"
+                                                    Click="SshCopyStep_Click" Tag="SshSetupCode5"/>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- STEP 6 -->
+                                    <Border Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                        <StackPanel>
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                                <Border Background="{StaticResource NeonCyanBrush}" CornerRadius="3" Padding="6,2" Margin="0,0,8,0">
+                                                    <TextBlock Text="STEP 6" FontSize="10" FontWeight="Bold" Foreground="Black"/>
+                                                </Border>
+                                                <TextBlock Text="Restart Claude Code so the new MCP binary loads" FontSize="14" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource TextPrimaryBrush}"/>
+                                            </StackPanel>
+                                            <TextBlock TextWrapping="Wrap" FontSize="12" LineHeight="18" Margin="0,0,0,8"
+                                                       Foreground="{StaticResource TextSecondaryBrush}"
+                                                       Text="Close all Claude Code / Claude Desktop / CluadeX windows that have obsidianx-mcp running. Then open a fresh Claude Code session — it'll spawn obsidianx-mcp v2.5.0 which has the SSH tools registered."/>
+                                            <Border Background="#0D000000" Padding="12" CornerRadius="4">
+                                                <TextBox x:Name="SshSetupCode6" IsReadOnly="True" BorderThickness="0" Background="Transparent"
+                                                         FontFamily="{StaticResource MonoFont}" FontSize="12" TextWrapping="Wrap"
+                                                         Foreground="{StaticResource TextPrimaryBrush}"
+                                                         Text="Get-Process obsidianx-mcp -ErrorAction SilentlyContinue | Stop-Process -Force"/>
+                                            </Border>
+                                            <Button Content="&#x1F4CB; Copy" Style="{StaticResource NavButton}" Padding="12,6"
+                                                    HorizontalAlignment="Right" Margin="0,8,0,0"
+                                                    Click="SshCopyStep_Click" Tag="SshSetupCode6"/>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- STEP 7 -->
+                                    <Border Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                        <StackPanel>
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                                <Border Background="{StaticResource NeonCyanBrush}" CornerRadius="3" Padding="6,2" Margin="0,0,8,0">
+                                                    <TextBlock Text="STEP 7" FontSize="10" FontWeight="Bold" Foreground="Black"/>
+                                                </Border>
+                                                <TextBlock Text="Smoke test — ask Claude these 5 things in order" FontSize="14" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource TextPrimaryBrush}"/>
+                                            </StackPanel>
+                                            <TextBlock TextWrapping="Wrap" FontSize="12" LineHeight="18" Margin="0,0,0,8"
+                                                       Foreground="{StaticResource TextSecondaryBrush}"
+                                                       Text="Send these to a fresh Claude session. The 4th MUST be denied (proves the guard works); the 5th MUST be rejected by ssh_tail's path validator (proves shell-injection is impossible)."/>
+                                            <Border Background="#0D000000" Padding="12" CornerRadius="4">
+                                                <TextBox x:Name="SshSetupCode7" IsReadOnly="True" BorderThickness="0" Background="Transparent"
+                                                         FontFamily="{StaticResource MonoFont}" FontSize="12" TextWrapping="Wrap" AcceptsReturn="True"
+                                                         Foreground="{StaticResource TextPrimaryBrush}"
+                                                         Text="1) ดู SSH profile ที่มีให้หน่อย                  → ssh_profiles_list ต้องเจอ xman4289-readonly&#x0A;2) เช็คคิว mail ของเซิฟ xman4289                    → ssh_run exim -bpc ต้องคืนตัวเลข&#x0A;3) tail mainlog 50 บรรทัด                         → ssh_tail /var/log/exim/mainlog lines=50&#x0A;4) ลอง rm /tmp/test ดู                            → ssh_run rm ต้องได้ allowed:false reason=NotInAllowList&#x0A;5) เช็ค path: /var/log/x; rm -rf /                → ssh_tail ต้อง reject ที่ TailPathSafe"/>
+                                            </Border>
+                                            <Button Content="&#x1F4CB; Copy" Style="{StaticResource NavButton}" Padding="12,6"
+                                                    HorizontalAlignment="Right" Margin="0,8,0,0"
+                                                    Click="SshCopyStep_Click" Tag="SshSetupCode7"/>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- AUDIT FOOTNOTE -->
+                                    <Border Background="{StaticResource SurfaceBrush}" Padding="16" CornerRadius="6" Margin="0,8,0,0">
+                                        <StackPanel>
+                                            <TextBlock Text="VERIFY AUDIT AFTER SMOKE TEST" FontSize="11" FontWeight="SemiBold"
+                                                       Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,8"/>
+                                            <TextBlock TextWrapping="Wrap" FontSize="12" Margin="0,0,0,8"
+                                                       Foreground="{StaticResource TextSecondaryBrush}"
+                                                       Text="Click 'Open audit log' at the top — you should see new lines with node_id starting 'ssh:xman4289-readonly' and op fields ssh_ok / ssh_denied / ssh_mitm matching what you exercised."/>
+                                            <TextBlock TextWrapping="Wrap" FontSize="11" FontStyle="Italic"
+                                                       Foreground="{StaticResource TextMutedBrush}"
+                                                       Text="If a future connect ever returns host_key_mismatch=true, STOP. That means the server's host key changed — possible MITM, or someone reinstalled the box. Verify the new fingerprint manually before clearing the entry from ssh-known-hosts.txt."/>
+                                        </StackPanel>
+                                    </Border>
+
+                                </StackPanel>
+                            </ScrollViewer>
+
+                            <!-- ═════════════════════════════════════════════════ -->
+                            <!-- SSH PROFILE ADD / EDIT DIALOG (overlay)             -->
+                            <!-- Mirrors the Sharing tab's ScopeDialogOverlay        -->
+                            <!-- modal pattern. Visibility flipped from              -->
+                            <!-- MainWindow.Ssh.cs via OpenSshDialog().              -->
+                            <!-- ═════════════════════════════════════════════════ -->
+                            <Border x:Name="SshDialogOverlay" Visibility="Collapsed"
+                                    Background="#CC000000">
+                                <Border Width="620" MaxHeight="780" VerticalAlignment="Center"
+                                        HorizontalAlignment="Center"
+                                        Background="{StaticResource DarkPanelBrush}"
+                                        BorderBrush="{StaticResource ElectricPurpleBrush}" BorderThickness="1"
+                                        CornerRadius="10" Padding="0" Effect="{StaticResource PurpleGlow}">
+                                    <Grid>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="*"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+
+                                        <!-- Header -->
+                                        <Border Grid.Row="0" Background="{StaticResource SurfaceBrush}"
+                                                CornerRadius="10,10,0,0" Padding="20,14">
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel>
+                                                    <TextBlock x:Name="SshDialogTitle" Text="Add SSH profile"
+                                                               FontSize="18" FontWeight="Bold"
+                                                               Foreground="{StaticResource TextPrimaryBrush}"/>
+                                                    <TextBlock Text="Register a server Claude can dial. The key path stays local — only the connection metadata is written to ssh-profiles.json."
+                                                               FontSize="11" Foreground="{StaticResource TextSecondaryBrush}"
+                                                               Margin="0,2,0,0" TextWrapping="Wrap"/>
+                                                </StackPanel>
+                                                <Button Grid.Column="1" Content="&#x2715;" Style="{StaticResource NavButton}"
+                                                        Click="SshDialogClose_Click" Padding="8,2" FontSize="14"/>
+                                            </Grid>
+                                        </Border>
+
+                                        <!-- Body -->
+                                        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="20,12">
+                                            <StackPanel>
+                                                <!-- Profile Id -->
+                                                <TextBlock Text="Profile id (kebab-case, e.g. xman4289-readonly)" FontSize="11" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
+                                                <TextBox x:Name="SshDialogId" Padding="8,6" Margin="0,0,0,12"
+                                                         FontFamily="{StaticResource MonoFont}" FontSize="12"
+                                                         Background="{StaticResource SurfaceBrush}"
+                                                         Foreground="{StaticResource TextPrimaryBrush}"
+                                                         BorderBrush="{StaticResource SurfaceLightBrush}" BorderThickness="1"/>
+
+                                                <!-- Description -->
+                                                <TextBlock Text="Description (one line — shown in tool result + audit context)" FontSize="11" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
+                                                <TextBox x:Name="SshDialogDescription" Padding="8,6" Margin="0,0,0,12"
+                                                         FontSize="12"
+                                                         Background="{StaticResource SurfaceBrush}"
+                                                         Foreground="{StaticResource TextPrimaryBrush}"
+                                                         BorderBrush="{StaticResource SurfaceLightBrush}" BorderThickness="1"/>
+
+                                                <!-- Host + Port -->
+                                                <Grid Margin="0,0,0,12">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*"/>
+                                                        <ColumnDefinition Width="120"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <StackPanel>
+                                                        <TextBlock Text="Host (IP or DNS)" FontSize="11" FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
+                                                        <TextBox x:Name="SshDialogHost" Padding="8,6"
+                                                                 FontFamily="{StaticResource MonoFont}" FontSize="12"
+                                                                 Background="{StaticResource SurfaceBrush}"
+                                                                 Foreground="{StaticResource TextPrimaryBrush}"
+                                                                 BorderBrush="{StaticResource SurfaceLightBrush}" BorderThickness="1"/>
+                                                    </StackPanel>
+                                                    <StackPanel Grid.Column="1" Margin="8,0,0,0">
+                                                        <TextBlock Text="Port" FontSize="11" FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
+                                                        <TextBox x:Name="SshDialogPort" Text="22" Padding="8,6"
+                                                                 FontFamily="{StaticResource MonoFont}" FontSize="12"
+                                                                 Background="{StaticResource SurfaceBrush}"
+                                                                 Foreground="{StaticResource TextPrimaryBrush}"
+                                                                 BorderBrush="{StaticResource SurfaceLightBrush}" BorderThickness="1"/>
+                                                    </StackPanel>
+                                                </Grid>
+
+                                                <!-- User -->
+                                                <TextBlock Text="SSH username" FontSize="11" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
+                                                <TextBox x:Name="SshDialogUser" Padding="8,6" Margin="0,0,0,12"
+                                                         FontFamily="{StaticResource MonoFont}" FontSize="12"
+                                                         Background="{StaticResource SurfaceBrush}"
+                                                         Foreground="{StaticResource TextPrimaryBrush}"
+                                                         BorderBrush="{StaticResource SurfaceLightBrush}" BorderThickness="1"/>
+
+                                                <!-- Key path + Browse -->
+                                                <TextBlock Text="Private key path (absolute — never copied into the JSON, only the path)" FontSize="11" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
+                                                <Grid Margin="0,0,0,12">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*"/>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBox x:Name="SshDialogKeyPath" Padding="8,6"
+                                                             FontFamily="{StaticResource MonoFont}" FontSize="12"
+                                                             Background="{StaticResource SurfaceBrush}"
+                                                             Foreground="{StaticResource TextPrimaryBrush}"
+                                                             BorderBrush="{StaticResource SurfaceLightBrush}" BorderThickness="1"/>
+                                                    <Button Grid.Column="1" Content="Browse&#x2026;" Style="{StaticResource NavButton}"
+                                                            Click="SshDialogBrowseKey_Click" Padding="14,6" Margin="6,0,0,0" FontSize="11"/>
+                                                </Grid>
+
+                                                <!-- Passphrase -->
+                                                <TextBlock Text="Key passphrase (if the key is encrypted — masked)" FontSize="11" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
+                                                <PasswordBox x:Name="SshDialogPassphrase" Padding="8,6" Margin="0,0,0,4"
+                                                             FontSize="12"
+                                                             Background="{StaticResource SurfaceBrush}"
+                                                             Foreground="{StaticResource TextPrimaryBrush}"
+                                                             BorderBrush="{StaticResource SurfaceLightBrush}" BorderThickness="1"/>
+                                                <TextBlock Text="&#x26A0; Stored plaintext in ssh-profiles.json for Phase 1. Prefer a passphrase-less key with on-disk perms 600 + a command= pin on the server (see setup guide)."
+                                                           FontSize="10" TextWrapping="Wrap"
+                                                           Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,12"/>
+
+                                                <!-- Allow patterns (multiline) -->
+                                                <TextBlock Text="Allow patterns (one regex per line, anchored ^...$ recommended)" FontSize="11" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
+                                                <TextBox x:Name="SshDialogAllowPatterns" Padding="8,6" Margin="0,0,0,4"
+                                                         FontFamily="{StaticResource MonoFont}" FontSize="11"
+                                                         AcceptsReturn="True" TextWrapping="NoWrap" Height="110"
+                                                         VerticalScrollBarVisibility="Auto"
+                                                         HorizontalScrollBarVisibility="Auto"
+                                                         Background="{StaticResource SurfaceBrush}"
+                                                         Foreground="{StaticResource TextPrimaryBrush}"
+                                                         BorderBrush="{StaticResource SurfaceLightBrush}" BorderThickness="1"/>
+                                                <TextBlock Text="A command MUST fully match at least one pattern. Empty = no command allowed (default-deny)."
+                                                           FontSize="10" TextWrapping="Wrap"
+                                                           Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,12"/>
+
+                                                <!-- Deny patterns (multiline) -->
+                                                <TextBlock Text="Deny patterns (one per line — match anywhere → block)" FontSize="11" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource DangerBrush}" Margin="0,0,0,4"/>
+                                                <TextBox x:Name="SshDialogDenyPatterns" Padding="8,6" Margin="0,0,0,4"
+                                                         FontFamily="{StaticResource MonoFont}" FontSize="11"
+                                                         AcceptsReturn="True" TextWrapping="NoWrap" Height="80"
+                                                         VerticalScrollBarVisibility="Auto"
+                                                         Background="{StaticResource SurfaceBrush}"
+                                                         Foreground="{StaticResource TextPrimaryBrush}"
+                                                         BorderBrush="{StaticResource SurfaceLightBrush}" BorderThickness="1"/>
+                                                <TextBlock Text="Defaults are pre-filled with shell metacharacter blocks. Keep them — they catch foot-guns like `tail … ; rm -rf /`."
+                                                           FontSize="10" TextWrapping="Wrap"
+                                                           Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,12"/>
+
+                                                <!-- Runtime + checkboxes -->
+                                                <Grid Margin="0,0,0,12">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="160"/>
+                                                        <ColumnDefinition Width="*"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <StackPanel>
+                                                        <TextBlock Text="Max runtime (seconds)" FontSize="11" FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
+                                                        <TextBox x:Name="SshDialogMaxRuntime" Text="30" Padding="8,6"
+                                                                 FontFamily="{StaticResource MonoFont}" FontSize="12"
+                                                                 Background="{StaticResource SurfaceBrush}"
+                                                                 Foreground="{StaticResource TextPrimaryBrush}"
+                                                                 BorderBrush="{StaticResource SurfaceLightBrush}" BorderThickness="1"/>
+                                                    </StackPanel>
+                                                    <StackPanel Grid.Column="1" Margin="16,0,0,0" VerticalAlignment="Bottom">
+                                                        <CheckBox x:Name="SshDialogRequireConfirm"
+                                                                  Content="Require confirmation every call (for destructive profiles)"
+                                                                  Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,6"/>
+                                                        <CheckBox x:Name="SshDialogAuditToBrain" IsChecked="True"
+                                                                  Content="Audit every call to brain access-log"
+                                                                  Foreground="{StaticResource TextPrimaryBrush}"/>
+                                                    </StackPanel>
+                                                </Grid>
+                                            </StackPanel>
+                                        </ScrollViewer>
+
+                                        <!-- Footer -->
+                                        <Border Grid.Row="2" Background="{StaticResource SurfaceBrush}"
+                                                CornerRadius="0,0,10,10" Padding="20,12">
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock x:Name="SshDialogError" Text="" Grid.Column="0"
+                                                           Foreground="{StaticResource DangerBrush}" FontSize="11"
+                                                           VerticalAlignment="Center" TextWrapping="Wrap"/>
+                                                <Button Grid.Column="1" Content="Cancel" Style="{StaticResource NavButton}"
+                                                        Click="SshDialogClose_Click" Margin="8,0" Padding="14,6"/>
+                                                <Button Grid.Column="2" x:Name="SshDialogSaveBtn" Content="Save"
+                                                        Style="{StaticResource NeonButtonFilled}"
+                                                        Click="SshDialogSave_Click" Padding="18,6"/>
+                                            </Grid>
+                                        </Border>
+                                    </Grid>
+                                </Border>
                             </Border>
                         </Grid>
 

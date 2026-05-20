@@ -221,7 +221,8 @@ public partial class MainWindow : Window
         ["Settings"] = "SettingsView",
         ["Editor"] = "EditorView",
         ["Search"] = "SearchView",
-        ["Import"] = "ImportView"
+        ["Import"] = "ImportView",
+        ["Ssh"] = "SshView"
     };
 
     public MainWindow()
@@ -7056,7 +7057,7 @@ public partial class MainWindow : Window
             if (view != null) view.Visibility = Visibility.Visible;
         }
 
-        Button[] navButtons = [NavDashboard, NavBrainGraph, NavUniverse, NavNetwork, NavEditor, NavVault, NavSearch, NavClaude, NavGrowth, NavTokens, NavInsights, NavPeers, NavSharing, NavImport, NavSettings];
+        Button[] navButtons = [NavDashboard, NavBrainGraph, NavUniverse, NavNetwork, NavEditor, NavVault, NavSearch, NavClaude, NavGrowth, NavTokens, NavInsights, NavPeers, NavSharing, NavSsh, NavImport, NavSettings];
         foreach (var nb in navButtons) nb.Style = (Style)FindResource("NavButton");
         btn.Style = (Style)FindResource("NavButtonActive");
 
@@ -7071,6 +7072,7 @@ public partial class MainWindow : Window
         if (tag == "Vault") RefreshVaultTree();
         if (tag == "Universe") _ = InitializeUniverseAsync();
         if (tag == "Sharing") RefreshSharingScreen();
+        if (tag == "Ssh") RefreshSshView();
     }
 
     // ═══════════════════════════════════════
@@ -12327,7 +12329,7 @@ public partial class MainWindow : Window
             if (v != null) v.Visibility = Visibility.Collapsed;
         }
         EditorView.Visibility = Visibility.Visible;
-        Button[] navButtons = [NavDashboard, NavBrainGraph, NavUniverse, NavNetwork, NavEditor, NavVault, NavSearch, NavClaude, NavGrowth, NavTokens, NavInsights, NavPeers, NavSharing, NavImport, NavSettings];
+        Button[] navButtons = [NavDashboard, NavBrainGraph, NavUniverse, NavNetwork, NavEditor, NavVault, NavSearch, NavClaude, NavGrowth, NavTokens, NavInsights, NavPeers, NavSharing, NavSsh, NavImport, NavSettings];
         foreach (var nb in navButtons) nb.Style = (Style)FindResource("NavButton");
         NavEditor.Style = (Style)FindResource("NavButtonActive");
     }

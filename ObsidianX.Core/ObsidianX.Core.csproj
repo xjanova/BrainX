@@ -24,6 +24,10 @@
          BrainIdentity falls back to plaintext on other platforms with a
          console warning. -->
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.11" />
+    <!-- SSH client for the brain's owner-realm SSH tools (Renci SSH.NET).
+         Used by SshExecutor to dial whitelisted hosts on Claude's behalf
+         so the model can grep logs / read config without prompting. -->
+    <PackageReference Include="SSH.NET" Version="2024.2.0" />
   </ItemGroup>
 
 </Project>

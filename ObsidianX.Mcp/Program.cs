@@ -17,11 +17,11 @@ using ObsidianX.Core.Services;
 
 namespace ObsidianX.Mcp;
 
-internal static class Program
+internal static partial class Program
 {
     private const string ProtocolVersion = "2025-06-18";
     private const string ServerName = "obsidianx-brain";
-    internal const string ServerVersion = "2.4.0";
+    internal const string ServerVersion = "2.5.1";
 
     /// <summary>
     /// Build a one-line version string including the bound assembly's
@@ -196,9 +196,24 @@ internal static class Program
             "AT SESSION END (when user says 'พรุ่งนี้คุยต่อ' / 'save session' / 'handoff' / 'พักก่อน'):\n" +
             "  → Write a #session-handoff note in Notes/Claude-Sessions/ with: branch, files touched, what shipped, what's pending, gotchas, deploy steps, open questions.\n" +
             "  → The SessionStart hook auto-injects the most recent #session-handoff into the next Claude's context — a good handoff means the next session starts at full context.\n\n" +
+            "WHEN THE QUESTION INVOLVES SERVER STATE (logs, processes, mail queue, WP/DB config, file existence, deploy status, anything on a remote host the owner runs):\n" +
+            "  1. Call ssh_profiles_list FIRST to see which hosts the owner has authorized for this brain.\n" +
+            "  2. If a relevant profile exists, run ssh_run or ssh_tail BEFORE asking the owner to check it manually. Cite the profile_id + matched_pattern in your reply so the owner sees what was inspected.\n" +
+            "  3. If the command is denied (allowed:false), the profile's allow_patterns don't cover that command yet — read the deny reason, suggest a narrower command that DOES match, or fall back to asking the user.\n" +
+            "  4. If host_key_mismatch:true appears in the result — STOP and flag it loudly. This is a possible MITM or unapproved rekey. Don't retry; ask the owner to verify the server's fingerprint manually before doing anything else.\n" +
+            "  Skip SSH only when the question is clearly NOT about server state (code review, planning, brainstorming, brain-content questions).\n\n" +
+            "WHEN A SSH PROFILE HAS require_confirmation:true (returned by ssh_profiles_list):\n" +
+            "  This is the owner's signal that the profile carries WRITE / DESTRUCTIVE commands (deploys, restarts, cache flushes, config edits). The auto-run rule above does NOT apply — instead:\n" +
+            "  1. NEVER call ssh_run on that profile without asking the user FIRST in chat.\n" +
+            "  2. Show the EXACT command you plan to run + the profile_id + what it will modify. Use the user's language.\n" +
+            "  3. Wait for explicit go: 'ok'/'yes'/'ใช่'/'ทำเลย'/'go'/'do it' = approved. 'no'/'ไม่'/'stop'/'หยุด' = abort and propose an alternative.\n" +
+            "  4. After execution, briefly summarise what changed (exit_code, stdout highlights) and remind the owner the action is in access-log.ndjson under op=ssh_ok or ssh_fail.\n" +
+            "  5. If the owner gives blanket approval like 'just do them all' for a multi-step deploy, you may chain calls without re-asking BETWEEN steps — but stop and report the moment any step returns allowed:false / success:false / host_key_mismatch:true.\n" +
+            "  This rule exists because the only thing standing between Claude and 'rm -rf' on a production server is the allowlist + your judgment. The owner trusts you to use both.\n\n" +
             "═══ TOOL MENU ════════════════════════════════════════════════\n\n" +
             "READ:  brain_search (keyword) · brain_semantic_search (embeddings) · brain_walk (graph traversal — start at note(s), expand N hops via wiki-links, returns subgraph + edges) · brain_get_note · brain_get_backlinks · brain_list · brain_scope_list (enumerate folder namespaces) · brain_stats · brain_expertise · brain_synthesize (top-K full-content bundle) · brain_bundle (~500-token pre-built bundle by topic) · brain_bundles_list · brain_suggest_links · brain_find_contradictions (LLM-verified) · brain_suggest_topics (gap analysis)\n" +
             "WRITE: brain_create_note · brain_append_note · brain_remember · brain_import_path\n" +
+            "SSH:   ssh_profiles_list (enumerate authorized hosts) · ssh_run (exec a whitelisted command via profile_id) · ssh_tail (last N lines of a remote file) — owner-realm only, NEVER over BrainHub. Use these to grep logs, check status, read config before asking the user. Audit reaches access-log.ndjson with op=ssh_ok|ssh_fail|ssh_denied|ssh_mitm.\n" +
             "REVIEW QUEUE: submit_for_review · fetch_review_queue · post_review_verdict (Co-Pilot Arena bridge)\n\n" +
             "═══ EFFICIENCY ══════════════════════════════════════════════\n\n" +
             "Prefer brain_walk over chained brain_search + brain_get_backlinks when exploring 'what's near X'. One walk = one call = one logged event.\n" +
@@ -573,6 +588,45 @@ internal static class Program
                         ["notes"] = new JObject { ["type"] = "string", ["description"] = "verdict notes — required for 'revise', helpful for 'rejected'" }
                     },
                     ["required"] = new JArray { "id", "verdict" }
+                }),
+            Tool("ssh_profiles_list",
+                "List the SSH profiles the owner has registered for this brain. Returns id, host, user, " +
+                "description, and how many allow-patterns each profile has. Call this FIRST before ssh_run " +
+                "so you know which profile id to pass. Profiles live in .obsidianx/ssh-profiles.json — if " +
+                "the list is empty the owner hasn't set any up yet.",
+                new JObject { ["type"] = "object", ["properties"] = new JObject() }),
+            Tool("ssh_run",
+                "Run a read-only diagnostic command on a whitelisted server, via the SSH profile named by " +
+                "profile_id. The command MUST match one of the profile's allow_patterns — anything else " +
+                "is denied without dialing. Returns stdout, stderr, exit_code, matched_pattern. Use this " +
+                "to grep server logs, check process status, read config files BEFORE asking the user. " +
+                "Examples: profile_id='xman4289-readonly' command='exim -bpc'. Per-call timeout from the " +
+                "profile (default 30s).",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["profile_id"] = new JObject { ["type"] = "string", ["description"] = "id from ssh_profiles_list" },
+                        ["command"] = new JObject { ["type"] = "string", ["description"] = "the shell command to run remotely; must match a profile allow_pattern" }
+                    },
+                    ["required"] = new JArray { "profile_id", "command" }
+                }),
+            Tool("ssh_tail",
+                "Read the last N lines of a remote file via the profile's whitelisted commands. Convenience " +
+                "wrapper over ssh_run that constructs 'tail -n <lines> <path>'. The constructed command " +
+                "must still pass the profile's allow_patterns — typical pattern: ^tail -n \\d+ /var/log/.*. " +
+                "Default lines=200.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["profile_id"] = new JObject { ["type"] = "string" },
+                        ["path"] = new JObject { ["type"] = "string", ["description"] = "absolute remote file path" },
+                        ["lines"] = new JObject { ["type"] = "integer", ["default"] = 200, ["description"] = "tail size (1..5000)" }
+                    },
+                    ["required"] = new JArray { "profile_id", "path" }
                 })
         }
     });
@@ -619,6 +673,9 @@ internal static class Program
                 "submit_for_review"         => SubmitForReview(args),
                 "fetch_review_queue"        => FetchReviewQueue(args),
                 "post_review_verdict"       => PostReviewVerdict(args),
+                "ssh_profiles_list"         => SshProfilesList(),
+                "ssh_run"                   => SshRun(args),
+                "ssh_tail"                  => SshTail(args),
                 _ => throw new InvalidOperationException($"unknown tool: {name}")
             };
 
