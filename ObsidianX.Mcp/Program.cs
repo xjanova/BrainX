@@ -114,6 +114,17 @@ internal static partial class Program
         }
         catch (Exception ex) { Log($"brain rules install failed: {ex.Message}"); }
 
+        // Self-heal Claude Desktop's claude_desktop_config.json so its UI
+        // sidebar shows the version we're actually running. Desktop doesn't
+        // render serverInfo.version anywhere visible — owners verify the
+        // running version under Advanced options → Environment variables,
+        // where OBSIDIANX_MCP_VERSION lives. If that env var lags behind
+        // ServerVersion (because the user upgraded the binary without
+        // re-running register-claude), rewrite it here. Effect lands on
+        // the NEXT Claude Desktop restart, not this session.
+        try { EnsureDesktopConfigVersion(); }
+        catch (Exception ex) { Log($"desktop config self-heal failed (non-fatal): {ex.Message}"); }
+
         // If ObsidianX client isn't running, bring it up. The MCP server
         // is spawned by Claude Desktop / Claude Code on first connection,
         // so this effectively "opens the brain visualiser automatically"
@@ -3513,6 +3524,71 @@ internal static partial class Program
     private static void Log(string msg)
     {
         try { Console.Error.WriteLine($"[obsidianx-mcp] {msg}"); } catch { }
+    }
+
+    /// <summary>
+    /// Self-healing version stamp in Claude Desktop's config. Walks
+    /// %APPDATA%/Claude/claude_desktop_config.json, finds any
+    /// "obsidianx-brain*" entry, and rewrites its OBSIDIANX_MCP_VERSION
+    /// env var to <see cref="ServerVersion"/> if the two disagree.
+    ///
+    /// Why this exists: Claude Desktop's Settings → Developer UI doesn't
+    /// render the MCP <c>serverInfo.version</c> field anywhere, so the
+    /// only way to verify "the running binary is what I think it is" is
+    /// via the env var shown under Advanced options. If the owner upgrades
+    /// the binary without re-running <c>obsidianx-mcp register-claude</c>,
+    /// the env var lies. This method closes that gap automatically —
+    /// effect lands on the NEXT Claude Desktop restart, not this session.
+    ///
+    /// Idempotent: only rewrites when values disagree, and never touches
+    /// other config entries. Fails silently — config write errors must
+    /// not break MCP startup.
+    /// </summary>
+    private static void EnsureDesktopConfigVersion()
+    {
+        var configPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "Claude", "claude_desktop_config.json");
+        if (!File.Exists(configPath)) return;     // No Desktop install → nothing to heal
+
+        string raw;
+        try { raw = File.ReadAllText(configPath); }
+        catch (IOException) { return; }
+
+        JObject json;
+        try { json = JObject.Parse(raw); }
+        catch (JsonReaderException) { return; }   // Corrupt config — let the owner fix it manually
+
+        if (json["mcpServers"] is not JObject servers) return;
+
+        bool changed = false;
+        foreach (var prop in servers.Properties())
+        {
+            if (!prop.Name.StartsWith("obsidianx-brain", StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (prop.Value is not JObject entry) continue;
+
+            var env = entry["env"] as JObject;
+            if (env == null)
+            {
+                env = new JObject();
+                entry["env"] = env;
+            }
+
+            var current = env["OBSIDIANX_MCP_VERSION"]?.ToString();
+            if (!string.Equals(current, ServerVersion, StringComparison.Ordinal))
+            {
+                env["OBSIDIANX_MCP_VERSION"] = ServerVersion;
+                Log($"desktop config: bumped OBSIDIANX_MCP_VERSION on \"{prop.Name}\" {current ?? "(unset)"} -> {ServerVersion}");
+                changed = true;
+            }
+        }
+
+        if (changed)
+        {
+            try { File.WriteAllText(configPath, json.ToString(Newtonsoft.Json.Formatting.Indented)); }
+            catch (IOException ex) { Log($"desktop config write failed: {ex.Message}"); }
+        }
     }
 
     /// <summary>

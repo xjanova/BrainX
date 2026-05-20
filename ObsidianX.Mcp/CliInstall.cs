@@ -27,12 +27,13 @@ internal static class CliInstall
 {
     /// <summary>
     /// The MCP server's stable name in both Claude Code CLI and Claude
-    /// Desktop config. NEVER suffix this with a version (e.g.
-    /// "obsidianx-brain v2.4.0") — the label in Claude Desktop's UI comes
-    /// from this key directly, so baking the version in here freezes the
-    /// displayed version at install time even when the binary is upgraded.
-    /// Version lookup is delegated to the binary's serverInfo response on
-    /// every fresh handshake — that path is always accurate.
+    /// Desktop config. NEVER suffix this with a version — the label
+    /// shown in Claude Desktop's sidebar comes from this key directly,
+    /// so baking the version in here freezes the displayed name across
+    /// binary upgrades. Version lives in the OBSIDIANX_MCP_VERSION env
+    /// var instead (visible under Advanced options) and the MCP server
+    /// self-heals that var to <c>ServerVersion</c> on every boot — see
+    /// <c>EnsureDesktopConfigVersion</c> in Program.cs.
     /// </summary>
     public const string McpServerName = "obsidianx-brain";
 
@@ -45,7 +46,7 @@ internal static class CliInstall
         Console.WriteLine("  obsidianx-mcp <vault-path>              Run as MCP server with explicit vault path");
         Console.WriteLine("  obsidianx-mcp install [options]         Install brain-first rules + print MCP registration");
         Console.WriteLine("  obsidianx-mcp register-claude [--vault] Re-register this binary with Claude Code (auto-includes");
-        Console.WriteLine("                                          server name stays \"obsidianx-brain\"; version comes from binary, not the config)");
+        Console.WriteLine("                                          server name stays \"obsidianx-brain\"; OBSIDIANX_MCP_VERSION env var is self-healed on every MCP boot)");
         Console.WriteLine("  obsidianx-mcp bake-bundles [options]    Pre-bake ~500-token context bundles for top topics so");
         Console.WriteLine("                                          brain_bundle <topic> answers in ONE cheap MCP call");
         Console.WriteLine("  obsidianx-mcp --version | -v | version  Print version + binary path + build time");
@@ -110,15 +111,16 @@ internal static class CliInstall
         Console.WriteLine();
         Console.WriteLine("  Run this once to register the MCP server with Claude Code:");
         Console.WriteLine();
-        // Server name stays "obsidianx-brain" forever — no version suffix,
-        // no version env var. Both UI surfaces (Claude Code CLI's
-        // `claude mcp get` and Claude Desktop's Settings → Developer)
-        // pick up the real version from the binary's serverInfo response
-        // on every handshake. Baking it into the config froze the label
-        // at install time and caused stale "v2.4.0" labels to outlive the
-        // binary by months.
+        // Server name stays "obsidianx-brain" forever — no version suffix
+        // in the key. OBSIDIANX_MCP_VERSION env var IS written though, so
+        // Claude Desktop's Advanced options panel can show what's running.
+        // To stop the env var from going stale after binary upgrades, the
+        // MCP server self-heals it on boot (EnsureDesktopConfigVersion in
+        // Program.cs) — the user sees the updated value on the NEXT
+        // Claude Desktop restart after upgrading.
         Console.WriteLine($"    claude mcp add {McpServerName} \"{exePath}\" \"{vault}\" \\");
-        Console.WriteLine($"      -e OBSIDIANX_VAULT=\"{vault}\"");
+        Console.WriteLine($"      -e OBSIDIANX_VAULT=\"{vault}\" \\");
+        Console.WriteLine($"      -e OBSIDIANX_MCP_VERSION={Program.ServerVersion}");
         Console.WriteLine();
         Console.WriteLine("  Or let this binary do it for you (removes any existing registration first):");
         Console.WriteLine();
@@ -136,7 +138,8 @@ internal static class CliInstall
                     ["args"] = new JArray { vault },
                     ["env"] = new JObject
                     {
-                        ["OBSIDIANX_VAULT"] = vault
+                        ["OBSIDIANX_VAULT"] = vault,
+                        ["OBSIDIANX_MCP_VERSION"] = Program.ServerVersion
                     }
                 }
             }
@@ -273,12 +276,15 @@ internal static class CliInstall
 
     /// <summary>
     /// One-shot `claude mcp` registration. Replaces any existing
-    /// "obsidianx-brain" entry with one that points at THIS exe. Does NOT
-    /// write an OBSIDIANX_MCP_VERSION env var or version-suffix the server
-    /// name (lesson from 2026-05-20: hardcoding version in the config makes
-    /// Claude Desktop's UI label freeze at install time when the binary
-    /// upgrades). Version is reported by the binary's serverInfo response
-    /// on every handshake — that's always current.
+    /// "obsidianx-brain*" entry with one that points at THIS exe.
+    ///
+    /// Server name is the stable <see cref="McpServerName"/> — no version
+    /// suffix in the key. OBSIDIANX_MCP_VERSION env var IS written so the
+    /// version is visible in `claude mcp get` and Claude Desktop's
+    /// Advanced options panel; the MCP server itself self-heals that env
+    /// var on every boot (see <c>EnsureDesktopConfigVersion</c> in
+    /// Program.cs) so it stays accurate across binary upgrades even when
+    /// the owner forgets to re-run register-claude.
     /// </summary>
     public static async Task<int> RegisterClaudeAsync(string[] args)
     {
@@ -298,10 +304,12 @@ internal static class CliInstall
             Console.WriteLine();
             Console.WriteLine("Registers this binary with Claude Code by running the equivalent of:");
             Console.WriteLine("  claude mcp remove obsidianx-brain -s local   (if it exists)");
-            Console.WriteLine("  claude mcp add obsidianx-brain <exe> <vault> -e OBSIDIANX_VAULT=<vault>");
+            Console.WriteLine("  claude mcp add obsidianx-brain <exe> <vault> -e OBSIDIANX_VAULT=<vault> -e OBSIDIANX_MCP_VERSION=<v>");
             Console.WriteLine();
-            Console.WriteLine("Server name is always \"obsidianx-brain\" — no version suffix. Version is");
-            Console.WriteLine("served by the binary's MCP initialize handshake on every connect.");
+            Console.WriteLine("Server name is always \"obsidianx-brain\" — no version suffix in the key.");
+            Console.WriteLine("OBSIDIANX_MCP_VERSION env var surfaces the running version under");
+            Console.WriteLine("Claude Desktop's Advanced options. The MCP server self-heals this var");
+            Console.WriteLine("on every boot if the binary's ServerVersion has moved past it.");
             return 0;
         }
 
@@ -327,20 +335,21 @@ internal static class CliInstall
         var rc = await RunClaudeAsync(
             "mcp", "add", McpServerName,
             exePath, vault,
-            "-e", $"OBSIDIANX_VAULT={vault}"
+            "-e", $"OBSIDIANX_VAULT={vault}",
+            "-e", $"OBSIDIANX_MCP_VERSION={Program.ServerVersion}"
         ).ConfigureAwait(false);
         if (rc != 0)
         {
             Console.WriteLine($"  ✗ `claude mcp add` exited with code {rc}. Run it manually:");
-            Console.WriteLine($"    claude mcp add {McpServerName} \"{exePath}\" \"{vault}\" -e OBSIDIANX_VAULT=\"{vault}\"");
+            Console.WriteLine($"    claude mcp add {McpServerName} \"{exePath}\" \"{vault}\" -e OBSIDIANX_VAULT=\"{vault}\" -e OBSIDIANX_MCP_VERSION={Program.ServerVersion}");
             return rc;
         }
         Console.WriteLine("[3/3] Claude Desktop: updating claude_desktop_config.json...");
         UpdateClaudeDesktopConfig(exePath, vault);
         Console.WriteLine();
         Console.WriteLine($"✓ Done. Verify in TWO places:");
-        Console.WriteLine($"  • Claude Code CLI: `claude mcp get {McpServerName}` — command + env var");
-        Console.WriteLine($"  • Claude Desktop:  Settings → Developer → Local MCP servers — see \"{McpServerName}\" (version v{Program.ServerVersion} comes from the binary's serverInfo handshake, not the config)");
+        Console.WriteLine($"  • Claude Code CLI: `claude mcp get {McpServerName}` — see OBSIDIANX_MCP_VERSION={Program.ServerVersion}");
+        Console.WriteLine($"  • Claude Desktop:  Settings → Developer → Local MCP servers → \"{McpServerName}\" → Advanced options → Environment variables");
         Console.WriteLine($"  RESTART both Claude Code and Claude Desktop to pick up the new config.");
         return 0;
     }
@@ -349,8 +358,11 @@ internal static class CliInstall
     /// Update Claude Desktop's `claude_desktop_config.json` to register
     /// THIS exe under the stable <see cref="McpServerName"/> key. Desktop's
     /// UI shows the key name in its sidebar — keeping it unversioned means
-    /// the label stays correct across binary upgrades. Version reaches the
-    /// UI through the JSON-RPC initialize handshake.
+    /// the label stays correct across binary upgrades. The running version
+    /// is stamped into <c>env.OBSIDIANX_MCP_VERSION</c> so it's visible in
+    /// the Advanced options panel; <c>EnsureDesktopConfigVersion</c>
+    /// (Program.cs) self-heals that value on every MCP boot so it never
+    /// drifts behind the binary.
     ///
     /// Removes any existing key starting with "obsidianx-brain" to clean up
     /// older version-suffixed entries (e.g. legacy "obsidianx-brain v2.4.0"
@@ -405,7 +417,8 @@ internal static class CliInstall
             ["args"] = new JArray(),
             ["env"] = new JObject
             {
-                ["OBSIDIANX_VAULT"] = vault
+                ["OBSIDIANX_VAULT"] = vault,
+                ["OBSIDIANX_MCP_VERSION"] = Program.ServerVersion
             }
         };
 
