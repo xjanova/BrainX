@@ -525,8 +525,13 @@
                                         </Border>
                                     </Grid>
 
-                                    <!-- 3D Brain Map (full width) with glassmorphism Expertise overlay -->
-                                    <Border Style="{StaticResource CardPanel}" Margin="0,0,0,20" MinHeight="520">
+                                    <!-- 3D Brain Map (full width) with glassmorphism Expertise overlay.
+                                         Phase 2: outer Border swapped to NeuralCard so the depth + corner
+                                         radius matches the rest of the Dashboard surfaces. Inner viewport +
+                                         overlay still use cyberpunk styling; full Map chrome migration
+                                         (toolbar restyle, glass overlay redo) is a later commit. -->
+                                    <Border Style="{StaticResource NeuralCard}" Margin="0,0,0,20" MinHeight="520"
+                                            Padding="16,12">
                                         <Grid>
                                             <Grid.RowDefinitions>
                                                 <RowDefinition Height="Auto"/>
@@ -747,20 +752,29 @@
                                             </Grid>
                                         </Border>
 
-                                    <!-- Quick Actions -->
-                                    <Border Style="{StaticResource CardPanel}">
+                                    <!-- Quick Actions (Neural redesign — Phase 2)
+                                         NeuralCard wrapper + TypeCardTitle label + NeuralBtn / NeuralBtnPrimary
+                                         buttons. Re-index Vault is the only action with a side effect on the
+                                         entire knowledge graph, so it gets the primary violet treatment; the
+                                         other three are secondary (ghost = no decoration, default = card-tinted). -->
+                                    <Border Style="{StaticResource NeuralCard}" Padding="22,18">
                                         <StackPanel>
-                                            <TextBlock Text="QUICK ACTIONS" FontSize="11" FontWeight="SemiBold"
-                                                       Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,12"/>
+                                            <TextBlock Text="QUICK ACTIONS"
+                                                       Style="{StaticResource TypeCardTitle}"
+                                                       Margin="0,0,0,14"/>
                                             <WrapPanel>
-                                                <Button Content="&#x1F504; Re-index Vault" Style="{StaticResource NeonButton}"
-                                                        Click="ReindexVault_Click" Margin="0,0,8,8"/>
-                                                <Button Content="&#x1F4D6; Open in Obsidian" Style="{StaticResource NeonButton}"
-                                                        Click="OpenObsidian_Click" Margin="0,0,8,8"/>
-                                                <Button Content="&#x1F310; Join Network" Style="{StaticResource NeonButton}"
-                                                        Click="JoinNetwork_Click" Margin="0,0,8,8"/>
-                                                <Button Content="&#x1F4CA; Export Stats" Style="{StaticResource NeonButton}"
-                                                        Click="ExportStats_Click" Margin="0,0,8,8"/>
+                                                <Button Content="&#x1F504;  Re-index Vault"
+                                                        Style="{StaticResource NeuralBtnPrimary}"
+                                                        Click="ReindexVault_Click" Margin="0,0,10,10"/>
+                                                <Button Content="&#x1F4D6;  Open in Obsidian"
+                                                        Style="{StaticResource NeuralBtn}"
+                                                        Click="OpenObsidian_Click" Margin="0,0,10,10"/>
+                                                <Button Content="&#x1F310;  Join Network"
+                                                        Style="{StaticResource NeuralBtn}"
+                                                        Click="JoinNetwork_Click" Margin="0,0,10,10"/>
+                                                <Button Content="&#x1F4CA;  Export Stats"
+                                                        Style="{StaticResource NeuralBtnGhost}"
+                                                        Click="ExportStats_Click" Margin="0,0,10,10"/>
                                             </WrapPanel>
                                         </StackPanel>
                                     </Border>
