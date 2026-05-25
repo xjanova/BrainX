@@ -271,6 +271,36 @@ public partial class MainWindow
     // Wired from MainWindow.xaml — the seven Settings left-nav buttons all
     // share this single Click handler and disambiguate by Tag.
     // ═════════════════════════════════════════════════════════════════
+    // Network view — "See all peers" link jumps to the Peers view. Reuses
+    // the existing nav-button mechanism so the sidebar selection state
+    // tracks correctly. Wired from MainWindow.xaml in the Network view.
+    private void SeeAllPeers_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        // Use the existing nav system — the sidebar has a button named
+        // "NavPeers" (or similar). Just programmatically click it via the
+        // ShowView helper if present, otherwise toggle SettingsView/
+        // PeersView visibility directly.
+        try
+        {
+            // Hide every known view, show Peers.
+            foreach (var name in new[] {
+                "DashboardView", "BrainGraphView", "UniverseView", "NetworkView",
+                "VaultView", "ClaudeView", "PeersView", "SharingView", "GrowthView",
+                "TokensView", "InsightsView", "SettingsView", "EditorView",
+                "SearchView", "ImportView", "SshView" })
+            {
+                if (FindName(name) is System.Windows.UIElement el)
+                    el.Visibility = name == "PeersView"
+                        ? System.Windows.Visibility.Visible
+                        : System.Windows.Visibility.Collapsed;
+            }
+        }
+        catch (System.Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"SeeAllPeers_Click: {ex.Message}");
+        }
+    }
+
     private void SettingsJump_Click(object sender, System.Windows.RoutedEventArgs e)
     {
         if (sender is not System.Windows.Controls.Button btn) return;

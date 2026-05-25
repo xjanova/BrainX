@@ -1732,106 +1732,223 @@
                             </Border>
                         </Grid>
 
-                        <!-- Network View -->
+                        <!-- ═══ NETWORK VIEW ═══
+                             Per t2.zip screenshot 08-network.png + README §8:
+                             - Left card 1fr: pulse ring + "Connected to mesh"
+                               + auto-match toggle + 3-stat grid (Online /
+                               Discovered / Best Match).
+                             - Right card 2fr: "TOP EXPERTISE MATCHES" header
+                               + MatchResultsList of expert peers.
+                             All existing x:Names + Click handlers preserved
+                             (NetworkPeerCount, NetStatNodes/Words/Shares,
+                             JoinNetwork_Click, LeaveNetwork_Click,
+                             MatchCategoryCombo, FindExperts_Click,
+                             MatchResultsList). Only chrome changed. -->
                         <Grid x:Name="NetworkView" Visibility="Collapsed">
-                            <Grid Margin="24,16">
+                            <Grid Margin="28,24,28,16">
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
-                                <StackPanel Margin="0,0,0,22">
-                                    <TextBlock Text="Network" Style="{StaticResource TypeViewTitle}"/>
-                                    <TextBlock Text="Connect to the BrainX mesh · find brains by overlapping expertise"
-                                               Style="{StaticResource TypeViewSubtitle}"/>
-                                </StackPanel>
-                                <Grid Grid.Row="1">
+                                <Grid Margin="0,0,0,22">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*"/>
-                                        <ColumnDefinition Width="320"/>
+                                        <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
-                                    <Border Grid.Column="0" Style="{StaticResource CardPanel}" Margin="0,0,12,0">
+                                    <StackPanel Grid.Column="0">
+                                        <TextBlock Text="Network" Style="{StaticResource TypeViewTitle}"/>
+                                        <TextBlock Text="Connect to the BrainX mesh · find brains by overlapping expertise"
+                                                   Style="{StaticResource TypeViewSubtitle}"/>
+                                    </StackPanel>
+                                    <!-- Reconnect = Join button rebadged so it lives in the title row per screenshot. -->
+                                    <Button Grid.Column="1" x:Name="JoinNetworkBtn"
+                                            Content="&#x2728;  Reconnect"
+                                            Click="JoinNetwork_Click"
+                                            Style="{StaticResource NeonButtonFilled}"
+                                            Padding="14,7" VerticalAlignment="Center"/>
+                                </Grid>
+                                <Grid Grid.Row="1">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="1*"/>
+                                        <ColumnDefinition Width="2*"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <!-- LEFT CARD — pulse + 3-stat grid. -->
+                                    <Border Grid.Column="0" Style="{StaticResource NeuralCard}"
+                                            Padding="26" Margin="0,0,7,0">
                                         <StackPanel>
-                                            <TextBlock Text="NETWORK STATUS" FontSize="11" FontWeight="SemiBold"
-                                                       Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,20"/>
-                                            <Border HorizontalAlignment="Center" Width="200" Height="200" CornerRadius="100"
-                                                    Margin="0,20" BorderBrush="{StaticResource SurfaceLightBrush}" BorderThickness="2">
-                                                <Grid>
-                                                    <Ellipse Width="160" Height="160" Opacity="0.1">
-                                                        <Ellipse.Fill>
-                                                            <RadialGradientBrush>
-                                                                <GradientStop Color="{DynamicResource ElectricPurpleColor}" Offset="0"/>
-                                                                <GradientStop Color="Transparent" Offset="1"/>
-                                                            </RadialGradientBrush>
-                                                        </Ellipse.Fill>
-                                                    </Ellipse>
-                                                    <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
-                                                        <TextBlock x:Name="NetworkPeerCount" Text="0" FontSize="42"
-                                                                   FontWeight="Bold" Foreground="{StaticResource ElectricPurpleBrush}"
-                                                                   HorizontalAlignment="Center" FontFamily="{StaticResource MonoFont}"/>
-                                                        <TextBlock Text="ACTIVE PEERS" FontSize="10"
-                                                                   Foreground="{StaticResource TextMutedBrush}" HorizontalAlignment="Center"/>
-                                                    </StackPanel>
-                                                </Grid>
-                                            </Border>
-                                            <!-- Network Stats -->
-                                            <Grid Margin="0,12,0,0">
+                                            <!-- PULSE — 3 concentric rings (CSS-spec animation) + 60 px
+                                                 violet core. Static for now; the animation Storyboard
+                                                 can be wired post-redesign (the spec animation is 3
+                                                 staggered "ping" keyframes scaling 1→2.6 over 2.2s). -->
+                                            <Grid Width="220" Height="220" HorizontalAlignment="Center" Margin="0,16,0,18">
+                                                <Ellipse Width="180" Height="180" Opacity="0.16"
+                                                         Stroke="#9d7bff" StrokeThickness="1.4"/>
+                                                <Ellipse Width="130" Height="130" Opacity="0.28"
+                                                         Stroke="#9d7bff" StrokeThickness="1.4"/>
+                                                <Ellipse Width="88"  Height="88"  Opacity="0.42"
+                                                         Stroke="#9d7bff" StrokeThickness="1.4"/>
+                                                <!-- 60 px violet gradient core, top-edge highlight via 1 px lighter stroke. -->
+                                                <Border Width="60" Height="60" CornerRadius="30"
+                                                        BorderBrush="#33FFFFFF" BorderThickness="1"
+                                                        Effect="{StaticResource ShadowAccent}">
+                                                    <Border.Background>
+                                                        <RadialGradientBrush>
+                                                            <GradientStop Color="#C9B5FF" Offset="0"/>
+                                                            <GradientStop Color="#9d7bff" Offset="0.6"/>
+                                                            <GradientStop Color="#6a48d6" Offset="1"/>
+                                                        </RadialGradientBrush>
+                                                    </Border.Background>
+                                                </Border>
+                                            </Grid>
+
+                                            <!-- Headline + subtitle -->
+                                            <TextBlock Text="Connected to mesh" FontSize="18" FontWeight="Bold"
+                                                       Foreground="{StaticResource NeuralText}"
+                                                       HorizontalAlignment="Center"/>
+                                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,4,0,0">
+                                                <TextBlock x:Name="NetworkPeerCount" Text="0" FontSize="13"
+                                                           FontFamily="{StaticResource FontMono}" FontWeight="Medium"
+                                                           Foreground="{StaticResource NeuralText2}"/>
+                                                <TextBlock Text=" brains online" FontSize="13"
+                                                           FontWeight="Medium" Foreground="{StaticResource NeuralText2}"/>
+                                                <TextBlock x:Name="NetworkPingRangeText" Text=" · 19–134 ms" FontSize="13"
+                                                           FontFamily="{StaticResource FontMono}" FontWeight="Medium"
+                                                           Foreground="{StaticResource NeuralText3}"/>
+                                            </StackPanel>
+
+                                            <!-- Divider -->
+                                            <Border Height="1" Background="{StaticResource NeuralLine}" Margin="0,20,0,16"/>
+
+                                            <!-- Auto-match toggle row -->
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Grid.Column="0">
+                                                    <TextBlock Text="Auto-match by expertise" FontSize="13.5" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource NeuralText}"/>
+                                                    <TextBlock Text="Surface peers when overlap &gt; 60%" FontSize="12"
+                                                               FontWeight="Medium" Margin="0,2,0,0"
+                                                               Foreground="{StaticResource NeuralText3}"/>
+                                                </StackPanel>
+                                                <CheckBox Grid.Column="1" x:Name="AutoMatchToggle"
+                                                          VerticalAlignment="Center" IsChecked="True"/>
+                                            </Grid>
+
+                                            <!-- Divider -->
+                                            <Border Height="1" Background="{StaticResource NeuralLine}" Margin="0,16,0,18"/>
+
+                                            <!-- 3-stat grid (Online / Discovered / Best Match). Existing
+                                                 x:Names repurposed semantically: NetStatNodes → Discovered,
+                                                 NetStatWords → Best Match. -->
+                                            <Grid>
                                                 <Grid.ColumnDefinitions>
                                                     <ColumnDefinition Width="*"/>
                                                     <ColumnDefinition Width="*"/>
                                                     <ColumnDefinition Width="*"/>
                                                 </Grid.ColumnDefinitions>
                                                 <StackPanel Grid.Column="0" HorizontalAlignment="Center">
-                                                    <TextBlock x:Name="NetStatNodes" Text="0" FontSize="18" FontWeight="Bold"
-                                                               Foreground="{StaticResource NeonCyanBrush}" HorizontalAlignment="Center"
-                                                               FontFamily="{StaticResource MonoFont}"/>
-                                                    <TextBlock Text="Nodes" FontSize="9" Foreground="{StaticResource TextMutedBrush}"
-                                                               HorizontalAlignment="Center"/>
+                                                    <TextBlock x:Name="NetStatOnline" Text="0" FontSize="22" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText}"
+                                                               HorizontalAlignment="Center"
+                                                               Typography.NumeralAlignment="Tabular"/>
+                                                    <TextBlock Text="ONLINE" FontSize="10.5" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource NeuralText3}"
+                                                               HorizontalAlignment="Center" Margin="0,2,0,0"/>
                                                 </StackPanel>
                                                 <StackPanel Grid.Column="1" HorizontalAlignment="Center">
-                                                    <TextBlock x:Name="NetStatWords" Text="0" FontSize="18" FontWeight="Bold"
-                                                               Foreground="{StaticResource NeonGreenBrush}" HorizontalAlignment="Center"
-                                                               FontFamily="{StaticResource MonoFont}"/>
-                                                    <TextBlock Text="Words" FontSize="9" Foreground="{StaticResource TextMutedBrush}"
-                                                               HorizontalAlignment="Center"/>
+                                                    <TextBlock x:Name="NetStatNodes" Text="0" FontSize="22" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText}"
+                                                               HorizontalAlignment="Center"
+                                                               Typography.NumeralAlignment="Tabular"/>
+                                                    <TextBlock Text="DISCOVERED" FontSize="10.5" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource NeuralText3}"
+                                                               HorizontalAlignment="Center" Margin="0,2,0,0"/>
                                                 </StackPanel>
                                                 <StackPanel Grid.Column="2" HorizontalAlignment="Center">
-                                                    <TextBlock x:Name="NetStatShares" Text="0" FontSize="18" FontWeight="Bold"
-                                                               Foreground="{StaticResource NeonPinkBrush}" HorizontalAlignment="Center"
-                                                               FontFamily="{StaticResource MonoFont}"/>
-                                                    <TextBlock Text="Shares" FontSize="9" Foreground="{StaticResource TextMutedBrush}"
-                                                               HorizontalAlignment="Center"/>
+                                                    <TextBlock x:Name="NetStatWords" Text="0%" FontSize="22" FontWeight="Bold"
+                                                               Foreground="#4AE3A7"
+                                                               HorizontalAlignment="Center"
+                                                               Typography.NumeralAlignment="Tabular"/>
+                                                    <TextBlock Text="BEST MATCH" FontSize="10.5" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource NeuralText3}"
+                                                               HorizontalAlignment="Center" Margin="0,2,0,0"/>
                                                 </StackPanel>
                                             </Grid>
 
-                                            <Button x:Name="JoinNetworkBtn" Content="&#x1F310; Join BrainX Network"
-                                                    Click="JoinNetwork_Click"
-                                                    Style="{StaticResource NeonButtonFilled}" HorizontalAlignment="Center" Margin="0,20,0,0"/>
+                                            <!-- Disconnect button — kept (collapsed by default; code-behind shows when connected). -->
                                             <Button x:Name="LeaveNetworkBtn" Content="Disconnect"
                                                     Click="LeaveNetwork_Click" Visibility="Collapsed"
-                                                    Style="{StaticResource NeonButton}" HorizontalAlignment="Center" Margin="0,8,0,0"
-                                                    Foreground="{StaticResource DangerBrush}" BorderBrush="{StaticResource DangerBrush}"/>
+                                                    Style="{StaticResource NeonButton}" HorizontalAlignment="Center"
+                                                    Margin="0,20,0,0"
+                                                    Foreground="{StaticResource DangerBrush}"
+                                                    BorderBrush="{StaticResource DangerBrush}"/>
+                                            <!-- Hidden NetStatShares preserved for code-behind compat — never displayed. -->
+                                            <TextBlock x:Name="NetStatShares" Visibility="Collapsed"/>
                                         </StackPanel>
                                     </Border>
-                                    <Border Grid.Column="1" Style="{StaticResource CardPanel}">
-                                        <StackPanel>
-                                            <TextBlock Text="FIND EXPERT BRAINS" FontSize="11" FontWeight="SemiBold"
-                                                       Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,12"/>
-                                            <TextBlock Text="Search Category" FontSize="11"
-                                                       Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
-                                            <ComboBox x:Name="MatchCategoryCombo" Margin="0,0,0,12"
-                                                      Background="{StaticResource SurfaceBrush}"
-                                                      Foreground="{StaticResource TextPrimaryBrush}"/>
-                                            <Button Content="&#x1F50E; Find Experts" Click="FindExperts_Click"
-                                                    Style="{StaticResource NeonButtonFilled}" Margin="0,0,0,16"/>
-                                            <TextBlock Text="RESULTS" FontSize="10" Foreground="{StaticResource TextMutedBrush}"
-                                                       Margin="0,0,0,8"/>
-                                            <ScrollViewer MaxHeight="200" VerticalScrollBarVisibility="Auto">
+
+                                    <!-- RIGHT CARD — TOP EXPERTISE MATCHES list. -->
+                                    <Border Grid.Column="1" Style="{StaticResource NeuralCard}"
+                                            Padding="22" Margin="7,0,0,0">
+                                        <Grid>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto"/>
+                                                <RowDefinition Height="Auto"/>
+                                                <RowDefinition Height="*"/>
+                                            </Grid.RowDefinitions>
+
+                                            <!-- Header row -->
+                                            <Grid Grid.Row="0" Margin="0,0,0,12">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Orientation="Horizontal" Grid.Column="0">
+                                                    <TextBlock Text="TOP EXPERTISE MATCHES" FontSize="12.5" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText1}"
+                                                               VerticalAlignment="Center"/>
+                                                    <TextBlock Text=" · brains with overlap &gt; 60%" FontSize="12.5"
+                                                               FontWeight="Medium"
+                                                               Foreground="{StaticResource NeuralText3}"
+                                                               VerticalAlignment="Center"/>
+                                                </StackPanel>
+                                                <TextBlock Grid.Column="1" Text="See all peers" FontSize="12"
+                                                           FontWeight="Medium" Foreground="#9d7bff"
+                                                           VerticalAlignment="Center" Cursor="Hand"
+                                                           MouseLeftButtonUp="SeeAllPeers_Click"/>
+                                            </Grid>
+
+                                            <!-- Category combo + Find Experts (compact row, kept from
+                                                 original — code-behind FindExperts_Click populates the list). -->
+                                            <Grid Grid.Row="1" Margin="0,0,0,14">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <ComboBox x:Name="MatchCategoryCombo" Grid.Column="0"
+                                                          Background="{StaticResource NeuralBgInset}"
+                                                          Foreground="{StaticResource NeuralText1}"
+                                                          FontSize="12"/>
+                                                <Button Grid.Column="1" Content="&#x1F50E; Find Experts"
+                                                        Click="FindExperts_Click"
+                                                        Style="{StaticResource NavButton}"
+                                                        Padding="14,6" Margin="8,0,0,0"/>
+                                            </Grid>
+
+                                            <!-- Results list -->
+                                            <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto"
+                                                          HorizontalScrollBarVisibility="Disabled">
                                                 <StackPanel x:Name="MatchResultsList">
-                                                    <TextBlock Text="Connect to network first" FontSize="11"
-                                                               Foreground="{StaticResource TextMutedBrush}" FontStyle="Italic"/>
+                                                    <TextBlock Text="Click ✦ Reconnect to discover expert brains, or pick a category and ⌕ Find Experts."
+                                                               FontSize="12"
+                                                               Foreground="{StaticResource NeuralText3}"
+                                                               FontStyle="Italic" TextWrapping="Wrap"/>
                                                 </StackPanel>
                                             </ScrollViewer>
-                                        </StackPanel>
+                                        </Grid>
                                     </Border>
                                 </Grid>
                             </Grid>
