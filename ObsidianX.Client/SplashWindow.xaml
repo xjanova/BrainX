@@ -1,0 +1,150 @@
+<Window x:Class="ObsidianX.Client.SplashWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="ObsidianX"
+        Width="520" Height="400"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterScreen"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ShowInTaskbar="False"
+        Topmost="True">
+    <!-- The splash runs on its OWN STA thread (see App.xaml.cs).
+         That keeps its animation smooth even when MainWindow's
+         constructor is hogging the main UI thread during heavy
+         init (XAML parse, brain-export load, WebView2 spin-up).
+         Cyberpunk palette is hardcoded here because the splash
+         thread can't safely share Application.Resources from the
+         main thread without cross-thread access errors. -->
+    <Window.Resources>
+        <SolidColorBrush x:Key="BgDark" Color="#FF0A081C"/>
+        <SolidColorBrush x:Key="BgPanel" Color="#FF12102B"/>
+        <SolidColorBrush x:Key="BorderNeon" Color="#886CF0FF"/>
+        <SolidColorBrush x:Key="NeonCyan" Color="#FF6CF0FF"/>
+        <SolidColorBrush x:Key="NeonMagenta" Color="#FFFF2E94"/>
+        <SolidColorBrush x:Key="NeonGreen" Color="#FF6CFFA8"/>
+        <SolidColorBrush x:Key="TextBright" Color="#FFE8E6FF"/>
+        <SolidColorBrush x:Key="TextMuted" Color="#88A0A8C8"/>
+        <SolidColorBrush x:Key="TextDim" Color="#55808AA8"/>
+        <FontFamily x:Key="MonoFont">Consolas, JetBrains Mono, Cascadia Mono</FontFamily>
+    </Window.Resources>
+
+    <Border CornerRadius="14"
+            BorderBrush="{StaticResource BorderNeon}"
+            BorderThickness="1"
+            ClipToBounds="True">
+        <Border.Background>
+            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                <GradientStop Color="#FF0E0C24" Offset="0"/>
+                <GradientStop Color="#FF160F3A" Offset="0.55"/>
+                <GradientStop Color="#FF0A081C" Offset="1"/>
+            </LinearGradientBrush>
+        </Border.Background>
+
+        <Grid Margin="28,24">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <!-- title block -->
+                <RowDefinition Height="Auto"/>
+                <!-- neon underline -->
+                <RowDefinition Height="*"/>
+                <!-- stage list -->
+                <RowDefinition Height="Auto"/>
+                <!-- footer brain-stats -->
+            </Grid.RowDefinitions>
+
+            <!-- ═══════════ TITLE BLOCK ═══════════ -->
+            <StackPanel Grid.Row="0" HorizontalAlignment="Center">
+                <TextBlock x:Name="LogoText"
+                           Text="◆ OBSIDIANX ◆"
+                           FontSize="32"
+                           FontWeight="Bold"
+                           Foreground="{StaticResource NeonCyan}"
+                           HorizontalAlignment="Center"
+                           Margin="0,0,0,4"
+                           RenderTransformOrigin="0.5,0.5">
+                    <TextBlock.Effect>
+                        <DropShadowEffect Color="#FF6CF0FF" BlurRadius="20" ShadowDepth="0" Opacity="0.85"/>
+                    </TextBlock.Effect>
+                    <TextBlock.RenderTransform>
+                        <ScaleTransform x:Name="LogoScale" ScaleX="1" ScaleY="1"/>
+                    </TextBlock.RenderTransform>
+                    <TextBlock.Triggers>
+                        <!-- Soft breathing pulse — gives the splash life
+                             without distracting from the stage list. -->
+                        <EventTrigger RoutedEvent="TextBlock.Loaded">
+                            <BeginStoryboard>
+                                <Storyboard RepeatBehavior="Forever" AutoReverse="True">
+                                    <DoubleAnimation
+                                        Storyboard.TargetName="LogoScale"
+                                        Storyboard.TargetProperty="ScaleX"
+                                        From="1.0" To="1.04"
+                                        Duration="0:0:1.4"/>
+                                    <DoubleAnimation
+                                        Storyboard.TargetName="LogoScale"
+                                        Storyboard.TargetProperty="ScaleY"
+                                        From="1.0" To="1.04"
+                                        Duration="0:0:1.4"/>
+                                </Storyboard>
+                            </BeginStoryboard>
+                        </EventTrigger>
+                    </TextBlock.Triggers>
+                </TextBlock>
+                <TextBlock Text="Neural Knowledge Network"
+                           FontSize="11"
+                           FontFamily="{StaticResource MonoFont}"
+                           Foreground="{StaticResource TextMuted}"
+                           HorizontalAlignment="Center"
+                           Margin="0,0,0,2"/>
+                <TextBlock x:Name="VersionText"
+                           Text="v2.6.0"
+                           FontSize="10"
+                           FontFamily="{StaticResource MonoFont}"
+                           Foreground="{StaticResource NeonMagenta}"
+                           HorizontalAlignment="Center"/>
+            </StackPanel>
+
+            <!-- ═══════════ ANIMATED PROGRESS LINE ═══════════ -->
+            <Grid Grid.Row="1" Height="2" Margin="0,18,0,12">
+                <Rectangle Fill="{StaticResource BgPanel}"/>
+                <Rectangle x:Name="ProgressFill"
+                           Fill="{StaticResource NeonCyan}"
+                           HorizontalAlignment="Left"
+                           Width="0">
+                    <Rectangle.Effect>
+                        <DropShadowEffect Color="#FF6CF0FF" BlurRadius="8" ShadowDepth="0" Opacity="0.9"/>
+                    </Rectangle.Effect>
+                </Rectangle>
+            </Grid>
+
+            <!-- ═══════════ STAGE LIST ═══════════
+                 Populated programmatically by AppendStage() so each
+                 stage can flip its glyph (⠋ → ✓) as Report fires. -->
+            <ScrollViewer Grid.Row="2"
+                          VerticalScrollBarVisibility="Disabled"
+                          HorizontalScrollBarVisibility="Disabled"
+                          Margin="6,0">
+                <StackPanel x:Name="StageList" Orientation="Vertical"/>
+            </ScrollViewer>
+
+            <!-- ═══════════ FOOTER — brain stats ═══════════ -->
+            <StackPanel Grid.Row="3" HorizontalAlignment="Center" Margin="0,12,0,0">
+                <TextBlock x:Name="BrainStatsText"
+                           FontSize="10"
+                           FontFamily="{StaticResource MonoFont}"
+                           Foreground="{StaticResource TextDim}"
+                           HorizontalAlignment="Center"
+                           Text=""/>
+                <TextBlock x:Name="SubtitleText"
+                           FontSize="9"
+                           FontFamily="{StaticResource MonoFont}"
+                           Foreground="{StaticResource TextDim}"
+                           HorizontalAlignment="Center"
+                           FontStyle="Italic"
+                           Margin="0,4,0,0"
+                           Text="เปิดสมองของคุณ..."/>
+            </StackPanel>
+        </Grid>
+    </Border>
+</Window>

@@ -5,6 +5,8 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows;
+using System.Windows.Threading;
+using ObsidianX.Client.Services;
 
 namespace ObsidianX.Client;
 
@@ -73,6 +75,33 @@ public partial class App : Application
         {
             Debug.WriteLine($"Shortcut setup failed: {ex.Message}");
         }
+
+        // v2.6.1+ — splash before MainWindow.
+        // We removed StartupUri from App.xaml so we can sequence things:
+        //   1. Spin up the splash on its own STA thread (it paints + animates
+        //      immediately, independent of the main UI thread).
+        //   2. Defer MainWindow construction to ApplicationIdle so the splash
+        //      gets a chance to render fully before the heavy work begins.
+        //   3. MainWindow emits StartupProgress.Report at milestones; splash
+        //      ticks them live.
+        //   4. MainWindow's Loaded handler calls StartupProgress.Complete()
+        //      → splash fades + closes itself.
+        try
+        {
+            SplashWindow.LaunchOnDedicatedThread();
+            StartupProgress.Report("Booting ObsidianX...", 0.05, tag: "boot");
+        }
+        catch (Exception ex) { Debug.WriteLine($"Splash launch failed (non-fatal): {ex.Message}"); }
+
+        // Defer MainWindow creation so the splash thread has a real chance
+        // to paint + run its entry animations before MainWindow's heavy
+        // constructor seizes the dispatcher.
+        Dispatcher.InvokeAsync(() =>
+        {
+            var main = new MainWindow();
+            MainWindow = main;
+            main.Show();
+        }, DispatcherPriority.Loaded);
     }
 
     protected override void OnExit(ExitEventArgs e)

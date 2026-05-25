@@ -2057,6 +2057,8 @@ public partial class MainWindow : Window
 
     private void Window_Loaded(object sender, RoutedEventArgs e)
     {
+        Services.StartupProgress.Report("Loading theme & resources", 0.10, tag: "theme");
+
         var pulse = (Storyboard)FindResource("PulseAnimation");
         pulse.Begin();
 
@@ -2065,12 +2067,22 @@ public partial class MainWindow : Window
         // refreshes the bottom-bar label if a newer build is available.
         // Doesn't block startup — UX nicety only.
         _ = CheckLatestReleaseAsync();
+
+        Services.StartupProgress.Report("Initializing brain identity", 0.22, tag: "identity");
         InitializeIdentity();
+
         LoadSettingsFromFile();
         ApplyUiTheme(_uiTheme);
         ApplyBgDim();
         PopulateThemeList();
+
+        Services.StartupProgress.Report("Indexing vault notes", 0.42, tag: "index");
         IndexVault();
+        Services.StartupProgress.Report(
+            $"Loaded {_graph.TotalNodes:N0} notes · {_graph.TotalEdges:N0} wiki-links",
+            0.55, tag: "index");
+
+        Services.StartupProgress.Report("Checking Claude MCP connection", 0.62, tag: "mcp");
         CheckClaudeConnection();
 
         // Load physics
@@ -2133,6 +2145,7 @@ public partial class MainWindow : Window
         UniverseGraph2D.SetTheme(_themeAccent, _themeSecondary);
 
         // Populate UI
+        Services.StartupProgress.Report("Wiring UI panels", 0.78, tag: "ui");
         UpdateUI();
         PopulateMatchCategories();
         PopulateSettings();
@@ -2149,6 +2162,7 @@ public partial class MainWindow : Window
         // (it loads three.js from CDN + the brain-export, taking 1-2 s).
         // Deferred via Dispatcher.ContextIdle so the rest of Window_Loaded
         // returns first and the splash visuals settle before WebView spins.
+        Services.StartupProgress.Report("Initializing Universe galaxy", 0.92, tag: "universe");
         Dispatcher.BeginInvoke(new Action(() => _ = InitializeUniverseAsync()),
             System.Windows.Threading.DispatcherPriority.ContextIdle);
         _ = LoadAiBackends();
@@ -2222,6 +2236,12 @@ public partial class MainWindow : Window
 
         // Start render loop
         CompositionTarget.Rendering += OnRenderFrame;
+
+        // All synchronous boot work is done. Universe galaxy still
+        // loading in the background (scheduled at ContextIdle) but
+        // the user can already see + interact with the app — dismiss
+        // the splash. The Universe will fade in behind it.
+        Services.StartupProgress.Complete();
     }
 
     // ═══════════════════════════════════════
