@@ -320,41 +320,28 @@
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
 
-                            <!-- Brand crest per t2.zip — 132 px rounded card with the Logo
-                                 brain inside, framed by a soft violet halo. Replaces the
-                                 earlier 180 px Logo with a cyan-ring PulseRing that was
-                                 way too big for the t2.zip layout. Logo gets a soft radial
-                                 opacity mask so the corners fade into the card surface. -->
+                            <!-- Brand crest — user: "เอาออกมาจากวงกลม ให้พอดีกับสี่เหลี่ยม".
+                                 Removed the Ellipse PulseRing and the RadialGradientBrush
+                                 opacity mask; the Logo now fills the 132 px rounded
+                                 rectangle edge-to-edge (UniformToFill + clipped to the
+                                 card's corner radius). x:Name="PulseRing" preserved on
+                                 a zero-size dummy so code-behind animations that ref it
+                                 don't NRE. -->
                             <Border Grid.Row="0" Height="132" Margin="14,16,14,10"
                                     CornerRadius="16"
-                                    BorderBrush="{StaticResource NeuralLineStrong}" BorderThickness="1">
-                                <Border.Background>
-                                    <RadialGradientBrush GradientOrigin="0.5,0.45" Center="0.5,0.45"
-                                                         RadiusX="0.7" RadiusY="0.7">
-                                        <GradientStop Color="#449d7bff" Offset="0"/>
-                                        <GradientStop Color="#14140c2e" Offset="0.65"/>
-                                        <GradientStop Color="#00100a26" Offset="1"/>
-                                    </RadialGradientBrush>
-                                </Border.Background>
+                                    BorderBrush="{StaticResource NeuralLineStrong}" BorderThickness="1"
+                                    ClipToBounds="True">
                                 <Border.Effect>
                                     <DropShadowEffect Color="#9d7bff" BlurRadius="28"
                                                       ShadowDepth="0" Opacity="0.45"/>
                                 </Border.Effect>
                                 <Grid>
-                                    <Ellipse x:Name="PulseRing" Width="118" Height="118" Opacity="0.35"
-                                             StrokeThickness="1.5" Stroke="{StaticResource NeuralViolet2}"/>
                                     <Image Source="pack://application:,,,/Assets/Logo.png"
-                                           Width="108" Height="108" Stretch="Uniform"
-                                           RenderOptions.BitmapScalingMode="HighQuality">
-                                        <Image.OpacityMask>
-                                            <RadialGradientBrush Center="0.5,0.5" GradientOrigin="0.5,0.5"
-                                                                 RadiusX="0.55" RadiusY="0.55">
-                                                <GradientStop Color="#FFFFFFFF" Offset="0"/>
-                                                <GradientStop Color="#FFFFFFFF" Offset="0.6"/>
-                                                <GradientStop Color="#00FFFFFF" Offset="1"/>
-                                            </RadialGradientBrush>
-                                        </Image.OpacityMask>
-                                    </Image>
+                                           Stretch="UniformToFill"
+                                           RenderOptions.BitmapScalingMode="HighQuality"/>
+                                    <!-- Dummy zero-size element so code-behind that animates
+                                         PulseRing (Storyboard target via FindName) keeps working. -->
+                                    <Ellipse x:Name="PulseRing" Width="0" Height="0" Opacity="0"/>
                                 </Grid>
                             </Border>
 
@@ -371,28 +358,141 @@
                                          ═══════════════════════════════════════════════════════════ -->
                                     <TextBlock Text="NAVIGATION" FontSize="10" Foreground="{StaticResource TextMutedBrush}"
                                                Margin="22,8,0,12" FontWeight="SemiBold"/>
-                                    <!-- v2.0.96 had Universe as the default active view; Dashboard
-                                         and Brain Graph were both hidden. User: "ยึดเมนูรุ่น 2.0.96". -->
-                                    <Button x:Name="NavUniverse" Content="&#x1F30C;  Universe"
-                                            Style="{StaticResource NavButtonActive}" Click="Nav_Click" Tag="Universe"/>
+                                    <!-- Dashboard restored to the menu + default active view per
+                                         user "เพิ่ม หน้า dashboard". Each row now uses a 2-col
+                                         Grid (label | kbd chip) per t2.zip screenshot. The kbd
+                                         chip is a small NeuralBgInset pill on the right edge. -->
+                                    <Button x:Name="NavDashboard" Style="{StaticResource NavButtonActive}"
+                                            Click="Nav_Click" Tag="Dashboard">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="&#x2B21;  Dashboard"
+                                                       VerticalAlignment="Center"/>
+                                            <Border Grid.Column="1" Background="#22FFFFFF"
+                                                    BorderBrush="{StaticResource NeuralLine}" BorderThickness="1"
+                                                    CornerRadius="5" Padding="6,1" VerticalAlignment="Center">
+                                                <TextBlock Text="&#x2318;1" FontSize="10.5"
+                                                           FontFamily="{StaticResource FontMono}"
+                                                           Foreground="#CCFFFFFF"/>
+                                            </Border>
+                                        </Grid>
+                                    </Button>
+                                    <Button x:Name="NavUniverse" Style="{StaticResource NavButton}"
+                                            Click="Nav_Click" Tag="Universe">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="&#x1F30C;  Universe"
+                                                       VerticalAlignment="Center"/>
+                                            <Border Grid.Column="1" Background="{StaticResource NeuralBgInset}"
+                                                    BorderBrush="{StaticResource NeuralLine}" BorderThickness="1"
+                                                    CornerRadius="5" Padding="6,1" VerticalAlignment="Center">
+                                                <TextBlock Text="&#x2318;2" FontSize="10.5"
+                                                           FontFamily="{StaticResource FontMono}"
+                                                           Foreground="{StaticResource NeuralTextDim}"/>
+                                            </Border>
+                                        </Grid>
+                                    </Button>
                                     <Button x:Name="NavBrainGraph" Content="&#x25C9;  Brain Graph"
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="BrainGraph"
                                             Visibility="Collapsed"/>
-                                    <Button x:Name="NavDashboard" Content="&#x2B21;  Dashboard (legacy)"
-                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Dashboard"
-                                            Visibility="Collapsed"/>
                                     <Button x:Name="NavNetwork" Content="&#x2B22;  Network"
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Network"/>
-                                    <Button x:Name="NavEditor" Content="&#x270F;  Editor"
-                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Editor"/>
-                                    <Button x:Name="NavVault" Content="&#x1F4C1;  Vault Explorer"
-                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Vault"/>
-                                    <Button x:Name="NavSearch" Content="&#x1F50D;  Search"
-                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Search"/>
-                                    <Button x:Name="NavClaude" Content="&#x1F4AC;  AI Chat"
-                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Claude"/>
-                                    <Button x:Name="NavGrowth" Content="&#x1F4C8;  Growth"
-                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Growth"/>
+                                    <Button x:Name="NavEditor" Style="{StaticResource NavButton}"
+                                            Click="Nav_Click" Tag="Editor">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="&#x270F;  Editor"
+                                                       VerticalAlignment="Center"/>
+                                            <Border Grid.Column="1" Background="{StaticResource NeuralBgInset}"
+                                                    BorderBrush="{StaticResource NeuralLine}" BorderThickness="1"
+                                                    CornerRadius="5" Padding="6,1" VerticalAlignment="Center">
+                                                <TextBlock Text="&#x2318;E" FontSize="10.5"
+                                                           FontFamily="{StaticResource FontMono}"
+                                                           Foreground="{StaticResource NeuralTextDim}"/>
+                                            </Border>
+                                        </Grid>
+                                    </Button>
+                                    <Button x:Name="NavVault" Style="{StaticResource NavButton}"
+                                            Click="Nav_Click" Tag="Vault">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="&#x1F4C1;  Vault Explorer"
+                                                       VerticalAlignment="Center"/>
+                                            <Border Grid.Column="1" Background="{StaticResource NeuralBgInset}"
+                                                    BorderBrush="{StaticResource NeuralLine}" BorderThickness="1"
+                                                    CornerRadius="5" Padding="6,1" VerticalAlignment="Center">
+                                                <TextBlock Text="&#x2318;B" FontSize="10.5"
+                                                           FontFamily="{StaticResource FontMono}"
+                                                           Foreground="{StaticResource NeuralTextDim}"/>
+                                            </Border>
+                                        </Grid>
+                                    </Button>
+                                    <Button x:Name="NavSearch" Style="{StaticResource NavButton}"
+                                            Click="Nav_Click" Tag="Search">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="&#x1F50D;  Search"
+                                                       VerticalAlignment="Center"/>
+                                            <Border Grid.Column="1" Background="{StaticResource NeuralBgInset}"
+                                                    BorderBrush="{StaticResource NeuralLine}" BorderThickness="1"
+                                                    CornerRadius="5" Padding="6,1" VerticalAlignment="Center">
+                                                <TextBlock Text="&#x2318;F" FontSize="10.5"
+                                                           FontFamily="{StaticResource FontMono}"
+                                                           Foreground="{StaticResource NeuralTextDim}"/>
+                                            </Border>
+                                        </Grid>
+                                    </Button>
+                                    <Button x:Name="NavClaude" Style="{StaticResource NavButton}"
+                                            Click="Nav_Click" Tag="Claude">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="&#x1F4AC;  AI Chat"
+                                                       VerticalAlignment="Center"/>
+                                            <Border Grid.Column="1" Background="{StaticResource NeuralBgInset}"
+                                                    BorderBrush="{StaticResource NeuralLine}" BorderThickness="1"
+                                                    CornerRadius="5" Padding="6,1" VerticalAlignment="Center">
+                                                <TextBlock Text="&#x2318;K" FontSize="10.5"
+                                                           FontFamily="{StaticResource FontMono}"
+                                                           Foreground="{StaticResource NeuralTextDim}"/>
+                                            </Border>
+                                        </Grid>
+                                    </Button>
+                                    <Button x:Name="NavGrowth" Style="{StaticResource NavButton}"
+                                            Click="Nav_Click" Tag="Growth">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="&#x1F4C8;  Growth"
+                                                       VerticalAlignment="Center"/>
+                                            <Border Grid.Column="1" Background="{StaticResource NeuralBgInset}"
+                                                    BorderBrush="{StaticResource NeuralLine}" BorderThickness="1"
+                                                    CornerRadius="5" Padding="6,1" VerticalAlignment="Center">
+                                                <TextBlock Text="&#x2318;3" FontSize="10.5"
+                                                           FontFamily="{StaticResource FontMono}"
+                                                           Foreground="{StaticResource NeuralTextDim}"/>
+                                            </Border>
+                                        </Grid>
+                                    </Button>
                                     <Button x:Name="NavTokens" Content="&#x1F4B0;  Tokens"
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Tokens"/>
                                     <Button x:Name="NavInsights" Content="&#x1F4A1;  Insights"
@@ -447,8 +547,9 @@
 
                     <!-- CONTENT AREA -->
                     <Grid Grid.Column="1">
-                        <!-- Dashboard (legacy — Universe is the v2.0.96 default startup). -->
-                        <Grid x:Name="DashboardView" Visibility="Collapsed">
+                        <!-- Dashboard — default startup (per user "เพิ่ม หน้า dashboard").
+                             KPI cards + Activity Feed + Recently Edited inside. -->
+                        <Grid x:Name="DashboardView" Visibility="Visible">
                             <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="28,24,28,32">
                                 <StackPanel>
                                     <!-- ═══════════════════════════════════════════════════════════════
@@ -3075,7 +3176,7 @@
                              first nav click to this view, not on app startup, so the
                              WebView2 spin-up cost is paid only when the user asks for
                              it. -->
-                        <Grid x:Name="UniverseView" Visibility="Visible">
+                        <Grid x:Name="UniverseView" Visibility="Collapsed">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
