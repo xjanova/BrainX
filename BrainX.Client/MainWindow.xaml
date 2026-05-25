@@ -2297,42 +2297,150 @@
                             </Grid>
                         </Grid>
 
-                        <!-- Vault Explorer -->
+                        <!-- ═══ VAULT EXPLORER ═══
+                             Per t2.zip screenshot 05-vault.png + README §6:
+                             header (title + path subtitle + right-aligned
+                             "New note / New folder / Re-index" actions), then
+                             2-col body (320 px folders tree + 1fr list table).
+                             Existing VaultTree x:Name + handlers preserved;
+                             the new VaultListPane on the right is populated
+                             by code-behind on tree selection change. -->
                         <Grid x:Name="VaultView" Visibility="Collapsed">
-                            <Grid Margin="24,16">
+                            <Grid Margin="28,24,28,16">
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
-                                <StackPanel Margin="0,0,0,22">
-                                    <TextBlock Text="Vault Explorer" Style="{StaticResource TypeViewTitle}"/>
-                                    <TextBlock x:Name="VaultViewSubtitle"
-                                               Text="C:\xman\vault · auto-watched"
-                                               Style="{StaticResource TypeViewSubtitle}"/>
-                                </StackPanel>
-                                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,12">
-                                    <Button Content="New Note" Style="{StaticResource NeonButtonFilled}"
-                                            Click="VaultNewNote_Click" Padding="12,6" Margin="0,0,8,0" FontSize="11"/>
-                                    <Button Content="New Folder" Style="{StaticResource NeonButton}"
-                                            Click="VaultNewFolder_Click" Padding="12,6" Margin="0,0,8,0" FontSize="11"/>
-                                    <Button Content="Refresh" Style="{StaticResource NavButton}"
-                                            Click="VaultRefresh_Click" Padding="12,6" FontSize="11"/>
-                                </StackPanel>
-                                <Border Grid.Row="1" Style="{StaticResource CardPanel}">
-                                    <TreeView x:Name="VaultTree" Background="Transparent"
-                                              Foreground="{StaticResource TextPrimaryBrush}" BorderThickness="0"
-                                              MouseDoubleClick="VaultTree_DoubleClick">
-                                        <TreeView.ContextMenu>
-                                            <ContextMenu Background="{StaticResource DarkPanelBrush}"
-                                                         Foreground="{StaticResource TextPrimaryBrush}" BorderBrush="{StaticResource SurfaceLightBrush}">
-                                                <MenuItem Header="Open in Editor" Click="VaultOpenInEditor_Click"/>
-                                                <MenuItem Header="Rename" Click="VaultRename_Click"/>
-                                                <Separator/>
-                                                <MenuItem Header="Delete" Click="VaultDelete_Click" Foreground="#FF4444"/>
-                                            </ContextMenu>
-                                        </TreeView.ContextMenu>
-                                    </TreeView>
-                                </Border>
+                                <Grid Grid.Row="0" Margin="0,0,0,22">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0">
+                                        <TextBlock Text="Vault Explorer" Style="{StaticResource TypeViewTitle}"/>
+                                        <TextBlock x:Name="VaultViewSubtitle"
+                                                   Text="C:\xman\vault · auto-watched"
+                                                   Style="{StaticResource TypeViewSubtitle}"/>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
+                                        <Button Content="&#x002B;  New note" Style="{StaticResource NavButton}"
+                                                Click="VaultNewNote_Click" Padding="14,6" Margin="0,0,4,0" FontSize="12.5"/>
+                                        <Button Content="&#x1F4C1;  New folder" Style="{StaticResource NavButton}"
+                                                Click="VaultNewFolder_Click" Padding="14,6" Margin="0,0,4,0" FontSize="12.5"/>
+                                        <Button Content="&#x21BB;  Re-index" Style="{StaticResource NavButton}"
+                                                Click="VaultRefresh_Click" Padding="14,6" FontSize="12.5"/>
+                                    </StackPanel>
+                                </Grid>
+                                <Grid Grid.Row="1">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="320"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <!-- FOLDERS TREE CARD -->
+                                    <Border Grid.Column="0" Style="{StaticResource NeuralCard}"
+                                            Padding="18" Margin="0,0,12,0">
+                                        <Grid>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto"/>
+                                                <RowDefinition Height="*"/>
+                                            </Grid.RowDefinitions>
+                                            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,12">
+                                                <TextBlock Text="FOLDERS" FontSize="12.5" FontWeight="Bold"
+                                                           Foreground="{StaticResource NeuralText1}"
+                                                           VerticalAlignment="Center"/>
+                                                <TextBlock Text=" · tree" FontSize="12.5"
+                                                           FontWeight="Medium"
+                                                           Foreground="{StaticResource NeuralText3}"
+                                                           VerticalAlignment="Center"/>
+                                            </StackPanel>
+                                            <TreeView Grid.Row="1" x:Name="VaultTree" Background="Transparent"
+                                                      Foreground="{StaticResource NeuralText1}" BorderThickness="0"
+                                                      MouseDoubleClick="VaultTree_DoubleClick">
+                                                <TreeView.ContextMenu>
+                                                    <ContextMenu Background="{StaticResource NeuralBgCard}"
+                                                                 Foreground="{StaticResource NeuralText1}"
+                                                                 BorderBrush="{StaticResource NeuralLine}">
+                                                        <MenuItem Header="Open in Editor" Click="VaultOpenInEditor_Click"/>
+                                                        <MenuItem Header="Rename" Click="VaultRename_Click"/>
+                                                        <Separator/>
+                                                        <MenuItem Header="Delete" Click="VaultDelete_Click" Foreground="#FF4444"/>
+                                                    </ContextMenu>
+                                                </TreeView.ContextMenu>
+                                            </TreeView>
+                                        </Grid>
+                                    </Border>
+
+                                    <!-- LISTING CARD (right wider) -->
+                                    <Border Grid.Column="1" Style="{StaticResource NeuralCard}" Padding="22">
+                                        <Grid>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto"/>
+                                                <RowDefinition Height="Auto"/>
+                                                <RowDefinition Height="*"/>
+                                            </Grid.RowDefinitions>
+                                            <!-- Header row: breadcrumb + List/Grid segmented -->
+                                            <Grid Grid.Row="0" Margin="0,0,0,14">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Grid.Column="0">
+                                                    <TextBlock x:Name="VaultBreadcrumbText"
+                                                               Text="ROOT · 0 notes" FontSize="13" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText1}"/>
+                                                </StackPanel>
+                                                <Border Grid.Column="1" Background="{StaticResource NeuralBgInset}"
+                                                        BorderBrush="{StaticResource NeuralLine}" BorderThickness="1"
+                                                        CornerRadius="9" Padding="3" VerticalAlignment="Center">
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <Border CornerRadius="7" Padding="12,4"
+                                                                Background="{StaticResource NeuralBgCard2}">
+                                                            <TextBlock Text="List" FontSize="11" FontWeight="SemiBold"
+                                                                       Foreground="{StaticResource NeuralText}"/>
+                                                        </Border>
+                                                        <Border CornerRadius="7" Padding="12,4">
+                                                            <TextBlock Text="Grid" FontSize="11" FontWeight="SemiBold"
+                                                                       Foreground="{StaticResource NeuralText2}"/>
+                                                        </Border>
+                                                    </StackPanel>
+                                                </Border>
+                                            </Grid>
+
+                                            <!-- Column headers -->
+                                            <Grid Grid.Row="1" Margin="0,0,0,8">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="180"/>
+                                                    <ColumnDefinition Width="80"/>
+                                                    <ColumnDefinition Width="110"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Grid.Column="0" Text="NAME" FontSize="10.5" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource NeuralText3}"/>
+                                                <TextBlock Grid.Column="1" Text="CATEGORY" FontSize="10.5" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource NeuralText3}"
+                                                           HorizontalAlignment="Right"/>
+                                                <TextBlock Grid.Column="2" Text="WORDS" FontSize="10.5" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource NeuralText3}"
+                                                           HorizontalAlignment="Right"/>
+                                                <TextBlock Grid.Column="3" Text="MODIFIED" FontSize="10.5" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource NeuralText3}"
+                                                           HorizontalAlignment="Right"/>
+                                            </Grid>
+
+                                            <!-- File rows — populated by code-behind on tree selection. -->
+                                            <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto"
+                                                          HorizontalScrollBarVisibility="Disabled">
+                                                <StackPanel x:Name="VaultListPane">
+                                                    <TextBlock Text="Select a folder in the tree to list its notes."
+                                                               FontSize="12.5"
+                                                               Foreground="{StaticResource NeuralText3}"
+                                                               FontStyle="Italic" Margin="0,12,0,0"/>
+                                                </StackPanel>
+                                            </ScrollViewer>
+                                        </Grid>
+                                    </Border>
+                                </Grid>
                             </Grid>
                         </Grid>
 
