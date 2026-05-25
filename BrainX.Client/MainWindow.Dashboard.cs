@@ -202,6 +202,13 @@ public partial class MainWindow
             core.Settings.AreDevToolsEnabled = false;
             core.Settings.AreDefaultContextMenusEnabled = false;
 
+            // The scene posts {"type":"ready"} after JS finishes setting up
+            // the three.js canvas. We push the brain snapshot in response
+            // so it can render real nodes (otherwise the scene sits on
+            // "Waiting for brain snapshot..."). Same pattern as the main
+            // Universe view's OnUniverseMessage.
+            core.WebMessageReceived += OnDashUniverseMessage;
+
             DashUniverseWebView.Source = new System.Uri(
                 "https://universe.local/universe/index.html?cameraMode=orbit&mode=wallpaper-active");
             _dashUniverseInitialized = true;
@@ -209,6 +216,47 @@ public partial class MainWindow
         catch (System.Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"DashUniverse init failed: {ex.Message}");
+        }
+    }
+
+    private void OnDashUniverseMessage(object? sender,
+        Microsoft.Web.WebView2.Core.CoreWebView2WebMessageReceivedEventArgs e)
+    {
+        try
+        {
+            var json = e.WebMessageAsJson;
+            var msg = Newtonsoft.Json.JsonConvert.DeserializeAnonymousType(
+                json, new { type = "" });
+            if (msg?.type == "ready")
+            {
+                PushBrainSnapshotToDashUniverse();
+            }
+        }
+        catch (System.Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"OnDashUniverseMessage: {ex.Message}");
+        }
+    }
+
+    private void PushBrainSnapshotToDashUniverse()
+    {
+        if (DashUniverseWebView?.CoreWebView2 == null) return;
+        try
+        {
+            var path = System.IO.Path.Combine(_vaultPath, ".obsidianx", "brain-export.json");
+            if (!System.IO.File.Exists(path))
+            {
+                var fallback = "{\"type\":\"brain\",\"payload\":{\"DisplayName\":\"(no brain-export.json yet)\",\"TotalNotes\":0,\"TotalWords\":0,\"TotalEdges\":0,\"Expertise\":[]}}";
+                DashUniverseWebView.CoreWebView2.PostWebMessageAsJson(fallback);
+                return;
+            }
+            var brainJson = System.IO.File.ReadAllText(path);
+            var envelope = "{\"type\":\"brain\",\"payload\":" + brainJson + "}";
+            DashUniverseWebView.CoreWebView2.PostWebMessageAsJson(envelope);
+        }
+        catch (System.Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"PushBrainSnapshotToDashUniverse: {ex.Message}");
         }
     }
 }

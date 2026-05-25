@@ -334,15 +334,22 @@
                                                       ShadowDepth="0" Opacity="0.40"/>
                                 </Border.Effect>
                                 <Grid>
+                                    <!-- Stretch=Uniform shows the WHOLE logo (brain crest +
+                                         BRAINX wordmark + GLOBAL AI BRAIN PROGRAM caption)
+                                         instead of UniformToFill cropping the bottom.
+                                         OpacityMask widened (radius 0.92, solid out to 0.78)
+                                         so the wordmark text isn't faded away — only the
+                                         4 corners of the rectangle softly blend into the
+                                         sidebar background. -->
                                     <Image Source="pack://application:,,,/Assets/Logo.png"
-                                           Stretch="UniformToFill"
+                                           Stretch="Uniform"
                                            RenderOptions.BitmapScalingMode="HighQuality">
                                         <Image.OpacityMask>
                                             <RadialGradientBrush Center="0.5,0.5"
                                                                  GradientOrigin="0.5,0.5"
-                                                                 RadiusX="0.62" RadiusY="0.62">
+                                                                 RadiusX="0.92" RadiusY="0.92">
                                                 <GradientStop Color="#FFFFFFFF" Offset="0"/>
-                                                <GradientStop Color="#FFFFFFFF" Offset="0.55"/>
+                                                <GradientStop Color="#FFFFFFFF" Offset="0.78"/>
                                                 <GradientStop Color="#00FFFFFF" Offset="1"/>
                                             </RadialGradientBrush>
                                         </Image.OpacityMask>
