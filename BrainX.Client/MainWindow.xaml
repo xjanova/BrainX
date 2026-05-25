@@ -320,30 +320,22 @@
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
 
-                            <!-- Brand crest — circle (NO rectangle container) with RGB
-                                 fire-rainbow gradient. User: "โลโก้เป็นวงกลม เอาออกจาก
-                                 สี่เหลี่ยมเลย ขนาดใหญ่เท่าสี่เหลี่ยมเดิม และเป็น rgb
-                                 ไล่ไฟสี". Replaces the violet-themed rectangle from
-                                 fcbdf82. Circle is 168 px diameter (≈ same area as the
-                                 prior 180×132 rectangle). The outer ring is a 6-stop
-                                 RGB fire gradient (red→orange→yellow→green→cyan→violet
-                                 →magenta), inside is a subtle dark fill with the brain
-                                 silhouette + caption. -->
+                            <!-- Brand crest — circle (NO rectangle container). User: "รูป
+                                 โลโก้ Zoom อีก / ต้องเป็นอนิเมชั่น rgb / และไม่ต้อง
+                                 มีแสงเรืองรอบๆ". Three changes from fc71334:
+                                   1. Removed the 190 px outer halo Ellipse + the
+                                      DropShadowEffect on the disc — no glow around.
+                                   2. Brain Image enlarged 90 → 130 px (fills the circle
+                                      now, with the BRAINX wordmark prominent).
+                                   3. Both rainbow rings now ROTATE forever via
+                                      RotateTransform + Storyboard on Loaded. Outer ring
+                                      rotates clockwise 8 s/turn; inner ring rotates
+                                      counter-clockwise 6 s/turn. The diagonal linear
+                                      gradient sweeping around a circle = animated RGB
+                                      iridescence. -->
                             <Grid Grid.Row="0" Margin="0,16,0,10" HorizontalAlignment="Center">
-                                <!-- Outer glow halo behind the circle so the fire ring
-                                     reads as glowing without a hard rectangular edge. -->
-                                <Ellipse Width="190" Height="190" Opacity="0.30">
-                                    <Ellipse.Fill>
-                                        <RadialGradientBrush GradientOrigin="0.5,0.5">
-                                            <GradientStop Color="#FF6A2D" Offset="0"/>
-                                            <GradientStop Color="#9D7BFF" Offset="0.5"/>
-                                            <GradientStop Color="Transparent" Offset="1"/>
-                                        </RadialGradientBrush>
-                                    </Ellipse.Fill>
-                                </Ellipse>
                                 <!-- The CIRCLE itself — 168 px disc clipped to round.
-                                     Background = subtle dark radial; the rainbow lives
-                                     on the outer Ellipse stroke layer just inside. -->
+                                     No DropShadowEffect (user: no glow around). -->
                                 <Border Width="168" Height="168" CornerRadius="84"
                                         ClipToBounds="True">
                                     <Border.Background>
@@ -354,19 +346,10 @@
                                             <GradientStop Color="#060410" Offset="1"/>
                                         </RadialGradientBrush>
                                     </Border.Background>
-                                    <Border.Effect>
-                                        <DropShadowEffect Color="#FF6A2D" BlurRadius="36"
-                                                          ShadowDepth="0" Opacity="0.55"/>
-                                    </Border.Effect>
                                     <Grid>
-                                        <!-- Layer 1: RGB fire ring (the user's
-                                             "rgb ไล่ไฟสี"). 7-stop gradient sweeps red
-                                             → orange → yellow → green → cyan → violet
-                                             → magenta around the disc. WPF can't do a
-                                             true conic gradient; the diagonal linear
-                                             gradient gives a similar fiery-iridescent
-                                             read on a circle stroke. -->
-                                        <Ellipse Width="160" Height="160" StrokeThickness="3.5">
+                                        <!-- Layer 1: Outer RGB fire ring — ROTATING. -->
+                                        <Ellipse Width="160" Height="160" StrokeThickness="3.5"
+                                                 RenderTransformOrigin="0.5,0.5">
                                             <Ellipse.Stroke>
                                                 <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
                                                     <GradientStop Color="#FF2D3E" Offset="0"/>
@@ -378,13 +361,25 @@
                                                     <GradientStop Color="#FF4F9E" Offset="1"/>
                                                 </LinearGradientBrush>
                                             </Ellipse.Stroke>
-                                            <Ellipse.Effect>
-                                                <BlurEffect Radius="0.5"/>
-                                            </Ellipse.Effect>
+                                            <Ellipse.RenderTransform>
+                                                <RotateTransform x:Name="CrestRingOuter" Angle="0"/>
+                                            </Ellipse.RenderTransform>
+                                            <Ellipse.Triggers>
+                                                <EventTrigger RoutedEvent="Loaded">
+                                                    <BeginStoryboard>
+                                                        <Storyboard RepeatBehavior="Forever">
+                                                            <DoubleAnimation
+                                                                Storyboard.TargetName="CrestRingOuter"
+                                                                Storyboard.TargetProperty="Angle"
+                                                                From="0" To="360" Duration="0:0:8"/>
+                                                        </Storyboard>
+                                                    </BeginStoryboard>
+                                                </EventTrigger>
+                                            </Ellipse.Triggers>
                                         </Ellipse>
-                                        <!-- Layer 2: A second fainter inner ring, offset
-                                             rotation, so the rainbow looks layered. -->
-                                        <Ellipse Width="140" Height="140" StrokeThickness="1.4" Opacity="0.7">
+                                        <!-- Layer 2: Inner ring — ROTATING THE OTHER WAY. -->
+                                        <Ellipse Width="140" Height="140" StrokeThickness="1.4" Opacity="0.7"
+                                                 RenderTransformOrigin="0.5,0.5">
                                             <Ellipse.Stroke>
                                                 <LinearGradientBrush StartPoint="1,0" EndPoint="0,1">
                                                     <GradientStop Color="#FF4F9E" Offset="0"/>
@@ -395,42 +390,36 @@
                                                     <GradientStop Color="#FF6A2D" Offset="1"/>
                                                 </LinearGradientBrush>
                                             </Ellipse.Stroke>
+                                            <Ellipse.RenderTransform>
+                                                <RotateTransform x:Name="CrestRingInner" Angle="0"/>
+                                            </Ellipse.RenderTransform>
+                                            <Ellipse.Triggers>
+                                                <EventTrigger RoutedEvent="Loaded">
+                                                    <BeginStoryboard>
+                                                        <Storyboard RepeatBehavior="Forever">
+                                                            <DoubleAnimation
+                                                                Storyboard.TargetName="CrestRingInner"
+                                                                Storyboard.TargetProperty="Angle"
+                                                                From="360" To="0" Duration="0:0:6"/>
+                                                        </Storyboard>
+                                                    </BeginStoryboard>
+                                                </EventTrigger>
+                                            </Ellipse.Triggers>
                                         </Ellipse>
-                                        <!-- Layer 3: Brain silhouette inside, sized to
-                                             read clearly inside the bigger circle. -->
+                                        <!-- Layer 3: Brain — ZOOMED IN (90 → 130 px). -->
                                         <Image Source="pack://application:,,,/Assets/Logo.png"
-                                               Stretch="Uniform" Width="90" Height="90"
-                                               Opacity="0.78"
+                                               Stretch="Uniform" Width="130" Height="130"
+                                               Opacity="0.92"
                                                HorizontalAlignment="Center" VerticalAlignment="Center"
-                                               Margin="0,-10,0,0"
                                                RenderOptions.BitmapScalingMode="HighQuality">
                                             <Image.OpacityMask>
                                                 <RadialGradientBrush Center="0.5,0.5" RadiusX="0.6" RadiusY="0.6">
                                                     <GradientStop Color="#FFFFFFFF" Offset="0"/>
-                                                    <GradientStop Color="#FFFFFFFF" Offset="0.65"/>
+                                                    <GradientStop Color="#FFFFFFFF" Offset="0.75"/>
                                                     <GradientStop Color="#00FFFFFF" Offset="1"/>
                                                 </RadialGradientBrush>
                                             </Image.OpacityMask>
                                         </Image>
-                                        <!-- Layer 4: Constellation dots (RGB fire colors). -->
-                                        <Canvas>
-                                            <Ellipse Canvas.Left="28" Canvas.Top="32" Width="2.8" Height="2.8"
-                                                     Fill="#FFD23C" Opacity="0.9"/>
-                                            <Ellipse Canvas.Left="134" Canvas.Top="40" Width="2.6" Height="2.6"
-                                                     Fill="#5BE9E9" Opacity="0.9"/>
-                                            <Ellipse Canvas.Left="38" Canvas.Top="118" Width="2.2" Height="2.2"
-                                                     Fill="#FF4F9E" Opacity="0.8"/>
-                                            <Ellipse Canvas.Left="138" Canvas.Top="116" Width="2.4" Height="2.4"
-                                                     Fill="#9D7BFF" Opacity="0.9"/>
-                                            <Ellipse Canvas.Left="82" Canvas.Top="22" Width="2" Height="2"
-                                                     Fill="#FF6A2D" Opacity="0.85"/>
-                                        </Canvas>
-                                        <!-- Layer 5: Mono caption at bottom. -->
-                                        <TextBlock Text="NEURAL &#x00B7; KNOWLEDGE"
-                                                   FontSize="9" FontFamily="{StaticResource FontMono}"
-                                                   Foreground="{StaticResource NeuralText3}"
-                                                   HorizontalAlignment="Center" VerticalAlignment="Bottom"
-                                                   Margin="0,0,0,14" Opacity="0.85"/>
                                         <!-- Dummy 0-size PulseRing for animation compat. -->
                                         <Ellipse x:Name="PulseRing" Width="0" Height="0" Opacity="0"/>
                                     </Grid>
