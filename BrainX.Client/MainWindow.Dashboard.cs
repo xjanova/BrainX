@@ -78,22 +78,26 @@ public partial class MainWindow
         Brush B(string key) =>
             (Brush)(System.Windows.Application.Current.TryFindResource(key) ?? Brushes.Gray);
 
+        // Format times as HH:MM:SS per t2.zip screenshot (was "Nm ago" relative).
+        var now = DateTime.Now;
+        string T(int minutesAgo) => now.AddMinutes(-minutesAgo).ToString("HH:mm:ss");
+
         var rows = new List<DashActivityRow>
         {
-            new() { Time = "just now", KindLabel = "MCP", KindBrush = B("ActKindMcp"),
-                    Message = "Claude called brain_search \"dashboard kpi prototype\"" },
-            new() { Time = "1m ago",   KindLabel = "SAV", KindBrush = B("ActKindSave"),
-                    Message = $"Saved MainWindow.xaml ({_graph?.TotalNodes ?? 0:N0} nodes indexed)" },
-            new() { Time = "3m ago",   KindLabel = "IND", KindBrush = B("ActKindIndex"),
-                    Message = "Auto-link pass added 12 wiki-links between sessions" },
-            new() { Time = "4m ago",   KindLabel = "AI",  KindBrush = B("ActKindAi"),
-                    Message = "Local Ollama answered Claude redirect (38 ms · deepseek-r1:8b)" },
-            new() { Time = "12m ago",  KindLabel = "PEE", KindBrush = B("ActKindPeer"),
-                    Message = "Peer 0xBRAIN-a17e-c0de joined the mesh (Alice's Brain)" },
-            new() { Time = "27m ago",  KindLabel = "SHA", KindBrush = B("ActKindShare"),
-                    Message = "Accepted share bundle: 14 notes · Programming/CSharp" },
-            new() { Time = "1h ago",   KindLabel = "MCP", KindBrush = B("ActKindMcp"),
-                    Message = "Claude called brain_remember (session #9 handoff stored)" },
+            new() { Time = T(0),  KindLabel = "MCP", KindBrush = B("ActKindMcp"),
+                    Message = "brain_search \"barnes-hut quadtree\" → 3 notes" },
+            new() { Time = T(1),  KindLabel = "SAV", KindBrush = B("ActKindSave"),
+                    Message = "Auto-saved findings → Programming/CSharp/Barnes-Hut.md" },
+            new() { Time = T(3),  KindLabel = "IND", KindBrush = B("ActKindIndex"),
+                    Message = $"Re-indexed CLAUDE.md (changed) · {_graph?.TotalNodes ?? 0:N0} nodes · {_graph?.TotalEdges ?? 0:N0} links" },
+            new() { Time = T(6),  KindLabel = "AI",  KindBrush = B("ActKindAi"),
+                    Message = "AiRouter: ollama/deepseek-r1:8b · 1.2k tok in, 980 tok out" },
+            new() { Time = T(10), KindLabel = "MCP", KindBrush = B("ActKindMcp"),
+                    Message = "brain_expertise → 14 categories returned" },
+            new() { Time = T(18), KindLabel = "PEE", KindBrush = B("ActKindPeer"),
+                    Message = "Peer joined: novaCortex.0xBR41N-72e9..." },
+            new() { Time = T(34), KindLabel = "SHA", KindBrush = B("ActKindShare"),
+                    Message = "Share request received: DataScience bundle" },
         };
 
         DashActivityList.ItemsSource = rows;
