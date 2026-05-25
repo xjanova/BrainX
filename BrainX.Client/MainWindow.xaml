@@ -791,7 +791,7 @@
                                                 <!-- 3D / 2D segmented toggle per screenshot — 3D active = violet -->
                                                 <StackPanel Grid.Column="2" Orientation="Horizontal">
                                                     <Button x:Name="DashView3DBtn" Content="3D"
-                                                            Style="{StaticResource NeonButton}"
+                                                            Style="{StaticResource NeuralBtnGhost}"
                                                             Padding="10,3" FontSize="10"
                                                             Tag="3D" Click="DashViewMode_Click"/>
                                                     <Button x:Name="DashView2DBtn" Content="2D"
@@ -962,22 +962,22 @@
                                                                            Foreground="{StaticResource TextSecondaryBrush}"/>
                                                             </StackPanel>
                                                             <StackPanel Grid.Column="2" Orientation="Horizontal">
-                                                                <Button Content="&#x26A1; Kick" Style="{StaticResource NeonButton}"
+                                                                <Button Content="&#x26A1; Kick" Style="{StaticResource NeuralBtnGhost}"
                                                                         Padding="10,4" FontSize="11" Click="KickNode_Click" Margin="0,0,4,0"/>
                                                                 <Button x:Name="DashNodeEditBtn" Content="&#x270E; Edit"
-                                                                        Style="{StaticResource NeonButton}"
+                                                                        Style="{StaticResource NeuralBtnGhost}"
                                                                         Padding="10,4" FontSize="11" Click="EditDashNode_Click" Margin="0,0,4,0"/>
                                                                 <Button x:Name="DashNodeSaveBtn" Content="&#x1F4BE; Save"
                                                                         Style="{StaticResource NeuralBtnPrimary}"
                                                                         Visibility="Collapsed"
                                                                         Padding="10,4" FontSize="11" Click="SaveDashNode_Click" Margin="0,0,4,0"/>
                                                                 <Button x:Name="DashNodeCancelBtn" Content="Cancel"
-                                                                        Style="{StaticResource NeonButton}"
+                                                                        Style="{StaticResource NeuralBtnGhost}"
                                                                         Visibility="Collapsed"
                                                                         Padding="10,4" FontSize="11" Click="CancelDashNode_Click" Margin="0,0,4,0"/>
                                                                 <Button Content="&#x1F4D6; Open" Style="{StaticResource NeuralBtnPrimary}"
                                                                         Padding="10,4" FontSize="11" Click="OpenDashNodeFile_Click" Margin="0,0,4,0"/>
-                                                                <Button Content="&#x2715;" Style="{StaticResource NeonButton}"
+                                                                <Button Content="&#x2715;" Style="{StaticResource NeuralBtnGhost}"
                                                                         Padding="8,4" FontSize="11" ToolTip="Close"
                                                                         Click="CloseDashNode_Click"/>
                                                             </StackPanel>
@@ -1256,22 +1256,22 @@
                                                      _cameraMode = CameraMode.RealBrain in MainWindow.xaml.cs. -->
                                                 <ComboBoxItem Content="Real Brain (5s dwell)" IsSelected="True"/>
                                             </ComboBox>
-                                            <Button Content="&#x2B06; Up" Style="{StaticResource NeonButton}"
+                                            <Button Content="&#x2B06; Up" Style="{StaticResource NeuralBtnGhost}"
                                                     Padding="10,3" FontSize="10" Click="ZoomOutLevel_Click" Margin="0,0,6,0"
                                                     ToolTip="Zoom back to parent cluster"/>
-                                            <Button Content="&#x1F3AF; Fit" Style="{StaticResource NeonButton}"
+                                            <Button Content="&#x1F3AF; Fit" Style="{StaticResource NeuralBtnGhost}"
                                                     Padding="10,3" FontSize="10" Click="FitOverview_Click" Margin="0,0,6,0"
                                                     ToolTip="Frame the whole graph"/>
-                                            <Button Content="&#x1F4A5; Shake" Style="{StaticResource NeonButton}"
+                                            <Button Content="&#x1F4A5; Shake" Style="{StaticResource NeuralBtnGhost}"
                                                     Padding="10,3" FontSize="10" Click="ShakeGraph_Click" Margin="0,0,6,0"/>
-                                            <Button Content="&#x1F504; Reset" Style="{StaticResource NeonButton}"
+                                            <Button Content="&#x1F504; Reset" Style="{StaticResource NeuralBtnGhost}"
                                                     Padding="10,3" FontSize="10" Click="ResetCamera_Click" Margin="0,0,6,0"/>
                                             <!-- Toggle the expertise overlay panel inside the brain graph
                                                  view. Same data as the Dashboard's right-rail panel; hidden
                                                  by default so the graph has full width when not needed. -->
                                             <Button x:Name="GraphExpertiseToggleBtn"
                                                     Content="&#x1F4CA; Expertise"
-                                                    Style="{StaticResource NeonButton}"
+                                                    Style="{StaticResource NeuralBtnGhost}"
                                                     Padding="10,3" FontSize="10"
                                                     Click="GraphExpertiseToggle_Click" Margin="0,0,6,0"
                                                     ToolTip="Toggle the expertise profile overlay"/>
@@ -1281,7 +1281,7 @@
                                                  glassmorphism style but pinned to the LEFT of the graph. -->
                                             <Button x:Name="GraphActivityToggleBtn"
                                                     Content="&#x1F4E1; Activity"
-                                                    Style="{StaticResource NeonButton}"
+                                                    Style="{StaticResource NeuralBtnGhost}"
                                                     Padding="10,3" FontSize="10"
                                                     Click="GraphActivityToggle_Click" Margin="0,0,6,0"
                                                     ToolTip="Toggle the live brain-activity overlay (reads/writes/tool calls)"/>
@@ -1312,7 +1312,7 @@
                                                  Universe view replaces 3D BrainGraph; 2D path stays as the
                                                  primary Graph view with MCP pulse + flash overlay. -->
                                             <Button x:Name="GraphView3DBtn" Content="3D"
-                                                    Style="{StaticResource NeonButton}"
+                                                    Style="{StaticResource NeuralBtnGhost}"
                                                     Padding="10,3" FontSize="10"
                                                     Tag="3D" Click="GraphViewMode_Click" Margin="0,0,4,0"
                                                     Visibility="Collapsed"/>
@@ -1752,22 +1752,22 @@
                                                                Foreground="{StaticResource TextSecondaryBrush}"/>
                                                 </StackPanel>
                                                 <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-                                                    <Button Content="&#x26A1; Kick" Style="{StaticResource NeonButton}"
+                                                    <Button Content="&#x26A1; Kick" Style="{StaticResource NeuralBtnGhost}"
                                                             Padding="10,4" FontSize="11" Click="KickGraphNode_Click" Margin="0,0,6,0"/>
                                                     <Button x:Name="GraphNodeEditBtn" Content="&#x270E; Edit"
-                                                            Style="{StaticResource NeonButton}"
+                                                            Style="{StaticResource NeuralBtnGhost}"
                                                             Padding="10,4" FontSize="11" Click="EditGraphNode_Click" Margin="0,0,6,0"/>
                                                     <Button x:Name="GraphNodeSaveBtn" Content="&#x1F4BE; Save"
                                                             Style="{StaticResource NeuralBtnPrimary}"
                                                             Visibility="Collapsed"
                                                             Padding="10,4" FontSize="11" Click="SaveGraphNode_Click" Margin="0,0,6,0"/>
                                                     <Button x:Name="GraphNodeCancelBtn" Content="Cancel"
-                                                            Style="{StaticResource NeonButton}"
+                                                            Style="{StaticResource NeuralBtnGhost}"
                                                             Visibility="Collapsed"
                                                             Padding="10,4" FontSize="11" Click="CancelGraphNode_Click" Margin="0,0,6,0"/>
                                                     <Button Content="&#x1F4D6; Open" Style="{StaticResource NeuralBtnPrimary}"
                                                             Padding="10,4" FontSize="11" Click="OpenNodeFile_Click" Margin="0,0,6,0"/>
-                                                    <Button Content="&#x2715;" Style="{StaticResource NeonButton}"
+                                                    <Button Content="&#x2715;" Style="{StaticResource NeuralBtnGhost}"
                                                             Padding="8,4" FontSize="11" ToolTip="Close"
                                                             Click="CloseGraphNode_Click"/>
                                                 </StackPanel>
@@ -1941,7 +1941,7 @@
                                             <!-- Disconnect button — kept (collapsed by default; code-behind shows when connected). -->
                                             <Button x:Name="LeaveNetworkBtn" Content="Disconnect"
                                                     Click="LeaveNetwork_Click" Visibility="Collapsed"
-                                                    Style="{StaticResource NeonButton}" HorizontalAlignment="Center"
+                                                    Style="{StaticResource NeuralBtnGhost}" HorizontalAlignment="Center"
                                                     Margin="0,20,0,0"
                                                     Foreground="{StaticResource DangerBrush}"
                                                     BorderBrush="{StaticResource DangerBrush}"/>
@@ -2057,10 +2057,10 @@
                                          CluadeX's UI. The chip is hidden when CluadeX isn't
                                          installed (auth-token file missing). -->
                                     <Border x:Name="CluadeXBridgePanel"
-                                            Background="#220B0B1A"
-                                            BorderBrush="{StaticResource NeonCyanBrush}"
-                                            BorderThickness="1" CornerRadius="8"
-                                            Margin="0,8,0,0" Padding="12,8">
+                                            Background="{StaticResource NeuralBgInset}"
+                                            BorderBrush="{StaticResource NeuralLineAccent}"
+                                            BorderThickness="1" CornerRadius="9"
+                                            Margin="0,10,0,0" Padding="14,9">
                                         <Grid>
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="Auto"/>
@@ -2072,58 +2072,65 @@
                                                 <Ellipse x:Name="CluadeXBridgeDot" Width="8" Height="8"
                                                          Fill="#664444" Margin="0,0,8,0"
                                                          VerticalAlignment="Center"/>
-                                                <TextBlock Text="🌉 CluadeX bridge" FontSize="11"
+                                                <TextBlock Text="&#x1F309; CluadeX bridge" FontSize="12"
                                                            FontWeight="SemiBold"
-                                                           Foreground="{StaticResource NeonCyanBrush}"
+                                                           Foreground="{StaticResource NeuralText1}"
                                                            VerticalAlignment="Center" Margin="0,0,10,0"/>
                                             </StackPanel>
                                             <TextBlock Grid.Column="1"
                                                        x:Name="CluadeXBridgeStatusText"
                                                        Text="not connected — click Ping to probe \\.\pipe\cluadex-mcp"
-                                                       FontSize="10"
-                                                       Foreground="{StaticResource TextSecondaryBrush}"
-                                                       VerticalAlignment="Center" TextWrapping="Wrap"/>
+                                                       FontSize="11"
+                                                       Foreground="{StaticResource NeuralText3}"
+                                                       VerticalAlignment="Center" TextWrapping="Wrap"
+                                                       FontFamily="{StaticResource FontMono}"/>
                                             <StackPanel Grid.Column="2" Orientation="Horizontal">
                                                 <Button x:Name="CluadeXBridgePingBtn"
                                                         Content="📡 Ping"
-                                                        Style="{StaticResource NeonButton}"
+                                                        Style="{StaticResource NeuralBtnGhost}"
                                                         Padding="10,3" FontSize="10"
                                                         Click="CluadeXBridgePing_Click"
                                                         Margin="0,0,6,0"
                                                         ToolTip="Send a no-op ping to verify the CluadeX named-pipe is reachable + auth token matches"/>
                                                 <Button x:Name="CluadeXBridgeAlignBtn"
                                                         Content="🎯 Align"
-                                                        Style="{StaticResource NeonButton}"
+                                                        Style="{StaticResource NeuralBtnGhost}"
                                                         Padding="10,3" FontSize="10"
                                                         Click="CluadeXBridgeAlign_Click"
                                                         Margin="0,0,6,0"
                                                         ToolTip="Force CluadeX to load the same provider+model as BrainX — frees the previous GGUF weights from VRAM if needed"/>
                                                 <Button x:Name="CluadeXBridgeTestBtn"
                                                         Content="🧪 Test prompt"
-                                                        Style="{StaticResource NeonButton}"
+                                                        Style="{StaticResource NeuralBtnGhost}"
                                                         Padding="10,3" FontSize="10"
                                                         Click="CluadeXBridgeTest_Click"
                                                         ToolTip="Send a tiny test spec via cluadex.write_code — a new chat session should pop up in CluadeX's UI"/>
                                             </StackPanel>
                                         </Grid>
                                     </Border>
-                                    <TextBlock x:Name="ClaudeViewStatus" Text="Checking..." FontSize="12"
-                                               Foreground="{StaticResource TextSecondaryBrush}"/>
+                                    <TextBlock x:Name="ClaudeViewStatus" Text="Checking..." FontSize="11.5"
+                                               Foreground="{StaticResource NeuralText3}" Margin="0,8,0,0"/>
                                     <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                                        <TextBlock Text="Backend" VerticalAlignment="Center" FontSize="11"
-                                                   Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,6,0"/>
-                                        <ComboBox x:Name="AiBackendCombo" Width="140" FontSize="11"
-                                                  SelectionChanged="AiBackend_Changed" Margin="0,0,10,0"/>
-                                        <TextBlock Text="Model" VerticalAlignment="Center" FontSize="11"
-                                                   Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,6,0"/>
-                                        <ComboBox x:Name="AiModelCombo" Width="180" FontSize="11" Margin="0,0,10,0"/>
-                                        <Button Content="↻ Refresh" Style="{StaticResource NeonButton}" Padding="10,3" FontSize="10"
+                                        <TextBlock Text="BACKEND" VerticalAlignment="Center" FontSize="10.5"
+                                                   FontWeight="SemiBold"
+                                                   Foreground="{StaticResource NeuralText3}" Margin="0,0,8,0"/>
+                                        <ComboBox x:Name="AiBackendCombo" Width="160" FontSize="12"
+                                                  Background="{StaticResource NeuralBgInset}"
+                                                  Foreground="{StaticResource NeuralText1}"
+                                                  SelectionChanged="AiBackend_Changed" Margin="0,0,14,0"/>
+                                        <TextBlock Text="MODEL" VerticalAlignment="Center" FontSize="10.5"
+                                                   FontWeight="SemiBold"
+                                                   Foreground="{StaticResource NeuralText3}" Margin="0,0,8,0"/>
+                                        <ComboBox x:Name="AiModelCombo" Width="200" FontSize="12"
+                                                  Background="{StaticResource NeuralBgInset}"
+                                                  Foreground="{StaticResource NeuralText1}" Margin="0,0,14,0"/>
+                                        <Button Content="&#x21BB; Refresh" Style="{StaticResource NeuralBtnGhost}" Padding="12,4" FontSize="11.5"
                                                 Click="RefreshAiBackends_Click" Margin="0,0,6,0"/>
-                                        <Button Content="⚙ Models" Style="{StaticResource NeonButton}" Padding="10,3" FontSize="10"
+                                        <Button Content="&#x2699; Models" Style="{StaticResource NeuralBtnGhost}" Padding="12,4" FontSize="11.5"
                                                 Click="ToggleModelManager_Click" Margin="0,0,0,0"/>
-                                        <TextBlock x:Name="AiLatencyText" FontSize="10" Margin="14,0,0,0"
-                                                   FontFamily="{StaticResource MonoFont}" VerticalAlignment="Center"
-                                                   Foreground="{StaticResource TextMutedBrush}"/>
+                                        <TextBlock x:Name="AiLatencyText" FontSize="11" Margin="14,0,0,0"
+                                                   FontFamily="{StaticResource FontMono}" VerticalAlignment="Center"
+                                                   Foreground="{StaticResource NeuralText3}"/>
                                     </StackPanel>
 
                                     <!-- 🔀 REDIRECT CLAUDE DESKTOP TOGGLE — magenta-tinted card per
@@ -2208,7 +2215,7 @@
                                                     </ToggleButton.Style>
                                                 </ToggleButton>
                                                 <Button x:Name="RedirectShowTrafficBtn" Content="📡 Show live traffic"
-                                                        Style="{StaticResource NeonButton}" Padding="6,3" FontSize="10"
+                                                        Style="{StaticResource NeuralBtnGhost}" Padding="6,3" FontSize="10"
                                                         Click="ToggleRedirectTraffic_Click" Margin="0,8,0,0"/>
                                             </StackPanel>
                                         </Grid>
@@ -2227,7 +2234,7 @@
                                                      Foreground="{StaticResource TextPrimaryBrush}"
                                                      BorderBrush="{StaticResource SurfaceLightBrush}" BorderThickness="1"
                                                      FontFamily="{StaticResource MonoFont}" FontSize="10"/>
-                                            <Button Content="Reset counters" Style="{StaticResource NeonButton}"
+                                            <Button Content="Reset counters" Style="{StaticResource NeuralBtnGhost}"
                                                     Click="ResetRedirectStats_Click" Padding="10,3" FontSize="10"
                                                     HorizontalAlignment="Left" Margin="0,6,0,0"/>
                                         </StackPanel>
@@ -2250,9 +2257,9 @@
                                                      FontFamily="{StaticResource MonoFont}" FontSize="11"
                                                      Margin="0,0,0,6"/>
                                             <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
-                                                <Button Content="Use as default" Style="{StaticResource NeonButton}"
+                                                <Button Content="Use as default" Style="{StaticResource NeuralBtnGhost}"
                                                         Click="UseSelectedModel_Click" Padding="10,4" FontSize="10" Margin="0,0,6,0"/>
-                                                <Button Content="Remove" Style="{StaticResource NeonButton}"
+                                                <Button Content="Remove" Style="{StaticResource NeuralBtnGhost}"
                                                         Click="RemoveModel_Click" Padding="10,4" FontSize="10"/>
                                             </StackPanel>
 
@@ -2325,7 +2332,7 @@
                                                          VerticalContentAlignment="Center"
                                                          ToolTip="Repo path the CluadeX worker should run inside. Leave empty to use CluadeX's current dir."/>
                                                 <Button Grid.Column="2" x:Name="ArenaClearBtn"
-                                                        Content="Clear feed" Style="{StaticResource NeonButton}"
+                                                        Content="Clear feed" Style="{StaticResource NeuralBtnGhost}"
                                                         Padding="10,3" FontSize="10" Margin="8,0,0,0"
                                                         Click="ArenaClear_Click"
                                                         ToolTip="Wipe the bubble feed. Worker history stays in CluadeX's codex.db."/>
@@ -2361,7 +2368,7 @@
                                                            Foreground="{StaticResource TextMutedBrush}"
                                                            VerticalAlignment="Center"/>
                                                 <Button Grid.Column="1" x:Name="ArenaCancelBtn"
-                                                        Content="✕ Stop" Style="{StaticResource NeonButton}"
+                                                        Content="✕ Stop" Style="{StaticResource NeuralBtnGhost}"
                                                         Padding="10,3" FontSize="10"
                                                         IsEnabled="False" Click="ArenaCancel_Click"
                                                         ToolTip="Cancel the running orchestration. Worker stops at its next checkpoint."/>
@@ -4566,7 +4573,7 @@
                                                            FontWeight="SemiBold"/>
                                                 <TextBox x:Name="SettingsVaultPath" Style="{StaticResource NeonTextBox}"
                                                          IsReadOnly="True" Opacity="0.6" Margin="0,0,0,12"/>
-                                                <Button Content="Change Vault Path" Style="{StaticResource NeonButton}"
+                                                <Button Content="Change Vault Path" Style="{StaticResource NeuralBtnGhost}"
                                                         Click="ChangeVaultPath_Click" HorizontalAlignment="Left" Padding="16,8"/>
                                                 <TextBlock Text="Auto-detects changes via FileSystemWatcher"
                                                            FontSize="11" Margin="0,12,0,0"
@@ -4619,9 +4626,9 @@
                                                          BorderBrush="{StaticResource SurfaceLightBrush}" BorderThickness="1"
                                                          Margin="0,0,0,8"/>
                                                 <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
-                                                    <Button Content="+ Add folder" Style="{StaticResource NeonButton}"
+                                                    <Button Content="+ Add folder" Style="{StaticResource NeuralBtnGhost}"
                                                             Click="AddScanPath_Click" Padding="12,6" Margin="0,0,8,0"/>
-                                                    <Button Content="− Remove" Style="{StaticResource NeonButton}"
+                                                    <Button Content="− Remove" Style="{StaticResource NeuralBtnGhost}"
                                                             Click="RemoveScanPath_Click" Padding="12,6"/>
                                                 </StackPanel>
 
@@ -4649,13 +4656,13 @@
 
                                                 <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
                                                     <Button x:Name="PreviewScanButton" Content="Preview Scan"
-                                                            Style="{StaticResource NeonButton}"
+                                                            Style="{StaticResource NeuralBtnGhost}"
                                                             Click="PreviewScan_Click" Padding="16,8" Margin="0,0,8,0"/>
                                                     <Button x:Name="ImportScanButton" Content="Import Now"
                                                             Style="{StaticResource NeuralBtnPrimary}"
                                                             Click="ImportScan_Click" Padding="16,8"
                                                             Margin="0,0,8,0" IsEnabled="False"/>
-                                                    <Button Content="Save Patterns" Style="{StaticResource NeonButton}"
+                                                    <Button Content="Save Patterns" Style="{StaticResource NeuralBtnGhost}"
                                                             Click="SaveScanPatterns_Click" Padding="16,8"/>
                                                 </StackPanel>
                                                 <TextBlock x:Name="ScanStatusText" FontSize="11"
@@ -4699,7 +4706,7 @@
                                                 <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
                                                     <Button Content="Export Brain Now" Style="{StaticResource NeuralBtnPrimary}"
                                                             Click="ExportBrain_Click" Padding="16,8" Margin="0,0,8,0"/>
-                                                    <Button Content="Open .obsidianx folder" Style="{StaticResource NeonButton}"
+                                                    <Button Content="Open .obsidianx folder" Style="{StaticResource NeuralBtnGhost}"
                                                             Click="OpenExportFolder_Click" Padding="16,8"/>
                                                 </StackPanel>
                                                 <TextBlock x:Name="ExportStatusText" FontSize="11"
@@ -4730,9 +4737,9 @@
                                                 <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
                                                     <Button Content="+ New" Style="{StaticResource NeuralBtnPrimary}"
                                                             Click="NewCategory_Click" Padding="12,6" Margin="0,0,8,0"/>
-                                                    <Button Content="Edit" Style="{StaticResource NeonButton}"
+                                                    <Button Content="Edit" Style="{StaticResource NeuralBtnGhost}"
                                                             Click="EditCategory_Click" Padding="12,6" Margin="0,0,8,0"/>
-                                                    <Button Content="Delete" Style="{StaticResource NeonButton}"
+                                                    <Button Content="Delete" Style="{StaticResource NeuralBtnGhost}"
                                                             Click="DeleteCategory_Click" Padding="12,6"/>
                                                 </StackPanel>
 
@@ -4765,7 +4772,7 @@
                                                         <StackPanel Orientation="Horizontal">
                                                             <Button Content="Save" Style="{StaticResource NeuralBtnPrimary}"
                                                                     Click="SaveCategory_Click" Padding="16,6" Margin="0,0,8,0"/>
-                                                            <Button Content="Cancel" Style="{StaticResource NeonButton}"
+                                                            <Button Content="Cancel" Style="{StaticResource NeuralBtnGhost}"
                                                                     Click="CancelCategoryEdit_Click" Padding="16,6"/>
                                                         </StackPanel>
                                                     </StackPanel>
@@ -4890,7 +4897,7 @@
                                                 <StackPanel Orientation="Horizontal">
                                                     <Button Content="Save keys" Style="{StaticResource NeuralBtnPrimary}"
                                                             Click="SaveAiKeys_Click" Padding="14,6" Margin="0,0,6,0"/>
-                                                    <Button Content="Refresh backends" Style="{StaticResource NeonButton}"
+                                                    <Button Content="Refresh backends" Style="{StaticResource NeuralBtnGhost}"
                                                             Click="RefreshAfterKeys_Click" Padding="14,6"/>
                                                 </StackPanel>
                                                 <TextBlock x:Name="AiKeysStatus" FontSize="11" Margin="0,8,0,0"
@@ -4928,7 +4935,7 @@
                                                              FontFamily="{StaticResource MonoFont}" FontSize="11"
                                                              Text="Server=localhost;Port=3306;Database=obsidianx;User=root;Password=;"
                                                              Margin="0,0,0,8"/>
-                                                    <Button Content="Save connection" Style="{StaticResource NeonButton}"
+                                                    <Button Content="Save connection" Style="{StaticResource NeuralBtnGhost}"
                                                             Click="SaveMySqlConn_Click" Padding="12,6" HorizontalAlignment="Left"/>
                                                 </StackPanel>
                                                 <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
@@ -4973,7 +4980,7 @@
                                                                Foreground="{StaticResource TextPrimaryBrush}"
                                                                FontFamily="{StaticResource MonoFont}" VerticalAlignment="Center"/>
                                                 </StackPanel>
-                                                <Button Content="Re-index with current settings" Style="{StaticResource NeonButton}"
+                                                <Button Content="Re-index with current settings" Style="{StaticResource NeuralBtnGhost}"
                                                         Click="ReindexVault_Click" Padding="16,8" HorizontalAlignment="Left"/>
                                             </StackPanel>
                                         </Border>
@@ -5002,13 +5009,13 @@
                                                 <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
                                                     <Button Content="Install in Claude Code CLI" Style="{StaticResource NeuralBtnPrimary}"
                                                             Click="InstallMcp_Click" Padding="16,8" Margin="0,0,8,0"/>
-                                                    <Button Content="Copy Command" Style="{StaticResource NeonButton}"
+                                                    <Button Content="Copy Command" Style="{StaticResource NeuralBtnGhost}"
                                                             Click="CopyMcpCommand_Click" Padding="16,8" Margin="0,0,8,0"/>
-                                                    <Button Content="Build MCP Server" Style="{StaticResource NeonButton}"
+                                                    <Button Content="Build MCP Server" Style="{StaticResource NeuralBtnGhost}"
                                                             Click="BuildMcpServer_Click" Padding="16,8" Margin="0,0,8,0"/>
-                                                    <Button Content="Test" Style="{StaticResource NeonButton}"
+                                                    <Button Content="Test" Style="{StaticResource NeuralBtnGhost}"
                                                             Click="TestMcp_Click" Padding="16,8" Margin="0,0,8,0"/>
-                                                    <Button Content="Uninstall" Style="{StaticResource NeonButton}"
+                                                    <Button Content="Uninstall" Style="{StaticResource NeuralBtnGhost}"
                                                             Click="UninstallMcp_Click" Padding="16,8"/>
                                                 </StackPanel>
 
@@ -5027,9 +5034,9 @@
                                                         <StackPanel Orientation="Horizontal">
                                                             <Button Content="Install hook" Style="{StaticResource NeuralBtnPrimary}"
                                                                     Click="InstallClaudeHook_Click" Padding="12,5" FontSize="10" Margin="0,0,6,0"/>
-                                                            <Button Content="Remove hook" Style="{StaticResource NeonButton}"
+                                                            <Button Content="Remove hook" Style="{StaticResource NeuralBtnGhost}"
                                                                     Click="UninstallClaudeHook_Click" Padding="12,5" FontSize="10" Margin="0,0,6,0"/>
-                                                            <Button Content="Check status" Style="{StaticResource NeonButton}"
+                                                            <Button Content="Check status" Style="{StaticResource NeuralBtnGhost}"
                                                                     Click="CheckClaudeHook_Click" Padding="12,5" FontSize="10"/>
                                                         </StackPanel>
                                                         <TextBlock x:Name="ClaudeHookStatus" FontSize="10" Margin="0,6,0,0"
@@ -5053,7 +5060,7 @@
                                                                  TextWrapping="NoWrap" AcceptsReturn="True" Height="140"
                                                                  HorizontalScrollBarVisibility="Auto"
                                                                  VerticalScrollBarVisibility="Auto"/>
-                                                        <Button Content="Copy JSON" Style="{StaticResource NeonButton}"
+                                                        <Button Content="Copy JSON" Style="{StaticResource NeuralBtnGhost}"
                                                                 Click="CopyMcpConfig_Click" Padding="12,6" Margin="0,8,0,0"
                                                                 HorizontalAlignment="Left"/>
                                                     </StackPanel>
