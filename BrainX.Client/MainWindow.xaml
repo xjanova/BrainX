@@ -3206,61 +3206,15 @@
                              WebView2 spin-up cost is paid only when the user asks for
                              it. -->
                         <Grid x:Name="UniverseView" Visibility="Collapsed">
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="*"/>
-                            </Grid.RowDefinitions>
-
-                            <!-- ═══ Brain Graph view header (t2.zip 02-brain-graph.png)
-                                 Per "brain graph = univers" — Universe IS Brain Graph. -->
-                            <Grid Grid.Row="0" Margin="28,20,28,16">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="Auto"/>
-                                </Grid.ColumnDefinitions>
-                                <StackPanel Grid.Column="0">
-                                    <TextBlock Text="Brain Graph" Style="{StaticResource TypeViewTitle}"/>
-                                    <TextBlock x:Name="BrainGraphSubtitle"
-                                               Text="455 nodes · 2,724 edges · live physics"
-                                               Style="{StaticResource TypeViewSubtitle}"/>
-                                </StackPanel>
-                                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
-                                    <!-- 3D/2D segmented (re-uses UniverseViewToggle_Click handler) -->
-                                    <Border Background="{StaticResource NeuralBgInset}"
-                                            BorderBrush="{StaticResource NeuralLine}" BorderThickness="1"
-                                            CornerRadius="9" Padding="3" Margin="0,0,10,0"
-                                            Cursor="Hand" MouseLeftButtonUp="UniverseViewToggle_Click">
-                                        <StackPanel Orientation="Horizontal">
-                                            <Border x:Name="BGHeader3D" CornerRadius="7" Padding="12,4"
-                                                    Background="{StaticResource NeuralPrimaryBtn}">
-                                                <TextBlock Text="3D" FontSize="12" FontWeight="SemiBold"
-                                                           Foreground="White"/>
-                                            </Border>
-                                            <Border x:Name="BGHeader2D" CornerRadius="7" Padding="12,4">
-                                                <TextBlock Text="2D" FontSize="12" FontWeight="SemiBold"
-                                                           Foreground="{StaticResource NeuralText2}"/>
-                                            </Border>
-                                        </StackPanel>
-                                    </Border>
-                                    <Button Style="{StaticResource NeuralBtnGhost}" Margin="0,0,10,0">
-                                        <StackPanel Orientation="Horizontal">
-                                            <TextBlock Text="&#x25BD;" FontSize="11" Margin="0,0,6,0"
-                                                       VerticalAlignment="Center"/>
-                                            <TextBlock Text="Filter" VerticalAlignment="Center"/>
-                                        </StackPanel>
-                                    </Button>
-                                    <Button Style="{StaticResource NeuralBtnGhost}">
-                                        <StackPanel Orientation="Horizontal">
-                                            <TextBlock Text="&#x21BB;" FontSize="13" Margin="0,0,6,0"
-                                                       VerticalAlignment="Center"/>
-                                            <TextBlock Text="Re-layout" VerticalAlignment="Center"/>
-                                        </StackPanel>
-                                    </Button>
-                                </StackPanel>
-                            </Grid>
+                            <!-- User: "เอาแถบบนออกทั้งแถบ" — Brain Graph view header
+                                 (title + subtitle + 3D/2D + Filter + Re-layout) removed.
+                                 The Universe galaxy is now full-bleed — no chrome eating
+                                 vertical space. Sidebar still tells the user which view
+                                 they're on, and 3D/2D can still be toggled from the
+                                 floating WPF pill (UniverseViewToggle) below. -->
 
                             <!-- 3D Universe (WebView2 + three.js) — default visible -->
-                            <Border Grid.Row="1" x:Name="UniverseWebBorder" Background="#FF000308" ClipToBounds="True">
+                            <Border x:Name="UniverseWebBorder" Background="#FF000308" ClipToBounds="True">
                                 <wv2:WebView2 x:Name="UniverseWebView" DefaultBackgroundColor="Black"/>
                             </Border>
 
@@ -3274,7 +3228,7 @@
                                  Backdrop is 88% opaque so the empty WebView's
                                  black void is masked but the WebView still
                                  receives the navigation paint underneath. -->
-                            <Border Grid.Row="1" x:Name="UniverseLoadingOverlay"
+                            <Border x:Name="UniverseLoadingOverlay"
                                     Background="#DD000308"
                                     Panel.ZIndex="50"
                                     Visibility="Visible">
@@ -3370,7 +3324,7 @@
                             <!-- 2D Graph (WriteableBitmap renderer) — collapsed by default.
                                  Shares _graphPhysics with the (hidden) BrainGraphView so
                                  MCP pulse flashes here too. -->
-                            <Border Grid.Row="1" x:Name="UniverseGraph2DBorder" CornerRadius="0" ClipToBounds="True"
+                            <Border x:Name="UniverseGraph2DBorder" CornerRadius="0" ClipToBounds="True"
                                     Visibility="Collapsed"
                                     MouseLeftButtonDown="Graph2D_MouseDown"
                                     MouseLeftButtonUp="Graph2D_MouseUp"
@@ -3384,17 +3338,16 @@
                                 <services:Graph2DRenderer x:Name="UniverseGraph2D"/>
                             </Border>
 
-                            <!-- WPF floating 3D/2D toggle — hidden now that the
-                                 Brain Graph view header has its own 3D/2D segmented.
-                                 Kept in tree for compat — UniverseViewToggle_Click handler
-                                 still binds to it (and to the new header segmented). -->
-                            <Border Grid.Row="1" x:Name="UniverseViewToggle"
+                            <!-- WPF floating 3D/2D toggle — restored now that the Brain
+                                 Graph view header is gone. Pinned top-right corner of
+                                 the Universe view, sits on top of the WebView via
+                                 Panel.ZIndex=100. Tiny pill, doesn't crowd the galaxy. -->
+                            <Border x:Name="UniverseViewToggle"
                                     HorizontalAlignment="Right" VerticalAlignment="Top"
                                     Margin="0,18,18,0" Padding="0"
                                     Panel.ZIndex="100"
                                     CornerRadius="999"
                                     Cursor="Hand"
-                                    Visibility="Collapsed"
                                     MouseLeftButtonUp="UniverseViewToggle_Click">
                                 <Border.Background>
                                     <SolidColorBrush Color="#CC0A081C"/>
