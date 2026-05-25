@@ -297,23 +297,16 @@
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
 
-                    <!-- LEFT SIDEBAR — fully opaque gradient (Phase 3 glass effect
-                         can't work anyway because of WebView2 airspace). Keeps the
-                         coloured top edge + glow border for visual harmony. -->
+                    <!-- LEFT SIDEBAR (Neural redesign — Phase 1B)
+                         Background → NeuralSidebarBg (#14102a → #0e0a22 violet gradient
+                         matching the design handoff spec). Right edge → NeuralLine
+                         (subtle 8% violet hairline, replaces the loud cyan glow gradient).
+                         Width stays at 220 px for now; bumping to 240 per the spec is a
+                         later commit alongside the brand-crest + nav-item migration. -->
                     <Border x:Name="SidebarBorder" Grid.Column="0"
+                            Background="{StaticResource NeuralSidebarBg}"
+                            BorderBrush="{StaticResource NeuralLine}"
                             BorderThickness="0,0,1,0">
-                        <Border.Background>
-                            <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
-                                <GradientStop Color="#FF0A081C" Offset="0"/>
-                                <GradientStop Color="#FF060512" Offset="1"/>
-                            </LinearGradientBrush>
-                        </Border.Background>
-                        <Border.BorderBrush>
-                            <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
-                                <GradientStop Color="#666CF0FF" Offset="0"/>
-                                <GradientStop Color="#22FFFFFF" Offset="1"/>
-                            </LinearGradientBrush>
-                        </Border.BorderBrush>
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -349,16 +342,16 @@
                                 <StackPanel Margin="0,8,0,8">
                                     <TextBlock Text="NAVIGATION" FontSize="10" Foreground="{StaticResource TextMutedBrush}"
                                                Margin="22,8,0,12" FontWeight="SemiBold"/>
-                                    <!-- Universe is the dashboard now. BrainGraph nav hidden
-                                         because the Universe HUD has a View toggle that flips
-                                         to 2D Graph inline. Dashboard nav also hidden (legacy). -->
+                                    <!-- Universe is the default startup view; Dashboard is the
+                                         classic stats overview kept available alongside it.
+                                         BrainGraph nav stays hidden because the Universe HUD has a
+                                         View toggle that flips to 2D Graph inline. -->
+                                    <Button x:Name="NavDashboard" Content="&#x2B21;  Dashboard"
+                                            Style="{StaticResource NavButtonActive}" Click="Nav_Click" Tag="Dashboard"/>
                                     <Button x:Name="NavUniverse" Content="&#x1F30C;  Universe"
-                                            Style="{StaticResource NavButtonActive}" Click="Nav_Click" Tag="Universe"/>
+                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Universe"/>
                                     <Button x:Name="NavBrainGraph" Content="&#x25C9;  Brain Graph"
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="BrainGraph"
-                                            Visibility="Collapsed"/>
-                                    <Button x:Name="NavDashboard" Content="&#x2B21;  Dashboard (legacy)"
-                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Dashboard"
                                             Visibility="Collapsed"/>
                                     <Button x:Name="NavNetwork" Content="&#x2B22;  Network"
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Network"/>
@@ -418,46 +411,119 @@
 
                     <!-- CONTENT AREA -->
                     <Grid Grid.Column="1">
-                        <!-- Dashboard (legacy — kept hidden; Universe replaces this) -->
-                        <Grid x:Name="DashboardView" Visibility="Collapsed">
-                            <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="24,16">
+                        <!-- Dashboard — default startup view (the at-a-glance stats
+                             overview). Universe view is still available from the sidebar. -->
+                        <Grid x:Name="DashboardView" Visibility="Visible">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="28,24,28,32">
                                 <StackPanel>
-                                    <TextBlock Text="Dashboard" FontSize="24" FontWeight="Bold"
-                                               Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,4"/>
-                                    <TextBlock Text="Your neural knowledge overview" FontSize="12"
-                                               Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,20"/>
+                                    <!-- ═══════════════════════════════════════════════════════════════
+                                         VIEW HEADER (Neural redesign — Phase 2)
+                                         26 px Manrope-fallback title + 13.5 px subtitle, matches the
+                                         design handoff spec (design_handoff_brainx_redesign §"View head").
+                                         ═══════════════════════════════════════════════════════════════ -->
+                                    <StackPanel Margin="0,0,0,22">
+                                        <TextBlock Text="Dashboard" Style="{StaticResource TypeViewTitle}"/>
+                                        <TextBlock Text="Your neural knowledge overview"
+                                                   Style="{StaticResource TypeViewSubtitle}"/>
+                                    </StackPanel>
 
-                                    <!-- Stats -->
-                                    <UniformGrid Columns="4" Margin="0,0,0,20">
-                                        <Border Style="{StaticResource CardPanel}" Margin="0,0,8,0">
-                                            <StackPanel>
-                                                <TextBlock x:Name="StatNotes" Text="0" Style="{StaticResource StatNumber}"
-                                                           Foreground="{StaticResource NeonCyanBrush}"/>
-                                                <TextBlock Text="KNOWLEDGE NODES" Style="{StaticResource StatLabel}"/>
-                                            </StackPanel>
+                                    <!-- ═══════════════════════════════════════════════════════════════
+                                         KPI GRID — 4 cards, 16 px gap (Neural redesign Phase 2)
+                                         Each card: 18 px padding, NeuralCard surface (shadow-2 + edge-top),
+                                         3 px colored thumb on the LEFT EDGE TOP (the prototype's ::before
+                                         pseudo, recreated here as an actual <Border> with the accent glow),
+                                         uppercase label + 36 px tabular value.
+                                         Preserves: x:Name = StatNotes / StatWords / StatLinks / StatCategories
+                                         (the Window_Loaded → IndexVault populates these from _graph).
+                                         ═══════════════════════════════════════════════════════════════ -->
+                                    <Grid Margin="0,0,0,22">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <!-- Card 1: KNOWLEDGE NODES — violet accent -->
+                                        <Border Grid.Column="0" Style="{StaticResource NeuralCard}"
+                                                Padding="18,16,18,18" Margin="0,0,8,0">
+                                            <Grid>
+                                                <Border Width="3" Height="30"
+                                                        Background="{StaticResource NeuralViolet}"
+                                                        HorizontalAlignment="Left" VerticalAlignment="Top"
+                                                        CornerRadius="2" Margin="0,2,0,0">
+                                                    <Border.Effect>
+                                                        <DropShadowEffect Color="{StaticResource NeuralVioletColor}"
+                                                                          BlurRadius="14" ShadowDepth="0" Opacity="0.7"/>
+                                                    </Border.Effect>
+                                                </Border>
+                                                <StackPanel Margin="14,0,0,0">
+                                                    <TextBlock Text="KNOWLEDGE NODES" Style="{StaticResource TypeKpiLabel}"/>
+                                                    <TextBlock x:Name="StatNotes" Text="0"
+                                                               Style="{StaticResource TypeKpiValue}" Margin="0,6,0,0"/>
+                                                </StackPanel>
+                                            </Grid>
                                         </Border>
-                                        <Border Style="{StaticResource CardPanel}" Margin="4,0,4,0">
-                                            <StackPanel>
-                                                <TextBlock x:Name="StatWords" Text="0" Style="{StaticResource StatNumber}"
-                                                           Foreground="{StaticResource ElectricPurpleBrush}"/>
-                                                <TextBlock Text="TOTAL WORDS" Style="{StaticResource StatLabel}"/>
-                                            </StackPanel>
+                                        <!-- Card 2: TOTAL WORDS — cyan accent -->
+                                        <Border Grid.Column="1" Style="{StaticResource NeuralCard}"
+                                                Padding="18,16,18,18" Margin="4,0,4,0">
+                                            <Grid>
+                                                <Border Width="3" Height="30"
+                                                        Background="{StaticResource NeuralCyan}"
+                                                        HorizontalAlignment="Left" VerticalAlignment="Top"
+                                                        CornerRadius="2" Margin="0,2,0,0">
+                                                    <Border.Effect>
+                                                        <DropShadowEffect Color="{StaticResource NeuralCyanColor}"
+                                                                          BlurRadius="14" ShadowDepth="0" Opacity="0.7"/>
+                                                    </Border.Effect>
+                                                </Border>
+                                                <StackPanel Margin="14,0,0,0">
+                                                    <TextBlock Text="TOTAL WORDS" Style="{StaticResource TypeKpiLabel}"/>
+                                                    <TextBlock x:Name="StatWords" Text="0"
+                                                               Style="{StaticResource TypeKpiValue}" Margin="0,6,0,0"/>
+                                                </StackPanel>
+                                            </Grid>
                                         </Border>
-                                        <Border Style="{StaticResource CardPanel}" Margin="4,0,4,0">
-                                            <StackPanel>
-                                                <TextBlock x:Name="StatLinks" Text="0" Style="{StaticResource StatNumber}"
-                                                           Foreground="{StaticResource NeonPinkBrush}"/>
-                                                <TextBlock Text="CONNECTIONS" Style="{StaticResource StatLabel}"/>
-                                            </StackPanel>
+                                        <!-- Card 3: CONNECTIONS — mint accent -->
+                                        <Border Grid.Column="2" Style="{StaticResource NeuralCard}"
+                                                Padding="18,16,18,18" Margin="4,0,4,0">
+                                            <Grid>
+                                                <Border Width="3" Height="30"
+                                                        Background="{StaticResource NeuralMint}"
+                                                        HorizontalAlignment="Left" VerticalAlignment="Top"
+                                                        CornerRadius="2" Margin="0,2,0,0">
+                                                    <Border.Effect>
+                                                        <DropShadowEffect Color="{StaticResource NeuralMintColor}"
+                                                                          BlurRadius="14" ShadowDepth="0" Opacity="0.7"/>
+                                                    </Border.Effect>
+                                                </Border>
+                                                <StackPanel Margin="14,0,0,0">
+                                                    <TextBlock Text="CONNECTIONS" Style="{StaticResource TypeKpiLabel}"/>
+                                                    <TextBlock x:Name="StatLinks" Text="0"
+                                                               Style="{StaticResource TypeKpiValue}" Margin="0,6,0,0"/>
+                                                </StackPanel>
+                                            </Grid>
                                         </Border>
-                                        <Border Style="{StaticResource CardPanel}" Margin="8,0,0,0">
-                                            <StackPanel>
-                                                <TextBlock x:Name="StatCategories" Text="0" Style="{StaticResource StatNumber}"
-                                                           Foreground="{StaticResource NeonGreenBrush}"/>
-                                                <TextBlock Text="EXPERTISE AREAS" Style="{StaticResource StatLabel}"/>
-                                            </StackPanel>
+                                        <!-- Card 4: EXPERTISE AREAS — magenta accent -->
+                                        <Border Grid.Column="3" Style="{StaticResource NeuralCard}"
+                                                Padding="18,16,18,18" Margin="8,0,0,0">
+                                            <Grid>
+                                                <Border Width="3" Height="30"
+                                                        Background="{StaticResource NeuralMagenta}"
+                                                        HorizontalAlignment="Left" VerticalAlignment="Top"
+                                                        CornerRadius="2" Margin="0,2,0,0">
+                                                    <Border.Effect>
+                                                        <DropShadowEffect Color="{StaticResource NeuralMagentaColor}"
+                                                                          BlurRadius="14" ShadowDepth="0" Opacity="0.7"/>
+                                                    </Border.Effect>
+                                                </Border>
+                                                <StackPanel Margin="14,0,0,0">
+                                                    <TextBlock Text="EXPERTISE AREAS" Style="{StaticResource TypeKpiLabel}"/>
+                                                    <TextBlock x:Name="StatCategories" Text="0"
+                                                               Style="{StaticResource TypeKpiValue}" Margin="0,6,0,0"/>
+                                                </StackPanel>
+                                            </Grid>
                                         </Border>
-                                    </UniformGrid>
+                                    </Grid>
 
                                     <!-- 3D Brain Map (full width) with glassmorphism Expertise overlay -->
                                     <Border Style="{StaticResource CardPanel}" Margin="0,0,0,20" MinHeight="520">
@@ -2721,11 +2787,15 @@
                         </Grid>
 
                         <!-- ═══ UNIVERSE VIEW (WebView2 + three.js + embedded 2D) ═══
-                             Default startup view (replaces Dashboard). WebView2 lives
-                             inside this content cell so the WPF chrome (sidebar/title/
-                             status) stays visible and interactive — the airspace rule
-                             keeps the WebView out of the chrome's area. -->
-                        <Grid x:Name="UniverseView" Visibility="Visible">
+                             Available from sidebar; Dashboard is the default startup
+                             view again. WebView2 lives inside this content cell so the
+                             WPF chrome (sidebar/title/status) stays visible and
+                             interactive — the airspace rule keeps the WebView out of
+                             the chrome's area. InitializeUniverseAsync is triggered on
+                             first nav click to this view, not on app startup, so the
+                             WebView2 spin-up cost is paid only when the user asks for
+                             it. -->
+                        <Grid x:Name="UniverseView" Visibility="Collapsed">
                             <!-- 3D Universe (WebView2 + three.js) — default visible -->
                             <Border x:Name="UniverseWebBorder" Background="#FF000308" ClipToBounds="True">
                                 <wv2:WebView2 x:Name="UniverseWebView" DefaultBackgroundColor="Black"/>

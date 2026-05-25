@@ -42,3 +42,9 @@ launchSettings.json
 *.bak
 *.swp
 ~$*
+
+# Design handoff working files (extracted from brainx.zip — reference
+# material the designer dropped during the UI redesign; not source code).
+.brainx-zip-extracted/
+brainx.zip
+logobrain.png
