@@ -564,13 +564,25 @@
                         <!-- Dashboard — default startup (per user "เพิ่ม หน้า dashboard").
                              KPI cards + Activity Feed + Recently Edited inside. -->
                         <Grid x:Name="DashboardView" Visibility="Visible">
-                            <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="28,24,28,32">
-                                <StackPanel>
-                                    <!-- ═══════════════════════════════════════════════════════════════
-                                         VIEW HEADER per t2.zip screenshots/01-dashboard.png:
-                                         left = title + subtitle, right = Refresh (ghost) + New note (primary)
-                                         ═══════════════════════════════════════════════════════════════ -->
-                                    <Grid Margin="0,0,0,22">
+                            <!-- Refactored from ScrollViewer/StackPanel → 4-row Grid
+                                 (Auto header · Auto KPI · *  map row · Auto quick actions).
+                                 WebView2 = HwndHost native window; ScrollViewer's clip
+                                 region doesn't constrain HwndHost so when the StackPanel
+                                 was taller than the viewport, the map's WebView2 painted
+                                 PAST the bottom into the status bar (user: "map view
+                                 ทะลุบาร์ล่าง"). Fixed by removing scroll so every child
+                                 sits inside an explicit grid row that fits within the
+                                 visible content area. Map gets the * row so it absorbs
+                                 the remaining vertical space cleanly. -->
+                            <Grid Margin="28,24,28,16">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <!-- View header — Row 0 -->
+                                <Grid Grid.Row="0" Margin="0,0,0,22">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*"/>
                                             <ColumnDefinition Width="Auto"/>
@@ -600,16 +612,8 @@
                                         </StackPanel>
                                     </Grid>
 
-                                    <!-- ═══════════════════════════════════════════════════════════════
-                                         KPI GRID — 4 cards, 16 px gap (Neural redesign Phase 2)
-                                         Each card: 18 px padding, NeuralCard surface (shadow-2 + edge-top),
-                                         3 px colored thumb on the LEFT EDGE TOP (the prototype's ::before
-                                         pseudo, recreated here as an actual <Border> with the accent glow),
-                                         uppercase label + 36 px tabular value.
-                                         Preserves: x:Name = StatNotes / StatWords / StatLinks / StatCategories
-                                         (the Window_Loaded → IndexVault populates these from _graph).
-                                         ═══════════════════════════════════════════════════════════════ -->
-                                    <Grid Margin="0,0,0,22">
+                                    <!-- KPI grid — Row 1 -->
+                                    <Grid Grid.Row="1" Margin="0,0,0,22">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*"/>
                                             <ColumnDefinition Width="*"/>
@@ -689,20 +693,12 @@
                                         </Border>
                                     </Grid>
 
-                                    <!-- ═══════════════════════════════════════════════════════════════
-                                         DASH-GRID — 2 columns (1.6fr Neural Map · 1fr Activity + Recent).
-                                         Mirrors the prototype's DashboardView main grid exactly
-                                         (design_handoff_brainx_redesign/design/views-a.jsx::DashboardView).
-                                         The Map Border in Column 0 wraps the existing 3D viewport, 2D
-                                         renderer, Expertise overlay, and NodeInfoPanel UNCHANGED — their
-                                         renderers are tied to FullGraph / DashGraph2D / EditDashNode
-                                         handlers in code-behind, so touching them risks the Universe
-                                         pulse + click-to-edit flow. Column 1 is brand-new from the
-                                         prototype: Activity Feed (kind-badge rows) + Recently Edited
-                                         (real vault data). See MainWindow.Dashboard.cs for the data
-                                         populate.
-                                         ═══════════════════════════════════════════════════════════════ -->
-                                    <Grid Margin="0,0,0,20" MinHeight="520">
+                                    <!-- DASH-GRID — Row 2 (* — fills remaining height).
+                                         2 columns (1.6fr Neural Map · 1fr Activity + Recent).
+                                         MinHeight removed because the Grid's * row now sizes us
+                                         exactly to the available space — no overflow into the
+                                         status bar (the original "map view ทะลุบาร์ล่าง" bug). -->
+                                    <Grid Grid.Row="2" Margin="0,0,0,16">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="1.6*"/>
                                             <ColumnDefinition Width="*"/>
@@ -1114,12 +1110,12 @@
                                     </Grid>
                                     <!-- end DASH-GRID 2-col -->
 
-                                    <!-- Quick Actions (Neural redesign — Phase 2)
+                                    <!-- Quick Actions — Row 3 (Auto, pinned to the bottom).
                                          NeuralCard wrapper + TypeCardTitle label + NeuralBtn / NeuralBtnPrimary
                                          buttons. Re-index Vault is the only action with a side effect on the
                                          entire knowledge graph, so it gets the primary violet treatment; the
                                          other three are secondary (ghost = no decoration, default = card-tinted). -->
-                                    <Border Style="{StaticResource NeuralCard}" Padding="22,18">
+                                    <Border Grid.Row="3" Style="{StaticResource NeuralCard}" Padding="22,18">
                                         <StackPanel>
                                             <TextBlock Text="QUICK ACTIONS"
                                                        Style="{StaticResource TypeCardTitle}"
@@ -1140,8 +1136,8 @@
                                             </WrapPanel>
                                         </StackPanel>
                                     </Border>
-                                </StackPanel>
-                            </ScrollViewer>
+                                <!-- end Dashboard inner 4-row Grid -->
+                                </Grid>
                         </Grid>
 
                         <!-- Brain Graph View -->
