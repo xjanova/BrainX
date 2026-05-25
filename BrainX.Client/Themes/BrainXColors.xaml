@@ -146,4 +146,34 @@
     <GradientStop Color="#0a071a" Offset="0.8"/>
   </RadialGradientBrush>
 
+  <!-- ═══════════════════════════════════════════════════════════════════
+       Activity-feed kind badges (Dashboard right rail). One 135deg gradient
+       per kind, same hex stops as the prototype's `.act-kind.X` CSS classes
+       in views.css §"Activity list".
+       ═══════════════════════════════════════════════════════════════════ -->
+  <LinearGradientBrush x:Key="ActKindMcp" StartPoint="0,0" EndPoint="1,1">
+    <GradientStop Color="#9d7bff" Offset="0"/>
+    <GradientStop Color="#6a48d6" Offset="1"/>
+  </LinearGradientBrush>
+  <LinearGradientBrush x:Key="ActKindSave" StartPoint="0,0" EndPoint="1,1">
+    <GradientStop Color="#4ae3a7" Offset="0"/>
+    <GradientStop Color="#1aa57a" Offset="1"/>
+  </LinearGradientBrush>
+  <LinearGradientBrush x:Key="ActKindIndex" StartPoint="0,0" EndPoint="1,1">
+    <GradientStop Color="#5be9e9" Offset="0"/>
+    <GradientStop Color="#2bb8b8" Offset="1"/>
+  </LinearGradientBrush>
+  <LinearGradientBrush x:Key="ActKindAi" StartPoint="0,0" EndPoint="1,1">
+    <GradientStop Color="#ffc23c" Offset="0"/>
+    <GradientStop Color="#d68f10" Offset="1"/>
+  </LinearGradientBrush>
+  <LinearGradientBrush x:Key="ActKindPeer" StartPoint="0,0" EndPoint="1,1">
+    <GradientStop Color="#ff4f9e" Offset="0"/>
+    <GradientStop Color="#d62677" Offset="1"/>
+  </LinearGradientBrush>
+  <LinearGradientBrush x:Key="ActKindShare" StartPoint="0,0" EndPoint="1,1">
+    <GradientStop Color="#74d2ff" Offset="0"/>
+    <GradientStop Color="#3a96d8" Offset="1"/>
+  </LinearGradientBrush>
+
 </ResourceDictionary>

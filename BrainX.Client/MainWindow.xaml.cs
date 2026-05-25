@@ -2147,6 +2147,11 @@ public partial class MainWindow : Window
         // Populate UI
         Services.StartupProgress.Report("Wiring UI panels", 0.78, tag: "ui");
         UpdateUI();
+        // Dashboard right-rail: Activity Feed + Recently Edited (see
+        // MainWindow.Dashboard.cs). Activity is seeded with sample rows for
+        // now; Recently Edited reads real _graph data populated by IndexVault
+        // above, so it shows the actual 5 most-recently-modified notes.
+        PopulateDashSidebar();
         PopulateMatchCategories();
         PopulateSettings();
         PopulateImportSettings();

@@ -525,13 +525,26 @@
                                         </Border>
                                     </Grid>
 
-                                    <!-- 3D Brain Map (full width) with glassmorphism Expertise overlay.
-                                         Phase 2: outer Border swapped to NeuralCard so the depth + corner
-                                         radius matches the rest of the Dashboard surfaces. Inner viewport +
-                                         overlay still use cyberpunk styling; full Map chrome migration
-                                         (toolbar restyle, glass overlay redo) is a later commit. -->
-                                    <Border Style="{StaticResource NeuralCard}" Margin="0,0,0,20" MinHeight="520"
-                                            Padding="16,12">
+                                    <!-- ═══════════════════════════════════════════════════════════════
+                                         DASH-GRID — 2 columns (1.6fr Neural Map · 1fr Activity + Recent).
+                                         Mirrors the prototype's DashboardView main grid exactly
+                                         (design_handoff_brainx_redesign/design/views-a.jsx::DashboardView).
+                                         The Map Border in Column 0 wraps the existing 3D viewport, 2D
+                                         renderer, Expertise overlay, and NodeInfoPanel UNCHANGED — their
+                                         renderers are tied to FullGraph / DashGraph2D / EditDashNode
+                                         handlers in code-behind, so touching them risks the Universe
+                                         pulse + click-to-edit flow. Column 1 is brand-new from the
+                                         prototype: Activity Feed (kind-badge rows) + Recently Edited
+                                         (real vault data). See MainWindow.Dashboard.cs for the data
+                                         populate.
+                                         ═══════════════════════════════════════════════════════════════ -->
+                                    <Grid Margin="0,0,0,20" MinHeight="520">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="1.6*"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Border Grid.Column="0" Style="{StaticResource NeuralCard}"
+                                                Margin="0,0,8,0" Padding="16,12">
                                         <Grid>
                                             <Grid.RowDefinitions>
                                                 <RowDefinition Height="Auto"/>
@@ -751,6 +764,174 @@
                                                 </Border>
                                             </Grid>
                                         </Border>
+                                        <!-- end Map Border (Grid.Column=0). Right column below. -->
+
+                                        <!-- ═══════════════════════════════════════════════════════════
+                                             RIGHT COLUMN (Grid.Column=1)
+                                             Activity Feed (top) + Recently Edited (bottom). New from the
+                                             prototype right-rail; bound via DashActivityList +
+                                             DashRecentNotesList in MainWindow.Dashboard.cs.
+                                             ═══════════════════════════════════════════════════════════ -->
+                                        <StackPanel Grid.Column="1" Margin="8,0,0,0">
+                                            <!-- ── Activity Feed card ─────────────────────────────────── -->
+                                            <Border Style="{StaticResource NeuralCard}" Margin="0,0,0,12">
+                                                <Grid>
+                                                    <Grid.RowDefinitions>
+                                                        <RowDefinition Height="Auto"/>
+                                                        <RowDefinition Height="*"/>
+                                                    </Grid.RowDefinitions>
+                                                    <!-- card-head -->
+                                                    <Grid Grid.Row="0" Margin="18,14,18,12">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                            <ColumnDefinition Width="*"/>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                        </Grid.ColumnDefinitions>
+                                                        <TextBlock Grid.Column="0" Text="ACTIVITY FEED"
+                                                                   Style="{StaticResource TypeCardTitle}"
+                                                                   VerticalAlignment="Center"/>
+                                                        <TextBlock Grid.Column="1" Text=" · live"
+                                                                   VerticalAlignment="Center" Margin="6,0,0,0"
+                                                                   FontSize="12"
+                                                                   Foreground="{StaticResource NeuralText3}"/>
+                                                        <Border Grid.Column="3" Style="{StaticResource NeuralTagAccent}">
+                                                            <StackPanel Orientation="Horizontal">
+                                                                <Border Width="6" Height="6" CornerRadius="3"
+                                                                        Background="{StaticResource NeuralMint}"
+                                                                        Effect="{StaticResource GlowMint}"
+                                                                        VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                                                <TextBlock Text="Mesh online" FontSize="11.5"
+                                                                           FontWeight="SemiBold"
+                                                                           Foreground="{StaticResource NeuralViolet2}"
+                                                                           VerticalAlignment="Center"/>
+                                                            </StackPanel>
+                                                        </Border>
+                                                    </Grid>
+                                                    <!-- divider -->
+                                                    <Border Grid.Row="0" Height="1" VerticalAlignment="Bottom"
+                                                            Background="{StaticResource NeuralLine}"/>
+                                                    <!-- activity-list (bound to DashActivityList) -->
+                                                    <ScrollViewer Grid.Row="1" MaxHeight="320"
+                                                                  VerticalScrollBarVisibility="Auto"
+                                                                  Padding="0,4">
+                                                        <ItemsControl x:Name="DashActivityList">
+                                                            <ItemsControl.ItemTemplate>
+                                                                <DataTemplate>
+                                                                    <Grid>
+                                                                        <Grid.ColumnDefinitions>
+                                                                            <ColumnDefinition Width="64"/>
+                                                                            <ColumnDefinition Width="42"/>
+                                                                            <ColumnDefinition Width="*"/>
+                                                                        </Grid.ColumnDefinitions>
+                                                                        <TextBlock Grid.Column="0"
+                                                                                   Text="{Binding Time}"
+                                                                                   Style="{StaticResource TypeMonoSmall}"
+                                                                                   Margin="18,12,0,12"
+                                                                                   VerticalAlignment="Top"/>
+                                                                        <Border Grid.Column="1"
+                                                                                Background="{Binding KindBrush}"
+                                                                                CornerRadius="4"
+                                                                                Width="32" Height="16"
+                                                                                Margin="0,14,0,0"
+                                                                                VerticalAlignment="Top"
+                                                                                HorizontalAlignment="Left">
+                                                                            <TextBlock Text="{Binding KindLabel}"
+                                                                                       FontSize="9"
+                                                                                       FontWeight="ExtraBold"
+                                                                                       Foreground="White"
+                                                                                       HorizontalAlignment="Center"
+                                                                                       VerticalAlignment="Center"
+                                                                                       FontFamily="{StaticResource FontMono}"/>
+                                                                        </Border>
+                                                                        <TextBlock Grid.Column="2"
+                                                                                   Text="{Binding Message}"
+                                                                                   FontSize="13"
+                                                                                   Foreground="{StaticResource NeuralText1}"
+                                                                                   TextWrapping="Wrap"
+                                                                                   Margin="10,12,18,12"
+                                                                                   LineHeight="18"/>
+                                                                    </Grid>
+                                                                </DataTemplate>
+                                                            </ItemsControl.ItemTemplate>
+                                                        </ItemsControl>
+                                                    </ScrollViewer>
+                                                </Grid>
+                                            </Border>
+
+                                            <!-- ── Recently Edited card ───────────────────────────────── -->
+                                            <Border Style="{StaticResource NeuralCard}">
+                                                <Grid>
+                                                    <Grid.RowDefinitions>
+                                                        <RowDefinition Height="Auto"/>
+                                                        <RowDefinition Height="*"/>
+                                                    </Grid.RowDefinitions>
+                                                    <Grid Grid.Row="0" Margin="18,14,18,12">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                            <ColumnDefinition Width="*"/>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                        </Grid.ColumnDefinitions>
+                                                        <TextBlock Grid.Column="0" Text="RECENTLY EDITED"
+                                                                   Style="{StaticResource TypeCardTitle}"
+                                                                   VerticalAlignment="Center"/>
+                                                        <TextBlock Grid.Column="1" x:Name="DashRecentCountText"
+                                                                   Text=" · 0 notes"
+                                                                   VerticalAlignment="Center" Margin="6,0,0,0"
+                                                                   FontSize="12"
+                                                                   Foreground="{StaticResource NeuralText3}"/>
+                                                        <Button Grid.Column="3" Content="See all"
+                                                                Style="{StaticResource NeuralBtnGhost}"
+                                                                Height="26" Padding="10,0" FontSize="12"
+                                                                Tag="Vault" Click="Nav_Click"/>
+                                                    </Grid>
+                                                    <Border Grid.Row="0" Height="1" VerticalAlignment="Bottom"
+                                                            Background="{StaticResource NeuralLine}"/>
+                                                    <ItemsControl Grid.Row="1" x:Name="DashRecentNotesList"
+                                                                  Margin="6,4,6,10">
+                                                        <ItemsControl.ItemTemplate>
+                                                            <DataTemplate>
+                                                                <Border CornerRadius="8" Padding="10,9" Margin="0,1"
+                                                                        Background="Transparent">
+                                                                    <Grid>
+                                                                        <Grid.ColumnDefinitions>
+                                                                            <ColumnDefinition Width="14"/>
+                                                                            <ColumnDefinition Width="*"/>
+                                                                            <ColumnDefinition Width="Auto"/>
+                                                                        </Grid.ColumnDefinitions>
+                                                                        <Border Grid.Column="0" Width="10" Height="10"
+                                                                                CornerRadius="5"
+                                                                                Background="{Binding CategoryBrush}"
+                                                                                VerticalAlignment="Top"
+                                                                                Margin="0,5,0,0"/>
+                                                                        <StackPanel Grid.Column="1" Margin="10,0,8,0">
+                                                                            <TextBlock Text="{Binding Title}"
+                                                                                       FontSize="13.5"
+                                                                                       FontWeight="Medium"
+                                                                                       Foreground="{StaticResource NeuralText}"
+                                                                                       TextTrimming="CharacterEllipsis"/>
+                                                                            <TextBlock Text="{Binding Meta}"
+                                                                                       FontSize="11.5"
+                                                                                       Foreground="{StaticResource NeuralText3}"
+                                                                                       Margin="0,2,0,0"/>
+                                                                        </StackPanel>
+                                                                        <TextBlock Grid.Column="2"
+                                                                                   Text="{Binding WordsLabel}"
+                                                                                   FontFamily="{StaticResource FontMono}"
+                                                                                   FontSize="11.5"
+                                                                                   Foreground="{StaticResource NeuralText2}"
+                                                                                   VerticalAlignment="Center"/>
+                                                                    </Grid>
+                                                                </Border>
+                                                            </DataTemplate>
+                                                        </ItemsControl.ItemTemplate>
+                                                    </ItemsControl>
+                                                </Grid>
+                                            </Border>
+                                        </StackPanel>
+                                    </Grid>
+                                    <!-- end DASH-GRID 2-col -->
 
                                     <!-- Quick Actions (Neural redesign — Phase 2)
                                          NeuralCard wrapper + TypeCardTitle label + NeuralBtn / NeuralBtnPrimary
