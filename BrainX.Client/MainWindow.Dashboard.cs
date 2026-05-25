@@ -271,6 +271,41 @@ public partial class MainWindow
     // Wired from MainWindow.xaml — the seven Settings left-nav buttons all
     // share this single Click handler and disambiguate by Tag.
     // ═════════════════════════════════════════════════════════════════
+    // Search view — clicking a filter pill swaps which one is "active"
+    // (NavButtonActive style) and stashes the Tag value into a field that
+    // the existing SearchExecute_Click reads when narrowing results. The
+    // existing filter mechanism in MainWindow.xaml.cs's SearchExecute_Click
+    // can read _searchCategoryFilter to gate result rows.
+    //
+    // Wired from MainWindow.xaml on six filter buttons (All + 5 categories).
+    private string _searchCategoryFilter = "All";
+
+    private void SearchFilter_Click(object sender, System.Windows.RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.Button btn) return;
+        var tag = btn.Tag as string ?? "All";
+        _searchCategoryFilter = tag;
+
+        // Re-style: clicked = NavButtonActive, every sibling = NavButton.
+        var navButton       = (System.Windows.Style)FindResource("NavButton");
+        var navButtonActive = (System.Windows.Style)FindResource("NavButtonActive");
+        if (btn.Parent is System.Windows.Controls.Panel parent)
+        {
+            foreach (var child in parent.Children)
+                if (child is System.Windows.Controls.Button b)
+                    b.Style = navButton;
+        }
+        btn.Style = navButtonActive;
+
+        // Re-run search if the box has content (mirrors the "live re-filter"
+        // behavior the screenshot's pills imply).
+        if (SearchBox != null && !string.IsNullOrWhiteSpace(SearchBox.Text))
+        {
+            // Reuse the existing handler with synthetic args.
+            SearchExecute_Click(this, new System.Windows.RoutedEventArgs());
+        }
+    }
+
     // Network view — "See all peers" link jumps to the Peers view. Reuses
     // the existing nav-button mechanism so the sidebar selection state
     // tracks correctly. Wired from MainWindow.xaml in the Network view.

@@ -3352,31 +3352,124 @@
                             </Grid>
                         </Grid>
 
-                        <!-- ═══ SEARCH VIEW ═══ -->
+                        <!-- ═══ SEARCH VIEW ═══
+                             Per t2.zip 06-search.png + README §7. Centered
+                             max-width 920 px layout, 50 px tall search box with
+                             a magnifier on the left + ⌘F kbd on the right,
+                             filter pills row, then stacked result cards. -->
                         <Grid x:Name="SearchView" Visibility="Collapsed">
-                            <Grid Margin="24,16">
+                            <Grid Margin="28,24,28,16" MaxWidth="980" HorizontalAlignment="Stretch">
                                 <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
                                 <StackPanel Margin="0,0,0,22">
                                     <TextBlock Text="Search" Style="{StaticResource TypeViewTitle}"/>
-                                    <TextBlock Text="Full-text search across all notes"
+                                    <TextBlock x:Name="SearchSubtitle"
+                                               Text="Full-text search across all notes"
                                                Style="{StaticResource TypeViewSubtitle}"/>
                                 </StackPanel>
-                                <Grid Grid.Row="1" Margin="0,0,0,16">
+
+                                <!-- 50 px tall search box with magnifier + kbd chip -->
+                                <Border Grid.Row="1" Margin="0,0,0,16"
+                                        Background="{StaticResource NeuralBgInset}"
+                                        BorderBrush="{StaticResource NeuralLine}" BorderThickness="1"
+                                        CornerRadius="10" MinHeight="50">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="48"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="&#x1F50E;" FontSize="16"
+                                                   Foreground="{StaticResource NeuralText3}"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                        <TextBox Grid.Column="1" x:Name="SearchBox"
+                                                 Background="Transparent" BorderThickness="0"
+                                                 Foreground="{StaticResource NeuralText}"
+                                                 CaretBrush="#9d7bff"
+                                                 FontSize="14.5"
+                                                 Padding="0,12" VerticalAlignment="Center"
+                                                 KeyDown="SearchBox_KeyDown"
+                                                 Tag="Search notes... (Enter to search)"/>
+                                        <Border Grid.Column="2" Margin="0,0,14,0" VerticalAlignment="Center"
+                                                Background="{StaticResource NeuralBgCard2}"
+                                                BorderBrush="{StaticResource NeuralLine}" BorderThickness="1"
+                                                CornerRadius="6" Padding="8,3">
+                                            <TextBlock Text="&#x2318; F" FontSize="10.5"
+                                                       FontFamily="{StaticResource FontMono}"
+                                                       Foreground="{StaticResource NeuralText3}"/>
+                                        </Border>
+                                    </Grid>
+                                </Border>
+
+                                <!-- Filter pills row + result count meta -->
+                                <Grid Grid.Row="2" Margin="0,0,0,16">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*"/>
                                         <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
-                                    <TextBox x:Name="SearchBox" Style="{StaticResource NeonTextBox}"
-                                             FontSize="14" Padding="12,8" KeyDown="SearchBox_KeyDown"
-                                             Tag="Search notes... (Enter to search)"/>
-                                    <Button Grid.Column="1" Content="Search" Style="{StaticResource NeonButtonFilled}"
-                                            Padding="20,8" Margin="8,0,0,0" Click="SearchExecute_Click"/>
+                                    <StackPanel Orientation="Horizontal" Grid.Column="0">
+                                        <Button Content="All" Style="{StaticResource NavButtonActive}"
+                                                Padding="14,5" Margin="0,0,4,0" Tag="All"
+                                                Click="SearchFilter_Click"/>
+                                        <Button Style="{StaticResource NavButton}"
+                                                Padding="14,5" Margin="0,0,4,0" Tag="Programming"
+                                                Click="SearchFilter_Click">
+                                            <StackPanel Orientation="Horizontal">
+                                                <Ellipse Width="6" Height="6" Fill="#5be9e9" Margin="0,1,7,0"
+                                                         VerticalAlignment="Center"/>
+                                                <TextBlock Text="Programming"/>
+                                            </StackPanel>
+                                        </Button>
+                                        <Button Style="{StaticResource NavButton}"
+                                                Padding="14,5" Margin="0,0,4,0" Tag="DataScience"
+                                                Click="SearchFilter_Click">
+                                            <StackPanel Orientation="Horizontal">
+                                                <Ellipse Width="6" Height="6" Fill="#ffc23c" Margin="0,1,7,0"
+                                                         VerticalAlignment="Center"/>
+                                                <TextBlock Text="DataScience"/>
+                                            </StackPanel>
+                                        </Button>
+                                        <Button Style="{StaticResource NavButton}"
+                                                Padding="14,5" Margin="0,0,4,0" Tag="Design"
+                                                Click="SearchFilter_Click">
+                                            <StackPanel Orientation="Horizontal">
+                                                <Ellipse Width="6" Height="6" Fill="#ff4f9e" Margin="0,1,7,0"
+                                                         VerticalAlignment="Center"/>
+                                                <TextBlock Text="Design / Art"/>
+                                            </StackPanel>
+                                        </Button>
+                                        <Button Style="{StaticResource NavButton}"
+                                                Padding="14,5" Margin="0,0,4,0" Tag="Engineering"
+                                                Click="SearchFilter_Click">
+                                            <StackPanel Orientation="Horizontal">
+                                                <Ellipse Width="6" Height="6" Fill="#4ae3a7" Margin="0,1,7,0"
+                                                         VerticalAlignment="Center"/>
+                                                <TextBlock Text="Engineering"/>
+                                            </StackPanel>
+                                        </Button>
+                                        <Button Style="{StaticResource NavButton}"
+                                                Padding="14,5" Margin="0,0,4,0" Tag="AI"
+                                                Click="SearchFilter_Click">
+                                            <StackPanel Orientation="Horizontal">
+                                                <Ellipse Width="6" Height="6" Fill="#9d7bff" Margin="0,1,7,0"
+                                                         VerticalAlignment="Center"/>
+                                                <TextBlock Text="AI / MachineLearning"/>
+                                            </StackPanel>
+                                        </Button>
+                                    </StackPanel>
+                                    <TextBlock Grid.Column="1" x:Name="SearchMetaText"
+                                               Text="" FontSize="11.5"
+                                               FontFamily="{StaticResource FontMono}"
+                                               Foreground="{StaticResource NeuralText3}"
+                                               VerticalAlignment="Center"/>
                                 </Grid>
-                                <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
+
+                                <ScrollViewer Grid.Row="3" VerticalScrollBarVisibility="Auto"
+                                              HorizontalScrollBarVisibility="Disabled">
                                     <StackPanel x:Name="SearchResults"/>
                                 </ScrollViewer>
                             </Grid>
