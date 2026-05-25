@@ -5,24 +5,25 @@
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
                 <!--
-                  Legacy cyberpunk theme — drives the existing MainWindow shell and
-                  all 11 view templates. Stays merged FIRST so the Neural* tokens
-                  below can override on demand without breaking unmigrated views.
-                -->
-                <ResourceDictionary Source="Themes/CyberpunkTheme.xaml"/>
-
-                <!--
-                  Neural redesign tokens — see design_handoff_brainx_redesign/.
-                  Loaded in dependency order: colors → effects → typography →
-                  controls. Typography references colors (Foreground), controls
-                  reference all three. ResourceDictionary lookup is by key, not
-                  by load order, but keeping them ordered makes the dependency
-                  graph obvious to future readers.
+                  Neural redesign tokens FIRST — they're referenced by the
+                  CyberpunkTheme NavButton + NavButtonActive (which I restyled
+                  to use Neural violet brushes). If CyberpunkTheme loaded first,
+                  its {StaticResource NeuralText1} etc would resolve to null
+                  at load time and the whole NavButton template fails silently
+                  → MainWindow never shows. Order: colors → effects →
+                  typography → controls → cyberpunk (consumes).
                 -->
                 <ResourceDictionary Source="Themes/BrainXColors.xaml"/>
                 <ResourceDictionary Source="Themes/BrainXEffects.xaml"/>
                 <ResourceDictionary Source="Themes/BrainXTypography.xaml"/>
                 <ResourceDictionary Source="Themes/BrainXControls.xaml"/>
+
+                <!--
+                  Cyberpunk theme — drives the existing MainWindow shell and
+                  the un-migrated view templates. Consumes Neural keys for
+                  NavButton + NavButtonActive (restyled to match t2.zip).
+                -->
+                <ResourceDictionary Source="Themes/CyberpunkTheme.xaml"/>
             </ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>
     </Application.Resources>

@@ -77,30 +77,37 @@
     <FontFamily x:Key="MonoFont">Cascadia Code, Consolas</FontFamily>
 
     <!-- Nav Button Style -->
+    <!-- NavButton — restyled to match t2.zip nav item look (clean violet, no
+         cyan glow). Hover = subtle 4% white wash. The button's Content (a
+         single TextBlock with "<icon>  <label>") stays the same so menu
+         items don't have to be rewritten — only the surrounding chrome
+         changed. Padding 14,9 gives 34 px tall rows. -->
     <Style x:Key="NavButton" TargetType="Button">
         <Setter Property="Background" Value="Transparent"/>
-        <Setter Property="Foreground" Value="{StaticResource TextSecondaryBrush}"/>
+        <Setter Property="Foreground" Value="{StaticResource NeuralText1}"/>
         <Setter Property="BorderThickness" Value="0"/>
-        <Setter Property="Padding" Value="16,14"/>
-        <Setter Property="FontSize" Value="14"/>
-        <Setter Property="FontFamily" Value="{StaticResource MainFont}"/>
+        <Setter Property="Padding" Value="14,9"/>
+        <Setter Property="FontSize" Value="13.5"/>
+        <Setter Property="FontFamily" Value="{StaticResource FontSans}"/>
+        <Setter Property="FontWeight" Value="Medium"/>
         <Setter Property="Cursor" Value="Hand"/>
         <Setter Property="HorizontalContentAlignment" Value="Left"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Button">
                     <Border x:Name="Bd" Background="{TemplateBinding Background}"
-                            CornerRadius="8" Margin="6,2" Padding="{TemplateBinding Padding}">
+                            BorderBrush="Transparent" BorderThickness="1"
+                            CornerRadius="9" Margin="10,1" Padding="{TemplateBinding Padding}">
                         <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
                                           VerticalAlignment="Center"/>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Bd" Property="Background" Value="{StaticResource SurfaceBrush}"/>
-                            <Setter Property="Foreground" Value="{StaticResource NeonCyanBrush}"/>
+                            <Setter TargetName="Bd" Property="Background" Value="#0AFFFFFF"/>
+                            <Setter Property="Foreground" Value="{StaticResource NeuralText}"/>
                         </Trigger>
                         <Trigger Property="IsPressed" Value="True">
-                            <Setter TargetName="Bd" Property="Background" Value="{StaticResource SurfaceLightBrush}"/>
+                            <Setter TargetName="Bd" Property="Background" Value="#14FFFFFF"/>
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -108,28 +115,27 @@
         </Setter>
     </Style>
 
-    <!-- Active Nav Button -->
+    <!-- NavButtonActive — restyled to match t2.zip "active sidebar item":
+         violet gradient pill (20% → 8% violet), violet outline, white text,
+         soft accent shadow. Code-behind toggles between NavButton + this
+         style via FindResource("NavButtonActive"). -->
     <Style x:Key="NavButtonActive" TargetType="Button" BasedOn="{StaticResource NavButton}">
-        <Setter Property="Foreground" Value="{StaticResource NeonCyanBrush}"/>
+        <Setter Property="Foreground" Value="#FFFFFFFF"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Button">
-                    <Border x:Name="Bd" Background="{StaticResource SurfaceBrush}"
-                            CornerRadius="8" Margin="6,2" Padding="{TemplateBinding Padding}"
-                            BorderBrush="{StaticResource NeonCyanBrush}" BorderThickness="0,0,0,0">
-                        <Grid>
-                            <Rectangle Width="3" HorizontalAlignment="Left" Margin="-10,0,0,0"
-                                       RadiusX="1.5" RadiusY="1.5">
-                                <Rectangle.Fill>
-                                    <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
-                                        <GradientStop Color="{StaticResource NeonCyanColor}" Offset="0"/>
-                                        <GradientStop Color="{StaticResource ElectricPurpleColor}" Offset="1"/>
-                                    </LinearGradientBrush>
-                                </Rectangle.Fill>
-                            </Rectangle>
-                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
-                                              VerticalAlignment="Center"/>
-                        </Grid>
+                    <Border x:Name="Bd"
+                            BorderBrush="{StaticResource NeuralLineAccent}" BorderThickness="1"
+                            CornerRadius="9" Margin="10,1" Padding="{TemplateBinding Padding}"
+                            Effect="{StaticResource ShadowAccent}">
+                        <Border.Background>
+                            <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                <GradientStop Color="#339d7bff" Offset="0"/>
+                                <GradientStop Color="#149d7bff" Offset="1"/>
+                            </LinearGradientBrush>
+                        </Border.Background>
+                        <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                          VerticalAlignment="Center"/>
                     </Border>
                 </ControlTemplate>
             </Setter.Value>

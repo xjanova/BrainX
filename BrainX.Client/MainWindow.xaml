@@ -146,10 +146,15 @@
                                        ToolTip="Click to copy brain address"/>
                         </StackPanel>
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,8,0">
-                            <!-- Theme/palette picker — opens a popup with color swatches + dim sliders.
-                                 Tinted with accent + glow so it's easy to spot in the title bar. -->
+                            <!-- Theme picker hidden per t2.zip screenshots — titlebar shows
+                                 only identity pill + user pill + window controls. Theme +
+                                 dim sliders are accessible from Settings view (future) or via
+                                 keyboard shortcut. Visibility=Collapsed keeps the x:Name +
+                                 handler binding intact for ThemeButton_Click to be callable
+                                 programmatically if needed. -->
                             <Button x:Name="ThemeButton" Width="40" Height="28"
                                     Background="Transparent" BorderThickness="0" Cursor="Hand"
+                                    Visibility="Collapsed"
                                     ToolTip="UI theme + background dim"
                                     Click="ThemeButton_Click" Margin="4,0,4,0">
                                 <Button.Template>
@@ -315,26 +320,43 @@
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
 
-                            <!-- Brain badge — just the logo. Name/address live in the title bar.
-                                 Uses a radial opacity mask so the logo's dark edges fade seamlessly
-                                 into the sidebar gradient instead of showing a hard square crop. -->
-                            <Grid Grid.Row="0" Margin="8,12,8,12" HorizontalAlignment="Center">
-                                <Ellipse x:Name="PulseRing" Width="190" Height="190" Opacity="0.35"
-                                         StrokeThickness="1.5" Stroke="{StaticResource NeonCyanBrush}"
-                                         Effect="{StaticResource LogoGlow}"/>
-                                <Image Source="pack://application:,,,/Assets/Logo.png"
-                                       Width="180" Height="180" Stretch="Uniform"
-                                       RenderOptions.BitmapScalingMode="HighQuality">
-                                    <Image.OpacityMask>
-                                        <RadialGradientBrush Center="0.5,0.5" GradientOrigin="0.5,0.5"
-                                                             RadiusX="0.55" RadiusY="0.55">
-                                            <GradientStop Color="#FFFFFFFF" Offset="0"/>
-                                            <GradientStop Color="#FFFFFFFF" Offset="0.6"/>
-                                            <GradientStop Color="#00FFFFFF" Offset="1"/>
-                                        </RadialGradientBrush>
-                                    </Image.OpacityMask>
-                                </Image>
-                            </Grid>
+                            <!-- Brand crest per t2.zip — 132 px rounded card with the Logo
+                                 brain inside, framed by a soft violet halo. Replaces the
+                                 earlier 180 px Logo with a cyan-ring PulseRing that was
+                                 way too big for the t2.zip layout. Logo gets a soft radial
+                                 opacity mask so the corners fade into the card surface. -->
+                            <Border Grid.Row="0" Height="132" Margin="14,16,14,10"
+                                    CornerRadius="16"
+                                    BorderBrush="{StaticResource NeuralLineStrong}" BorderThickness="1">
+                                <Border.Background>
+                                    <RadialGradientBrush GradientOrigin="0.5,0.45" Center="0.5,0.45"
+                                                         RadiusX="0.7" RadiusY="0.7">
+                                        <GradientStop Color="#449d7bff" Offset="0"/>
+                                        <GradientStop Color="#14140c2e" Offset="0.65"/>
+                                        <GradientStop Color="#00100a26" Offset="1"/>
+                                    </RadialGradientBrush>
+                                </Border.Background>
+                                <Border.Effect>
+                                    <DropShadowEffect Color="#9d7bff" BlurRadius="28"
+                                                      ShadowDepth="0" Opacity="0.45"/>
+                                </Border.Effect>
+                                <Grid>
+                                    <Ellipse x:Name="PulseRing" Width="118" Height="118" Opacity="0.35"
+                                             StrokeThickness="1.5" Stroke="{StaticResource NeuralViolet2}"/>
+                                    <Image Source="pack://application:,,,/Assets/Logo.png"
+                                           Width="108" Height="108" Stretch="Uniform"
+                                           RenderOptions.BitmapScalingMode="HighQuality">
+                                        <Image.OpacityMask>
+                                            <RadialGradientBrush Center="0.5,0.5" GradientOrigin="0.5,0.5"
+                                                                 RadiusX="0.55" RadiusY="0.55">
+                                                <GradientStop Color="#FFFFFFFF" Offset="0"/>
+                                                <GradientStop Color="#FFFFFFFF" Offset="0.6"/>
+                                                <GradientStop Color="#00FFFFFF" Offset="1"/>
+                                            </RadialGradientBrush>
+                                        </Image.OpacityMask>
+                                    </Image>
+                                </Grid>
+                            </Border>
 
                             <!-- Nav -->
                             <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto"
