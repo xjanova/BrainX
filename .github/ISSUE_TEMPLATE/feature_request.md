@@ -1,6 +1,6 @@
 ---
 name: Feature Request
-about: Suggest a new feature for ObsidianX
+about: Suggest a new feature for BrainX
 title: "[FEATURE] "
 labels: enhancement
 assignees: ''

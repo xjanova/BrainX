@@ -1,6 +1,6 @@
 ---
 name: Bug Report
-about: Report a bug in ObsidianX
+about: Report a bug in BrainX
 title: "[BUG] "
 labels: bug
 assignees: ''
