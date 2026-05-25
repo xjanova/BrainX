@@ -2221,26 +2221,60 @@
 
                         <!-- ═══ PEERS VIEW ═══ -->
                         <Grid x:Name="PeersView" Visibility="Collapsed">
-                            <Grid Margin="24,16">
+                            <Grid Margin="28,24,28,16">
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
-                                <Grid Margin="0,0,0,16">
-                                    <StackPanel>
+                                <!-- Peers view header per t2.zip 09-peers.png:
+                                     title + count subtitle (left) + Rescan ghost + All/Online/Offline
+                                     segmented (right). PeersSubtitle x:Name preserved so
+                                     RefreshPeersList can keep updating the count line. -->
+                                <Grid Grid.Row="0" Margin="0,0,0,22">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0">
                                         <TextBlock Text="Peers" Style="{StaticResource TypeViewTitle}"/>
                                         <TextBlock x:Name="PeersSubtitle" Text="Join the network to see peers"
                                                    Style="{StaticResource TypeViewSubtitle}"/>
                                     </StackPanel>
-                                    <Button Content="&#x1F504; Refresh" Style="{StaticResource NeonButton}"
-                                            HorizontalAlignment="Right" VerticalAlignment="Top"
-                                            Click="RefreshPeers_Click" Padding="12,6" FontSize="11"/>
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
+                                        <Button Style="{StaticResource NeuralBtnGhost}"
+                                                Click="RefreshPeers_Click" Margin="0,0,10,0">
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Text="&#x21BB;" FontSize="13" Margin="0,0,6,0"
+                                                           VerticalAlignment="Center"/>
+                                                <TextBlock Text="Rescan" VerticalAlignment="Center"/>
+                                            </StackPanel>
+                                        </Button>
+                                        <Border Background="{StaticResource NeuralBgInset}"
+                                                BorderBrush="{StaticResource NeuralLine}" BorderThickness="1"
+                                                CornerRadius="9" Padding="3">
+                                            <StackPanel Orientation="Horizontal">
+                                                <Border CornerRadius="7" Padding="10,4"
+                                                        Background="{StaticResource NeuralPrimaryBtn}">
+                                                    <TextBlock Text="All" FontSize="11" FontWeight="SemiBold"
+                                                               Foreground="White"/>
+                                                </Border>
+                                                <Border CornerRadius="7" Padding="10,4">
+                                                    <TextBlock Text="Online" FontSize="11" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource NeuralText2}"/>
+                                                </Border>
+                                                <Border CornerRadius="7" Padding="10,4">
+                                                    <TextBlock Text="Offline" FontSize="11" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource NeuralText2}"/>
+                                                </Border>
+                                            </StackPanel>
+                                        </Border>
+                                    </StackPanel>
                                 </Grid>
-                                <Border Grid.Row="1" Style="{StaticResource CardPanel}">
-                                    <ScrollViewer VerticalScrollBarVisibility="Auto">
-                                        <StackPanel x:Name="PeersList"/>
-                                    </ScrollViewer>
-                                </Border>
+                                <!-- Peer cards list — no outer card wrapper (per t2.zip,
+                                     each peer is its own NeuralCard, gap between them). -->
+                                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                                    <StackPanel x:Name="PeersList"/>
+                                </ScrollViewer>
                             </Grid>
                         </Grid>
 

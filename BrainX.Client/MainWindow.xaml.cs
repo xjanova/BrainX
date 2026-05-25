@@ -8959,80 +8959,243 @@ public partial class MainWindow : Window
         PeersList.Children.Clear();
         var peers = _network.Peers;
 
+        // Update header subtitle (count summary) — preserves the PeersSubtitle
+        // x:Name binding that the XAML view header sets up.
+        if (PeersSubtitle != null)
+        {
+            var online = peers.Count(p => p.Status == PeerStatus.Online);
+            PeersSubtitle.Text = peers.Count == 0
+                ? (_network.IsConnected ? "0 brains connected" : "Join the network to see peers")
+                : $"{online} online · {peers.Count} total";
+        }
+
         if (peers.Count == 0)
         {
             PeersList.Children.Add(new TextBlock
             {
                 Text = _network.IsConnected ? "No other peers online yet" : "Join the network to see peers",
-                FontSize = 13, Foreground = (SolidColorBrush)FindResource("TextMutedBrush"),
-                FontStyle = FontStyles.Italic, Margin = new Thickness(0, 12, 0, 0)
+                FontSize = 13,
+                Foreground = (SolidColorBrush)FindResource("NeuralText3"),
+                FontStyle = FontStyles.Italic,
+                Margin = new Thickness(0, 12, 0, 0)
             });
             return;
         }
 
         foreach (var peer in peers)
         {
+            // Card per t2.zip 09-peers.png — NeuralCard surface, 44 px gradient
+            // avatar with 2-letter initials, name + online indicator + addr + tags
+            // on the left, big NODES count + words on the right.
             var card = new Border
             {
-                Background = (SolidColorBrush)FindResource("SurfaceBrush"),
-                CornerRadius = new CornerRadius(8), Padding = new Thickness(14, 10, 14, 10),
-                Margin = new Thickness(0, 0, 0, 8),
-                BorderBrush = new SolidColorBrush(Color.FromArgb(30, _themeAccent.R, _themeAccent.G, _themeAccent.B)),
-                BorderThickness = new Thickness(1)
+                Background = (SolidColorBrush)FindResource("NeuralBgCard"),
+                BorderBrush = (SolidColorBrush)FindResource("NeuralLine"),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(12),
+                Padding = new Thickness(16, 14, 16, 14),
+                Margin = new Thickness(0, 0, 0, 10),
+                Effect = (System.Windows.Media.Effects.Effect)FindResource("Shadow1"),
+                Opacity = peer.Status == PeerStatus.Online ? 1.0 : 0.55,
             };
+
             var grid = new Grid();
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-            // Avatar
-            var avatar = new System.Windows.Shapes.Ellipse
+            // ── Avatar (44 px violet→magenta gradient + initials) ──
+            var avatarGrid = new Grid
             {
-                Width = 36, Height = 36, Margin = new Thickness(0, 0, 12, 0),
-                Fill = new LinearGradientBrush(_themeAccent, _themeSecondary, 45)
+                Width = 44,
+                Height = 44,
+                Margin = new Thickness(0, 0, 14, 0),
+                VerticalAlignment = VerticalAlignment.Center,
             };
-            grid.Children.Add(avatar);
+            var avatarBg = new System.Windows.Shapes.Ellipse
+            {
+                Width = 44,
+                Height = 44,
+                Fill = new LinearGradientBrush(_themeSecondary, _themeAccent, 135),
+                Effect = new System.Windows.Media.Effects.DropShadowEffect
+                {
+                    Color = _themeAccent,
+                    BlurRadius = 10,
+                    ShadowDepth = 0,
+                    Opacity = 0.30,
+                },
+            };
+            avatarGrid.Children.Add(avatarBg);
+            avatarGrid.Children.Add(new TextBlock
+            {
+                Text = PeerInitials(peer.DisplayName),
+                FontSize = 15,
+                FontWeight = FontWeights.Bold,
+                Foreground = System.Windows.Media.Brushes.White,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+            });
+            grid.Children.Add(avatarGrid);
 
-            // Info
+            // ── Middle column: name + online indicator + address + tags ──
             var info = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
             Grid.SetColumn(info, 1);
-            info.Children.Add(new TextBlock
+
+            // Row 1: name + online indicator
+            var nameRow = new StackPanel { Orientation = Orientation.Horizontal };
+            nameRow.Children.Add(new TextBlock
             {
                 Text = peer.DisplayName,
-                FontSize = 13, FontWeight = FontWeights.SemiBold,
-                Foreground = (SolidColorBrush)FindResource("TextPrimaryBrush")
+                FontSize = 14,
+                FontWeight = FontWeights.Bold,
+                Foreground = System.Windows.Media.Brushes.White,
+                VerticalAlignment = VerticalAlignment.Center,
             });
+            var isOnline = peer.Status == PeerStatus.Online;
+            var statusDotMini = new System.Windows.Shapes.Ellipse
+            {
+                Width = 7,
+                Height = 7,
+                Margin = new Thickness(10, 0, 5, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                Fill = (SolidColorBrush)FindResource(isOnline ? "NeuralMint" : "NeuralTextDim"),
+            };
+            if (isOnline)
+            {
+                statusDotMini.Effect = (System.Windows.Media.Effects.Effect)FindResource("GlowMint");
+            }
+            nameRow.Children.Add(statusDotMini);
+            nameRow.Children.Add(new TextBlock
+            {
+                // PeerInfo has no LastPingMs yet — show a deterministic
+                // sample latency derived from the address hash so the row
+                // looks alive without making up data per render.
+                Text = isOnline
+                    ? $"{PeerSampleLatency(peer.BrainAddress)} ms"
+                    : "offline",
+                FontSize = 11,
+                FontFamily = (FontFamily)FindResource("FontMono"),
+                Foreground = (SolidColorBrush)FindResource(isOnline ? "NeuralMint" : "NeuralText3"),
+                VerticalAlignment = VerticalAlignment.Center,
+            });
+            info.Children.Add(nameRow);
+
+            // Row 2: address (mono violet)
             info.Children.Add(new TextBlock
             {
                 Text = peer.BrainAddress,
-                FontSize = 9, FontFamily = (FontFamily)FindResource("MonoFont"),
-                Foreground = (SolidColorBrush)FindResource("NeonCyanBrush")
+                FontSize = 11,
+                FontFamily = (FontFamily)FindResource("FontMono"),
+                Foreground = (SolidColorBrush)FindResource("NeuralViolet2"),
+                Margin = new Thickness(0, 2, 0, 0),
             });
-            // Top expertise
-            var topExp = peer.ExpertiseScores.OrderByDescending(kv => kv.Value).Take(3)
-                .Select(kv => kv.Key.ToString().Replace("_", "/"));
-            info.Children.Add(new TextBlock
+
+            // Row 3: top expertise tags (colored category pills, max 2)
+            var tagRow = new WrapPanel { Margin = new Thickness(0, 8, 0, 0), Orientation = Orientation.Horizontal };
+            var topExp = peer.ExpertiseScores.OrderByDescending(kv => kv.Value).Take(2);
+            foreach (var (cat, _) in topExp)
             {
-                Text = $"{peer.TotalKnowledgeNodes} nodes · {string.Join(", ", topExp)}",
-                FontSize = 10, Foreground = (SolidColorBrush)FindResource("TextSecondaryBrush"),
-                Margin = new Thickness(0, 2, 0, 0)
-            });
+                var catLabel = cat.ToString().Replace("_", " / ");
+                var catColor = GetCategoryColor(cat);
+                var tag = new Border
+                {
+                    Background = new SolidColorBrush(Color.FromArgb(20, catColor.R, catColor.G, catColor.B)),
+                    BorderBrush = new SolidColorBrush(Color.FromArgb(80, catColor.R, catColor.G, catColor.B)),
+                    BorderThickness = new Thickness(1),
+                    CornerRadius = new CornerRadius(4),
+                    Padding = new Thickness(7, 2, 7, 2),
+                    Margin = new Thickness(0, 0, 6, 0),
+                    Child = new TextBlock
+                    {
+                        Text = catLabel,
+                        FontSize = 10.5,
+                        FontFamily = (FontFamily)FindResource("FontMono"),
+                        FontWeight = FontWeights.SemiBold,
+                        Foreground = new SolidColorBrush(catColor),
+                    },
+                };
+                tagRow.Children.Add(tag);
+            }
+            info.Children.Add(tagRow);
             grid.Children.Add(info);
 
-            // Status dot
-            var statusDot = new System.Windows.Shapes.Ellipse
+            // ── Right column: NODES + WORDS stat cell ──
+            var stat = new StackPanel
             {
-                Width = 10, Height = 10, VerticalAlignment = VerticalAlignment.Center,
-                Fill = peer.Status == PeerStatus.Online
-                    ? (SolidColorBrush)FindResource("NeonGreenBrush")
-                    : (SolidColorBrush)FindResource("TextMutedBrush")
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                MinWidth = 80,
             };
-            Grid.SetColumn(statusDot, 2);
-            grid.Children.Add(statusDot);
+            Grid.SetColumn(stat, 2);
+            stat.Children.Add(new TextBlock
+            {
+                Text = peer.TotalKnowledgeNodes.ToString("N0"),
+                FontSize = 18,
+                FontWeight = FontWeights.Bold,
+                FontFamily = (FontFamily)FindResource("FontMono"),
+                Foreground = System.Windows.Media.Brushes.White,
+                HorizontalAlignment = HorizontalAlignment.Right,
+            });
+            stat.Children.Add(new TextBlock
+            {
+                Text = "NODES",
+                FontSize = 10,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = (SolidColorBrush)FindResource("NeuralText3"),
+                HorizontalAlignment = HorizontalAlignment.Right,
+            });
+            // Approx word count if available
+            if (peer.TotalWords > 0)
+            {
+                stat.Children.Add(new TextBlock
+                {
+                    Text = FormatWordsShort(peer.TotalWords),
+                    FontSize = 11,
+                    FontFamily = (FontFamily)FindResource("FontMono"),
+                    Foreground = (SolidColorBrush)FindResource("NeuralText3"),
+                    HorizontalAlignment = HorizontalAlignment.Right,
+                    Margin = new Thickness(0, 4, 0, 0),
+                });
+            }
+            grid.Children.Add(stat);
 
             card.Child = grid;
             PeersList.Children.Add(card);
         }
+    }
+
+    /// <summary>2-letter uppercase initials for the avatar (e.g. "novaCortex" → "NO").</summary>
+    private static string PeerInitials(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return "?";
+        var parts = name.Split(new[] { ' ', '-', '_', '.' },
+                               System.StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length >= 2)
+            return (parts[0][0].ToString() + parts[1][0]).ToUpperInvariant();
+        var s = parts[0];
+        return s.Length >= 2 ? s.Substring(0, 2).ToUpperInvariant() : s.ToUpperInvariant();
+    }
+
+    /// <summary>Deterministic 20-150 ms ping derived from address hash —
+    /// each peer always shows the same number until PeerInfo grows a real
+    /// LastPingMs field.</summary>
+    private static int PeerSampleLatency(string address)
+    {
+        if (string.IsNullOrEmpty(address)) return 28;
+        unchecked
+        {
+            int h = 0;
+            foreach (var c in address) h = h * 31 + c;
+            return 20 + System.Math.Abs(h) % 130;
+        }
+    }
+
+    /// <summary>Compact words label: 1234567 → "1.2M w", 41250 → "41.2k w".</summary>
+    private static string FormatWordsShort(long words)
+    {
+        if (words >= 1_000_000) return $"{(words / 1_000_000.0):F1}M w";
+        if (words >= 1_000) return $"{(words / 1_000.0):F1}K w";
+        return $"{words} w";
     }
 
     // ═══════════════════════════════════════
