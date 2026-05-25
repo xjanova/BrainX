@@ -11,6 +11,16 @@
     <AssemblyVersion>2.6.0.0</AssemblyVersion>
     <FileVersion>2.6.0.0</FileVersion>
     <Product>ObsidianX MCP Server</Product>
+    <!-- v2.6.0+: cross-platform headless MCP. WPF Client stays Windows
+         only (System.Windows.* deps), but the brain server is pure
+         .NET 9 with platform-guarded DPAPI fallback in BrainIdentity.
+         Publish per platform (self-contained flag removes the .NET 9
+         runtime install dependency on the user's machine; 60-80MB
+         single-folder vs 5MB framework-dependent):
+           dotnet publish -c Release -r osx-arm64 [self-contained flag]
+           dotnet publish -c Release -r linux-x64 [self-contained flag]
+           dotnet publish -c Release -r win-x64   [self-contained flag] -->
+    <RuntimeIdentifiers>win-x64;osx-arm64;osx-x64;linux-x64</RuntimeIdentifiers>
   </PropertyGroup>
 
   <ItemGroup>
