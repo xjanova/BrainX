@@ -2158,13 +2158,37 @@ public partial class MainWindow : Window
         StartAccessLogWatcher();
         StartMcpStatusWatcher();
 
-        // Universe is the default view now — kick off WebView2 init eagerly
-        // (it loads three.js from CDN + the brain-export, taking 1-2 s).
-        // Deferred via Dispatcher.ContextIdle so the rest of Window_Loaded
-        // returns first and the splash visuals settle before WebView spins.
+        // Universe is the default view now — kick off WebView2 init.
+        // CRITICAL: we delay this by a full second AFTER Window_Loaded
+        // ends so the user actually sees the Universe loading overlay
+        // sit on screen with its spinner before stages start ticking.
+        //
+        // Why 1000ms specifically:
+        //   - Splash fade is 420ms (parallel thread); during that time
+        //     the splash covers MainWindow — the overlay underneath
+        //     isn't visible yet.
+        //   - On fast machines with WebView2 already cached, the entire
+        //     init flow (EnsureCoreWebView2Async → Source → JS ready
+        //     → snapshot push) can finish in <400ms. If we kick it off
+        //     at ContextIdle (immediately after Window_Loaded), all
+        //     three overlay stages flash by behind the splash and the
+        //     user sees "splash → instant full UI" with no Universe
+        //     loading visible at all.
+        //   - 1000ms gives splash time to fully fade (420ms) PLUS ~580ms
+        //     of clear overlay visibility before the first stage ticks.
+        //   - Cost is zero perceived — splash is already animating during
+        //     these 1000ms; nothing is "waiting".
         Services.StartupProgress.Report("Initializing Universe galaxy", 0.92, tag: "universe");
-        Dispatcher.BeginInvoke(new Action(() => _ = InitializeUniverseAsync()),
-            System.Windows.Threading.DispatcherPriority.ContextIdle);
+        var universeStartTimer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(1000)
+        };
+        universeStartTimer.Tick += (_, _) =>
+        {
+            universeStartTimer.Stop();
+            _ = InitializeUniverseAsync();
+        };
+        universeStartTimer.Start();
         _ = LoadAiBackends();
         _ = RefreshAiKeyStatus();
         InitRedirectToggle();
@@ -7459,12 +7483,14 @@ public partial class MainWindow : Window
                     $"Streaming {_graph.TotalNodes:N0} notes into galaxy",
                     "Final frame");
                 PushBrainSnapshotToUniverse();
-                // Hide the overlay shortly after — the JS will receive the
-                // snapshot, build geometry, and start rendering within ~80ms.
-                // The 250ms delay lets the user actually SEE the final status
-                // text ("Streaming N notes...") before the overlay fades.
+                // Hide the overlay after a 700ms beat — that's enough time
+                // for the user to actually READ "Streaming N notes into
+                // galaxy" before the fade-out animation kicks in. The JS
+                // builds geometry in parallel during these 700ms, so by the
+                // time the fade completes (480ms) the galaxy is rendering
+                // with real stars instead of fading from blank to blank.
                 var hideTimer = new System.Windows.Threading.DispatcherTimer
-                    { Interval = TimeSpan.FromMilliseconds(250) };
+                    { Interval = TimeSpan.FromMilliseconds(700) };
                 hideTimer.Tick += (_, _) =>
                 {
                     hideTimer.Stop();
