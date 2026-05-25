@@ -1954,24 +1954,34 @@
                             </Grid>
                         </Grid>
 
-                        <!-- AI Chat View (formerly "Claude AI") -->
+                        <!-- AI Chat View (formerly "Claude AI") — per t2.zip 07-assistant.png
+                             + README §4. Surgical chrome migration: title + subtitle row to
+                             match other views, AiChatModeCombo moved into the toolbar row,
+                             outer margins 28,24,28,16 to align. Inner chat machinery
+                             (CluadeXBridgePanel, SoloChatPanel, CoPilotArenaPanel, redirect
+                             card) preserved verbatim. -->
                         <Grid x:Name="ClaudeView" Visibility="Collapsed">
-                            <Grid Margin="24,16">
+                            <Grid Margin="28,24,28,16">
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                     <RowDefinition Height="Auto"/>
                                 </Grid.RowDefinitions>
-                                <StackPanel Margin="0,0,0,22">
-                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
-                                        <TextBlock Text="AI Brain Assistant" Style="{StaticResource TypeViewTitle}"/>
-                                        <!-- Mode selector. Solo = today's behaviour (one model
-                                             talks to the user). Co-Pilot Arena = orchestrated
-                                             via the CluadeX bridge (named pipe \\.\pipe\cluadex-mcp).
-                                             Both items are now selectable; the bridge tester
-                                             below validates connectivity before sending. -->
-                                        <ComboBox x:Name="AiChatModeCombo" Width="220" FontSize="11" Margin="20,4,0,0"
+                                <StackPanel Margin="0,0,0,18">
+                                    <TextBlock Text="AI Brain Assistant" Style="{StaticResource TypeViewTitle}"/>
+                                    <TextBlock x:Name="ClaudeViewSubtitle"
+                                               Text="Chat with local or cloud models · vault = system prompt"
+                                               Style="{StaticResource TypeViewSubtitle}"/>
+                                    <!-- Mode selector — moved here from the inline title row so the
+                                         title stays clean. Style preserved. -->
+                                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                        <TextBlock Text="MODE" FontSize="10.5" FontWeight="SemiBold"
+                                                   Foreground="{StaticResource NeuralText3}"
+                                                   VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                        <ComboBox x:Name="AiChatModeCombo" Width="220" FontSize="11"
                                                   VerticalAlignment="Center" SelectedIndex="0"
+                                                  Background="{StaticResource NeuralBgInset}"
+                                                  Foreground="{StaticResource NeuralText1}"
                                                   SelectionChanged="AiChatMode_Changed"
                                                   ToolTip="Solo: chat with one model. Co-Pilot Arena: delegate to CluadeX worker via named pipe.">
                                             <ComboBoxItem Content="Solo (one model)"/>
@@ -2056,27 +2066,51 @@
                                                    Foreground="{StaticResource TextMutedBrush}"/>
                                     </StackPanel>
 
-                                    <!-- 🔀 REDIRECT CLAUDE DESKTOP TOGGLE -->
-                                    <Border Background="#330B0B1A" BorderBrush="{StaticResource NeonCyanBrush}"
-                                            BorderThickness="1" CornerRadius="8" Margin="0,12,0,0" Padding="14">
+                                    <!-- 🔀 REDIRECT CLAUDE DESKTOP TOGGLE — magenta-tinted card per
+                                         spec §4 ("magenta-tinted card with bolt icon 36 px gradient
+                                         square"). Background uses a violet→magenta tint, bolt icon
+                                         in a gradient square on the left. -->
+                                    <Border Style="{StaticResource NeuralCard}" Margin="0,12,0,0" Padding="18">
+                                        <Border.Background>
+                                            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                                                <GradientStop Color="#321A35" Offset="0"/>
+                                                <GradientStop Color="#1A1535" Offset="1"/>
+                                            </LinearGradientBrush>
+                                        </Border.Background>
                                         <Grid>
                                             <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto"/>
                                                 <ColumnDefinition Width="*"/>
                                                 <ColumnDefinition Width="Auto"/>
                                             </Grid.ColumnDefinitions>
-                                            <StackPanel Grid.Column="0">
-                                                <TextBlock Text="🔀 REDIRECT CLAUDE DESKTOP → LOCAL AI" FontSize="12"
-                                                           FontWeight="SemiBold" Foreground="{StaticResource NeonCyanBrush}"/>
-                                                <TextBlock x:Name="RedirectStatusText" FontSize="11"
-                                                           Foreground="{StaticResource TextSecondaryBrush}" Margin="0,3,0,0"
+                                            <!-- 36 px bolt icon gradient square per spec. -->
+                                            <Border Grid.Column="0" Width="36" Height="36"
+                                                    CornerRadius="9" Margin="0,0,14,0"
+                                                    Effect="{StaticResource ShadowAccent}">
+                                                <Border.Background>
+                                                    <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                                        <GradientStop Color="#FF4F9E" Offset="0"/>
+                                                        <GradientStop Color="#9d7bff" Offset="1"/>
+                                                    </LinearGradientBrush>
+                                                </Border.Background>
+                                                <TextBlock Text="&#x26A1;" FontSize="18"
+                                                           Foreground="White" HorizontalAlignment="Center"
+                                                           VerticalAlignment="Center"/>
+                                            </Border>
+                                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                                <TextBlock Text="Redirect Claude Desktop &#x2192; Local AI"
+                                                           FontSize="14" FontWeight="Bold"
+                                                           Foreground="{StaticResource NeuralText}"/>
+                                                <TextBlock x:Name="RedirectStatusText" FontSize="12"
+                                                           Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0"
                                                            TextWrapping="Wrap"
                                                            Text="OFF — Claude Desktop talks to api.anthropic.com (cloud)"/>
-                                                <TextBlock x:Name="RedirectTrafficText" FontSize="10"
-                                                           Foreground="{StaticResource TextMutedBrush}"
-                                                           FontFamily="{StaticResource MonoFont}" Margin="0,6,0,0"
+                                                <TextBlock x:Name="RedirectTrafficText" FontSize="11"
+                                                           Foreground="{StaticResource NeuralText3}"
+                                                           FontFamily="{StaticResource FontMono}" Margin="0,6,0,0"
                                                            Text="Traffic: 0 requests · 0 B in · 0 B out"/>
                                             </StackPanel>
-                                            <StackPanel Grid.Column="1" Orientation="Vertical" VerticalAlignment="Center">
+                                            <StackPanel Grid.Column="2" Orientation="Vertical" VerticalAlignment="Center">
                                                 <ToggleButton x:Name="RedirectToggle" Width="90" Height="34"
                                                               Checked="RedirectToggle_Checked"
                                                               Unchecked="RedirectToggle_Unchecked"
