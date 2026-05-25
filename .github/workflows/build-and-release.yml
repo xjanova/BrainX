@@ -49,25 +49,25 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "sha=${SHA}"         >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}"         >> "$GITHUB_OUTPUT"
-          echo "## ObsidianX ${VERSION}" >> "$GITHUB_STEP_SUMMARY"
+          echo "## BrainX ${VERSION}" >> "$GITHUB_STEP_SUMMARY"
           echo "- commit: \`${SHA}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- tag: \`${TAG}\`"   >> "$GITHUB_STEP_SUMMARY"
 
       - name: Restore
-        run: dotnet restore ObsidianX.slnx
+        run: dotnet restore BrainX.slnx
 
       - name: Build
         env:
           BUILD_VERSION: ${{ steps.ver.outputs.version }}
           BUILD_COMMIT:  ${{ steps.ver.outputs.sha }}
-        run: dotnet build ObsidianX.slnx -c Release --no-restore
+        run: dotnet build BrainX.slnx -c Release --no-restore
 
       - name: Publish (win-x64, self-contained)
         env:
           BUILD_VERSION: ${{ steps.ver.outputs.version }}
           BUILD_COMMIT:  ${{ steps.ver.outputs.sha }}
         run: |
-          dotnet publish ObsidianX.Client/ObsidianX.Client.csproj `
+          dotnet publish BrainX.Client/BrainX.Client.csproj `
             -c Release `
             -r win-x64 `
             --self-contained true `
@@ -78,13 +78,13 @@ jobs:
         shell: bash
         run: |
           cd publish/win-x64
-          7z a "../../ObsidianX-${{ steps.ver.outputs.version }}-win-x64.zip" "."
+          7z a "../../BrainX-${{ steps.ver.outputs.version }}-win-x64.zip" "."
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ObsidianX-${{ steps.ver.outputs.version }}-win-x64
-          path: ObsidianX-${{ steps.ver.outputs.version }}-win-x64.zip
+          name: BrainX-${{ steps.ver.outputs.version }}-win-x64
+          path: BrainX-${{ steps.ver.outputs.version }}-win-x64.zip
           retention-days: 30
 
       - name: Create tag and GitHub Release
@@ -95,13 +95,13 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
-          name: ObsidianX ${{ steps.ver.outputs.version }}
+          name: BrainX ${{ steps.ver.outputs.version }}
           body: |
             Auto-generated release from commit `${{ steps.ver.outputs.sha }}`.
 
             The shipped binary's About card and bottom bar will display
             `v${{ steps.ver.outputs.version }}+${{ steps.ver.outputs.sha }}`,
             matching this tag.
-          files: ObsidianX-${{ steps.ver.outputs.version }}-win-x64.zip
+          files: BrainX-${{ steps.ver.outputs.version }}-win-x64.zip
           generate_release_notes: true
           fail_on_unmatched_files: true
