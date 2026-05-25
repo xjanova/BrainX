@@ -320,100 +320,122 @@
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
 
-                            <!-- Brand crest — rebuilt to match t2.zip BrandCrest spec
-                                 (README §Assets: "outer violet radial glow → magenta→
-                                 violet→cyan gradient ring → translucent brain silhouette
-                                 → constellation dots → mono caption arc NEURAL · KNOWLEDGE").
-                                 Replaces the vivid-pink Logo.png that dominated every view
-                                 — the t2 crest is subtle and violet, not a hot-pink
-                                 rectangle. BRAINX wordmark already lives in the titlebar
-                                 header so removing it from the crest is fine. -->
-                            <Border Grid.Row="0" Height="132" Margin="14,16,14,10"
-                                    CornerRadius="16"
-                                    BorderBrush="{StaticResource NeuralLine}" BorderThickness="1"
-                                    ClipToBounds="True">
-                                <Border.Background>
-                                    <RadialGradientBrush Center="0.5,0.42" GradientOrigin="0.5,0.42"
-                                                         RadiusX="0.95" RadiusY="0.95">
-                                        <GradientStop Color="#251D44" Offset="0"/>
-                                        <GradientStop Color="#14102a" Offset="0.65"/>
-                                        <GradientStop Color="#0e0a22" Offset="1"/>
-                                    </RadialGradientBrush>
-                                </Border.Background>
-                                <Border.Effect>
-                                    <DropShadowEffect Color="#9d7bff" BlurRadius="28"
-                                                      ShadowDepth="0" Opacity="0.35"/>
-                                </Border.Effect>
-                                <Grid>
-                                    <!-- Layer 1: Outer violet radial glow blob. -->
-                                    <Ellipse Width="110" Height="110" Opacity="0.18"
-                                             HorizontalAlignment="Center" VerticalAlignment="Center"
-                                             Margin="0,-12,0,0">
-                                        <Ellipse.Fill>
-                                            <RadialGradientBrush>
-                                                <GradientStop Color="#9d7bff" Offset="0"/>
-                                                <GradientStop Color="Transparent" Offset="1"/>
-                                            </RadialGradientBrush>
-                                        </Ellipse.Fill>
-                                    </Ellipse>
-                                    <!-- Layer 2: Gradient ring (magenta→violet→cyan). -->
-                                    <Ellipse Width="78" Height="78" StrokeThickness="1.6"
-                                             HorizontalAlignment="Center" VerticalAlignment="Center"
-                                             Margin="0,-12,0,0">
-                                        <Ellipse.Stroke>
-                                            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-                                                <GradientStop Color="#FF4F9E" Offset="0"/>
-                                                <GradientStop Color="#9d7bff" Offset="0.5"/>
-                                                <GradientStop Color="#5be9e9" Offset="1"/>
-                                            </LinearGradientBrush>
-                                        </Ellipse.Stroke>
-                                    </Ellipse>
-                                    <!-- Layer 3: Inner ring (subtle). -->
-                                    <Ellipse Width="56" Height="56" StrokeThickness="0.8"
-                                             Stroke="#55B89DFF" Opacity="0.6"
-                                             HorizontalAlignment="Center" VerticalAlignment="Center"
-                                             Margin="0,-12,0,0"/>
-                                    <!-- Layer 4: Translucent brain silhouette. The existing
-                                         Logo.png is reused but heavily faded so its pink
-                                         pixels don't dominate — just a vague brain shape. -->
-                                    <Image Source="pack://application:,,,/Assets/Logo.png"
-                                           Stretch="Uniform" Width="62" Height="62"
-                                           Opacity="0.55"
-                                           HorizontalAlignment="Center" VerticalAlignment="Center"
-                                           Margin="0,-12,0,0"
-                                           RenderOptions.BitmapScalingMode="HighQuality">
-                                        <Image.OpacityMask>
-                                            <RadialGradientBrush Center="0.5,0.5" RadiusX="0.6" RadiusY="0.6">
-                                                <GradientStop Color="#FFFFFFFF" Offset="0"/>
-                                                <GradientStop Color="#FFFFFFFF" Offset="0.6"/>
-                                                <GradientStop Color="#00FFFFFF" Offset="1"/>
-                                            </RadialGradientBrush>
-                                        </Image.OpacityMask>
-                                    </Image>
-                                    <!-- Layer 5: Constellation dots (5 tiny violet dots). -->
-                                    <Canvas>
-                                        <Ellipse Canvas.Left="22" Canvas.Top="20" Width="2.4" Height="2.4"
-                                                 Fill="#B89DFF" Opacity="0.85"/>
-                                        <Ellipse Canvas.Left="148" Canvas.Top="28" Width="2.4" Height="2.4"
-                                                 Fill="#5be9e9" Opacity="0.85"/>
-                                        <Ellipse Canvas.Left="36" Canvas.Top="62" Width="2" Height="2"
-                                                 Fill="#FF4F9E" Opacity="0.7"/>
-                                        <Ellipse Canvas.Left="160" Canvas.Top="58" Width="2" Height="2"
-                                                 Fill="#9d7bff" Opacity="0.85"/>
-                                        <Ellipse Canvas.Left="80" Canvas.Top="12" Width="1.8" Height="1.8"
-                                                 Fill="#B89DFF" Opacity="0.6"/>
-                                    </Canvas>
-                                    <!-- Layer 6: Mono caption arc at the bottom. -->
-                                    <TextBlock Text="NEURAL &#x00B7; KNOWLEDGE"
-                                               FontSize="8.5" FontFamily="{StaticResource FontMono}"
-                                               Foreground="{StaticResource NeuralText3}"
-                                               HorizontalAlignment="Center" VerticalAlignment="Bottom"
-                                               Margin="0,0,0,12" Opacity="0.75"
-                                               Typography.Capitals="AllSmallCaps"/>
-                                    <!-- Dummy 0-size PulseRing for animation compat. -->
-                                    <Ellipse x:Name="PulseRing" Width="0" Height="0" Opacity="0"/>
-                                </Grid>
-                            </Border>
+                            <!-- Brand crest — circle (NO rectangle container) with RGB
+                                 fire-rainbow gradient. User: "โลโก้เป็นวงกลม เอาออกจาก
+                                 สี่เหลี่ยมเลย ขนาดใหญ่เท่าสี่เหลี่ยมเดิม และเป็น rgb
+                                 ไล่ไฟสี". Replaces the violet-themed rectangle from
+                                 fcbdf82. Circle is 168 px diameter (≈ same area as the
+                                 prior 180×132 rectangle). The outer ring is a 6-stop
+                                 RGB fire gradient (red→orange→yellow→green→cyan→violet
+                                 →magenta), inside is a subtle dark fill with the brain
+                                 silhouette + caption. -->
+                            <Grid Grid.Row="0" Margin="0,16,0,10" HorizontalAlignment="Center">
+                                <!-- Outer glow halo behind the circle so the fire ring
+                                     reads as glowing without a hard rectangular edge. -->
+                                <Ellipse Width="190" Height="190" Opacity="0.30">
+                                    <Ellipse.Fill>
+                                        <RadialGradientBrush GradientOrigin="0.5,0.5">
+                                            <GradientStop Color="#FF6A2D" Offset="0"/>
+                                            <GradientStop Color="#9D7BFF" Offset="0.5"/>
+                                            <GradientStop Color="Transparent" Offset="1"/>
+                                        </RadialGradientBrush>
+                                    </Ellipse.Fill>
+                                </Ellipse>
+                                <!-- The CIRCLE itself — 168 px disc clipped to round.
+                                     Background = subtle dark radial; the rainbow lives
+                                     on the outer Ellipse stroke layer just inside. -->
+                                <Border Width="168" Height="168" CornerRadius="84"
+                                        ClipToBounds="True">
+                                    <Border.Background>
+                                        <RadialGradientBrush Center="0.5,0.5" GradientOrigin="0.5,0.5"
+                                                             RadiusX="0.95" RadiusY="0.95">
+                                            <GradientStop Color="#1A1535" Offset="0"/>
+                                            <GradientStop Color="#0A0820" Offset="0.7"/>
+                                            <GradientStop Color="#060410" Offset="1"/>
+                                        </RadialGradientBrush>
+                                    </Border.Background>
+                                    <Border.Effect>
+                                        <DropShadowEffect Color="#FF6A2D" BlurRadius="36"
+                                                          ShadowDepth="0" Opacity="0.55"/>
+                                    </Border.Effect>
+                                    <Grid>
+                                        <!-- Layer 1: RGB fire ring (the user's
+                                             "rgb ไล่ไฟสี"). 7-stop gradient sweeps red
+                                             → orange → yellow → green → cyan → violet
+                                             → magenta around the disc. WPF can't do a
+                                             true conic gradient; the diagonal linear
+                                             gradient gives a similar fiery-iridescent
+                                             read on a circle stroke. -->
+                                        <Ellipse Width="160" Height="160" StrokeThickness="3.5">
+                                            <Ellipse.Stroke>
+                                                <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                                                    <GradientStop Color="#FF2D3E" Offset="0"/>
+                                                    <GradientStop Color="#FF8A2D" Offset="0.18"/>
+                                                    <GradientStop Color="#FFD23C" Offset="0.33"/>
+                                                    <GradientStop Color="#4AE3A7" Offset="0.5"/>
+                                                    <GradientStop Color="#5BE9E9" Offset="0.66"/>
+                                                    <GradientStop Color="#9D7BFF" Offset="0.83"/>
+                                                    <GradientStop Color="#FF4F9E" Offset="1"/>
+                                                </LinearGradientBrush>
+                                            </Ellipse.Stroke>
+                                            <Ellipse.Effect>
+                                                <BlurEffect Radius="0.5"/>
+                                            </Ellipse.Effect>
+                                        </Ellipse>
+                                        <!-- Layer 2: A second fainter inner ring, offset
+                                             rotation, so the rainbow looks layered. -->
+                                        <Ellipse Width="140" Height="140" StrokeThickness="1.4" Opacity="0.7">
+                                            <Ellipse.Stroke>
+                                                <LinearGradientBrush StartPoint="1,0" EndPoint="0,1">
+                                                    <GradientStop Color="#FF4F9E" Offset="0"/>
+                                                    <GradientStop Color="#9D7BFF" Offset="0.2"/>
+                                                    <GradientStop Color="#5BE9E9" Offset="0.4"/>
+                                                    <GradientStop Color="#4AE3A7" Offset="0.6"/>
+                                                    <GradientStop Color="#FFD23C" Offset="0.8"/>
+                                                    <GradientStop Color="#FF6A2D" Offset="1"/>
+                                                </LinearGradientBrush>
+                                            </Ellipse.Stroke>
+                                        </Ellipse>
+                                        <!-- Layer 3: Brain silhouette inside, sized to
+                                             read clearly inside the bigger circle. -->
+                                        <Image Source="pack://application:,,,/Assets/Logo.png"
+                                               Stretch="Uniform" Width="90" Height="90"
+                                               Opacity="0.78"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                                               Margin="0,-10,0,0"
+                                               RenderOptions.BitmapScalingMode="HighQuality">
+                                            <Image.OpacityMask>
+                                                <RadialGradientBrush Center="0.5,0.5" RadiusX="0.6" RadiusY="0.6">
+                                                    <GradientStop Color="#FFFFFFFF" Offset="0"/>
+                                                    <GradientStop Color="#FFFFFFFF" Offset="0.65"/>
+                                                    <GradientStop Color="#00FFFFFF" Offset="1"/>
+                                                </RadialGradientBrush>
+                                            </Image.OpacityMask>
+                                        </Image>
+                                        <!-- Layer 4: Constellation dots (RGB fire colors). -->
+                                        <Canvas>
+                                            <Ellipse Canvas.Left="28" Canvas.Top="32" Width="2.8" Height="2.8"
+                                                     Fill="#FFD23C" Opacity="0.9"/>
+                                            <Ellipse Canvas.Left="134" Canvas.Top="40" Width="2.6" Height="2.6"
+                                                     Fill="#5BE9E9" Opacity="0.9"/>
+                                            <Ellipse Canvas.Left="38" Canvas.Top="118" Width="2.2" Height="2.2"
+                                                     Fill="#FF4F9E" Opacity="0.8"/>
+                                            <Ellipse Canvas.Left="138" Canvas.Top="116" Width="2.4" Height="2.4"
+                                                     Fill="#9D7BFF" Opacity="0.9"/>
+                                            <Ellipse Canvas.Left="82" Canvas.Top="22" Width="2" Height="2"
+                                                     Fill="#FF6A2D" Opacity="0.85"/>
+                                        </Canvas>
+                                        <!-- Layer 5: Mono caption at bottom. -->
+                                        <TextBlock Text="NEURAL &#x00B7; KNOWLEDGE"
+                                                   FontSize="9" FontFamily="{StaticResource FontMono}"
+                                                   Foreground="{StaticResource NeuralText3}"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Bottom"
+                                                   Margin="0,0,0,14" Opacity="0.85"/>
+                                        <!-- Dummy 0-size PulseRing for animation compat. -->
+                                        <Ellipse x:Name="PulseRing" Width="0" Height="0" Opacity="0"/>
+                                    </Grid>
+                                </Border>
+                            </Grid>
 
                             <!-- Nav -->
                             <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto"
