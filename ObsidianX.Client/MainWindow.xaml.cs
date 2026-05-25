@@ -7376,12 +7376,14 @@ public partial class MainWindow : Window
 
         try
         {
+            SetUniverseLoadingStatus("Spinning up WebView2 runtime", "Cold-start takes 1-2s");
             await UniverseWebView.EnsureCoreWebView2Async();
             var core = UniverseWebView.CoreWebView2;
 
             var wwwroot = Path.Combine(AppContext.BaseDirectory, "wwwroot");
             if (!Directory.Exists(wwwroot))
             {
+                SetUniverseLoadingStatus("Universe assets missing", "Rebuild the project");
                 MessageBox.Show(
                     $"Universe assets folder missing:\n{wwwroot}\n\n" +
                     "Rebuild the project so wwwroot is copied to bin/.",
@@ -7396,17 +7398,49 @@ public partial class MainWindow : Window
             core.Settings.AreDevToolsEnabled = true;
             core.Settings.AreDefaultContextMenusEnabled = true;
 
+            SetUniverseLoadingStatus("Loading three.js scene", "Galaxy bootstrap");
             UniverseWebView.Source = new Uri("https://universe.local/universe/index.html");
             _universeInitialized = true;
         }
         catch (Exception ex)
         {
+            SetUniverseLoadingStatus("WebView2 init failed", "Install WebView2 Runtime");
             MessageBox.Show(
                 $"WebView2 init failed: {ex.Message}\n\n" +
                 "If the WebView2 Runtime is missing, install it from:\n" +
                 "https://developer.microsoft.com/microsoft-edge/webview2/",
                 "Universe", MessageBoxButton.OK, MessageBoxImage.Error);
         }
+    }
+
+    /// <summary>Update the mini loader overlay over Universe. No-op if overlay is already hidden.</summary>
+    private void SetUniverseLoadingStatus(string text, string? subText = null)
+    {
+        if (UniverseLoadingOverlay == null || UniverseLoadingText == null) return;
+        if (UniverseLoadingOverlay.Visibility != Visibility.Visible) return;
+        UniverseLoadingText.Text = text;
+        if (UniverseLoadingSubText != null && subText != null)
+            UniverseLoadingSubText.Text = subText;
+    }
+
+    /// <summary>Fade out + collapse the Universe loader once the scene is rendering with data.</summary>
+    private void HideUniverseLoadingOverlay()
+    {
+        if (UniverseLoadingOverlay == null) return;
+        if (UniverseLoadingOverlay.Visibility != Visibility.Visible) return;
+        var fade = new System.Windows.Media.Animation.DoubleAnimation
+        {
+            From = 1.0, To = 0.0,
+            Duration = TimeSpan.FromMilliseconds(480),
+            EasingFunction = new System.Windows.Media.Animation.CubicEase
+                { EasingMode = System.Windows.Media.Animation.EasingMode.EaseIn }
+        };
+        fade.Completed += (_, _) =>
+        {
+            UniverseLoadingOverlay.Visibility = Visibility.Collapsed;
+            UniverseLoadingOverlay.Opacity = 1.0;  // reset for any future re-show
+        };
+        UniverseLoadingOverlay.BeginAnimation(OpacityProperty, fade);
     }
 
     private void OnUniverseMessage(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
@@ -7421,7 +7455,22 @@ public partial class MainWindow : Window
                 // Always push on ready (no one-shot guard) — JS sends `ready`
                 // again after Ctrl+R reload, F5, or page navigation. Without
                 // re-push the JS stays stuck on "Waiting for brain snapshot".
+                SetUniverseLoadingStatus(
+                    $"Streaming {_graph.TotalNodes:N0} notes into galaxy",
+                    "Final frame");
                 PushBrainSnapshotToUniverse();
+                // Hide the overlay shortly after — the JS will receive the
+                // snapshot, build geometry, and start rendering within ~80ms.
+                // The 250ms delay lets the user actually SEE the final status
+                // text ("Streaming N notes...") before the overlay fades.
+                var hideTimer = new System.Windows.Threading.DispatcherTimer
+                    { Interval = TimeSpan.FromMilliseconds(250) };
+                hideTimer.Tick += (_, _) =>
+                {
+                    hideTimer.Stop();
+                    HideUniverseLoadingOverlay();
+                };
+                hideTimer.Start();
             }
             else if (msg?.type == "toggleFullscreen")
             {

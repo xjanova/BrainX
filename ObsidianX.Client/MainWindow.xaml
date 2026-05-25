@@ -2720,6 +2720,109 @@
                                 <wv2:WebView2 x:Name="UniverseWebView" DefaultBackgroundColor="Black"/>
                             </Border>
 
+                            <!-- ═══ MINI LOADING OVERLAY (v2.6.1+) ═══
+                                 Sits ON TOP of the WebView while the three.js
+                                 scene boots. Hides after JS posts {type:"ready"}
+                                 and we've pushed the brain snapshot. Pattern
+                                 matches the splash screen aesthetic for
+                                 visual continuity — neon ring spinning around
+                                 a static diamond, mono-font status lines.
+                                 Backdrop is 88% opaque so the empty WebView's
+                                 black void is masked but the WebView still
+                                 receives the navigation paint underneath. -->
+                            <Border x:Name="UniverseLoadingOverlay"
+                                    Background="#DD000308"
+                                    Panel.ZIndex="50"
+                                    Visibility="Visible">
+                                <Border Background="#FF0E0C24"
+                                        BorderBrush="#886CF0FF" BorderThickness="1"
+                                        CornerRadius="10"
+                                        Padding="24,18"
+                                        HorizontalAlignment="Center" VerticalAlignment="Center"
+                                        MinWidth="280">
+                                    <Border.Effect>
+                                        <DropShadowEffect Color="#FF6CF0FF" BlurRadius="24"
+                                                          ShadowDepth="0" Opacity="0.45"/>
+                                    </Border.Effect>
+                                    <StackPanel HorizontalAlignment="Center">
+                                        <!-- Spinning neon ring -->
+                                        <Grid Width="44" Height="44" Margin="0,0,0,8"
+                                              HorizontalAlignment="Center">
+                                            <Ellipse Width="44" Height="44"
+                                                     Stroke="#226CF0FF" StrokeThickness="2"/>
+                                            <Ellipse Width="44" Height="44"
+                                                     Stroke="#FF6CF0FF" StrokeThickness="2"
+                                                     StrokeDashArray="2 8"
+                                                     RenderTransformOrigin="0.5,0.5">
+                                                <Ellipse.RenderTransform>
+                                                    <RotateTransform x:Name="UniverseLoadingRotate" Angle="0"/>
+                                                </Ellipse.RenderTransform>
+                                                <Ellipse.Triggers>
+                                                    <EventTrigger RoutedEvent="Ellipse.Loaded">
+                                                        <BeginStoryboard>
+                                                            <Storyboard RepeatBehavior="Forever">
+                                                                <DoubleAnimation
+                                                                    Storyboard.TargetName="UniverseLoadingRotate"
+                                                                    Storyboard.TargetProperty="Angle"
+                                                                    From="0" To="360"
+                                                                    Duration="0:0:1.8"/>
+                                                            </Storyboard>
+                                                        </BeginStoryboard>
+                                                    </EventTrigger>
+                                                </Ellipse.Triggers>
+                                                <Ellipse.Effect>
+                                                    <DropShadowEffect Color="#FF6CF0FF" BlurRadius="12"
+                                                                      ShadowDepth="0" Opacity="0.9"/>
+                                                </Ellipse.Effect>
+                                            </Ellipse>
+                                            <TextBlock Text="◆" FontSize="16"
+                                                       Foreground="#FFFF2E94"
+                                                       HorizontalAlignment="Center"
+                                                       VerticalAlignment="Center"
+                                                       RenderTransformOrigin="0.5,0.5">
+                                                <TextBlock.Effect>
+                                                    <DropShadowEffect Color="#FFFF2E94" BlurRadius="10"
+                                                                      ShadowDepth="0" Opacity="0.8"/>
+                                                </TextBlock.Effect>
+                                                <TextBlock.RenderTransform>
+                                                    <ScaleTransform x:Name="UniverseLoadingDiamondScale"
+                                                                    ScaleX="1" ScaleY="1"/>
+                                                </TextBlock.RenderTransform>
+                                                <TextBlock.Triggers>
+                                                    <EventTrigger RoutedEvent="TextBlock.Loaded">
+                                                        <BeginStoryboard>
+                                                            <Storyboard RepeatBehavior="Forever" AutoReverse="True">
+                                                                <DoubleAnimation
+                                                                    Storyboard.TargetName="UniverseLoadingDiamondScale"
+                                                                    Storyboard.TargetProperty="ScaleX"
+                                                                    From="1.0" To="1.25" Duration="0:0:0.9"/>
+                                                                <DoubleAnimation
+                                                                    Storyboard.TargetName="UniverseLoadingDiamondScale"
+                                                                    Storyboard.TargetProperty="ScaleY"
+                                                                    From="1.0" To="1.25" Duration="0:0:0.9"/>
+                                                            </Storyboard>
+                                                        </BeginStoryboard>
+                                                    </EventTrigger>
+                                                </TextBlock.Triggers>
+                                            </TextBlock>
+                                        </Grid>
+                                        <TextBlock x:Name="UniverseLoadingText"
+                                                   Text="Initializing Universe galaxy..."
+                                                   FontSize="11"
+                                                   FontFamily="Consolas, JetBrains Mono, Cascadia Mono"
+                                                   Foreground="#FFE8E6FF"
+                                                   HorizontalAlignment="Center"/>
+                                        <TextBlock x:Name="UniverseLoadingSubText"
+                                                   Text="three.js + WebView2"
+                                                   FontSize="9"
+                                                   FontFamily="Consolas, JetBrains Mono, Cascadia Mono"
+                                                   Foreground="#88A0A8C8"
+                                                   HorizontalAlignment="Center"
+                                                   Margin="0,4,0,0"/>
+                                    </StackPanel>
+                                </Border>
+                            </Border>
+
                             <!-- 2D Graph (WriteableBitmap renderer) — collapsed by default.
                                  Shares _graphPhysics with the (hidden) BrainGraphView so
                                  MCP pulse flashes here too. -->
