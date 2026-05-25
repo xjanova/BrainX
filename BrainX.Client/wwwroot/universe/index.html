@@ -90,12 +90,16 @@
         <div id="legend-rows"></div>
     </aside>
 
-    <!-- token-savings chip (top-right under legend gets crowded; pinning
-         it to top-center sidebar style instead). Updates whenever C# pushes
-         {type:"tokenStats", text, tooltip}. -->
-    <div id="token-chip" class="token-chip" hidden>
-        <span id="token-text"></span>
-    </div>
+    <!-- Token-savings chip removed per user "เอาตรงนี้ออก ใน universe"
+         (the floating "+5754.0k tok" pill cluttered the Brain Graph view).
+         The C# token tracker still computes savings + posts {type:"tokenStats"}
+         to the WebView every ~5s, but the JS handler at app.js line 633
+         is defensive (`if ($tokenChip && $tokenText && msg.text)`) so with
+         the chip's <div> gone the message is silently ignored — no JS error.
+         Status-bar chip in MainWindow.xaml (x:Name="TokenSavingsChip")
+         keeps the same data accessible via the legacy BrainGraph toolbar
+         for the few users who still want to see it. -->
+    <!-- (token-chip div intentionally removed) -->
 
     <!-- floating info card revealed on hover/click of a star.
          Auto-fades after 10 s of no hover; mouse-enter cancels the timer.
