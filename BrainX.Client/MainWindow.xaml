@@ -342,76 +342,55 @@
                                           PanningMode="VerticalOnly">
                                 <StackPanel Margin="0,8,0,8">
                                     <!-- ═══════════════════════════════════════════════════════════
-                                         SIDEBAR NAV — 5 groups per t2.zip screenshot 01-dashboard.png:
-                                         WORKSPACE / VAULT / INTELLIGENCE / NETWORK / SYSTEM.
-                                         Nav items not shown in the screenshot (Tokens / Insights /
-                                         SSH / Import) keep their x:Name + handlers but are hidden so
-                                         existing code-behind references stay intact. NavBrainGraph
-                                         (legacy WPF viewport) stays hidden because the sidebar
-                                         "Brain Graph" item now routes to Tag=Universe per the
-                                         "brain graph = univers" rule.
+                                         SIDEBAR NAV — restored to v2.0.96 menu structure per user
+                                         "เมนูเราต้องเหมือนเดิม เปลี่ยน แต่ ui สิยึดเมนูรุ่น 2.0.96".
+                                         Only UI styling changes (background / cards / fonts) — menu
+                                         layout, order, item labels, and visibility ALL match v2.0.96.
                                          ═══════════════════════════════════════════════════════════ -->
-
-                                    <!-- ── WORKSPACE ─────────────────────────────────── -->
-                                    <TextBlock Text="WORKSPACE" FontSize="10" Foreground="{StaticResource TextMutedBrush}"
-                                               Margin="22,8,0,8" FontWeight="SemiBold" Opacity="0.7"/>
-                                    <Button x:Name="NavDashboard" Content="&#x2B21;  Dashboard"
-                                            Style="{StaticResource NavButtonActive}" Click="Nav_Click" Tag="Dashboard"/>
-                                    <Button x:Name="NavUniverse" Content="&#x25C9;  Brain Graph"
-                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Universe"/>
-                                    <Button x:Name="NavGrowth" Content="&#x1F4C8;  Knowledge Growth"
-                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Growth"/>
-
-                                    <!-- ── VAULT ─────────────────────────────────────── -->
-                                    <TextBlock Text="VAULT" FontSize="10" Foreground="{StaticResource TextMutedBrush}"
-                                               Margin="22,16,0,8" FontWeight="SemiBold" Opacity="0.7"/>
+                                    <TextBlock Text="NAVIGATION" FontSize="10" Foreground="{StaticResource TextMutedBrush}"
+                                               Margin="22,8,0,12" FontWeight="SemiBold"/>
+                                    <!-- v2.0.96 had Universe as the default active view; Dashboard
+                                         and Brain Graph were both hidden. User: "ยึดเมนูรุ่น 2.0.96". -->
+                                    <Button x:Name="NavUniverse" Content="&#x1F30C;  Universe"
+                                            Style="{StaticResource NavButtonActive}" Click="Nav_Click" Tag="Universe"/>
+                                    <Button x:Name="NavBrainGraph" Content="&#x25C9;  Brain Graph"
+                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="BrainGraph"
+                                            Visibility="Collapsed"/>
+                                    <Button x:Name="NavDashboard" Content="&#x2B21;  Dashboard (legacy)"
+                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Dashboard"
+                                            Visibility="Collapsed"/>
+                                    <Button x:Name="NavNetwork" Content="&#x2B22;  Network"
+                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Network"/>
                                     <Button x:Name="NavEditor" Content="&#x270F;  Editor"
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Editor"/>
                                     <Button x:Name="NavVault" Content="&#x1F4C1;  Vault Explorer"
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Vault"/>
                                     <Button x:Name="NavSearch" Content="&#x1F50D;  Search"
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Search"/>
-
-                                    <!-- ── INTELLIGENCE ─────────────────────────────── -->
-                                    <TextBlock Text="INTELLIGENCE" FontSize="10" Foreground="{StaticResource TextMutedBrush}"
-                                               Margin="22,16,0,8" FontWeight="SemiBold" Opacity="0.7"/>
-                                    <Button x:Name="NavClaude" Content="&#x2728;  AI Brain Assistant"
+                                    <Button x:Name="NavClaude" Content="&#x1F4AC;  AI Chat"
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Claude"/>
+                                    <Button x:Name="NavGrowth" Content="&#x1F4C8;  Growth"
+                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Growth"/>
+                                    <Button x:Name="NavTokens" Content="&#x1F4B0;  Tokens"
+                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Tokens"/>
+                                    <Button x:Name="NavInsights" Content="&#x1F4A1;  Insights"
+                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Insights"/>
 
-                                    <!-- ── NETWORK ──────────────────────────────────── -->
                                     <TextBlock Text="NETWORK" FontSize="10" Foreground="{StaticResource TextMutedBrush}"
-                                               Margin="22,16,0,8" FontWeight="SemiBold" Opacity="0.7"/>
-                                    <Button x:Name="NavNetwork" Content="&#x2B22;  Network"
-                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Network"/>
+                                               Margin="22,24,0,12" FontWeight="SemiBold"/>
                                     <Button x:Name="NavPeers" Content="&#x1F465;  Peers"
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Peers"/>
                                     <Button x:Name="NavSharing" Content="&#x1F504;  Sharing"
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Sharing"/>
+                                    <Button x:Name="NavSsh" Content="&#x1F5A5;  SSH"
+                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Ssh"/>
 
-                                    <!-- ── SYSTEM ───────────────────────────────────── -->
                                     <TextBlock Text="SYSTEM" FontSize="10" Foreground="{StaticResource TextMutedBrush}"
-                                               Margin="22,16,0,8" FontWeight="SemiBold" Opacity="0.7"/>
+                                               Margin="22,24,0,12" FontWeight="SemiBold"/>
+                                    <Button x:Name="NavImport" Content="&#x1F4E5;  Import / Scan"
+                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Import"/>
                                     <Button x:Name="NavSettings" Content="&#x2699;  Settings"
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Settings"/>
-
-                                    <!-- Hidden nav buttons — kept in tree so existing code-behind
-                                         references (NavBrainGraph, NavTokens, NavInsights, NavSsh,
-                                         NavImport) don't break. Re-show by removing Visibility=Collapsed. -->
-                                    <Button x:Name="NavBrainGraph" Content="Brain Graph (legacy)"
-                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="BrainGraph"
-                                            Visibility="Collapsed"/>
-                                    <Button x:Name="NavTokens" Content="Tokens"
-                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Tokens"
-                                            Visibility="Collapsed"/>
-                                    <Button x:Name="NavInsights" Content="Insights"
-                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Insights"
-                                            Visibility="Collapsed"/>
-                                    <Button x:Name="NavSsh" Content="SSH"
-                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Ssh"
-                                            Visibility="Collapsed"/>
-                                    <Button x:Name="NavImport" Content="Import / Scan"
-                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Import"
-                                            Visibility="Collapsed"/>
                                 </StackPanel>
                             </ScrollViewer>
 
@@ -446,9 +425,8 @@
 
                     <!-- CONTENT AREA -->
                     <Grid Grid.Column="1">
-                        <!-- Dashboard — default startup view (the at-a-glance stats
-                             overview). Universe view is still available from the sidebar. -->
-                        <Grid x:Name="DashboardView" Visibility="Visible">
+                        <!-- Dashboard (legacy — Universe is the v2.0.96 default startup). -->
+                        <Grid x:Name="DashboardView" Visibility="Collapsed">
                             <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="28,24,28,32">
                                 <StackPanel>
                                     <!-- ═══════════════════════════════════════════════════════════════
@@ -3080,7 +3058,7 @@
                              first nav click to this view, not on app startup, so the
                              WebView2 spin-up cost is paid only when the user asks for
                              it. -->
-                        <Grid x:Name="UniverseView" Visibility="Collapsed">
+                        <Grid x:Name="UniverseView" Visibility="Visible">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
