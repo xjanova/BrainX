@@ -320,27 +320,34 @@
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
 
-                            <!-- Brand crest — user: "เอาออกมาจากวงกลม ให้พอดีกับสี่เหลี่ยม".
-                                 Removed the Ellipse PulseRing and the RadialGradientBrush
-                                 opacity mask; the Logo now fills the 132 px rounded
-                                 rectangle edge-to-edge (UniformToFill + clipped to the
-                                 card's corner radius). x:Name="PulseRing" preserved on
-                                 a zero-size dummy so code-behind animations that ref it
-                                 don't NRE. -->
+                            <!-- Brand crest — user: "fill พอดี ขอบๆ ต้องเฟดจางเนียนไป".
+                                 Logo fills the 132 px rounded rectangle via UniformToFill,
+                                 then an OpacityMask (radial gradient) keeps the center
+                                 fully opaque and softly fades the edges into the sidebar
+                                 background, no hard rectangle border. -->
                             <Border Grid.Row="0" Height="132" Margin="14,16,14,10"
                                     CornerRadius="16"
-                                    BorderBrush="{StaticResource NeuralLineStrong}" BorderThickness="1"
+                                    BorderBrush="Transparent" BorderThickness="0"
                                     ClipToBounds="True">
                                 <Border.Effect>
-                                    <DropShadowEffect Color="#9d7bff" BlurRadius="28"
-                                                      ShadowDepth="0" Opacity="0.45"/>
+                                    <DropShadowEffect Color="#9d7bff" BlurRadius="32"
+                                                      ShadowDepth="0" Opacity="0.40"/>
                                 </Border.Effect>
                                 <Grid>
                                     <Image Source="pack://application:,,,/Assets/Logo.png"
                                            Stretch="UniformToFill"
-                                           RenderOptions.BitmapScalingMode="HighQuality"/>
-                                    <!-- Dummy zero-size element so code-behind that animates
-                                         PulseRing (Storyboard target via FindName) keeps working. -->
+                                           RenderOptions.BitmapScalingMode="HighQuality">
+                                        <Image.OpacityMask>
+                                            <RadialGradientBrush Center="0.5,0.5"
+                                                                 GradientOrigin="0.5,0.5"
+                                                                 RadiusX="0.62" RadiusY="0.62">
+                                                <GradientStop Color="#FFFFFFFF" Offset="0"/>
+                                                <GradientStop Color="#FFFFFFFF" Offset="0.55"/>
+                                                <GradientStop Color="#00FFFFFF" Offset="1"/>
+                                            </RadialGradientBrush>
+                                        </Image.OpacityMask>
+                                    </Image>
+                                    <!-- Dummy 0-size PulseRing for animation compat. -->
                                     <Ellipse x:Name="PulseRing" Width="0" Height="0" Opacity="0"/>
                                 </Grid>
                             </Border>
@@ -773,11 +780,26 @@
                                                     </Viewport3D>
                                                 </Border>
 
-                                                <!-- 2D primary view — WriteableBitmap renderer, default.
-                                                     Interaction restored per t2.zip screenshot which shows the
-                                                     full controls hint ("Drag = rotate · Wheel = zoom · Click =
-                                                     info · Right-click = kick") + 3D/2D toggle visible. -->
+                                                <!-- Dashboard Universe embed — user spec "ใช้ univers ล๊อค
+                                                     ออบิท และปรับไม่ได้ใช้ค่าของ univers". Loads the same
+                                                     three.js scene the main Brain Graph uses, but with
+                                                     URL params `?cameraMode=orbit&mode=wallpaper-active`
+                                                     so the camera auto-orbits and the in-scene UI hides.
+                                                     IsHitTestVisible=False blocks mouse events at WPF
+                                                     level so pan/zoom/click are locked. -->
+                                                <Border x:Name="DashUniverseBorder" CornerRadius="8" ClipToBounds="True"
+                                                        Background="#FF0a0612">
+                                                    <wv2:WebView2 x:Name="DashUniverseWebView"
+                                                                  DefaultBackgroundColor="Black"
+                                                                  IsHitTestVisible="False"/>
+                                                </Border>
+
+                                                <!-- Legacy 2D primary view — hidden; replaced by the
+                                                     Universe WebView2 above. Kept in tree because
+                                                     Dash2D_* handlers + DashGraph2D renderer init are
+                                                     wired in code-behind. -->
                                                 <Border x:Name="DashView2DBorder" CornerRadius="8" ClipToBounds="True"
+                                                        Visibility="Collapsed"
                                                         MouseLeftButtonDown="Dash2D_MouseDown"
                                                         MouseLeftButtonUp="Dash2D_MouseUp"
                                                         MouseMove="Dash2D_MouseMove"

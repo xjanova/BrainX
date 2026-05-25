@@ -2192,6 +2192,10 @@ public partial class MainWindow : Window
         {
             universeStartTimer.Stop();
             _ = InitializeUniverseAsync();
+            // Dashboard map shows a SECOND Universe WebView2 in locked
+            // orbit mode — kick it off alongside the main one so by the
+            // time the user notices it, the galaxy is already rendering.
+            _ = InitializeDashUniverseAsync();
         };
         universeStartTimer.Start();
         _ = LoadAiBackends();

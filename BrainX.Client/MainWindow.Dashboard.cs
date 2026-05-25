@@ -163,4 +163,52 @@ public partial class MainWindow
         if (delta.TotalDays < 365)   return $"{(int)(delta.TotalDays / 30)} mo";
         return $"{(int)(delta.TotalDays / 365)} yr";
     }
+
+    // ═════════════════════════════════════════════════════════════════
+    // Dashboard Universe embed — loads the three.js galaxy in the
+    // Dashboard's map card with `cameraMode=orbit` + `mode=wallpaper-active`
+    // so the camera auto-orbits and the in-scene UI is hidden. The XAML
+    // sets IsHitTestVisible=False so pan/zoom/click are blocked at the
+    // WPF layer before they ever reach the WebView2 — matches the user
+    // spec "ใช้ univers ล๊อคออบิท และปรับไม่ได้".
+    // Mirrors InitializeUniverseAsync but for DashUniverseWebView; the
+    // two WebView2 instances are independent (heavier RAM but cleanest;
+    // re-parenting a single HwndHost-style control between visuals is
+    // fragile).
+    // ═════════════════════════════════════════════════════════════════
+    private bool _dashUniverseInitialized;
+
+    private async System.Threading.Tasks.Task InitializeDashUniverseAsync()
+    {
+        if (_dashUniverseInitialized) return;
+        if (DashUniverseWebView == null) return;
+
+        try
+        {
+            await DashUniverseWebView.EnsureCoreWebView2Async();
+            var core = DashUniverseWebView.CoreWebView2;
+
+            var wwwroot = System.IO.Path.Combine(System.AppContext.BaseDirectory, "wwwroot");
+            if (!System.IO.Directory.Exists(wwwroot))
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"DashUniverse: wwwroot missing at {wwwroot} — skipping init");
+                return;
+            }
+
+            core.SetVirtualHostNameToFolderMapping(
+                "universe.local", wwwroot,
+                Microsoft.Web.WebView2.Core.CoreWebView2HostResourceAccessKind.Allow);
+            core.Settings.AreDevToolsEnabled = false;
+            core.Settings.AreDefaultContextMenusEnabled = false;
+
+            DashUniverseWebView.Source = new System.Uri(
+                "https://universe.local/universe/index.html?cameraMode=orbit&mode=wallpaper-active");
+            _dashUniverseInitialized = true;
+        }
+        catch (System.Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"DashUniverse init failed: {ex.Message}");
+        }
+    }
 }
