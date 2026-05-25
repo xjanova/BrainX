@@ -43,20 +43,21 @@
         </Storyboard>
     </Window.Resources>
 
-    <Border CornerRadius="16" Background="{StaticResource DeepSpaceBrush}"
-            BorderBrush="{StaticResource SurfaceLightBrush}" BorderThickness="1"
+    <Border CornerRadius="16" Background="{StaticResource NeuralBgBase}"
+            BorderBrush="{StaticResource NeuralLine}" BorderThickness="1"
             ClipToBounds="True">
         <Grid>
-            <!-- Subtle full-window nebula texture — barely visible but adds depth -->
+            <!-- Ambient bk2 starfield + violet/cyan glow ellipses hidden per t2.zip
+                 screenshots which use a clean near-black violet background (#0a0612).
+                 The bk2 texture + glows were tinting the cards with extra nebula and
+                 made every screen feel washed-out vs the spec. Kept x:Name +
+                 Visibility=Collapsed so future "wallpaper mode" can re-enable them
+                 with a single setter flip if requested. -->
             <Image x:Name="WindowBgTexture" Source="pack://application:,,,/Assets/bk2.png"
-                   Stretch="UniformToFill" Opacity="0.09" IsHitTestVisible="False"/>
-
-            <!-- (Static snapshot of Universe removed — user wanted live, not a
-                 still image. Universe live = use the Wallpaper button instead,
-                 which spawns a real-time WebView2 reparented to WorkerW.) -->
-            <!-- Background ambient glow -->
+                   Stretch="UniformToFill" Opacity="0" IsHitTestVisible="False"
+                   Visibility="Collapsed"/>
             <Ellipse Width="600" Height="600" HorizontalAlignment="Right" VerticalAlignment="Top"
-                     Margin="0,-200,-200,0" Opacity="0.03">
+                     Margin="0,-200,-200,0" Opacity="0" Visibility="Collapsed">
                 <Ellipse.Fill>
                     <RadialGradientBrush>
                         <GradientStop Color="{DynamicResource ElectricPurpleColor}" Offset="0"/>
@@ -65,7 +66,7 @@
                 </Ellipse.Fill>
             </Ellipse>
             <Ellipse Width="400" Height="400" HorizontalAlignment="Left" VerticalAlignment="Bottom"
-                     Margin="-100,0,0,-100" Opacity="0.04">
+                     Margin="-100,0,0,-100" Opacity="0" Visibility="Collapsed">
                 <Ellipse.Fill>
                     <RadialGradientBrush>
                         <GradientStop Color="{DynamicResource NeonCyanColor}" Offset="0"/>
@@ -2576,18 +2577,57 @@
 
                         <!-- ═══ GROWTH CHART VIEW ═══ -->
                         <Grid x:Name="GrowthView" Visibility="Collapsed">
-                            <Grid Margin="24,16">
+                            <Grid Margin="28,24,28,32">
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
-                                <StackPanel Margin="0,0,0,16">
-                                    <TextBlock Text="Knowledge Growth" FontSize="24" FontWeight="Bold"
-                                               Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,4"/>
-                                    <TextBlock Text="Cumulative notes over real time — top categories tracked separately"
-                                               FontSize="12" Foreground="{StaticResource TextSecondaryBrush}"/>
-                                </StackPanel>
-                                <Border Grid.Row="1" Style="{StaticResource CardPanel}">
+                                <!-- View header per t2.zip 03-growth.png: title + subtitle + time-range
+                                     segmented (14d/30d/90d/All) + Export CSV ghost button -->
+                                <Grid Margin="0,0,0,22">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0">
+                                        <TextBlock Text="Knowledge Growth" Style="{StaticResource TypeViewTitle}"/>
+                                        <TextBlock Text="Cumulative notes over real time — top categories tracked separately"
+                                                   Style="{StaticResource TypeViewSubtitle}"/>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
+                                        <Border Background="{StaticResource NeuralBgInset}"
+                                                BorderBrush="{StaticResource NeuralLine}" BorderThickness="1"
+                                                CornerRadius="9" Padding="3" Margin="0,0,10,0">
+                                            <StackPanel Orientation="Horizontal">
+                                                <Border CornerRadius="7" Padding="10,4"
+                                                        Background="{StaticResource NeuralPrimaryBtn}">
+                                                    <TextBlock Text="14 d" FontSize="11" FontWeight="SemiBold"
+                                                               Foreground="White"/>
+                                                </Border>
+                                                <Border CornerRadius="7" Padding="10,4">
+                                                    <TextBlock Text="30 d" FontSize="11" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource NeuralText2}"/>
+                                                </Border>
+                                                <Border CornerRadius="7" Padding="10,4">
+                                                    <TextBlock Text="90 d" FontSize="11" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource NeuralText2}"/>
+                                                </Border>
+                                                <Border CornerRadius="7" Padding="10,4">
+                                                    <TextBlock Text="All" FontSize="11" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource NeuralText2}"/>
+                                                </Border>
+                                            </StackPanel>
+                                        </Border>
+                                        <Button Style="{StaticResource NeuralBtnGhost}">
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Text="&#x2B07;" FontSize="13" Margin="0,0,6,0"
+                                                           VerticalAlignment="Center"/>
+                                                <TextBlock Text="Export CSV" VerticalAlignment="Center"/>
+                                            </StackPanel>
+                                        </Button>
+                                    </StackPanel>
+                                </Grid>
+                                <Border Grid.Row="1" Style="{StaticResource NeuralCard}" Padding="18,16">
                                     <Grid>
                                         <Grid.RowDefinitions>
                                             <RowDefinition Height="*"/>
@@ -3041,8 +3081,61 @@
                              WebView2 spin-up cost is paid only when the user asks for
                              it. -->
                         <Grid x:Name="UniverseView" Visibility="Collapsed">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+
+                            <!-- ═══ Brain Graph view header (t2.zip 02-brain-graph.png)
+                                 Per "brain graph = univers" — Universe IS Brain Graph. -->
+                            <Grid Grid.Row="0" Margin="28,20,28,16">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0">
+                                    <TextBlock Text="Brain Graph" Style="{StaticResource TypeViewTitle}"/>
+                                    <TextBlock x:Name="BrainGraphSubtitle"
+                                               Text="455 nodes · 2,724 edges · live physics"
+                                               Style="{StaticResource TypeViewSubtitle}"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
+                                    <!-- 3D/2D segmented (re-uses UniverseViewToggle_Click handler) -->
+                                    <Border Background="{StaticResource NeuralBgInset}"
+                                            BorderBrush="{StaticResource NeuralLine}" BorderThickness="1"
+                                            CornerRadius="9" Padding="3" Margin="0,0,10,0"
+                                            Cursor="Hand" MouseLeftButtonUp="UniverseViewToggle_Click">
+                                        <StackPanel Orientation="Horizontal">
+                                            <Border x:Name="BGHeader3D" CornerRadius="7" Padding="12,4"
+                                                    Background="{StaticResource NeuralPrimaryBtn}">
+                                                <TextBlock Text="3D" FontSize="12" FontWeight="SemiBold"
+                                                           Foreground="White"/>
+                                            </Border>
+                                            <Border x:Name="BGHeader2D" CornerRadius="7" Padding="12,4">
+                                                <TextBlock Text="2D" FontSize="12" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource NeuralText2}"/>
+                                            </Border>
+                                        </StackPanel>
+                                    </Border>
+                                    <Button Style="{StaticResource NeuralBtnGhost}" Margin="0,0,10,0">
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="&#x25BD;" FontSize="11" Margin="0,0,6,0"
+                                                       VerticalAlignment="Center"/>
+                                            <TextBlock Text="Filter" VerticalAlignment="Center"/>
+                                        </StackPanel>
+                                    </Button>
+                                    <Button Style="{StaticResource NeuralBtnGhost}">
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="&#x21BB;" FontSize="13" Margin="0,0,6,0"
+                                                       VerticalAlignment="Center"/>
+                                            <TextBlock Text="Re-layout" VerticalAlignment="Center"/>
+                                        </StackPanel>
+                                    </Button>
+                                </StackPanel>
+                            </Grid>
+
                             <!-- 3D Universe (WebView2 + three.js) — default visible -->
-                            <Border x:Name="UniverseWebBorder" Background="#FF000308" ClipToBounds="True">
+                            <Border Grid.Row="1" x:Name="UniverseWebBorder" Background="#FF000308" ClipToBounds="True">
                                 <wv2:WebView2 x:Name="UniverseWebView" DefaultBackgroundColor="Black"/>
                             </Border>
 
@@ -3056,7 +3149,7 @@
                                  Backdrop is 88% opaque so the empty WebView's
                                  black void is masked but the WebView still
                                  receives the navigation paint underneath. -->
-                            <Border x:Name="UniverseLoadingOverlay"
+                            <Border Grid.Row="1" x:Name="UniverseLoadingOverlay"
                                     Background="#DD000308"
                                     Panel.ZIndex="50"
                                     Visibility="Visible">
@@ -3152,7 +3245,7 @@
                             <!-- 2D Graph (WriteableBitmap renderer) — collapsed by default.
                                  Shares _graphPhysics with the (hidden) BrainGraphView so
                                  MCP pulse flashes here too. -->
-                            <Border x:Name="UniverseGraph2DBorder" CornerRadius="0" ClipToBounds="True"
+                            <Border Grid.Row="1" x:Name="UniverseGraph2DBorder" CornerRadius="0" ClipToBounds="True"
                                     Visibility="Collapsed"
                                     MouseLeftButtonDown="Graph2D_MouseDown"
                                     MouseLeftButtonUp="Graph2D_MouseUp"
@@ -3166,13 +3259,17 @@
                                 <services:Graph2DRenderer x:Name="UniverseGraph2D"/>
                             </Border>
 
-                            <!-- WPF floating 3D/2D toggle — only inside Universe view. -->
-                            <Border x:Name="UniverseViewToggle"
+                            <!-- WPF floating 3D/2D toggle — hidden now that the
+                                 Brain Graph view header has its own 3D/2D segmented.
+                                 Kept in tree for compat — UniverseViewToggle_Click handler
+                                 still binds to it (and to the new header segmented). -->
+                            <Border Grid.Row="1" x:Name="UniverseViewToggle"
                                     HorizontalAlignment="Right" VerticalAlignment="Top"
                                     Margin="0,18,18,0" Padding="0"
                                     Panel.ZIndex="100"
                                     CornerRadius="999"
                                     Cursor="Hand"
+                                    Visibility="Collapsed"
                                     MouseLeftButtonUp="UniverseViewToggle_Click">
                                 <Border.Background>
                                     <SolidColorBrush Color="#CC0A081C"/>
