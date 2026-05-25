@@ -3901,9 +3901,19 @@
                             </Border>
                         </Grid>
 
-                        <!-- ═══ SETTINGS VIEW ═══ -->
+                        <!-- ═══ SETTINGS VIEW ═══
+                             Per t2.zip screenshot 11-settings.png + README §11:
+                             - 220 px sticky left nav (Identity / Vault / Ai Keys /
+                               Network / Mcp / Storage / About) → clicks BringIntoView
+                               the matching section anchor in the right-side scroller.
+                             - Right column is the existing settings stack restyled
+                               with NeuralCard surfaces + mixed-case 16 px titles +
+                               13 px gray subtitles (instead of the old UPPERCASE
+                               11 px gray label).
+                             All existing x:Name and Click handlers are preserved —
+                             only chrome changed, no functional regression. -->
                         <Grid x:Name="SettingsView" Visibility="Collapsed">
-                            <Grid Margin="24,16">
+                            <Grid Margin="28,24,28,16">
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
@@ -3913,19 +3923,80 @@
                                     <TextBlock Text="Identity · vault · AI keys · network · system"
                                                Style="{StaticResource TypeViewSubtitle}"/>
                                 </StackPanel>
-                                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
-                                    <StackPanel>
-                                        <!-- Brain Identity -->
-                                        <Border Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                <Grid Grid.Row="1">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="220"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <!-- LEFT NAV — clicks jump the right scroller to anchor. -->
+                                    <StackPanel Grid.Column="0" Margin="0,0,12,0">
+                                        <Button x:Name="SettingsNavIdentity" Content="Identity"
+                                                Style="{StaticResource NavButtonActive}"
+                                                Click="SettingsJump_Click" Tag="Identity"
+                                                HorizontalContentAlignment="Left" Padding="14,8"
+                                                Margin="0,0,0,2"/>
+                                        <Button x:Name="SettingsNavVault" Content="Vault"
+                                                Style="{StaticResource NavButton}"
+                                                Click="SettingsJump_Click" Tag="Vault"
+                                                HorizontalContentAlignment="Left" Padding="14,8"
+                                                Margin="0,0,0,2"/>
+                                        <Button x:Name="SettingsNavAiKeys" Content="Ai Keys"
+                                                Style="{StaticResource NavButton}"
+                                                Click="SettingsJump_Click" Tag="AiKeys"
+                                                HorizontalContentAlignment="Left" Padding="14,8"
+                                                Margin="0,0,0,2"/>
+                                        <Button x:Name="SettingsNavNetwork" Content="Network"
+                                                Style="{StaticResource NavButton}"
+                                                Click="SettingsJump_Click" Tag="Network"
+                                                HorizontalContentAlignment="Left" Padding="14,8"
+                                                Margin="0,0,0,2"/>
+                                        <Button x:Name="SettingsNavMcp" Content="Mcp"
+                                                Style="{StaticResource NavButton}"
+                                                Click="SettingsJump_Click" Tag="Mcp"
+                                                HorizontalContentAlignment="Left" Padding="14,8"
+                                                Margin="0,0,0,2"/>
+                                        <Button x:Name="SettingsNavStorage" Content="Storage"
+                                                Style="{StaticResource NavButton}"
+                                                Click="SettingsJump_Click" Tag="Storage"
+                                                HorizontalContentAlignment="Left" Padding="14,8"
+                                                Margin="0,0,0,2"/>
+                                        <Button x:Name="SettingsNavAbout" Content="About"
+                                                Style="{StaticResource NavButton}"
+                                                Click="SettingsJump_Click" Tag="About"
+                                                HorizontalContentAlignment="Left" Padding="14,8"
+                                                Margin="0,0,0,2"/>
+                                    </StackPanel>
+                                    <ScrollViewer x:Name="SettingsScrollViewer" Grid.Column="1"
+                                                  VerticalScrollBarVisibility="Auto"
+                                                  HorizontalScrollBarVisibility="Disabled"
+                                                  Padding="8,0,4,8">
+                                        <StackPanel>
+                                        <!-- Brain Identity — violet-tinted Identity card per spec §11. -->
+                                        <Border x:Name="SettingsAnchorIdentity"
+                                                Style="{StaticResource NeuralCard}"
+                                                Padding="22" Margin="0,0,0,14">
+                                            <Border.Background>
+                                                <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                                    <GradientStop Color="#251D44" Offset="0"/>
+                                                    <GradientStop Color="#1A1535" Offset="1"/>
+                                                </LinearGradientBrush>
+                                            </Border.Background>
                                             <StackPanel>
-                                                <TextBlock Text="BRAIN IDENTITY" FontSize="11" FontWeight="SemiBold"
-                                                           Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,12"/>
+                                                <StackPanel Margin="0,0,0,16">
+                                                    <TextBlock Text="Brain identity" FontSize="16" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText}"/>
+                                                    <TextBlock Text="ECDSA wallet-style address used to sign your shared knowledge."
+                                                               FontSize="12.5" FontWeight="Medium"
+                                                               Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0"/>
+                                                </StackPanel>
                                                 <TextBlock Text="Display Name" FontSize="11"
-                                                           Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
+                                                           Foreground="{StaticResource NeuralText3}" Margin="0,0,0,4"
+                                                           FontWeight="SemiBold"/>
                                                 <TextBox x:Name="SettingsBrainName" Style="{StaticResource NeonTextBox}"
                                                          Margin="0,0,0,12"/>
                                                 <TextBlock Text="Brain Address (read-only)" FontSize="11"
-                                                           Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
+                                                           Foreground="{StaticResource NeuralText3}" Margin="0,0,0,4"
+                                                           FontWeight="SemiBold"/>
                                                 <TextBox x:Name="SettingsBrainAddress" Style="{StaticResource NeonTextBox}"
                                                          IsReadOnly="True" Opacity="0.6" Margin="0,0,0,12"/>
                                                 <Button Content="Save Name" Style="{StaticResource NeonButtonFilled}"
@@ -3934,26 +4005,45 @@
                                         </Border>
 
                                         <!-- Vault Path -->
-                                        <Border Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                        <Border x:Name="SettingsAnchorVault"
+                                                Style="{StaticResource NeuralCard}"
+                                                Padding="22" Margin="0,0,0,14">
                                             <StackPanel>
-                                                <TextBlock Text="VAULT CONFIGURATION" FontSize="11" FontWeight="SemiBold"
-                                                           Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,12"/>
-                                                <TextBlock Text="Vault Path" FontSize="11"
-                                                           Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
+                                                <StackPanel Margin="0,0,0,16">
+                                                    <TextBlock Text="Vault" FontSize="16" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText}"/>
+                                                    <TextBlock Text="Where BrainX watches your Markdown files."
+                                                               FontSize="12.5" FontWeight="Medium"
+                                                               Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0"/>
+                                                </StackPanel>
+                                                <TextBlock Text="VAULT PATH" FontSize="11"
+                                                           Foreground="{StaticResource NeuralText3}" Margin="0,0,0,4"
+                                                           FontWeight="SemiBold"/>
                                                 <TextBox x:Name="SettingsVaultPath" Style="{StaticResource NeonTextBox}"
                                                          IsReadOnly="True" Opacity="0.6" Margin="0,0,0,12"/>
                                                 <Button Content="Change Vault Path" Style="{StaticResource NeonButton}"
                                                         Click="ChangeVaultPath_Click" HorizontalAlignment="Left" Padding="16,8"/>
+                                                <TextBlock Text="Auto-detects changes via FileSystemWatcher"
+                                                           FontSize="11" Margin="0,12,0,0"
+                                                           Foreground="{StaticResource NeuralText3}"/>
                                             </StackPanel>
                                         </Border>
 
                                         <!-- Network -->
-                                        <Border Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                        <Border x:Name="SettingsAnchorNetwork"
+                                                Style="{StaticResource NeuralCard}"
+                                                Padding="22" Margin="0,0,0,14">
                                             <StackPanel>
-                                                <TextBlock Text="NETWORK" FontSize="11" FontWeight="SemiBold"
-                                                           Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,12"/>
-                                                <TextBlock Text="Server URL" FontSize="11"
-                                                           Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
+                                                <StackPanel Margin="0,0,0,16">
+                                                    <TextBlock Text="Network" FontSize="16" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText}"/>
+                                                    <TextBlock Text="Mesh server endpoint that brokers peer connections."
+                                                               FontSize="12.5" FontWeight="Medium"
+                                                               Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0"/>
+                                                </StackPanel>
+                                                <TextBlock Text="SERVER URL" FontSize="11"
+                                                           Foreground="{StaticResource NeuralText3}" Margin="0,0,0,4"
+                                                           FontWeight="SemiBold"/>
                                                 <TextBox x:Name="SettingsServerUrl" Style="{StaticResource NeonTextBox}"
                                                          Text="http://localhost:5142/brain-hub" Margin="0,0,0,12"/>
                                                 <Button Content="Save Server URL" Style="{StaticResource NeonButtonFilled}"
@@ -3962,15 +4052,19 @@
                                         </Border>
 
                                         <!-- Auto-Import Scanner -->
-                                        <Border Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                        <Border Style="{StaticResource NeuralCard}"
+                                                Padding="22" Margin="0,0,0,14">
                                             <StackPanel>
-                                                <TextBlock Text="AUTO-IMPORT SCANNER (Resonance Scan)" FontSize="11" FontWeight="SemiBold"
-                                                           Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,8"/>
-                                                <TextBlock FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,12"
-                                                           TextWrapping="Wrap">
-                                                    Scans paths for CLAUDE.md, README.md, *.md using a priority-queue filesystem walk with
-                                                    archetype-aware descent and 64-bit SimHash near-duplicate detection. Pruned subtrees are never touched.
-                                                </TextBlock>
+                                                <StackPanel Margin="0,0,0,16">
+                                                    <TextBlock Text="Auto-import scanner" FontSize="16" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText}"/>
+                                                    <TextBlock FontSize="12.5" FontWeight="Medium"
+                                                               Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0"
+                                                               TextWrapping="Wrap">
+                                                        Scans paths for CLAUDE.md, README.md, *.md using a priority-queue walk with
+                                                        archetype-aware descent and 64-bit SimHash near-duplicate detection.
+                                                    </TextBlock>
+                                                </StackPanel>
 
                                                 <TextBlock Text="Scan paths" FontSize="11"
                                                            Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
@@ -4031,15 +4125,18 @@
                                         </Border>
 
                                         <!-- Brain Export -->
-                                        <Border Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                        <Border Style="{StaticResource NeuralCard}"
+                                                Padding="22" Margin="0,0,0,14">
                                             <StackPanel>
-                                                <TextBlock Text="BRAIN EXPORT (for Claude &amp; external tools)" FontSize="11" FontWeight="SemiBold"
-                                                           Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,8"/>
-                                                <TextBlock FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" Margin="0,0,0,12">
-                                                    Writes a machine-readable fingerprint of this brain so Claude and any external tool can
-                                                    pull your expertise without understanding BrainX internals. Updates a managed section
-                                                    in CLAUDE.md automatically.
-                                                </TextBlock>
+                                                <StackPanel Margin="0,0,0,16">
+                                                    <TextBlock Text="Brain export" FontSize="16" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText}"/>
+                                                    <TextBlock FontSize="12.5" FontWeight="Medium"
+                                                               Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0" TextWrapping="Wrap">
+                                                        Machine-readable fingerprint of this brain. Claude &amp; external tools
+                                                        pull your expertise without understanding BrainX internals.
+                                                    </TextBlock>
+                                                </StackPanel>
                                                 <StackPanel Margin="0,0,0,12">
                                                     <TextBlock Foreground="{StaticResource TextSecondaryBrush}" FontSize="11">
                                                         • <Run FontFamily="{StaticResource MonoFont}">.obsidianx/brain-export.json</Run> — full index (schema brain-export/v1)
@@ -4066,15 +4163,18 @@
                                         </Border>
 
                                         <!-- Custom Knowledge Categories -->
-                                        <Border Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                        <Border Style="{StaticResource NeuralCard}"
+                                                Padding="22" Margin="0,0,0,14">
                                             <StackPanel>
-                                                <TextBlock Text="CUSTOM KNOWLEDGE CATEGORIES" FontSize="11" FontWeight="SemiBold"
-                                                           Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,8"/>
-                                                <TextBlock FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" Margin="0,0,0,12">
-                                                    Teach BrainX new subjects beyond the 25 built-in domains. A custom category matches notes by
-                                                    keywords in Thai and English; when a note scores higher on yours than on any built-in, the node
-                                                    gets your color and clusters with its peers.
-                                                </TextBlock>
+                                                <StackPanel Margin="0,0,0,16">
+                                                    <TextBlock Text="Custom knowledge categories" FontSize="16" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText}"/>
+                                                    <TextBlock FontSize="12.5" FontWeight="Medium"
+                                                               Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0" TextWrapping="Wrap">
+                                                        Teach BrainX new subjects beyond the 25 built-in domains. Matches notes
+                                                        by Thai + English keywords; outscoring a built-in wins the node.
+                                                    </TextBlock>
+                                                </StackPanel>
 
                                                 <ListBox x:Name="CustomCategoryList" Height="140"
                                                          Background="{StaticResource DarkPanelBrush}"
@@ -4133,15 +4233,18 @@
                                         </Border>
 
                                         <!-- Graph Performance -->
-                                        <Border Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                        <Border Style="{StaticResource NeuralCard}"
+                                                Padding="22" Margin="0,0,0,14">
                                             <StackPanel>
-                                                <TextBlock Text="3D GRAPH PERFORMANCE" FontSize="11" FontWeight="SemiBold"
-                                                           Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,8"/>
-                                                <TextBlock FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" Margin="0,0,0,12">
-                                                    Physics uses Barnes-Hut octree (O(N log N)) and Fruchterman-Reingold forces
-                                                    with per-community gravity — nodes in the same cluster attract each other,
-                                                    not just the origin. Rendering culls distant and low-importance nodes.
-                                                </TextBlock>
+                                                <StackPanel Margin="0,0,0,16">
+                                                    <TextBlock Text="3D graph performance" FontSize="16" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText}"/>
+                                                    <TextBlock FontSize="12.5" FontWeight="Medium"
+                                                               Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0" TextWrapping="Wrap">
+                                                        Barnes-Hut octree (O(N log N)) + Fruchterman-Reingold forces with
+                                                        per-community gravity. Distant + low-importance nodes are culled.
+                                                    </TextBlock>
+                                                </StackPanel>
 
                                                 <TextBlock Text="Max visible nodes (0 = unlimited)" FontSize="11"
                                                            Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
@@ -4174,17 +4277,19 @@
                                             </StackPanel>
                                         </Border>
 
-                                        <!-- Cloud AI API keys -->
-                                        <Border Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                        <!-- Cloud AI API keys — AiKeys anchor. -->
+                                        <Border x:Name="SettingsAnchorAiKeys"
+                                                Style="{StaticResource NeuralCard}"
+                                                Padding="22" Margin="0,0,0,14">
                                             <StackPanel>
-                                                <TextBlock Text="CLOUD AI BACKENDS (API keys)" FontSize="11" FontWeight="SemiBold"
-                                                           Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,8"/>
-                                                <TextBlock FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" Margin="0,0,0,12">
-                                                    Optional — if you have keys, we'll auto-register these backends so you can use cloud
-                                                    models (free tiers included) alongside local Ollama. Keys stored at
-                                                    <Run FontFamily="{StaticResource MonoFont}">.obsidianx/ai-keys.json</Run>
-                                                    on this machine only.
-                                                </TextBlock>
+                                                <StackPanel Margin="0,0,0,16">
+                                                    <TextBlock Text="AI keys" FontSize="16" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText}"/>
+                                                    <TextBlock FontSize="12.5" FontWeight="Medium"
+                                                               Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0" TextWrapping="Wrap">
+                                                        Stored locally in <Run FontFamily="{StaticResource MonoFont}">.obsidianx/ai-keys.json</Run> — never sent off-disk.
+                                                    </TextBlock>
+                                                </StackPanel>
 
                                                 <TextBlock FontSize="11" Margin="0,0,0,4"
                                                            Foreground="{StaticResource TextSecondaryBrush}">
@@ -4248,16 +4353,20 @@
                                             </StackPanel>
                                         </Border>
 
-                                        <!-- Storage Provider -->
-                                        <Border Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                        <!-- Storage Provider — Storage anchor. -->
+                                        <Border x:Name="SettingsAnchorStorage"
+                                                Style="{StaticResource NeuralCard}"
+                                                Padding="22" Margin="0,0,0,14">
                                             <StackPanel>
-                                                <TextBlock Text="STORAGE BACKEND" FontSize="11" FontWeight="SemiBold"
-                                                           Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,8"/>
-                                                <TextBlock FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" Margin="0,0,0,12">
-                                                    Cache parsed graph + serve full-text search + persist access history.
-                                                    SQLite = local .obsidianx/brain.db with FTS5 (handles Thai via unicode61).
-                                                    MySQL = shared server DB for team "pool brain".
-                                                </TextBlock>
+                                                <StackPanel Margin="0,0,0,16">
+                                                    <TextBlock Text="Storage backend" FontSize="16" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText}"/>
+                                                    <TextBlock FontSize="12.5" FontWeight="Medium"
+                                                               Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0" TextWrapping="Wrap">
+                                                        Cache parsed graph + serve full-text search. SQLite local with FTS5 +
+                                                        Thai unicode61, or shared MySQL for team "pool brain".
+                                                    </TextBlock>
+                                                </StackPanel>
                                                 <TextBlock Text="Provider" FontSize="11"
                                                            Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
                                                 <ComboBox x:Name="StorageProviderCombo" Margin="0,0,0,12"
@@ -4287,15 +4396,18 @@
                                         </Border>
 
                                         <!-- AutoLinker -->
-                                        <Border Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                        <Border Style="{StaticResource NeuralCard}"
+                                                Padding="22" Margin="0,0,0,14">
                                             <StackPanel>
-                                                <TextBlock Text="AUTO-LINKER (connect related notes)" FontSize="11" FontWeight="SemiBold"
-                                                           Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,8"/>
-                                                <TextBlock FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" Margin="0,0,0,12">
-                                                    Creates edges between semantically related notes that don't have an explicit [[wiki-link]].
-                                                    Uses six signals (tag overlap, category match, title tokens, source folder, keyword co-occurrence)
-                                                    via inverted index — O(N·k), not O(N²). Auto-edges render as faded purple vs. the cyan wiki-links.
-                                                </TextBlock>
+                                                <StackPanel Margin="0,0,0,16">
+                                                    <TextBlock Text="Auto-linker" FontSize="16" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText}"/>
+                                                    <TextBlock FontSize="12.5" FontWeight="Medium"
+                                                               Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0" TextWrapping="Wrap">
+                                                        Edges between semantically related notes that lack an explicit [[wiki-link]].
+                                                        Six signals via inverted index — O(N·k). Auto-edges render as faded purple.
+                                                    </TextBlock>
+                                                </StackPanel>
                                                 <CheckBox x:Name="AutoLinkEnabledCheck" Content="Enable auto-linker"
                                                           Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,8"
                                                           IsChecked="True"
@@ -4321,17 +4433,20 @@
                                             </StackPanel>
                                         </Border>
 
-                                        <!-- Claude Code CLI Integration -->
-                                        <Border Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                        <!-- Claude Code CLI Integration — Mcp anchor. -->
+                                        <Border x:Name="SettingsAnchorMcp"
+                                                Style="{StaticResource NeuralCard}"
+                                                Padding="22" Margin="0,0,0,14">
                                             <StackPanel>
-                                                <TextBlock Text="CLAUDE INTEGRATION (CLI + DESKTOP)" FontSize="11" FontWeight="SemiBold"
-                                                           Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,8"/>
-                                                <TextBlock FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" Margin="0,0,0,12">
-                                                    One click installs into BOTH Claude Code CLI (every `claude` terminal session) AND Claude Desktop
-                                                    (claude_desktop_config.json — restart the app to pick up). Your brain shows up as 6 tools —
-                                                    brain_search, brain_get_note, brain_expertise, brain_list, brain_stats, brain_import_path —
-                                                    with no manual JSON editing.
-                                                </TextBlock>
+                                                <StackPanel Margin="0,0,0,16">
+                                                    <TextBlock Text="MCP registration" FontSize="16" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText}"/>
+                                                    <TextBlock FontSize="12.5" FontWeight="Medium"
+                                                               Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0" TextWrapping="Wrap">
+                                                        One click registers into Claude Code CLI + Claude Desktop. Your brain
+                                                        shows up as 6 MCP tools (brain_search, brain_get_note, brain_expertise…).
+                                                    </TextBlock>
+                                                </StackPanel>
 
                                                 <TextBlock Text="Install command" FontSize="11"
                                                            Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
@@ -4401,8 +4516,10 @@
                                             </StackPanel>
                                         </Border>
 
-                                        <!-- About -->
-                                        <Border Style="{StaticResource CardPanel}">
+                                        <!-- About — anchor. -->
+                                        <Border x:Name="SettingsAnchorAbout"
+                                                Style="{StaticResource NeuralCard}"
+                                                Padding="22" Margin="0,0,0,14">
                                             <Grid>
                                                 <Grid.ColumnDefinitions>
                                                     <ColumnDefinition Width="Auto"/>
@@ -4416,21 +4533,22 @@
                                                            Stretch="UniformToFill"/>
                                                 </Border>
                                                 <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                                                    <TextBlock Text="ABOUT" FontSize="11" FontWeight="SemiBold"
-                                                               Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,8"/>
+                                                    <TextBlock Text="About" FontSize="16" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText}" Margin="0,0,0,4"/>
                                                     <TextBlock x:Name="AboutVersionText"
                                                                Text="BrainX — Neural Knowledge Network"
-                                                               FontSize="13" Foreground="{StaticResource TextPrimaryBrush}"/>
+                                                               FontSize="13" Foreground="{StaticResource NeuralText1}"/>
                                                     <TextBlock Text="Decentralized brain-to-brain knowledge sharing"
-                                                               FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,4,0,0"/>
-                                                    <TextBlock x:Name="AboutBuildText" FontSize="10"
-                                                               Foreground="{StaticResource TextMutedBrush}"
+                                                               FontSize="12" Foreground="{StaticResource NeuralText2}" Margin="0,4,0,0"/>
+                                                    <TextBlock x:Name="AboutBuildText" FontSize="11"
+                                                               Foreground="{StaticResource NeuralText3}"
                                                                FontFamily="{StaticResource MonoFont}" Margin="0,6,0,0"/>
                                                 </StackPanel>
                                             </Grid>
                                         </Border>
-                                    </StackPanel>
-                                </ScrollViewer>
+                                        </StackPanel>
+                                    </ScrollViewer>
+                                </Grid>
                             </Grid>
                         </Grid>
                     </Grid>

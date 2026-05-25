@@ -259,4 +259,41 @@ public partial class MainWindow
             System.Diagnostics.Debug.WriteLine($"PushBrainSnapshotToDashUniverse: {ex.Message}");
         }
     }
+
+    // ═════════════════════════════════════════════════════════════════
+    // Settings — left-nav jump handler. Maps the Tag of the clicked nav
+    // Button ("Identity" / "Vault" / "AiKeys" / "Network" / "Mcp" /
+    // "Storage" / "About") to the matching SettingsAnchor{Tag} border in
+    // the ScrollViewer and calls BringIntoView so the section scrolls into
+    // the viewport. Then re-applies NavButton + NavButtonActive styles so
+    // the clicked button gets the violet pill state and the others reset.
+    //
+    // Wired from MainWindow.xaml — the seven Settings left-nav buttons all
+    // share this single Click handler and disambiguate by Tag.
+    // ═════════════════════════════════════════════════════════════════
+    private void SettingsJump_Click(object sender, System.Windows.RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.Button btn) return;
+        var tag = btn.Tag as string;
+        if (string.IsNullOrEmpty(tag)) return;
+
+        // 1. Find the matching anchor border and scroll it into view.
+        var anchorName = "SettingsAnchor" + tag;
+        var anchor = FindName(anchorName) as System.Windows.FrameworkElement;
+        anchor?.BringIntoView();
+
+        // 2. Swap NavButton ↔ NavButtonActive style across the seven buttons
+        //    so the clicked one shows the violet pill state. Done inline so
+        //    we don't have to enumerate the buttons via a stored list.
+        var navButton       = (System.Windows.Style)FindResource("NavButton");
+        var navButtonActive = (System.Windows.Style)FindResource("NavButtonActive");
+        foreach (var name in new[] { "SettingsNavIdentity", "SettingsNavVault", "SettingsNavAiKeys",
+                                     "SettingsNavNetwork", "SettingsNavMcp", "SettingsNavStorage",
+                                     "SettingsNavAbout" })
+        {
+            if (FindName(name) is System.Windows.Controls.Button b)
+                b.Style = navButton;
+        }
+        btn.Style = navButtonActive;
+    }
 }
