@@ -1,0 +1,149 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\BrainX.Core\BrainX.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="AvalonEdit" Version="6.3.1.120" />
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="10.0.5" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2792.45" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Editor\MarkdownHighlighting.xshd" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\Logo.png" />
+    <Resource Include="Assets\Logo.ico" />
+    <Resource Include="Assets\bk1.png" />
+    <Resource Include="Assets\bk2.png" />
+  </ItemGroup>
+
+  <!-- Universe view (WebView2 host) — html/js/css copied to bin so the
+       app can serve them via SetVirtualHostNameToFolderMapping. -->
+  <ItemGroup>
+    <None Update="wwwroot\**\*.*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <!-- Required by Graph2DRenderer's WriteableBitmap pixel-pump. The
+         canvas-style 2D renderer writes uint pixels directly into the
+         back buffer for the same reason Obsidian's web graph runs on
+         a Canvas2D context: WPF's retained-mode DrawingContext can't
+         hit 60 FPS at 400+ nodes. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Product>BrainX Neural Knowledge Network</Product>
+    <Company>xman</Company>
+    <ApplicationIcon>Assets\Logo.ico</ApplicationIcon>
+    <RepositoryUrl>https://github.com/xjanova/BrainX</RepositoryUrl>
+    <!-- Strong-name compat: keep AssemblyVersion stable so plugins/peers
+         loading by AssemblyName don't break across patch bumps. The
+         bumping lives in FileVersion + InformationalVersion instead. -->
+    <AssemblyVersion>2.0.0.0</AssemblyVersion>
+    <!-- Initial fallback values. The DeriveAndStampVersion target below
+         OVERRIDES these with git-derived numbers (or CI env vars) before
+         GetAssemblyVersion runs, so anything that reaches the runtime
+         metadata reflects the real working state. -->
+    <Version>2.0.0-dev</Version>
+    <FileVersion>2.0.0.0</FileVersion>
+    <InformationalVersion>2.0.0-dev+local</InformationalVersion>
+  </PropertyGroup>
+
+  <!--
+    Version derivation, in priority order:
+      1. CI env vars BUILD_VERSION/BUILD_COMMIT — set by
+         .github/workflows/build-and-release.yml so released binaries
+         match a tag on GitHub exactly.
+      2. Local git invocation — every commit bumps the patch number; a
+         "-dev" suffix is appended when the working tree has uncommitted
+         edits, so the runtime label is honest about not matching a
+         clean commit.
+      3. The fallback above (2.0.0-dev) — only reached if neither env
+         vars nor a git working tree are available.
+
+    This MUST run before GetAssemblyVersion so the values it sets get
+    picked up by the AssemblyInfo generator. Setting Version/etc. in a
+    plain PropertyGroup outside the target evaluates at project-load
+    time, which is too early — that's how 2.0.0-dev got stamped in the
+    earlier iteration of this file.
+  -->
+  <Target Name="DeriveAndStampVersion"
+          BeforeTargets="GetAssemblyVersion;CoreCompile;_GenerateSourceLinkSettings">
+
+    <!-- Path 1: CI env vars win when present. -->
+    <PropertyGroup Condition="'$(BUILD_VERSION)' != ''">
+      <Version>$(BUILD_VERSION)</Version>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(BUILD_VERSION)' != '' AND '$(BUILD_COMMIT)' != ''">
+      <InformationalVersion>$(BUILD_VERSION)+$(BUILD_COMMIT)</InformationalVersion>
+    </PropertyGroup>
+
+    <!-- Path 2: local git. Skipped entirely if env vars already set
+         BUILD_VERSION (so CI runs don't waste time invoking git). -->
+    <Exec Command="git rev-list --count HEAD"
+          Condition="'$(BUILD_VERSION)' == ''"
+          ConsoleToMSBuild="true"
+          ContinueOnError="true"
+          IgnoreExitCode="true"
+          StandardOutputImportance="low"
+          StandardErrorImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="GitCommitCount" />
+    </Exec>
+    <Exec Command="git rev-parse --short HEAD"
+          Condition="'$(BUILD_VERSION)' == ''"
+          ConsoleToMSBuild="true"
+          ContinueOnError="true"
+          IgnoreExitCode="true"
+          StandardOutputImportance="low"
+          StandardErrorImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="GitShortSha" />
+    </Exec>
+    <Exec Command="git diff --quiet HEAD --"
+          Condition="'$(BUILD_VERSION)' == ''"
+          ContinueOnError="true"
+          IgnoreExitCode="true"
+          StandardOutputImportance="low"
+          StandardErrorImportance="low">
+      <Output TaskParameter="ExitCode" PropertyName="GitDirtyExitCode" />
+    </Exec>
+
+    <!-- Build the SemVer triple from git when env vars are absent. -->
+    <PropertyGroup Condition="'$(BUILD_VERSION)' == '' AND '$(GitCommitCount)' != ''">
+      <Version>2.0.$(GitCommitCount)</Version>
+    </PropertyGroup>
+    <!-- Working tree has uncommitted edits → tag the SemVer with -dev so
+         it sorts BELOW the clean commit on GitHub. SemVer 2.0 says
+         "2.0.40-dev" is older than "2.0.40", which is exactly what we
+         want for the "update available" comparison once CI catches up. -->
+    <PropertyGroup Condition="'$(BUILD_VERSION)' == '' AND '$(GitCommitCount)' != '' AND '$(GitDirtyExitCode)' != '' AND '$(GitDirtyExitCode)' != '0'">
+      <Version>$(Version)-dev</Version>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(BUILD_VERSION)' == '' AND '$(GitShortSha)' != ''">
+      <InformationalVersion>$(Version)+$(GitShortSha)</InformationalVersion>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(BUILD_VERSION)' == '' AND '$(GitShortSha)' != '' AND '$(GitDirtyExitCode)' != '' AND '$(GitDirtyExitCode)' != '0'">
+      <InformationalVersion>$(Version)+$(GitShortSha)-dirty</InformationalVersion>
+    </PropertyGroup>
+
+    <!-- FileVersion is the legacy "1.2.3.4" tuple Windows shows in the
+         file properties pane; it must be 4 numeric parts so we can only
+         expand it for clean SemVer (no -dev suffix). -->
+    <PropertyGroup Condition="!$(Version.Contains('-'))">
+      <FileVersion>$(Version).0</FileVersion>
+    </PropertyGroup>
+
+    <Message Importance="high"
+             Text="BrainX version → Version=$(Version), Informational=$(InformationalVersion), File=$(FileVersion)" />
+  </Target>
+
+</Project>

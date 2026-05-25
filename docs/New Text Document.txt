@@ -1,0 +1,4 @@
+# 1. ปิด Claude Code ทุกหน้าต่าง  ← ทำแล้ว
+# 2. ⚠️ ขั้นที่ขาด:
+G:\Obsidian\ObsidianX\deploy-mcp.ps1
+# 3. เปิด Claude Code ใหม่  ← ทำแล้ว แต่ก่อน step 2
