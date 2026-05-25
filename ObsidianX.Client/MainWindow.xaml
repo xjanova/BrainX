@@ -3879,6 +3879,16 @@
                             <TextBlock x:Name="McpDesktopStatus" Text="DT ?" FontSize="10"
                                        FontFamily="{StaticResource MonoFont}"
                                        Foreground="{StaticResource TextMutedBrush}" Margin="0,0,10,0"/>
+                            <!-- MCP binary version chip (v2.6.0+). Reads ProductVersion
+                                 from the on-disk obsidianx-mcp.dll so the user can see
+                                 what build the NEXT Claude session will spawn — works
+                                 even when Claude Desktop's UI label is stale (Desktop
+                                 caches claude_desktop_config.json at startup). Tooltip
+                                 carries the full informational version + build time. -->
+                            <TextBlock x:Name="McpVersionText" Text="MCP ?" FontSize="10"
+                                       FontFamily="{StaticResource MonoFont}"
+                                       Foreground="{StaticResource TextMutedBrush}" Margin="0,0,10,0"
+                                       ToolTip="MCP binary version (reads obsidianx-mcp.dll on disk)"/>
                             <Ellipse x:Name="McpActivityDot" Width="6" Height="6" Fill="#555577" Margin="0,0,4,0"
                                      ToolTip="Recent MCP activity (access-log tail)"/>
                             <TextBlock x:Name="McpActivityStatus" Text="idle" FontSize="10"

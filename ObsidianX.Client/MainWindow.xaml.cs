@@ -10822,6 +10822,44 @@ public partial class MainWindow : Window
         return candidate;
     }
 
+    /// <summary>
+    /// Read the on-disk MCP binary's version + tooltip detail. Used by the
+    /// status-bar chip (v2.6.0+). Single source of truth: the .dll's
+    /// ProductVersion (stamped by csproj &lt;Version&gt;). Reads file metadata
+    /// only — never spawns the exe, never hits the network.
+    /// </summary>
+    private (string label, string tooltip) ReadMcpFileVersion()
+    {
+        try
+        {
+            var exe = McpServerExePath();
+            // Prefer the .dll (carries the same ProductVersion as the .exe
+            // launcher but the launcher is just a shim — the actual code
+            // version lives in the dll).
+            var dll = Path.ChangeExtension(exe, ".dll");
+            var target = File.Exists(dll) ? dll : exe;
+            if (!File.Exists(target))
+                return ("MCP n/a", $"MCP binary not found at expected path:\n{exe}\nBuild the MCP project or run deploy-mcp.ps1.");
+
+            var info = System.Diagnostics.FileVersionInfo.GetVersionInfo(target);
+            // ProductVersion is the SemVer ("2.6.0+sha…"); FileVersion is the
+            // 4-part numeric ("2.6.0.0"). Show ProductVersion shortened to
+            // its SemVer prefix in the chip, full string in the tooltip.
+            var product = info.ProductVersion ?? info.FileVersion ?? "?";
+            var key = product;
+            var plus = key.IndexOf('+'); if (plus >= 0) key = key[..plus];
+            var dash = key.IndexOf('-'); if (dash >= 0) key = key[..dash];
+
+            var built = File.GetLastWriteTime(target).ToString("yyyy-MM-dd HH:mm");
+            var tooltip = $"MCP v{product}\nBinary: {target}\nBuilt:  {built}";
+            return ($"MCP v{key}", tooltip);
+        }
+        catch (Exception ex)
+        {
+            return ("MCP ?", $"Could not read MCP version: {ex.Message}");
+        }
+    }
+
     private string FindSolutionRoot()
     {
         // Walk up from AppContext.BaseDirectory looking for ObsidianX.slnx
@@ -11265,6 +11303,18 @@ public partial class MainWindow : Window
             ? (SolidColorBrush)FindResource("NeonGreenBrush")
             : new SolidColorBrush(Color.FromRgb(0x55, 0x55, 0x77));
         McpDesktopStatus.Text = desktopOk ? "DT ✓" : "DT ✗";
+
+        // MCP binary version (v2.6.0+) — reads ProductVersion off the
+        // dll on disk. Authoritative source: what the NEXT Claude
+        // session will spawn. Beats Claude Desktop's UI label which
+        // caches config-file values at startup and never refreshes
+        // until the whole Desktop app is restarted.
+        if (McpVersionText != null)
+        {
+            var (label, tooltip) = ReadMcpFileVersion();
+            McpVersionText.Text = label;
+            McpVersionText.ToolTip = tooltip;
+        }
 
         // Recent activity — seconds since last access-log event
         var sinceLast = _lastMcpActivity == DateTime.MinValue
