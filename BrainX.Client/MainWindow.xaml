@@ -320,40 +320,96 @@
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
 
-                            <!-- Brand crest — user: "fill พอดี ขอบๆ ต้องเฟดจางเนียนไป".
-                                 Logo fills the 132 px rounded rectangle via UniformToFill,
-                                 then an OpacityMask (radial gradient) keeps the center
-                                 fully opaque and softly fades the edges into the sidebar
-                                 background, no hard rectangle border. -->
+                            <!-- Brand crest — rebuilt to match t2.zip BrandCrest spec
+                                 (README §Assets: "outer violet radial glow → magenta→
+                                 violet→cyan gradient ring → translucent brain silhouette
+                                 → constellation dots → mono caption arc NEURAL · KNOWLEDGE").
+                                 Replaces the vivid-pink Logo.png that dominated every view
+                                 — the t2 crest is subtle and violet, not a hot-pink
+                                 rectangle. BRAINX wordmark already lives in the titlebar
+                                 header so removing it from the crest is fine. -->
                             <Border Grid.Row="0" Height="132" Margin="14,16,14,10"
                                     CornerRadius="16"
-                                    BorderBrush="Transparent" BorderThickness="0"
+                                    BorderBrush="{StaticResource NeuralLine}" BorderThickness="1"
                                     ClipToBounds="True">
+                                <Border.Background>
+                                    <RadialGradientBrush Center="0.5,0.42" GradientOrigin="0.5,0.42"
+                                                         RadiusX="0.95" RadiusY="0.95">
+                                        <GradientStop Color="#251D44" Offset="0"/>
+                                        <GradientStop Color="#14102a" Offset="0.65"/>
+                                        <GradientStop Color="#0e0a22" Offset="1"/>
+                                    </RadialGradientBrush>
+                                </Border.Background>
                                 <Border.Effect>
-                                    <DropShadowEffect Color="#9d7bff" BlurRadius="32"
-                                                      ShadowDepth="0" Opacity="0.40"/>
+                                    <DropShadowEffect Color="#9d7bff" BlurRadius="28"
+                                                      ShadowDepth="0" Opacity="0.35"/>
                                 </Border.Effect>
                                 <Grid>
-                                    <!-- Stretch=Uniform shows the WHOLE logo (brain crest +
-                                         BRAINX wordmark + GLOBAL AI BRAIN PROGRAM caption)
-                                         instead of UniformToFill cropping the bottom.
-                                         OpacityMask widened (radius 0.92, solid out to 0.78)
-                                         so the wordmark text isn't faded away — only the
-                                         4 corners of the rectangle softly blend into the
-                                         sidebar background. -->
+                                    <!-- Layer 1: Outer violet radial glow blob. -->
+                                    <Ellipse Width="110" Height="110" Opacity="0.18"
+                                             HorizontalAlignment="Center" VerticalAlignment="Center"
+                                             Margin="0,-12,0,0">
+                                        <Ellipse.Fill>
+                                            <RadialGradientBrush>
+                                                <GradientStop Color="#9d7bff" Offset="0"/>
+                                                <GradientStop Color="Transparent" Offset="1"/>
+                                            </RadialGradientBrush>
+                                        </Ellipse.Fill>
+                                    </Ellipse>
+                                    <!-- Layer 2: Gradient ring (magenta→violet→cyan). -->
+                                    <Ellipse Width="78" Height="78" StrokeThickness="1.6"
+                                             HorizontalAlignment="Center" VerticalAlignment="Center"
+                                             Margin="0,-12,0,0">
+                                        <Ellipse.Stroke>
+                                            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                                                <GradientStop Color="#FF4F9E" Offset="0"/>
+                                                <GradientStop Color="#9d7bff" Offset="0.5"/>
+                                                <GradientStop Color="#5be9e9" Offset="1"/>
+                                            </LinearGradientBrush>
+                                        </Ellipse.Stroke>
+                                    </Ellipse>
+                                    <!-- Layer 3: Inner ring (subtle). -->
+                                    <Ellipse Width="56" Height="56" StrokeThickness="0.8"
+                                             Stroke="#55B89DFF" Opacity="0.6"
+                                             HorizontalAlignment="Center" VerticalAlignment="Center"
+                                             Margin="0,-12,0,0"/>
+                                    <!-- Layer 4: Translucent brain silhouette. The existing
+                                         Logo.png is reused but heavily faded so its pink
+                                         pixels don't dominate — just a vague brain shape. -->
                                     <Image Source="pack://application:,,,/Assets/Logo.png"
-                                           Stretch="Uniform"
+                                           Stretch="Uniform" Width="62" Height="62"
+                                           Opacity="0.55"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                                           Margin="0,-12,0,0"
                                            RenderOptions.BitmapScalingMode="HighQuality">
                                         <Image.OpacityMask>
-                                            <RadialGradientBrush Center="0.5,0.5"
-                                                                 GradientOrigin="0.5,0.5"
-                                                                 RadiusX="0.92" RadiusY="0.92">
+                                            <RadialGradientBrush Center="0.5,0.5" RadiusX="0.6" RadiusY="0.6">
                                                 <GradientStop Color="#FFFFFFFF" Offset="0"/>
-                                                <GradientStop Color="#FFFFFFFF" Offset="0.78"/>
+                                                <GradientStop Color="#FFFFFFFF" Offset="0.6"/>
                                                 <GradientStop Color="#00FFFFFF" Offset="1"/>
                                             </RadialGradientBrush>
                                         </Image.OpacityMask>
                                     </Image>
+                                    <!-- Layer 5: Constellation dots (5 tiny violet dots). -->
+                                    <Canvas>
+                                        <Ellipse Canvas.Left="22" Canvas.Top="20" Width="2.4" Height="2.4"
+                                                 Fill="#B89DFF" Opacity="0.85"/>
+                                        <Ellipse Canvas.Left="148" Canvas.Top="28" Width="2.4" Height="2.4"
+                                                 Fill="#5be9e9" Opacity="0.85"/>
+                                        <Ellipse Canvas.Left="36" Canvas.Top="62" Width="2" Height="2"
+                                                 Fill="#FF4F9E" Opacity="0.7"/>
+                                        <Ellipse Canvas.Left="160" Canvas.Top="58" Width="2" Height="2"
+                                                 Fill="#9d7bff" Opacity="0.85"/>
+                                        <Ellipse Canvas.Left="80" Canvas.Top="12" Width="1.8" Height="1.8"
+                                                 Fill="#B89DFF" Opacity="0.6"/>
+                                    </Canvas>
+                                    <!-- Layer 6: Mono caption arc at the bottom. -->
+                                    <TextBlock Text="NEURAL &#x00B7; KNOWLEDGE"
+                                               FontSize="8.5" FontFamily="{StaticResource FontMono}"
+                                               Foreground="{StaticResource NeuralText3}"
+                                               HorizontalAlignment="Center" VerticalAlignment="Bottom"
+                                               Margin="0,0,0,12" Opacity="0.75"
+                                               Typography.Capitals="AllSmallCaps"/>
                                     <!-- Dummy 0-size PulseRing for animation compat. -->
                                     <Ellipse x:Name="PulseRing" Width="0" Height="0" Opacity="0"/>
                                 </Grid>
@@ -370,8 +426,8 @@
                                          Only UI styling changes (background / cards / fonts) — menu
                                          layout, order, item labels, and visibility ALL match v2.0.96.
                                          ═══════════════════════════════════════════════════════════ -->
-                                    <TextBlock Text="NAVIGATION" FontSize="10" Foreground="{StaticResource TextMutedBrush}"
-                                               Margin="22,8,0,12" FontWeight="SemiBold"/>
+                                    <TextBlock Text="WORKSPACE" Style="{StaticResource TypeNavSectionLabel}"
+                                               Margin="22,8,0,8"/>
                                     <!-- Dashboard restored to the menu + default active view per
                                          user "เพิ่ม หน้า dashboard". Each row now uses a 2-col
                                          Grid (label | kbd chip) per t2.zip screenshot. The kbd
@@ -417,6 +473,8 @@
                                             Visibility="Collapsed"/>
                                     <Button x:Name="NavNetwork" Content="&#x2B22;  Network"
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Network"/>
+                                    <TextBlock Text="VAULT" Style="{StaticResource TypeNavSectionLabel}"
+                                               Margin="22,18,0,8"/>
                                     <Button x:Name="NavEditor" Style="{StaticResource NavButton}"
                                             Click="Nav_Click" Tag="Editor">
                                         <Grid>
@@ -471,6 +529,8 @@
                                             </Border>
                                         </Grid>
                                     </Button>
+                                    <TextBlock Text="INTELLIGENCE" Style="{StaticResource TypeNavSectionLabel}"
+                                               Margin="22,18,0,8"/>
                                     <Button x:Name="NavClaude" Style="{StaticResource NavButton}"
                                             Click="Nav_Click" Tag="Claude">
                                         <Grid>
@@ -512,8 +572,8 @@
                                     <Button x:Name="NavInsights" Content="&#x1F4A1;  Insights"
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Insights"/>
 
-                                    <TextBlock Text="NETWORK" FontSize="10" Foreground="{StaticResource TextMutedBrush}"
-                                               Margin="22,24,0,12" FontWeight="SemiBold"/>
+                                    <TextBlock Text="NETWORK" Style="{StaticResource TypeNavSectionLabel}"
+                                               Margin="22,18,0,8"/>
                                     <Button x:Name="NavPeers" Content="&#x1F465;  Peers"
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Peers"/>
                                     <Button x:Name="NavSharing" Content="&#x1F504;  Sharing"
@@ -521,8 +581,8 @@
                                     <Button x:Name="NavSsh" Content="&#x1F5A5;  SSH"
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Ssh"/>
 
-                                    <TextBlock Text="SYSTEM" FontSize="10" Foreground="{StaticResource TextMutedBrush}"
-                                               Margin="22,24,0,12" FontWeight="SemiBold"/>
+                                    <TextBlock Text="SYSTEM" Style="{StaticResource TypeNavSectionLabel}"
+                                               Margin="22,18,0,8"/>
                                     <Button x:Name="NavImport" Content="&#x1F4E5;  Import / Scan"
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Import"/>
                                     <Button x:Name="NavSettings" Content="&#x2699;  Settings"
@@ -735,7 +795,7 @@
                                                             Padding="10,3" FontSize="10"
                                                             Tag="3D" Click="DashViewMode_Click"/>
                                                     <Button x:Name="DashView2DBtn" Content="2D"
-                                                            Style="{StaticResource NeonButtonFilled}"
+                                                            Style="{StaticResource NeuralBtnPrimary}"
                                                             Padding="10,3" FontSize="10" Margin="4,0,0,0"
                                                             Tag="2D" Click="DashViewMode_Click"/>
                                                 </StackPanel>
@@ -908,14 +968,14 @@
                                                                         Style="{StaticResource NeonButton}"
                                                                         Padding="10,4" FontSize="11" Click="EditDashNode_Click" Margin="0,0,4,0"/>
                                                                 <Button x:Name="DashNodeSaveBtn" Content="&#x1F4BE; Save"
-                                                                        Style="{StaticResource NeonButtonFilled}"
+                                                                        Style="{StaticResource NeuralBtnPrimary}"
                                                                         Visibility="Collapsed"
                                                                         Padding="10,4" FontSize="11" Click="SaveDashNode_Click" Margin="0,0,4,0"/>
                                                                 <Button x:Name="DashNodeCancelBtn" Content="Cancel"
                                                                         Style="{StaticResource NeonButton}"
                                                                         Visibility="Collapsed"
                                                                         Padding="10,4" FontSize="11" Click="CancelDashNode_Click" Margin="0,0,4,0"/>
-                                                                <Button Content="&#x1F4D6; Open" Style="{StaticResource NeonButtonFilled}"
+                                                                <Button Content="&#x1F4D6; Open" Style="{StaticResource NeuralBtnPrimary}"
                                                                         Padding="10,4" FontSize="11" Click="OpenDashNodeFile_Click" Margin="0,0,4,0"/>
                                                                 <Button Content="&#x2715;" Style="{StaticResource NeonButton}"
                                                                         Padding="8,4" FontSize="11" ToolTip="Close"
@@ -1244,7 +1304,7 @@
                                             </Border>
                                             <Button x:Name="BrainBypassBtn"
                                                     Content="&#x1F9E0; Always"
-                                                    Style="{StaticResource NeonButtonFilled}"
+                                                    Style="{StaticResource NeuralBtnPrimary}"
                                                     Padding="10,3" FontSize="10"
                                                     Click="BrainBypass_Click" Margin="0,0,12,0"
                                                     ToolTip="Cycle brain-mode: Always → Auto → Off → Always.&#x0a;Always = inject reminder every turn (best for long sessions, deep debug)&#x0a;Auto = skip reminder when prompt &lt; 60 chars (best general use)&#x0a;Off = no reminders (best for trivial chat / greenfield)"/>
@@ -1257,7 +1317,7 @@
                                                     Tag="3D" Click="GraphViewMode_Click" Margin="0,0,4,0"
                                                     Visibility="Collapsed"/>
                                             <Button x:Name="GraphView2DBtn" Content="2D"
-                                                    Style="{StaticResource NeonButtonFilled}"
+                                                    Style="{StaticResource NeuralBtnPrimary}"
                                                     Padding="10,3" FontSize="10"
                                                     Tag="2D" Click="GraphViewMode_Click"
                                                     Visibility="Collapsed"/>
@@ -1698,14 +1758,14 @@
                                                             Style="{StaticResource NeonButton}"
                                                             Padding="10,4" FontSize="11" Click="EditGraphNode_Click" Margin="0,0,6,0"/>
                                                     <Button x:Name="GraphNodeSaveBtn" Content="&#x1F4BE; Save"
-                                                            Style="{StaticResource NeonButtonFilled}"
+                                                            Style="{StaticResource NeuralBtnPrimary}"
                                                             Visibility="Collapsed"
                                                             Padding="10,4" FontSize="11" Click="SaveGraphNode_Click" Margin="0,0,6,0"/>
                                                     <Button x:Name="GraphNodeCancelBtn" Content="Cancel"
                                                             Style="{StaticResource NeonButton}"
                                                             Visibility="Collapsed"
                                                             Padding="10,4" FontSize="11" Click="CancelGraphNode_Click" Margin="0,0,6,0"/>
-                                                    <Button Content="&#x1F4D6; Open" Style="{StaticResource NeonButtonFilled}"
+                                                    <Button Content="&#x1F4D6; Open" Style="{StaticResource NeuralBtnPrimary}"
                                                             Padding="10,4" FontSize="11" Click="OpenNodeFile_Click" Margin="0,0,6,0"/>
                                                     <Button Content="&#x2715;" Style="{StaticResource NeonButton}"
                                                             Padding="8,4" FontSize="11" ToolTip="Close"
@@ -1764,7 +1824,7 @@
                                     <Button Grid.Column="1" x:Name="JoinNetworkBtn"
                                             Content="&#x2728;  Reconnect"
                                             Click="JoinNetwork_Click"
-                                            Style="{StaticResource NeonButtonFilled}"
+                                            Style="{StaticResource NeuralBtnPrimary}"
                                             Padding="14,7" VerticalAlignment="Center"/>
                                 </Grid>
                                 <Grid Grid.Row="1">
@@ -2205,7 +2265,7 @@
                                                          BorderBrush="{StaticResource SurfaceLightBrush}"
                                                          CaretBrush="{StaticResource NeonCyanBrush}"
                                                          FontFamily="{StaticResource MonoFont}" Margin="0,0,6,0"/>
-                                                <Button x:Name="PullModelBtn" Content="↓ Pull" Style="{StaticResource NeonButtonFilled}"
+                                                <Button x:Name="PullModelBtn" Content="↓ Pull" Style="{StaticResource NeuralBtnPrimary}"
                                                         Click="PullModel_Click" Padding="10,4" FontSize="10"/>
                                             </StackPanel>
                                             <ProgressBar x:Name="ModelPullProgress" Height="6" Minimum="0" Maximum="100"
@@ -2320,10 +2380,10 @@
                                              AcceptsReturn="True" TextWrapping="Wrap" MinHeight="36" MaxHeight="120"
                                              VerticalScrollBarVisibility="Auto"/>
                                     <Button Grid.Column="1" x:Name="AskClaudeBtn" Content="Ask Claude"
-                                            Style="{StaticResource NeonButtonFilled}"
+                                            Style="{StaticResource NeuralBtnPrimary}"
                                             Click="AskClaude_Click"/>
                                     <Button Grid.Column="2" x:Name="SendToArenaBtn" Content="🤝 Send to Arena"
-                                            Style="{StaticResource NeonButtonFilled}" Visibility="Collapsed"
+                                            Style="{StaticResource NeuralBtnPrimary}" Visibility="Collapsed"
                                             Margin="8,0,0,0"
                                             Click="SendToArena_Click"
                                             ToolTip="Plan with the local intern, then delegate to CluadeX. A new chat session pops up in CluadeX's sidebar."/>
@@ -2624,7 +2684,7 @@
                                                            VerticalAlignment="Center" Margin="0,0,12,0"/>
                                                 <Button Grid.Column="1" x:Name="SharingDemoPeersBtn"
                                                         Content="&#x1F3AC;  Demo peer join"
-                                                        Style="{StaticResource NeonButtonFilled}"
+                                                        Style="{StaticResource NeuralBtnPrimary}"
                                                         Click="SharingDemoPeersBtn_Click" Padding="14,6"/>
                                             </Grid>
                                         </StackPanel>
@@ -2655,7 +2715,7 @@
                                                                Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0" TextWrapping="Wrap"/>
                                                 </StackPanel>
                                                 <Button Grid.Column="1" x:Name="SharingAddScopeBtn" Content="&#x2795;  Grant access"
-                                                        Style="{StaticResource NeonButtonFilled}" Click="SharingAddScopeBtn_Click"
+                                                        Style="{StaticResource NeuralBtnPrimary}" Click="SharingAddScopeBtn_Click"
                                                         Padding="10,5" VerticalAlignment="Center"/>
                                             </Grid>
 
@@ -2949,7 +3009,7 @@
                                                 <Button Grid.Column="1" Content="Cancel" Style="{StaticResource NavButton}"
                                                         Click="ScopeDialogClose_Click" Margin="8,0" Padding="14,6"/>
                                                 <Button Grid.Column="2" x:Name="ScopeDialogSaveBtn" Content="Save"
-                                                        Style="{StaticResource NeonButtonFilled}"
+                                                        Style="{StaticResource NeuralBtnPrimary}"
                                                         Click="ScopeDialogSave_Click" Padding="18,6"/>
                                             </Grid>
                                         </Border>
@@ -2995,7 +3055,7 @@
                                         </TextBlock>
                                         <StackPanel Orientation="Horizontal">
                                             <Button x:Name="ImportObsidianButton" Content="&#x1F4C2;  Pick Obsidian vault…"
-                                                    Style="{StaticResource NeonButtonFilled}" Click="ImportObsidianButton_Click"
+                                                    Style="{StaticResource NeuralBtnPrimary}" Click="ImportObsidianButton_Click"
                                                     Padding="14,8" Margin="0,0,8,0" FontSize="12"/>
                                             <Button x:Name="ImportCancelButton" Content="&#x2715;  Cancel"
                                                     Style="{StaticResource NavButton}" Click="ImportCancelButton_Click"
@@ -3501,7 +3561,7 @@
                                         </StackPanel>
                                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                                             <Button x:Name="EditorSaveBtn" Content="&#x1F4BE; Save"
-                                                    Style="{StaticResource NeonButtonFilled}" Click="EditorSave_Click"
+                                                    Style="{StaticResource NeuralBtnPrimary}" Click="EditorSave_Click"
                                                     Padding="12,4" FontSize="11" Margin="2,0,8,0"
                                                     ToolTip="Save current note (Ctrl+S)"/>
                                             <Button Content="New" Style="{StaticResource NavButton}" Click="EditorNew_Click"
@@ -3948,7 +4008,7 @@
                                                 <TextBlock Text="REGISTERED PROFILES" FontSize="11" FontWeight="SemiBold"
                                                            Foreground="{StaticResource TextMutedBrush}" VerticalAlignment="Center"/>
                                                 <Button Grid.Column="1" x:Name="SshAddProfileBtn" Content="&#x2795;  Add profile"
-                                                        Style="{StaticResource NeonButtonFilled}" Click="SshAddProfile_Click"
+                                                        Style="{StaticResource NeuralBtnPrimary}" Click="SshAddProfile_Click"
                                                         Padding="14,6" FontSize="11"/>
                                             </Grid>
                                             <StackPanel x:Name="SshProfilesList"/>
@@ -4377,7 +4437,7 @@
                                                 <Button Grid.Column="1" Content="Cancel" Style="{StaticResource NavButton}"
                                                         Click="SshDialogClose_Click" Margin="8,0" Padding="14,6"/>
                                                 <Button Grid.Column="2" x:Name="SshDialogSaveBtn" Content="Save"
-                                                        Style="{StaticResource NeonButtonFilled}"
+                                                        Style="{StaticResource NeuralBtnPrimary}"
                                                         Click="SshDialogSave_Click" Padding="18,6"/>
                                             </Grid>
                                         </Border>
@@ -4484,7 +4544,7 @@
                                                            FontWeight="SemiBold"/>
                                                 <TextBox x:Name="SettingsBrainAddress" Style="{StaticResource NeonTextBox}"
                                                          IsReadOnly="True" Opacity="0.6" Margin="0,0,0,12"/>
-                                                <Button Content="Save Name" Style="{StaticResource NeonButtonFilled}"
+                                                <Button Content="Save Name" Style="{StaticResource NeuralBtnPrimary}"
                                                         Click="SaveBrainName_Click" HorizontalAlignment="Left" Padding="16,8"/>
                                             </StackPanel>
                                         </Border>
@@ -4531,7 +4591,7 @@
                                                            FontWeight="SemiBold"/>
                                                 <TextBox x:Name="SettingsServerUrl" Style="{StaticResource NeonTextBox}"
                                                          Text="http://localhost:5142/brain-hub" Margin="0,0,0,12"/>
-                                                <Button Content="Save Server URL" Style="{StaticResource NeonButtonFilled}"
+                                                <Button Content="Save Server URL" Style="{StaticResource NeuralBtnPrimary}"
                                                         Click="SaveServerUrl_Click" HorizontalAlignment="Left" Padding="16,8"/>
                                             </StackPanel>
                                         </Border>
@@ -4592,7 +4652,7 @@
                                                             Style="{StaticResource NeonButton}"
                                                             Click="PreviewScan_Click" Padding="16,8" Margin="0,0,8,0"/>
                                                     <Button x:Name="ImportScanButton" Content="Import Now"
-                                                            Style="{StaticResource NeonButtonFilled}"
+                                                            Style="{StaticResource NeuralBtnPrimary}"
                                                             Click="ImportScan_Click" Padding="16,8"
                                                             Margin="0,0,8,0" IsEnabled="False"/>
                                                     <Button Content="Save Patterns" Style="{StaticResource NeonButton}"
@@ -4637,7 +4697,7 @@
                                                     </TextBlock>
                                                 </StackPanel>
                                                 <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-                                                    <Button Content="Export Brain Now" Style="{StaticResource NeonButtonFilled}"
+                                                    <Button Content="Export Brain Now" Style="{StaticResource NeuralBtnPrimary}"
                                                             Click="ExportBrain_Click" Padding="16,8" Margin="0,0,8,0"/>
                                                     <Button Content="Open .obsidianx folder" Style="{StaticResource NeonButton}"
                                                             Click="OpenExportFolder_Click" Padding="16,8"/>
@@ -4668,7 +4728,7 @@
                                                          Margin="0,0,0,8"/>
 
                                                 <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
-                                                    <Button Content="+ New" Style="{StaticResource NeonButtonFilled}"
+                                                    <Button Content="+ New" Style="{StaticResource NeuralBtnPrimary}"
                                                             Click="NewCategory_Click" Padding="12,6" Margin="0,0,8,0"/>
                                                     <Button Content="Edit" Style="{StaticResource NeonButton}"
                                                             Click="EditCategory_Click" Padding="12,6" Margin="0,0,8,0"/>
@@ -4703,7 +4763,7 @@
                                                                  Margin="0,0,0,8"/>
 
                                                         <StackPanel Orientation="Horizontal">
-                                                            <Button Content="Save" Style="{StaticResource NeonButtonFilled}"
+                                                            <Button Content="Save" Style="{StaticResource NeuralBtnPrimary}"
                                                                     Click="SaveCategory_Click" Padding="16,6" Margin="0,0,8,0"/>
                                                             <Button Content="Cancel" Style="{StaticResource NeonButton}"
                                                                     Click="CancelCategoryEdit_Click" Padding="16,6"/>
@@ -4828,7 +4888,7 @@
                                                 </StackPanel>
 
                                                 <StackPanel Orientation="Horizontal">
-                                                    <Button Content="Save keys" Style="{StaticResource NeonButtonFilled}"
+                                                    <Button Content="Save keys" Style="{StaticResource NeuralBtnPrimary}"
                                                             Click="SaveAiKeys_Click" Padding="14,6" Margin="0,0,6,0"/>
                                                     <Button Content="Refresh backends" Style="{StaticResource NeonButton}"
                                                             Click="RefreshAfterKeys_Click" Padding="14,6"/>
@@ -4872,7 +4932,7 @@
                                                             Click="SaveMySqlConn_Click" Padding="12,6" HorizontalAlignment="Left"/>
                                                 </StackPanel>
                                                 <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-                                                    <Button Content="Apply &amp; Rebuild Index" Style="{StaticResource NeonButtonFilled}"
+                                                    <Button Content="Apply &amp; Rebuild Index" Style="{StaticResource NeuralBtnPrimary}"
                                                             Click="ApplyStorage_Click" Padding="16,8"/>
                                                 </StackPanel>
                                                 <TextBlock x:Name="StorageStatusText" FontSize="11"
@@ -4940,7 +5000,7 @@
                                                          TextWrapping="Wrap" Margin="0,0,0,8"/>
 
                                                 <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-                                                    <Button Content="Install in Claude Code CLI" Style="{StaticResource NeonButtonFilled}"
+                                                    <Button Content="Install in Claude Code CLI" Style="{StaticResource NeuralBtnPrimary}"
                                                             Click="InstallMcp_Click" Padding="16,8" Margin="0,0,8,0"/>
                                                     <Button Content="Copy Command" Style="{StaticResource NeonButton}"
                                                             Click="CopyMcpCommand_Click" Padding="16,8" Margin="0,0,8,0"/>
@@ -4965,7 +5025,7 @@
                                                             pulled into the brain.
                                                         </TextBlock>
                                                         <StackPanel Orientation="Horizontal">
-                                                            <Button Content="Install hook" Style="{StaticResource NeonButtonFilled}"
+                                                            <Button Content="Install hook" Style="{StaticResource NeuralBtnPrimary}"
                                                                     Click="InstallClaudeHook_Click" Padding="12,5" FontSize="10" Margin="0,0,6,0"/>
                                                             <Button Content="Remove hook" Style="{StaticResource NeonButton}"
                                                                     Click="UninstallClaudeHook_Click" Padding="12,5" FontSize="10" Margin="0,0,6,0"/>
