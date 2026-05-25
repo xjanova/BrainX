@@ -8,7 +8,7 @@ namespace BrainX.Core.Services;
 /// <c>.jsx</c>, <c>.py</c>, <c>.go</c>, <c>.rs</c>) so the brain can
 /// search across code the same way it searches notes. Obsidian itself
 /// can't do this — code files aren't markdown — which is one of the
-/// places ObsidianX leapfrogs the original.
+/// places BrainX leapfrogs the original.
 ///
 /// Each source file becomes one <see cref="KnowledgeNode"/> with
 /// PrimaryCategory = Programming. We extract top-level symbol names

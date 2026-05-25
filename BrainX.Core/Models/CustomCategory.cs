@@ -2,7 +2,7 @@ namespace BrainX.Core.Models;
 
 /// <summary>
 /// A user-defined knowledge domain that lives alongside the 25 built-in
-/// <see cref="KnowledgeCategory"/> values. Lets users teach ObsidianX
+/// <see cref="KnowledgeCategory"/> values. Lets users teach BrainX
 /// about subjects that aren't covered by the shipped taxonomy —
 /// "Thai Classical Literature", "Brewing", "Music Theory", whatever
 /// the user studies.

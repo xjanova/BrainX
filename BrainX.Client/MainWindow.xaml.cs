@@ -680,7 +680,7 @@ public partial class MainWindow : Window
                 WindowStartupLocation = WindowStartupLocation.CenterScreen,
                 Width          = setupW,
                 Height         = setupH,
-                Title          = "ObsidianX Wallpaper — Preview (drag, tweak, then Apply)",
+                Title          = "BrainX Wallpaper — Preview (drag, tweak, then Apply)",
                 Content        = webView
             };
             // If user closes setup window via X → treat as Cancel.
@@ -1129,7 +1129,7 @@ public partial class MainWindow : Window
                 Top    = mon.Top,
                 Width  = mon.Width,
                 Height = mon.Height,
-                Title  = $"ObsidianX Wallpaper [{mon.DeviceName}]",
+                Title  = $"BrainX Wallpaper [{mon.DeviceName}]",
                 Content = webView
             };
             window.Show();
@@ -5166,7 +5166,7 @@ public partial class MainWindow : Window
     //   match the GitHub tag that produced the binary.
     // Local builds with no env vars get "2.0.0-dev+local" so dev work
     // doesn't accidentally claim it's a release.
-    private const string GitHubRepo = "xjanova/ObsidianX";
+    private const string GitHubRepo = "xjanova/BrainX";
     private const string GitHubLatestUrl = "https://api.github.com/repos/" + GitHubRepo + "/releases/latest";
     private string? _latestRemoteVersion;          // e.g. "2.0.137" — null until first poll succeeds
 
@@ -5220,7 +5220,7 @@ public partial class MainWindow : Window
             // the bottom bar shows.
             if (AboutVersionText != null)
             {
-                var head = $"ObsidianX — Neural Knowledge Network v{key}";
+                var head = $"BrainX — Neural Knowledge Network v{key}";
                 if (!string.IsNullOrEmpty(_latestRemoteVersion))
                 {
                     var cmp = CompareSemVerTriples(key, _latestRemoteVersion!);
@@ -5265,7 +5265,7 @@ public partial class MainWindow : Window
         // SemVer is appended only when an update is available — matches
         // the visual weight of "DT ?" / "Srv ?" in the same row.
         string label = $"v{localKey}";
-        string tip = $"ObsidianX v{display}";
+        string tip = $"BrainX v{display}";
         if (!string.IsNullOrEmpty(_latestRemoteVersion))
         {
             var cmp = CompareSemVerTriples(localKey, _latestRemoteVersion!);
@@ -5324,7 +5324,7 @@ public partial class MainWindow : Window
             // they return 403. Use the product name + local version so
             // their telemetry can spot real clients vs scrapers.
             var (display, _) = GetLocalVersion();
-            http.DefaultRequestHeaders.UserAgent.ParseAdd($"ObsidianX/{display} (+https://github.com/{GitHubRepo})");
+            http.DefaultRequestHeaders.UserAgent.ParseAdd($"BrainX/{display} (+https://github.com/{GitHubRepo})");
             http.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
 
             var json = await http.GetStringAsync(GitHubLatestUrl).ConfigureAwait(false);
@@ -5993,7 +5993,7 @@ public partial class MainWindow : Window
 
             // Pipe is alive — also fetch the active model so the user
             // sees model alignment status in one click. Compare against
-            // ObsidianX's currently-selected backend + model so we can
+            // BrainX's currently-selected backend + model so we can
             // flag the mismatch the user warned us about explicitly:
             // running two different models on one GPU is the canonical
             // way to OOM CUDA, and we'd rather refuse than silently
@@ -6028,10 +6028,10 @@ public partial class MainWindow : Window
                 mismatch = !(sameProvider && sameModel);
 
                 string verdict = mismatch
-                    ? $"  ⚠ MISMATCH — ObsidianX={obsBackend}/{obsModel}, CluadeX={info.Identity}. " +
+                    ? $"  ⚠ MISMATCH — BrainX={obsBackend}/{obsModel}, CluadeX={info.Identity}. " +
                       "Both use the same GPU; running two models = VRAM OOM. " +
                       "Align in CluadeX's Models tab before delegating tasks."
-                    : "  ✓ aligned with ObsidianX intern";
+                    : "  ✓ aligned with BrainX intern";
                 string oomFlag = oom ? "  ⚠ VRAM near full" : "";
                 modelLine = $" · loaded {info.Identity}{vram}{oomFlag}{verdict}";
                 if (!info.Ready) modelLine += "  ⚠ provider not ready";
@@ -6062,7 +6062,7 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// Force CluadeX to switch its provider+model to match what
-    /// ObsidianX has selected. The user explicitly asked for this:
+    /// BrainX has selected. The user explicitly asked for this:
     /// "ให้ obsidianx บังคับ cluadex โหลดโมเดลให้ตรงกับตัวเองได้เลย".
     /// Reads the AiBackendCombo + AiModelCombo selections, sends them to
     /// CluadeX via the set_model MCP tool, and reports the verdict on
@@ -6165,7 +6165,7 @@ public partial class MainWindow : Window
     // ─── Co-Pilot Arena ────────────────────────────────────────────────
     //
     // Phase 1B.3b — orchestrated Intern + Worker flow rendered as a bubble
-    // feed. The orchestrator lives in ObsidianX.Core (transport-agnostic);
+    // feed. The orchestrator lives in BrainX.Core (transport-agnostic);
     // here we wire it to the running app's HTTP /api/ai/chat endpoint for
     // the intern step and the existing bridge client for the worker step.
     //
@@ -6254,7 +6254,7 @@ public partial class MainWindow : Window
             Worker = EnsureCluadeXBridge(),
             Planner = PlanWithLocalInternAsync,
             // Plug the review queue in. Vault path drives where the JSON
-            // files live so Claude Desktop's obsidianx-mcp tools see the
+            // files live so Claude Desktop's brainx-mcp tools see the
             // exact same directory. When the user wants Phase 1B behaviour
             // (no reviewer), we'd null this out — for the comprehensive
             // flow, every Co-Pilot Arena task goes through review.
@@ -6603,7 +6603,7 @@ public partial class MainWindow : Window
                 HorizontalAlignment = HorizontalAlignment.Left,
                 Margin = new Thickness(0, 8, 0, 0),
                 Tag = taskId,
-                ToolTip = $"Bring CluadeX's window forward. Look for session [ObsidianX] {taskId} in its sidebar.",
+                ToolTip = $"Bring CluadeX's window forward. Look for session [BrainX] {taskId} in its sidebar.",
             };
             openBtn.Click += OpenInCluadeX_Click;
             stack.Children.Add(openBtn);
@@ -6657,19 +6657,19 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Position CluadeX's window adjacent to ObsidianX so the user perceives
+    /// Position CluadeX's window adjacent to BrainX so the user perceives
     /// a single workspace instead of two scattered windows. Once-per-session:
     /// after the first dock we don't fight the user if they manually move
     /// either window.
     ///
     /// Layout heuristic
-    ///  • Pick the monitor ObsidianX is currently on.
-    ///  • Try docking CluadeX flush against ObsidianX's right edge first;
+    ///  • Pick the monitor BrainX is currently on.
+    ///  • Try docking CluadeX flush against BrainX's right edge first;
     ///    fall back to its left edge if there isn't ≥800 px of room.
-    ///  • If neither side fits (small monitor, ObsidianX maximised), bail
+    ///  • If neither side fits (small monitor, BrainX maximised), bail
     ///    and leave CluadeX wherever it is — better to do nothing than to
     ///    move CluadeX to a worse position.
-    ///  • Match CluadeX's height to ObsidianX's height so the two read as a
+    ///  • Match CluadeX's height to BrainX's height so the two read as a
     ///    single panel pair.
     ///
     /// Triggered from <see cref="OnOrchestratorEvent"/> on
@@ -6756,7 +6756,7 @@ public partial class MainWindow : Window
     }
 
     /// <summary>Bring CluadeX's main window to the foreground so the user
-    /// can scroll to the [ObsidianX] task session in its sidebar. Doesn't
+    /// can scroll to the [BrainX] task session in its sidebar. Doesn't
     /// jump to a specific session — CluadeX would need a focus_session
     /// MCP tool for that, future work.</summary>
     private void OpenInCluadeX_Click(object sender, RoutedEventArgs e)
@@ -7818,7 +7818,7 @@ public partial class MainWindow : Window
         }
         catch
         {
-            MessageBox.Show("Could not open Obsidian. Please open it manually.", "ObsidianX",
+            MessageBox.Show("Could not open Obsidian. Please open it manually.", "BrainX",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }
@@ -7827,7 +7827,7 @@ public partial class MainWindow : Window
     {
         if (_network.IsConnected) return;
 
-        StatusText.Text = "Connecting to ObsidianX Network...";
+        StatusText.Text = "Connecting to BrainX Network...";
         JoinNetworkBtn.IsEnabled = false;
         JoinNetworkBtn.Content = "Connecting...";
 
@@ -7847,16 +7847,16 @@ public partial class MainWindow : Window
         {
             JoinNetworkBtn.Content = "\u2705 Connected";
             LeaveNetworkBtn.Visibility = Visibility.Visible;
-            StatusText.Text = "Connected to ObsidianX Network!";
+            StatusText.Text = "Connected to BrainX Network!";
         }
         else
         {
-            JoinNetworkBtn.Content = "\U0001F310 Join ObsidianX Network";
+            JoinNetworkBtn.Content = "\U0001F310 Join BrainX Network";
             JoinNetworkBtn.IsEnabled = true;
             StatusText.Text = "Failed to connect. Is the server running?";
             MessageBox.Show(
-                "Could not connect to ObsidianX Server.\n\n" +
-                "Start the server first:\n  cd ObsidianX.Server && dotnet run\n\n" +
+                "Could not connect to BrainX Server.\n\n" +
+                "Start the server first:\n  cd BrainX.Server && dotnet run\n\n" +
                 $"Server URL: {_serverUrl}",
                 "Connection Failed", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
@@ -7872,7 +7872,7 @@ public partial class MainWindow : Window
         {
             Debug.WriteLine($"Disconnect error: {ex.Message}");
         }
-        JoinNetworkBtn.Content = "\U0001F310 Join ObsidianX Network";
+        JoinNetworkBtn.Content = "\U0001F310 Join BrainX Network";
         JoinNetworkBtn.IsEnabled = true;
         LeaveNetworkBtn.Visibility = Visibility.Collapsed;
         StatusText.Text = "Disconnected from network";
@@ -8145,7 +8145,7 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// If `ObsidianX.Server` isn't running, walk up to the solution root,
+    /// If `BrainX.Server` isn't running, walk up to the solution root,
     /// pick the freshest build (Release vs Debug, by LastWriteTime — same
     /// trick MCP uses to launch us), and spawn it minimized. The Server
     /// is what serves /api/ai/backends, /api/brain/*, etc., so the AI
@@ -8156,7 +8156,7 @@ public partial class MainWindow : Window
     {
         try
         {
-            if (Process.GetProcessesByName("ObsidianX.Server").Length > 0) return;
+            if (Process.GetProcessesByName("BrainX.Server").Length > 0) return;
 
             var clientExe = Process.GetCurrentProcess().MainModule?.FileName;
             if (string.IsNullOrEmpty(clientExe)) return;
@@ -8165,8 +8165,8 @@ public partial class MainWindow : Window
 
             string[] candidates =
             [
-                Path.Combine(solnRoot, "ObsidianX.Server", "bin", "Release", "net10.0", "BrainX.Server.exe"),
-                Path.Combine(solnRoot, "ObsidianX.Server", "bin", "Debug",   "net10.0", "BrainX.Server.exe"),
+                Path.Combine(solnRoot, "BrainX.Server", "bin", "Release", "net10.0", "BrainX.Server.exe"),
+                Path.Combine(solnRoot, "BrainX.Server", "bin", "Debug",   "net10.0", "BrainX.Server.exe"),
             ];
 
             var pick = candidates
@@ -8210,7 +8210,7 @@ public partial class MainWindow : Window
         var dir = new DirectoryInfo(startDir);
         while (dir != null)
         {
-            if (File.Exists(Path.Combine(dir.FullName, "ObsidianX.slnx"))) return dir.FullName;
+            if (File.Exists(Path.Combine(dir.FullName, "BrainX.slnx"))) return dir.FullName;
             dir = dir.Parent;
         }
         return null;
@@ -10635,7 +10635,7 @@ public partial class MainWindow : Window
     private void ChangeVaultPath_Click(object s, RoutedEventArgs e)
     {
         MessageBox.Show(
-            "To change vault path, restart ObsidianX with:\n\n" +
+            "To change vault path, restart BrainX with:\n\n" +
             "  BrainX.Client.exe \"C:\\path\\to\\vault\"\n\n" +
             $"Current: {_vaultPath}",
             "Change Vault Path", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -10911,9 +10911,9 @@ public partial class MainWindow : Window
     {
         // Prefer the built artifact next to the solution
         var root = FindSolutionRoot();
-        var candidate = Path.Combine(root, "ObsidianX.Mcp", "bin", "Release", "net9.0", "obsidianx-mcp.exe");
+        var candidate = Path.Combine(root, "BrainX.Mcp", "bin", "Release", "net9.0", "brainx-mcp.exe");
         if (File.Exists(candidate)) return candidate;
-        candidate = Path.Combine(root, "ObsidianX.Mcp", "bin", "Debug", "net9.0", "obsidianx-mcp.exe");
+        candidate = Path.Combine(root, "BrainX.Mcp", "bin", "Debug", "net9.0", "brainx-mcp.exe");
         return candidate;
     }
 
@@ -10957,11 +10957,11 @@ public partial class MainWindow : Window
 
     private string FindSolutionRoot()
     {
-        // Walk up from AppContext.BaseDirectory looking for ObsidianX.slnx
+        // Walk up from AppContext.BaseDirectory looking for BrainX.slnx
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         while (dir != null)
         {
-            if (File.Exists(Path.Combine(dir.FullName, "ObsidianX.slnx"))) return dir.FullName;
+            if (File.Exists(Path.Combine(dir.FullName, "BrainX.slnx"))) return dir.FullName;
             dir = dir.Parent;
         }
         return AppContext.BaseDirectory;
@@ -10971,18 +10971,18 @@ public partial class MainWindow : Window
     {
         var exe = McpServerExePath();
         var built = File.Exists(exe);
-        var cmd = $"claude mcp add obsidianx-brain -s user -e OBSIDIANX_VAULT=\"{_vaultPath}\" -- \"{exe}\"";
+        var cmd = $"claude mcp add brainx-brain -s user -e BRAINX_VAULT=\"{_vaultPath}\" -- \"{exe}\"";
         McpInstallCommand.Text = cmd;
 
         var config = Newtonsoft.Json.JsonConvert.SerializeObject(new
         {
             mcpServers = new Dictionary<string, object>
             {
-                ["obsidianx-brain"] = new
+                ["brainx-brain"] = new
                 {
                     command = exe,
                     args = Array.Empty<string>(),
-                    env = new Dictionary<string, string> { ["OBSIDIANX_VAULT"] = _vaultPath }
+                    env = new Dictionary<string, string> { ["BRAINX_VAULT"] = _vaultPath }
                 }
             }
         }, Newtonsoft.Json.Formatting.Indented);
@@ -11014,7 +11014,7 @@ public partial class MainWindow : Window
                 CreateNoWindow = true
             };
             psi.ArgumentList.Add("build");
-            psi.ArgumentList.Add("ObsidianX.Mcp/BrainX.Mcp.csproj");
+            psi.ArgumentList.Add("BrainX.Mcp/BrainX.Mcp.csproj");
             psi.ArgumentList.Add("-c");
             psi.ArgumentList.Add("Release");
             psi.ArgumentList.Add("-v");
@@ -11132,17 +11132,17 @@ public partial class MainWindow : Window
             try
             {
                 McpStatusText.Text = "⏳ Installing to Claude Code CLI (user scope)…";
-                await RunClaudeCliAsync("mcp", "remove", "obsidianx-brain", "-s", "local");
-                await RunClaudeCliAsync("mcp", "remove", "obsidianx-brain", "-s", "user");
+                await RunClaudeCliAsync("mcp", "remove", "brainx-brain", "-s", "local");
+                await RunClaudeCliAsync("mcp", "remove", "brainx-brain", "-s", "user");
 
                 var (code, _, stderr) = await RunClaudeCliAsync(
-                    "mcp", "add", "obsidianx-brain",
+                    "mcp", "add", "brainx-brain",
                     "-s", "user",
-                    "-e", $"OBSIDIANX_VAULT={_vaultPath}",
+                    "-e", $"BRAINX_VAULT={_vaultPath}",
                     "--", exe);
 
                 var (_, listOut, _) = await RunClaudeCliAsync("mcp", "list");
-                if (listOut.Contains("obsidianx-brain") && listOut.Contains("Connected"))
+                if (listOut.Contains("brainx-brain") && listOut.Contains("Connected"))
                     summary.AppendLine("✅ Claude Code CLI — connected (user scope)");
                 else if (code == 0)
                     summary.AppendLine("⚠ Claude Code CLI — registered but can't verify");
@@ -11170,7 +11170,7 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Merge the obsidianx-brain server entry into Claude Desktop's
+    /// Merge the brainx-brain server entry into Claude Desktop's
     /// claude_desktop_config.json at %APPDATA%\Claude. Preserves any
     /// other mcpServers the user has configured. Creates the file /
     /// directory if Claude Desktop is installed but has never been
@@ -11202,13 +11202,13 @@ public partial class MainWindow : Window
             config["mcpServers"] = servers;
         }
 
-        servers["obsidianx-brain"] = new Newtonsoft.Json.Linq.JObject
+        servers["brainx-brain"] = new Newtonsoft.Json.Linq.JObject
         {
             ["command"] = exe,
             ["args"] = new Newtonsoft.Json.Linq.JArray(),
             ["env"] = new Newtonsoft.Json.Linq.JObject
             {
-                ["OBSIDIANX_VAULT"] = _vaultPath
+                ["BRAINX_VAULT"] = _vaultPath
             }
         };
 
@@ -11230,13 +11230,13 @@ public partial class MainWindow : Window
         {
             var config = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(cfgPath));
             var servers = config["mcpServers"] as Newtonsoft.Json.Linq.JObject;
-            if (servers != null && servers.Remove("obsidianx-brain"))
+            if (servers != null && servers.Remove("brainx-brain"))
             {
                 File.WriteAllText(cfgPath,
                     config.ToString(Newtonsoft.Json.Formatting.Indented));
                 return "Removed from Claude Desktop config";
             }
-            return "(obsidianx-brain not registered in Claude Desktop)";
+            return "(brainx-brain not registered in Claude Desktop)";
         }
         catch (Exception ex)
         {
@@ -11301,7 +11301,7 @@ public partial class MainWindow : Window
         {
             // Process-exists fallback — if the Server.exe is alive we still
             // show green-ish, just with a warning label. Otherwise it's red.
-            var procAlive = Process.GetProcessesByName("ObsidianX.Server").Length > 0;
+            var procAlive = Process.GetProcessesByName("BrainX.Server").Length > 0;
             if (procAlive)
             {
                 ServerStatusDot.Fill = new SolidColorBrush(Color.FromRgb(0xCC, 0x88, 0x44));
@@ -11320,7 +11320,7 @@ public partial class MainWindow : Window
     {
         // Prefer "open the dashboard in browser" — Server has its own
         // cyberpunk web UI at root. If it's down, try to launch it.
-        if (Process.GetProcessesByName("ObsidianX.Server").Length == 0)
+        if (Process.GetProcessesByName("BrainX.Server").Length == 0)
         {
             TryLaunchServerIfNotRunning();
             StatusText.Text = "Starting Server… (chip will go green when healthy)";
@@ -11445,7 +11445,7 @@ public partial class MainWindow : Window
             if (!File.Exists(path)) return false;
             var json = File.ReadAllText(path);
             // Quick contains — way cheaper than full JSON parse every 3s
-            return json.Contains("\"obsidianx-brain\"", StringComparison.Ordinal);
+            return json.Contains("\"brainx-brain\"", StringComparison.Ordinal);
         }
         catch (IOException) { return false; }
         catch (UnauthorizedAccessException) { return false; }
@@ -11458,7 +11458,7 @@ public partial class MainWindow : Window
             var cfg = ClaudeDesktopConfigPath();
             if (!File.Exists(cfg)) return false;
             return File.ReadAllText(cfg)
-                .Contains("\"obsidianx-brain\"", StringComparison.Ordinal);
+                .Contains("\"brainx-brain\"", StringComparison.Ordinal);
         }
         catch (IOException) { return false; }
         catch (UnauthorizedAccessException) { return false; }
@@ -11483,9 +11483,9 @@ public partial class MainWindow : Window
             else
             {
                 var (_, stdout, _) = await RunClaudeCliAsync("mcp", "list");
-                if (stdout.Contains("obsidianx-brain") && stdout.Contains("Connected"))
+                if (stdout.Contains("brainx-brain") && stdout.Contains("Connected"))
                     sb.AppendLine($"▸ Claude Code CLI: ✅ registered AND connected ({cli})");
-                else if (stdout.Contains("obsidianx-brain"))
+                else if (stdout.Contains("brainx-brain"))
                     sb.AppendLine("▸ Claude Code CLI: ⚠ registered but not connected");
                 else
                     sb.AppendLine("▸ Claude Code CLI: ❌ NOT registered");
@@ -11503,10 +11503,10 @@ public partial class MainWindow : Window
             {
                 var cfg = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(cfgPath));
                 var servers = cfg["mcpServers"] as Newtonsoft.Json.Linq.JObject;
-                if (servers?["obsidianx-brain"] != null)
+                if (servers?["brainx-brain"] != null)
                     sb.AppendLine($"▸ Claude Desktop:  ✅ registered in {cfgPath}");
                 else
-                    sb.AppendLine($"▸ Claude Desktop:  ❌ NOT registered (config exists but no obsidianx-brain)");
+                    sb.AppendLine($"▸ Claude Desktop:  ❌ NOT registered (config exists but no brainx-brain)");
             }
         }
         catch (Exception ex) { sb.AppendLine($"▸ Claude Desktop: ❌ error: {ex.Message}"); }
@@ -11519,8 +11519,8 @@ public partial class MainWindow : Window
         var sb = new System.Text.StringBuilder();
         try
         {
-            await RunClaudeCliAsync("mcp", "remove", "obsidianx-brain", "-s", "local");
-            await RunClaudeCliAsync("mcp", "remove", "obsidianx-brain", "-s", "user");
+            await RunClaudeCliAsync("mcp", "remove", "brainx-brain", "-s", "local");
+            await RunClaudeCliAsync("mcp", "remove", "brainx-brain", "-s", "user");
             sb.AppendLine("✓ Removed from Claude Code CLI (both scopes)");
         }
         catch (Exception ex) { sb.AppendLine($"✗ Claude Code CLI uninstall: {ex.Message}"); }
@@ -11573,7 +11573,7 @@ public partial class MainWindow : Window
             var hooks = root["hooks"] as Newtonsoft.Json.Linq.JObject ?? new Newtonsoft.Json.Linq.JObject();
             var postToolUse = hooks["PostToolUse"] as Newtonsoft.Json.Linq.JArray ?? new Newtonsoft.Json.Linq.JArray();
 
-            // Remove any previous ObsidianX entries so re-install is idempotent
+            // Remove any previous BrainX entries so re-install is idempotent
             for (int i = postToolUse.Count - 1; i >= 0; i--)
             {
                 var item = postToolUse[i];
@@ -11647,9 +11647,9 @@ public partial class MainWindow : Window
             if (removed > 0)
             {
                 File.WriteAllText(path, root.ToString(Newtonsoft.Json.Formatting.Indented));
-                ClaudeHookStatus.Text = $"✓ Removed {removed} ObsidianX hook(s) from {path}";
+                ClaudeHookStatus.Text = $"✓ Removed {removed} BrainX hook(s) from {path}";
             }
-            else ClaudeHookStatus.Text = "(nothing to remove — ObsidianX hook not found)";
+            else ClaudeHookStatus.Text = "(nothing to remove — BrainX hook not found)";
         }
         catch (Exception ex) { ClaudeHookStatus.Text = $"❌ Remove failed: {ex.Message}"; }
     }

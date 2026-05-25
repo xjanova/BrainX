@@ -8,10 +8,10 @@ namespace BrainX.Core.Services;
 
 /// <summary>
 /// Resolves, starts, and (if missing) downloads the CluadeX worker app so
-/// ObsidianX's Co-Pilot Arena "just works" on a fresh machine.
+/// BrainX's Co-Pilot Arena "just works" on a fresh machine.
 ///
 /// Discovery order (first hit wins, all paths cached after first success):
-///   1. Persisted setting at <c>%LocalAppData%\ObsidianX\cluadex-path.txt</c>
+///   1. Persisted setting at <c>%LocalAppData%\BrainX\cluadex-path.txt</c>
 ///      (the path that worked on the previous run).
 ///   2. Process-list scan — if CluadeX.exe is already running we use its
 ///      MainModule path. Cheapest case for "user already opened it".
@@ -30,7 +30,7 @@ namespace BrainX.Core.Services;
 ///   If discovery returns nothing AND the caller opted into auto-install,
 ///   we hit the GitHub Releases API for <c>xjanova/CluadeX</c>, pick the
 ///   first <c>CluadeX-v*.zip</c> asset, download it to
-///   <c>%LocalAppData%\ObsidianX\CluadeX\</c>, extract, and use that path.
+///   <c>%LocalAppData%\BrainX\CluadeX\</c>, extract, and use that path.
 ///
 /// Threading
 /// ---------
@@ -43,7 +43,7 @@ public sealed class CluadeXLauncher
     private const string PreferredExeName = "CluadeX.exe";
     private const string GitHubReleasesUrl =
         "https://api.github.com/repos/xjanova/CluadeX/releases/latest";
-    private const string UserAgent = "ObsidianX-CluadeXLauncher";
+    private const string UserAgent = "BrainX-CluadeXLauncher";
 
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly string _settingsPath;
@@ -53,7 +53,7 @@ public sealed class CluadeXLauncher
     public CluadeXLauncher()
     {
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        var obsidianXDir = Path.Combine(localAppData, "ObsidianX");
+        var obsidianXDir = Path.Combine(localAppData, "BrainX");
         Directory.CreateDirectory(obsidianXDir);
         _settingsPath = Path.Combine(obsidianXDir, "cluadex-path.txt");
         _installRoot = Path.Combine(obsidianXDir, "CluadeX");

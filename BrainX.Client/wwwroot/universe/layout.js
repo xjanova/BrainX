@@ -1,4 +1,4 @@
-// ObsidianX Universe — layout + palette.
+// BrainX Universe — layout + palette.
 //
 // Pure math: given a brain-export payload, deterministically place every
 // note in 3D space and assign it a color. No three.js imports here so this

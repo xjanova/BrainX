@@ -7,8 +7,8 @@ namespace BrainX.Core.Services;
 /// <see cref="KnowledgeNode"/>, decide whether the peer named in the scope may
 /// see the note (and at what level).
 ///
-/// Lives in Core so both <c>ObsidianX.Client</c> (owner-side decisions before
-/// answering a peer) and <c>ObsidianX.Server</c> (cheap deny-at-the-hub for
+/// Lives in Core so both <c>BrainX.Client</c> (owner-side decisions before
+/// answering a peer) and <c>BrainX.Server</c> (cheap deny-at-the-hub for
 /// scope-less or paused peers) can reuse the same logic. No state, no I/O —
 /// safe to call from any thread.
 /// </summary>

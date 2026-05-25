@@ -160,8 +160,8 @@ public class OpenRouterBackend : OpenAiCompatibleBackend
         : base("openrouter", "https://openrouter.ai/api/v1", apiKey,
                extraHeaders: new Dictionary<string, string>
                {
-                   ["HTTP-Referer"] = "https://github.com/xjanova/ObsidianX",
-                   ["X-Title"] = "ObsidianX"
+                   ["HTTP-Referer"] = "https://github.com/xjanova/BrainX",
+                   ["X-Title"] = "BrainX"
                }) { }
 }
 

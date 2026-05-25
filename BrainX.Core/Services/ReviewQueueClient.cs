@@ -9,13 +9,13 @@ namespace BrainX.Core.Services;
 ///
 /// Why file-backed (vs. shared in-memory queue or a server endpoint)?
 /// • The reviewer runs in a separate process (Claude Desktop) and reaches
-///   the queue through obsidianx-mcp tools (also a separate process).
+///   the queue through brainx-mcp tools (also a separate process).
 ///   File system is the lowest-friction shared medium.
 /// • Atomic per-item writes — File.WriteAllText is one syscall — avoid
 ///   read-modify-write races when submit + verdict happen close in time.
 /// • Easy to inspect: <c>ls .obsidianx/review-queue/</c> shows the queue.
 ///
-/// JSON shape (mirrors what obsidianx-mcp's three tools produce/consume):
+/// JSON shape (mirrors what brainx-mcp's three tools produce/consume):
 /// <code>
 /// {
 ///   "id": "task-260426-082412",

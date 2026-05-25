@@ -1,7 +1,7 @@
 namespace BrainX.Core.Models;
 
 /// <summary>
-/// Describes a folder that ObsidianX has detected as (probably) an Obsidian
+/// Describes a folder that BrainX has detected as (probably) an Obsidian
 /// vault. Produced by <c>ObsidianVaultDetector</c>; consumed by both the
 /// Sharing/Onboarding UI ("here are vaults we found, pick one") and the
 /// <c>ObsidianVaultImporter</c> (uses the metadata to decide how much to
@@ -61,7 +61,7 @@ public class ObsidianVaultInfo
     /// <summary>
     /// <c>useMarkdownLinks</c> from <c>.obsidian/app.json</c>. False = Obsidian
     /// is configured to write <c>[[wikilinks]]</c> (the default), true =
-    /// it writes <c>[plain markdown](links.md)</c>. Both work in ObsidianX
+    /// it writes <c>[plain markdown](links.md)</c>. Both work in BrainX
     /// but the value lets the UI warn migrating users.
     /// </summary>
     public bool UseMarkdownLinks { get; set; }

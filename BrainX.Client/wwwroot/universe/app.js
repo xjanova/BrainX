@@ -1,4 +1,4 @@
-// ObsidianX Universe — entry point.
+// BrainX Universe — entry point.
 //
 // Wires the WebView2 host bridge (C# ↔ JS) to the three.js scene module.
 // All DOM panels (info card, legend, status) live here; scene.js stays
@@ -763,7 +763,7 @@ function mountScene(brain) {
     try {
         const universe = scene.mount(brain);
         if (universe.nodes.length === 0) {
-            setStatus('Brain has 0 notes yet — open ObsidianX and add some.');
+            setStatus('Brain has 0 notes yet — open BrainX and add some.');
         } else {
             setStatus(`Universe rendered · ${universe.nodes.length.toLocaleString()} stars · ${universe.edges.length.toLocaleString()} wiki-links · ${universe.galaxies.length} galaxies`);
         }
@@ -1133,7 +1133,7 @@ async function tryStandaloneFetch() {
         const brain = await res.json();
         handleBrain(brain);
     } catch (err) {
-        setStatus('Open this page from inside ObsidianX (WebView2 host required).', true);
+        setStatus('Open this page from inside BrainX (WebView2 host required).', true);
         console.warn('[Universe] standalone fetch failed:', err);
     }
 }

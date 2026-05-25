@@ -1,4 +1,4 @@
-// ObsidianX Universe — three.js scene.
+// BrainX Universe — three.js scene.
 //
 // Owns the canvas, camera, render loop, and all GPU resources. Exposes
 // mount(brain, viewport) to build/replace the universe from a payload, and

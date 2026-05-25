@@ -36,7 +36,7 @@ public class ClaudeIntegration
     public void GenerateClaudeMd(KnowledgeGraph graph, BrainIdentity identity)
     {
         var sb = new StringBuilder();
-        sb.AppendLine("# ObsidianX Brain — Connected to Claude");
+        sb.AppendLine("# BrainX Brain — Connected to Claude");
         sb.AppendLine();
         sb.AppendLine($"**Brain Address:** `{identity.Address}`");
         sb.AppendLine($"**Display Name:** {identity.DisplayName}");
@@ -46,7 +46,7 @@ public class ClaudeIntegration
         sb.AppendLine();
         sb.AppendLine("## Vault Structure");
         sb.AppendLine();
-        sb.AppendLine("This is an ObsidianX-managed knowledge vault. Notes are Markdown files organized by knowledge domains.");
+        sb.AppendLine("This is an BrainX-managed knowledge vault. Notes are Markdown files organized by knowledge domains.");
         sb.AppendLine();
         // The expertise profile used to be rendered here as a static
         // snapshot — but BrainExporter writes a live, marker-managed
@@ -57,7 +57,7 @@ public class ClaudeIntegration
         sb.AppendLine("## Instructions for Claude");
         sb.AppendLine();
         sb.AppendLine("- When working with this vault, respect the existing folder structure and linking patterns.");
-        sb.AppendLine("- Use [[wiki-links]] for connecting notes. This vault uses ObsidianX knowledge graph.");
+        sb.AppendLine("- Use [[wiki-links]] for connecting notes. This vault uses BrainX knowledge graph.");
         sb.AppendLine("- Always add relevant #tags for categorization.");
         sb.AppendLine("- The brain owner's expertise areas are listed above — tailor your assistance accordingly.");
         sb.AppendLine("- When creating new notes, ensure they connect to existing knowledge nodes.");
@@ -69,7 +69,7 @@ public class ClaudeIntegration
     {
         var fullPrompt = string.IsNullOrEmpty(context)
             ? prompt
-            : $"Context from my ObsidianX vault:\n{context}\n\nQuestion: {prompt}";
+            : $"Context from my BrainX vault:\n{context}\n\nQuestion: {prompt}";
 
         var psi = new ProcessStartInfo("claude")
         {

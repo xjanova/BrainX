@@ -19,7 +19,7 @@ namespace BrainX.Core.Services;
 ///
 /// Why a delegate planner (instead of a typed AiHubService dependency):
 /// the WPF client lives in a separate process from the AiHubService
-/// (which runs inside ObsidianX.Server). The client reaches the hub via
+/// (which runs inside BrainX.Server). The client reaches the hub via
 /// HTTP at <c>/api/ai/chat</c>. By accepting the planner as a
 /// <c>Func&lt;string, CancellationToken, Task&lt;InternPlan&gt;&gt;</c>
 /// we keep this orchestrator transport-agnostic — it can be wired to

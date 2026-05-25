@@ -69,7 +69,7 @@ public partial class SplashWindow : Window
 
         // Seed the stage list with a "Booting…" placeholder so the panel
         // isn't an empty void in the first ~100ms before the first Report.
-        AppendStage("boot", "Booting ObsidianX...", spinning: true);
+        AppendStage("boot", "Booting BrainX...", spinning: true);
 
         // Best-effort brain-stats footer — read straight from the export
         // file if it exists so the user sees scale even before the brain
@@ -242,7 +242,7 @@ public partial class SplashWindow : Window
     {
         try
         {
-            var vaultPath = Environment.GetEnvironmentVariable("OBSIDIANX_VAULT");
+            var vaultPath = Environment.GetEnvironmentVariable("BRAINX_VAULT");
             if (string.IsNullOrWhiteSpace(vaultPath))
             {
                 // Walk up from the exe looking for .obsidianx/brain-export.json
@@ -339,7 +339,7 @@ public partial class SplashWindow : Window
         });
         thread.SetApartmentState(ApartmentState.STA);
         thread.IsBackground = true;
-        thread.Name = "ObsidianX.Splash";
+        thread.Name = "BrainX.Splash";
         thread.Start();
         ready.Wait(TimeSpan.FromSeconds(2));
         return thread;

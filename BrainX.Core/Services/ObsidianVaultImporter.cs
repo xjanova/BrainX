@@ -4,7 +4,7 @@ using BrainX.Core.Models;
 namespace BrainX.Core.Services;
 
 /// <summary>
-/// One-click migration of an existing Obsidian vault into ObsidianX.
+/// One-click migration of an existing Obsidian vault into BrainX.
 /// Two strategies:
 ///
 ///   <c>UseAsVault</c> — zero-copy. The caller is expected to persist the
@@ -24,7 +24,7 @@ namespace BrainX.Core.Services;
 /// read-only on the source side.
 ///
 /// Wiki-links, frontmatter, tags, callouts, embeds — none of it needs
-/// translation: ObsidianX's <c>KnowledgeIndexer</c> already speaks the same
+/// translation: BrainX's <c>KnowledgeIndexer</c> already speaks the same
 /// Obsidian-flavored Markdown dialect. The importer is therefore just a
 /// careful filesystem operation.
 /// </summary>
@@ -32,9 +32,9 @@ public class ObsidianVaultImporter
 {
     public enum ImportStrategy
     {
-        /// <summary>Point ObsidianX's vault path at the existing Obsidian folder.</summary>
+        /// <summary>Point BrainX's vault path at the existing Obsidian folder.</summary>
         UseAsVault,
-        /// <summary>Copy files into the current ObsidianX vault under <c>Imported/&lt;source-name&gt;/</c>.</summary>
+        /// <summary>Copy files into the current BrainX vault under <c>Imported/&lt;source-name&gt;/</c>.</summary>
         CopyInto
     }
 
@@ -47,7 +47,7 @@ public class ObsidianVaultImporter
         public bool PreserveFolderStructure { get; set; } = true;
         /// <summary>
         /// Skip the source vault's <c>.obsidian/</c> folder. Default true —
-        /// Obsidian config is meaningless inside ObsidianX and would clutter
+        /// Obsidian config is meaningless inside BrainX and would clutter
         /// the brain export.
         /// </summary>
         public bool SkipObsidianMeta { get; set; } = true;
@@ -83,7 +83,7 @@ public class ObsidianVaultImporter
         ".pdf",
         ".mp3", ".wav", ".ogg", ".m4a",
         ".mp4", ".webm", ".mov",
-        ".canvas",  // Obsidian Canvas files — keep them, ObsidianX reads them too
+        ".canvas",  // Obsidian Canvas files — keep them, BrainX reads them too
         ".excalidraw"
     };
 

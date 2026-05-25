@@ -89,7 +89,7 @@ public partial class App : Application
         try
         {
             SplashWindow.LaunchOnDedicatedThread();
-            StartupProgress.Report("Booting ObsidianX...", 0.05, tag: "boot");
+            StartupProgress.Report("Booting BrainX...", 0.05, tag: "boot");
         }
         catch (Exception ex) { Debug.WriteLine($"Splash launch failed (non-fatal): {ex.Message}"); }
 
@@ -117,7 +117,7 @@ public partial class App : Application
         // Best-effort: walk the existing app's main-window title and
         // bring it forward. The WPF Window's title is set in the XAML —
         // if it changes, this string needs to match.
-        var hwnd = FindWindow(null, "ObsidianX — Neural Knowledge Engine");
+        var hwnd = FindWindow(null, "BrainX — Neural Knowledge Engine");
         if (hwnd == IntPtr.Zero) return;
         ShowWindow(hwnd, SW_RESTORE);
         SetForegroundWindow(hwnd);
@@ -135,7 +135,7 @@ public partial class App : Application
         if (string.IsNullOrEmpty(exe) || !File.Exists(exe)) return;
 
         var desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
-        var shortcutPath = Path.Combine(desktop, "ObsidianX.lnk");
+        var shortcutPath = Path.Combine(desktop, "BrainX.lnk");
 
         var shellType = Type.GetTypeFromProgID("WScript.Shell");
         if (shellType == null) return;
@@ -173,7 +173,7 @@ public partial class App : Application
             st.InvokeMember("IconLocation", BindingFlags.SetProperty, null, shortcut,
                 new object[] { wantIcon });
             st.InvokeMember("Description", BindingFlags.SetProperty, null, shortcut,
-                new object[] { "ObsidianX Neural Knowledge Network" });
+                new object[] { "BrainX Neural Knowledge Network" });
             st.InvokeMember("Save", BindingFlags.InvokeMethod, null, shortcut, null);
         }
         finally

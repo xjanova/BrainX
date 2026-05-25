@@ -23,7 +23,7 @@ builder.Services.AddCors(options =>
 var app = builder.Build();
 
 // PR #7 — tamper-evident audit log lives next to the server binary so a
-// rotated/wiped DB can still be cross-checked. Set OBSIDIANX_AUDIT_KEY in
+// rotated/wiped DB can still be cross-checked. Set BRAINX_AUDIT_KEY in
 // the environment for production so the HMAC chain survives restarts.
 BrainX.Server.Hubs.AuditLog.Initialize(
     Path.Combine(AppContext.BaseDirectory, "audit"));
@@ -73,7 +73,7 @@ Console.WriteLine(@"
   \____/|_.__/|___/_|\__,_|_|\__,_|_| |_/_/\_\
 
   ╔══════════════════════════════════════════════╗
-  ║   ObsidianX Server — Brain Matchmaking Hub   ║
+  ║   BrainX Server — Brain Matchmaking Hub   ║
   ║   Neural Knowledge Network v2.0.0             ║
   ╚══════════════════════════════════════════════╝
 ");
@@ -102,10 +102,10 @@ app.MapGet("/api/stats", () =>
 // (Claude, other apps) can fetch the current owner's expertise over HTTP
 // without needing filesystem access.
 //
-// Configure via ObsidianX__VaultPath environment variable.
+// Configure via BrainX__VaultPath environment variable.
 static string ResolveVaultPath()
 {
-    var v = Environment.GetEnvironmentVariable("ObsidianX__VaultPath");
+    var v = Environment.GetEnvironmentVariable("BrainX__VaultPath");
     if (!string.IsNullOrWhiteSpace(v)) return v;
     return @"G:\Obsidian";
 }
@@ -178,7 +178,7 @@ app.MapGet("/api/brain/export", () =>
 {
     var export = LoadExport();
     return export is null
-        ? Results.NotFound(new { error = "brain-export.json not found — run Export Brain in ObsidianX Settings" })
+        ? Results.NotFound(new { error = "brain-export.json not found — run Export Brain in BrainX Settings" })
         : Results.Ok(export);
 });
 
@@ -266,7 +266,7 @@ static AiHubService BuildHub()
     var hub = new AiHubService(ResolveVaultPath());
 
     // Ollama is always registered (even if not running — UI shows as offline)
-    var ollamaUrl = Environment.GetEnvironmentVariable("OBSIDIANX_OLLAMA_URL")
+    var ollamaUrl = Environment.GetEnvironmentVariable("BRAINX_OLLAMA_URL")
                  ?? "http://localhost:11434";
     hub.Register(new OllamaBackend(ollamaUrl));
 
@@ -281,7 +281,7 @@ static AiHubService BuildHub()
     var deepSeekKey = ReadKey("DEEPSEEK_API_KEY", "deepseek_api_key");
     if (!string.IsNullOrWhiteSpace(deepSeekKey)) hub.Register(new DeepSeekBackend(deepSeekKey));
 
-    hub.DefaultModel = Environment.GetEnvironmentVariable("OBSIDIANX_DEFAULT_MODEL")
+    hub.DefaultModel = Environment.GetEnvironmentVariable("BRAINX_DEFAULT_MODEL")
                     ?? "llama3.2";
     return hub;
 }
@@ -308,7 +308,7 @@ static string? ReadKey(string envName, string jsonField)
 app.MapGet("/api/ai/models", async () =>
 {
     var ollama = new OllamaBackend(
-        Environment.GetEnvironmentVariable("OBSIDIANX_OLLAMA_URL") ?? "http://localhost:11434");
+        Environment.GetEnvironmentVariable("BRAINX_OLLAMA_URL") ?? "http://localhost:11434");
     if (!await ollama.IsAvailableAsync()) return Results.NotFound(new { error = "Ollama not reachable" });
     var installed = await ollama.ListModelDetailsAsync();
     var running = await ollama.ListRunningAsync();
@@ -331,7 +331,7 @@ app.MapPost("/api/ai/models/pull", async (HttpContext ctx) =>
     ctx.Response.Headers.CacheControl = "no-cache";
 
     var ollama = new OllamaBackend(
-        Environment.GetEnvironmentVariable("OBSIDIANX_OLLAMA_URL") ?? "http://localhost:11434");
+        Environment.GetEnvironmentVariable("BRAINX_OLLAMA_URL") ?? "http://localhost:11434");
     try
     {
         await foreach (var p in ollama.PullAsync(modelName, ctx.RequestAborted))
@@ -352,7 +352,7 @@ app.MapPost("/api/ai/models/pull", async (HttpContext ctx) =>
 app.MapDelete("/api/ai/models/{name}", async (string name) =>
 {
     var ollama = new OllamaBackend(
-        Environment.GetEnvironmentVariable("OBSIDIANX_OLLAMA_URL") ?? "http://localhost:11434");
+        Environment.GetEnvironmentVariable("BRAINX_OLLAMA_URL") ?? "http://localhost:11434");
     var ok = await ollama.DeleteAsync(name);
     return ok ? Results.Ok(new { deleted = name })
               : Results.BadRequest(new { error = $"could not delete {name}" });
@@ -662,7 +662,7 @@ app.MapPost("/v1/messages/count_tokens", async (HttpContext ctx) =>
 });
 
 // ─────────────── Secret key management ───────────────
-// The ObsidianX client writes API keys here so backends auto-register
+// The BrainX client writes API keys here so backends auto-register
 // on next BuildHub() call. Stored at .obsidianx/ai-keys.json (local
 // machine only, never committed to the vault's content).
 

@@ -7,7 +7,7 @@
         xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
         xmlns:services="clr-namespace:BrainX.Client.Services"
         mc:Ignorable="d"
-        Title="ObsidianX — Neural Knowledge Engine"
+        Title="BrainX — Neural Knowledge Engine"
         Width="1400" Height="900" MinWidth="1100" MinHeight="700"
         WindowStartupLocation="CenterScreen"
         WindowStyle="None" AllowsTransparency="True"
@@ -120,7 +120,7 @@
                             <Image Source="pack://application:,,,/Assets/Logo.png"
                                    Width="30" Height="30" Margin="0,0,10,0"
                                    Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality"/>
-                            <TextBlock Text="ObsidianX" FontSize="14" FontWeight="Bold"
+                            <TextBlock Text="BrainX" FontSize="14" FontWeight="Bold"
                                        Foreground="{StaticResource TextPrimaryBrush}" VerticalAlignment="Center"/>
                             <TextBlock Text=" — Neural Knowledge Engine" FontSize="11"
                                        Foreground="{StaticResource TextMutedBrush}" VerticalAlignment="Center"
@@ -1291,7 +1291,7 @@
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
                                 <StackPanel Margin="0,0,0,16">
-                                    <TextBlock Text="Network — ObsidianX Brain Mesh" FontSize="24" FontWeight="Bold"
+                                    <TextBlock Text="Network — BrainX Brain Mesh" FontSize="24" FontWeight="Bold"
                                                Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,4"/>
                                     <TextBlock Text="Connect your brain to the collective knowledge network"
                                                FontSize="12" Foreground="{StaticResource TextSecondaryBrush}"/>
@@ -1355,7 +1355,7 @@
                                                 </StackPanel>
                                             </Grid>
 
-                                            <Button x:Name="JoinNetworkBtn" Content="&#x1F310; Join ObsidianX Network"
+                                            <Button x:Name="JoinNetworkBtn" Content="&#x1F310; Join BrainX Network"
                                                     Click="JoinNetwork_Click"
                                                     Style="{StaticResource NeonButtonFilled}" HorizontalAlignment="Center" Margin="0,20,0,0"/>
                                             <Button x:Name="LeaveNetworkBtn" Content="Disconnect"
@@ -1463,7 +1463,7 @@
                                                         Padding="10,3" FontSize="10"
                                                         Click="CluadeXBridgeAlign_Click"
                                                         Margin="0,0,6,0"
-                                                        ToolTip="Force CluadeX to load the same provider+model as ObsidianX — frees the previous GGUF weights from VRAM if needed"/>
+                                                        ToolTip="Force CluadeX to load the same provider+model as BrainX — frees the previous GGUF weights from VRAM if needed"/>
                                                 <Button x:Name="CluadeXBridgeTestBtn"
                                                         Content="🧪 Test prompt"
                                                         Style="{StaticResource NeonButton}"
@@ -1635,7 +1635,7 @@
                                         <ScrollViewer VerticalScrollBarVisibility="Auto">
                                             <TextBlock x:Name="ClaudeOutput" TextWrapping="Wrap" FontSize="13"
                                                        Foreground="{StaticResource TextPrimaryBrush}"
-                                                       Text="Welcome to ObsidianX AI Chat.&#x0A;&#x0A;Solo mode: chat with the selected model (Ollama / NIM / OpenRouter / DeepSeek), grounded on your vault.&#x0A;&#x0A;Co-Pilot Arena (Phase 1) will let a local model and Claude collaborate on tasks here, with both wired into the brain MCP."/>
+                                                       Text="Welcome to BrainX AI Chat.&#x0A;&#x0A;Solo mode: chat with the selected model (Ollama / NIM / OpenRouter / DeepSeek), grounded on your vault.&#x0A;&#x0A;Co-Pilot Arena (Phase 1) will let a local model and Claude collaborate on tasks here, with both wired into the brain MCP."/>
                                         </ScrollViewer>
                                     </Border>
                                     <!-- ─── Co-Pilot Arena ─────────────────────────────────────
@@ -2194,7 +2194,7 @@
                                 <StackPanel Margin="0,0,0,16">
                                     <TextBlock Text="Import / Scan" FontSize="24" FontWeight="Bold"
                                                Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,4"/>
-                                    <TextBlock Text="Bring external knowledge into this ObsidianX vault. Original sources stay untouched."
+                                    <TextBlock Text="Bring external knowledge into this BrainX vault. Original sources stay untouched."
                                                FontSize="12" Foreground="{StaticResource TextSecondaryBrush}"/>
                                 </StackPanel>
 
@@ -2959,7 +2959,7 @@
                                                        Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,12"/>
                                             <TextBlock TextWrapping="Wrap" FontSize="13" LineHeight="20"
                                                        Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,10"
-                                                       Text="Claude (running through obsidianx-mcp) asks the brain to run a command on your behalf. The brain checks the profile's allow_patterns. If the command matches, it dials the host using the profile's SSH key and returns the output. If it doesn't match, the request is denied without dialing. Every call — allowed, denied, or MITM-flagged — is logged to .obsidianx/access-log.ndjson and pulses on the Universe graph."/>
+                                                       Text="Claude (running through brainx-mcp) asks the brain to run a command on your behalf. The brain checks the profile's allow_patterns. If the command matches, it dials the host using the profile's SSH key and returns the output. If it doesn't match, the request is denied without dialing. Every call — allowed, denied, or MITM-flagged — is logged to .obsidianx/access-log.ndjson and pulses on the Universe graph."/>
                                             <TextBlock TextWrapping="Wrap" FontSize="13" LineHeight="20"
                                                        Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"
                                                        Text="Defense in depth: the client-side allow_patterns catch programmer mistakes; the server-side command=&quot;...&quot; pin in authorized_keys (Step 3-4 below) catches MCP-server compromise. Use both — they protect against different attacker models."/>
@@ -3110,12 +3110,12 @@
                                             </StackPanel>
                                             <TextBlock TextWrapping="Wrap" FontSize="12" LineHeight="18" Margin="0,0,0,8"
                                                        Foreground="{StaticResource TextSecondaryBrush}"
-                                                       Text="Close all Claude Code / Claude Desktop / CluadeX windows that have obsidianx-mcp running. Then open a fresh Claude Code session — it'll spawn obsidianx-mcp v2.5.0 which has the SSH tools registered."/>
+                                                       Text="Close all Claude Code / Claude Desktop / CluadeX windows that have brainx-mcp running. Then open a fresh Claude Code session — it'll spawn brainx-mcp v2.5.0 which has the SSH tools registered."/>
                                             <Border Background="#0D000000" Padding="12" CornerRadius="4">
                                                 <TextBox x:Name="SshSetupCode6" IsReadOnly="True" BorderThickness="0" Background="Transparent"
                                                          FontFamily="{StaticResource MonoFont}" FontSize="12" TextWrapping="Wrap"
                                                          Foreground="{StaticResource TextPrimaryBrush}"
-                                                         Text="Get-Process obsidianx-mcp -ErrorAction SilentlyContinue | Stop-Process -Force"/>
+                                                         Text="Get-Process brainx-mcp -ErrorAction SilentlyContinue | Stop-Process -Force"/>
                                             </Border>
                                             <Button Content="&#x1F4CB; Copy" Style="{StaticResource NavButton}" Padding="12,6"
                                                     HorizontalAlignment="Right" Margin="0,8,0,0"
@@ -3381,7 +3381,7 @@
                                 <StackPanel Margin="0,0,0,16">
                                     <TextBlock Text="Settings" FontSize="24" FontWeight="Bold"
                                                Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,4"/>
-                                    <TextBlock Text="Configure your ObsidianX brain"
+                                    <TextBlock Text="Configure your BrainX brain"
                                                FontSize="12" Foreground="{StaticResource TextSecondaryBrush}"/>
                                 </StackPanel>
                                 <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
@@ -3508,7 +3508,7 @@
                                                            Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,8"/>
                                                 <TextBlock FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" Margin="0,0,0,12">
                                                     Writes a machine-readable fingerprint of this brain so Claude and any external tool can
-                                                    pull your expertise without understanding ObsidianX internals. Updates a managed section
+                                                    pull your expertise without understanding BrainX internals. Updates a managed section
                                                     in CLAUDE.md automatically.
                                                 </TextBlock>
                                                 <StackPanel Margin="0,0,0,12">
@@ -3542,7 +3542,7 @@
                                                 <TextBlock Text="CUSTOM KNOWLEDGE CATEGORIES" FontSize="11" FontWeight="SemiBold"
                                                            Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,8"/>
                                                 <TextBlock FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" Margin="0,0,0,12">
-                                                    Teach ObsidianX new subjects beyond the 25 built-in domains. A custom category matches notes by
+                                                    Teach BrainX new subjects beyond the 25 built-in domains. A custom category matches notes by
                                                     keywords in Thai and English; when a note scores higher on yours than on any built-in, the node
                                                     gets your color and clusters with its peers.
                                                 </TextBlock>
@@ -3831,7 +3831,7 @@
                                                         <TextBlock FontSize="10" Foreground="{StaticResource TextSecondaryBrush}"
                                                                    TextWrapping="Wrap" Margin="0,0,0,8">
                                                             Registers a PostToolUse hook in ~/.claude/settings.json. After Claude reads or edits
-                                                            any .md file, ObsidianX server evaluates it with IngestPolicy and auto-imports if
+                                                            any .md file, BrainX server evaluates it with IngestPolicy and auto-imports if
                                                             stable. No manual "remember this" needed — every solid note Claude touches gets
                                                             pulled into the brain.
                                                         </TextBlock>
@@ -3890,7 +3890,7 @@
                                                     <TextBlock Text="ABOUT" FontSize="11" FontWeight="SemiBold"
                                                                Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,8"/>
                                                     <TextBlock x:Name="AboutVersionText"
-                                                               Text="ObsidianX — Neural Knowledge Network"
+                                                               Text="BrainX — Neural Knowledge Network"
                                                                FontSize="13" Foreground="{StaticResource TextPrimaryBrush}"/>
                                                     <TextBlock Text="Decentralized brain-to-brain knowledge sharing"
                                                                FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,4,0,0"/>
@@ -3983,7 +3983,7 @@
                                        FontFamily="{StaticResource MonoFont}"
                                        Foreground="{StaticResource TextMutedBrush}" Margin="0,0,10,0"/>
                             <!-- MCP binary version chip (v2.6.0+). Reads ProductVersion
-                                 from the on-disk obsidianx-mcp.dll so the user can see
+                                 from the on-disk brainx-mcp.dll so the user can see
                                  what build the NEXT Claude session will spawn — works
                                  even when Claude Desktop's UI label is stale (Desktop
                                  caches claude_desktop_config.json at startup). Tooltip
@@ -3991,7 +3991,7 @@
                             <TextBlock x:Name="McpVersionText" Text="MCP ?" FontSize="10"
                                        FontFamily="{StaticResource MonoFont}"
                                        Foreground="{StaticResource TextMutedBrush}" Margin="0,0,10,0"
-                                       ToolTip="MCP binary version (reads obsidianx-mcp.dll on disk)"/>
+                                       ToolTip="MCP binary version (reads brainx-mcp.dll on disk)"/>
                             <Ellipse x:Name="McpActivityDot" Width="6" Height="6" Fill="#555577" Margin="0,0,4,0"
                                      ToolTip="Recent MCP activity (access-log tail)"/>
                             <TextBlock x:Name="McpActivityStatus" Text="idle" FontSize="10"
@@ -4004,7 +4004,7 @@
                                        Foreground="{StaticResource TextMutedBrush}" Margin="0,0,10,0"/>
                             <Border x:Name="ServerStatusChip" Background="Transparent"
                                     Cursor="Hand" Padding="0" MouseLeftButtonUp="ServerStatusChip_Click"
-                                    ToolTip="ObsidianX Server (Kestrel :5142) — click to open dashboard">
+                                    ToolTip="BrainX Server (Kestrel :5142) — click to open dashboard">
                                 <StackPanel Orientation="Horizontal">
                                     <Ellipse x:Name="ServerStatusDot" Width="6" Height="6"
                                              Fill="#555577" Margin="0,0,4,0"/>

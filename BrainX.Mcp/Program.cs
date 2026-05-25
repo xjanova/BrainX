@@ -5,14 +5,14 @@ using Newtonsoft.Json.Linq;
 using BrainX.Core.Services;
 
 // ─────────────────────────────────────────────────────────────────────────
-// ObsidianX MCP Server (stdio, JSON-RPC 2.0)
+// BrainX MCP Server (stdio, JSON-RPC 2.0)
 //
 // Exposes the local brain-export.json to Claude Code CLI (and any MCP
 // client) as tools: brain_search, brain_get_note, brain_expertise,
 // brain_list, brain_stats, brain_import_path.
 //
 // Transport: stdio (one JSON-RPC message per line).
-// Vault location: OBSIDIANX_VAULT env var, or first CLI arg, or default.
+// Vault location: BRAINX_VAULT env var, or first CLI arg, or default.
 // ─────────────────────────────────────────────────────────────────────────
 
 namespace BrainX.Mcp;
@@ -20,7 +20,7 @@ namespace BrainX.Mcp;
 internal static partial class Program
 {
     private const string ProtocolVersion = "2025-06-18";
-    private const string ServerName = "obsidianx-brain";
+    private const string ServerName = "brainx-brain";
     internal const string ServerVersion = "2.6.0";
 
     /// <summary>
@@ -47,7 +47,7 @@ internal static partial class Program
             : new FileInfo(loc).LastWriteTimeUtc.ToString(
                 "yyyy-MM-dd HH:mm 'UTC'",
                 System.Globalization.CultureInfo.InvariantCulture);
-        return $"obsidianx-mcp {info}\n  built: {built}\n  path:  {(string.IsNullOrEmpty(loc) ? "(unknown)" : loc)}";
+        return $"brainx-mcp {info}\n  built: {built}\n  path:  {(string.IsNullOrEmpty(loc) ? "(unknown)" : loc)}";
     }
 
     private static void PrintVersion()
@@ -60,8 +60,8 @@ internal static partial class Program
     public static async Task<int> Main(string[] args)
     {
         // CLI subcommand dispatch — single binary, multiple modes.
-        // `obsidianx-mcp install [--vault PATH]` runs the installer and exits;
-        // `obsidianx-mcp --version` prints the version and exits;
+        // `brainx-mcp install [--vault PATH]` runs the installer and exits;
+        // `brainx-mcp --version` prints the version and exits;
         // anything else (including no args) runs the MCP server.
         if (args.Length > 0 && args[0].Equals("install", StringComparison.OrdinalIgnoreCase))
         {
@@ -112,7 +112,7 @@ internal static partial class Program
 
         // Self-install brain-first memory rules into the user's Claude
         // Code project memory dir, idempotently. Mirrors what
-        // ObsidianX.Client does on first launch — but Client may not be
+        // BrainX.Client does on first launch — but Client may not be
         // running yet (or may not be installed at all on a CLI-only
         // machine). MCP is the universal entry point: every Claude
         // Code session boots the MCP exe, so we wire policy here.
@@ -129,14 +129,14 @@ internal static partial class Program
         // sidebar shows the version we're actually running. Desktop doesn't
         // render serverInfo.version anywhere visible — owners verify the
         // running version under Advanced options → Environment variables,
-        // where OBSIDIANX_MCP_VERSION lives. If that env var lags behind
+        // where BRAINX_MCP_VERSION lives. If that env var lags behind
         // ServerVersion (because the user upgraded the binary without
         // re-running register-claude), rewrite it here. Effect lands on
         // the NEXT Claude Desktop restart, not this session.
         try { EnsureDesktopConfigVersion(); }
         catch (Exception ex) { Log($"desktop config self-heal failed (non-fatal): {ex.Message}"); }
 
-        // If ObsidianX client isn't running, bring it up. The MCP server
+        // If BrainX client isn't running, bring it up. The MCP server
         // is spawned by Claude Desktop / Claude Code on first connection,
         // so this effectively "opens the brain visualiser automatically"
         // whenever the user starts talking to Claude.
@@ -202,7 +202,7 @@ internal static partial class Program
             ["resources"] = new JObject()
         },
         ["instructions"] =
-            "This is the owner's personal brain (ObsidianX) — a LIVING knowledge graph of 600+ notes, 1M+ words, 3,600+ wiki-links. It is NOT optional context. It is your primary memory.\n\n" +
+            "This is the owner's personal brain (BrainX) — a LIVING knowledge graph of 600+ notes, 1M+ words, 3,600+ wiki-links. It is NOT optional context. It is your primary memory.\n\n" +
             "AUTO-JOURNAL — The server AUTOMATICALLY logs every tool call you make to .obsidianx/sessions/<date>.md. You NEVER need to narrate 'I searched for X' — the brain is already tracking it. Focus your output on substance.\n\n" +
             "═══ HARD RULES ═══════════════════════════════════════════════\n\n" +
             "BEFORE ANSWERING any non-trivial prompt:\n" +
@@ -325,7 +325,7 @@ internal static partial class Program
                 "brain_synthesize's full-content packing (~8000 tokens). Bundle includes top 5-10 related notes " +
                 "with title + tags + short summary + ready-to-paste [[wiki-link]] block. Use this FIRST when the " +
                 "user asks about a known topic; fall back to brain_search/brain_synthesize if no bundle exists. " +
-                "Run `obsidianx-mcp bake-bundles` to (re)generate.",
+                "Run `brainx-mcp bake-bundles` to (re)generate.",
                 new JObject
                 {
                     ["type"] = "object",
@@ -337,7 +337,7 @@ internal static partial class Program
                 }),
             Tool("brain_bundles_list",
                 "Enumerate available pre-built context bundles (topic, type, note count, token estimate, last baked). " +
-                "Run BEFORE brain_bundle if you don't know what's available. Empty list = run `obsidianx-mcp bake-bundles`.",
+                "Run BEFORE brain_bundle if you don't know what's available. Empty list = run `brainx-mcp bake-bundles`.",
                 new JObject { ["type"] = "object", ["properties"] = new JObject() }),
             Tool("brain_import_path",
                 "Run Resonance Scan on a filesystem path and import matching notes into the brain. " +
@@ -561,7 +561,7 @@ internal static partial class Program
                     ["required"] = new JArray { "start" }
                 }),
             // ─── Co-Pilot Arena review queue (Phase 1C) ────────────────
-            // Three tools that bridge the ObsidianX orchestrator and the
+            // Three tools that bridge the BrainX orchestrator and the
             // Claude Desktop senior reviewer. Items live as one JSON file
             // each at <vault>/.obsidianx/review-queue/<id>.json. The
             // orchestrator submits, Claude Desktop fetches + posts a
@@ -569,7 +569,7 @@ internal static partial class Program
             // it (approve / revise loop / reject).
             Tool("submit_for_review",
                 "Queue a worker output for the senior reviewer (Claude Desktop). Used by the " +
-                "ObsidianX Co-Pilot Arena orchestrator after CluadeX produces a diff — NOT typically " +
+                "BrainX Co-Pilot Arena orchestrator after CluadeX produces a diff — NOT typically " +
                 "called by the user. Writes one JSON file per task to <vault>/.obsidianx/review-queue/.",
                 new JObject
                 {
@@ -753,7 +753,7 @@ internal static partial class Program
         var scope = NormaliseScope(args["scope"]?.ToString());
 
         var export = LoadExport()
-            ?? throw new InvalidOperationException("brain-export.json not found — open ObsidianX → Settings → Export Brain Now");
+            ?? throw new InvalidOperationException("brain-export.json not found — open BrainX → Settings → Export Brain Now");
 
         var ql = query.ToLowerInvariant();
         var matches = export.Nodes
@@ -1145,7 +1145,7 @@ internal static partial class Program
                 ["topicSlug"] = slug,
                 ["availableBundles"] = new JArray(available),
                 ["hint"] = available.Length == 0
-                    ? "No bundles baked yet. Run `obsidianx-mcp bake-bundles` to generate bundles for top topics."
+                    ? "No bundles baked yet. Run `brainx-mcp bake-bundles` to generate bundles for top topics."
                     : "Try one of the availableBundles, or call brain_search/brain_synthesize for ad-hoc topics."
             };
         }
@@ -1165,7 +1165,7 @@ internal static partial class Program
                 ["status"] = "parse-error",
                 ["topic"] = topic,
                 ["error"] = ex.Message,
-                ["hint"] = "Bundle file is malformed — re-run `obsidianx-mcp bake-bundles`."
+                ["hint"] = "Bundle file is malformed — re-run `brainx-mcp bake-bundles`."
             };
         }
     }
@@ -1181,7 +1181,7 @@ internal static partial class Program
                 ["status"] = "no-bundle-dir",
                 ["count"] = 0,
                 ["bundles"] = new JArray(),
-                ["hint"] = "No bundles baked yet. Run `obsidianx-mcp bake-bundles` to create them."
+                ["hint"] = "No bundles baked yet. Run `brainx-mcp bake-bundles` to create them."
             };
         }
 
@@ -1213,7 +1213,7 @@ internal static partial class Program
             ["count"] = summaries.Count,
             ["bundles"] = summaries,
             ["hint"] = summaries.Count == 0
-                ? "Bundle dir exists but no bundles. Run `obsidianx-mcp bake-bundles`."
+                ? "Bundle dir exists but no bundles. Run `brainx-mcp bake-bundles`."
                 : "Call brain_bundle topic=<topicSlug> to load a specific bundle."
         };
     }
@@ -1238,7 +1238,7 @@ internal static partial class Program
     }
 
     /// <summary>
-    /// `obsidianx-mcp bake-bundles [--vault PATH] [--topics tag1,tag2,...] [--limit-per-topic N]`
+    /// `brainx-mcp bake-bundles [--vault PATH] [--topics tag1,tag2,...] [--limit-per-topic N]`
     /// Discovers hot topics from the brain export (top tags) and queries
     /// (QueryGapAnalyzer) and bakes one JSON bundle per topic to
     /// `.obsidianx/bundles/<slug>.json`. Idempotent — overwrites existing
@@ -1267,10 +1267,10 @@ internal static partial class Program
                     int.TryParse(args[++i], out maxBundles);
                     break;
                 case "-h" or "--help" or "help":
-                    Console.WriteLine("Usage: obsidianx-mcp bake-bundles [options]");
+                    Console.WriteLine("Usage: brainx-mcp bake-bundles [options]");
                     Console.WriteLine();
                     Console.WriteLine("Options:");
-                    Console.WriteLine("  --vault PATH              Vault dir (default: env OBSIDIANX_VAULT or cwd)");
+                    Console.WriteLine("  --vault PATH              Vault dir (default: env BRAINX_VAULT or cwd)");
                     Console.WriteLine("  --topics tag1,tag2,...    Comma-separated topic list. Default: auto-discover top tags.");
                     Console.WriteLine("  --limit-per-topic N       Max notes per bundle (default 8)");
                     Console.WriteLine("  --max-bundles N           Max total bundles to bake (default 25)");
@@ -1281,15 +1281,15 @@ internal static partial class Program
         // Resolve vault — same logic as MCP-server-mode startup
         var vault = !string.IsNullOrWhiteSpace(vaultArg) && Directory.Exists(vaultArg)
             ? Path.GetFullPath(vaultArg)
-            : (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("OBSIDIANX_VAULT"))
-                && Directory.Exists(Environment.GetEnvironmentVariable("OBSIDIANX_VAULT")!)
-                    ? Path.GetFullPath(Environment.GetEnvironmentVariable("OBSIDIANX_VAULT")!)
+            : (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("BRAINX_VAULT"))
+                && Directory.Exists(Environment.GetEnvironmentVariable("BRAINX_VAULT")!)
+                    ? Path.GetFullPath(Environment.GetEnvironmentVariable("BRAINX_VAULT")!)
                     : Path.GetFullPath(Environment.CurrentDirectory));
 
         // Side-effect: rebind _vaultPath so LoadExport sees the right vault
         _vaultPath = vault;
 
-        Console.WriteLine($"obsidianx-mcp bake-bundles · v{ServerVersion}");
+        Console.WriteLine($"brainx-mcp bake-bundles · v{ServerVersion}");
         Console.WriteLine($"  vault:           {vault}");
         Console.WriteLine($"  limit-per-topic: {limitPerTopic}");
         Console.WriteLine();
@@ -1298,7 +1298,7 @@ internal static partial class Program
         if (export == null)
         {
             Console.WriteLine("✗ brain-export.json not found at " + Path.Combine(vault, ".obsidianx", "brain-export.json"));
-            Console.WriteLine("  Open ObsidianX → Settings → Export Brain Now first.");
+            Console.WriteLine("  Open BrainX → Settings → Export Brain Now first.");
             return 2;
         }
 
@@ -1546,7 +1546,7 @@ internal static partial class Program
             ["visitedFolders"] = report.VisitedFolders,
             ["prunedFolders"] = report.PrunedFolders,
             ["nearDuplicates"] = report.NearDuplicatesSkipped,
-            ["note"] = "Run 'Export Brain Now' in ObsidianX UI to refresh brain-export.json after import."
+            ["note"] = "Run 'Export Brain Now' in BrainX UI to refresh brain-export.json after import."
         };
     }
 
@@ -1610,7 +1610,7 @@ internal static partial class Program
             ["id"] = ComputeStableId(fullPath),
             ["bytes"] = sb.Length,
             ["hygiene"] = hygiene,
-            ["hint"] = "ObsidianX client will pick this up on next re-index. Tell user to click Re-index or it auto-refreshes on editor save. Inspect `hygiene` for related notes you should wiki-link before the next turn."
+            ["hint"] = "BrainX client will pick this up on next re-index. Tell user to click Re-index or it auto-refreshes on editor save. Inspect `hygiene` for related notes you should wiki-link before the next turn."
         };
     }
 
@@ -1697,7 +1697,7 @@ internal static partial class Program
             ["appendedBytes"] = content.Length,
             ["previousSha"] = previousSha,
             ["newSha"] = newSha,
-            ["hint"] = "Re-index in ObsidianX to update the graph. The diff shows what was appended — no need to brain_get_note this id to verify."
+            ["hint"] = "Re-index in BrainX to update the graph. The diff shows what was appended — no need to brain_get_note this id to verify."
         };
         if (diff != null) result["diff"] = diff;
         if (hygiene != null) result["hygiene"] = hygiene;
@@ -1860,7 +1860,7 @@ internal static partial class Program
     /// Graph traversal — BFS from one or more seed notes along wiki-links,
     /// rank reachable nodes, and return the resulting subgraph (nodes + the
     /// edges between them). The unique-moat tool: most LLM-wiki systems are
-    /// flat-RAG, but ObsidianX has a real graph (LinkedNodeIds + BacklinkIds
+    /// flat-RAG, but BrainX has a real graph (LinkedNodeIds + BacklinkIds
     /// precomputed per node). One walk replaces ~5 search round-trips.
     /// </summary>
     private static JToken BrainWalk(JObject args)
@@ -1882,7 +1882,7 @@ internal static partial class Program
         var compact = args["compact"]?.ToObject<bool>() ?? false;
         var scope = NormaliseScope(args["scope"]?.ToString());
 
-        var export = LoadExport() ?? throw new InvalidOperationException("brain-export.json not found — open ObsidianX → Settings → Export Brain Now");
+        var export = LoadExport() ?? throw new InvalidOperationException("brain-export.json not found — open BrainX → Settings → Export Brain Now");
         var byId = export.Nodes.ToDictionary(n => n.Id, n => n);
 
         // Scope acts as a "fence" for the walk: out-of-scope nodes are
@@ -2374,7 +2374,7 @@ internal static partial class Program
         return new JObject
         {
             ["mode"] = "legacy-heuristic",
-            ["note"] = "embeddings not built yet — using tag/category heuristic. Run 'Precompute embeddings' in ObsidianX, then re-run for LLM-verified contradictions.",
+            ["note"] = "embeddings not built yet — using tag/category heuristic. Run 'Precompute embeddings' in BrainX, then re-run for LLM-verified contradictions.",
             ["checked"] = export.Nodes.Count,
             ["found"] = pairs.Count,
             ["pairs"] = new JArray(top)
@@ -2670,7 +2670,7 @@ internal static partial class Program
         var actions = new JArray();
         if (missingEmb > 0)
             actions.Add(MakeAction("high", "missing-embeddings", $"{missingEmb} note(s) lack embeddings",
-                "obsidianx-mcp install --precompute  OR  brain_apply_audit_fix kind=missing-embeddings"));
+                "brainx-mcp install --precompute  OR  brain_apply_audit_fix kind=missing-embeddings"));
         if (staleEmb > 10)
             actions.Add(MakeAction("medium", "stale-embeddings", $"{staleEmb} embedding(s) older than the source note",
                 "brain_apply_audit_fix kind=stale-embeddings"));
@@ -3022,7 +3022,7 @@ internal static partial class Program
             ["dryRun"] = true, // category fix is always advisory — applying needs frontmatter edit + re-index
             ["scanned"] = uncat.Count,
             ["results"] = results,
-            ["note"] = "Category suggestions are advisory. Add 'category: <X>' to each note's YAML frontmatter and re-index in ObsidianX to apply."
+            ["note"] = "Category suggestions are advisory. Add 'category: <X>' to each note's YAML frontmatter and re-index in BrainX to apply."
         };
     }
 
@@ -3217,7 +3217,7 @@ internal static partial class Program
             return new JObject
             {
                 ["status"] = "no-export",
-                ["note"] = "brain-export.json not built yet — open ObsidianX → Settings → Export Brain Now to enable hygiene suggestions"
+                ["note"] = "brain-export.json not built yet — open BrainX → Settings → Export Brain Now to enable hygiene suggestions"
             };
         }
 
@@ -3398,7 +3398,7 @@ internal static partial class Program
     // line up the prior turn's notes.
     //
     // Cache key embeds the brain-export.json mtime, so a re-export busts
-    // every entry automatically. ENV escape hatch: OBSIDIANX_DISABLE_MEMO=1.
+    // every entry automatically. ENV escape hatch: BRAINX_DISABLE_MEMO=1.
     // Per-call escape hatch: pass bypass_cache:true.
 
     private record MemoEntry(DateTime AtUtc, JArray Compact, int OriginalCount, int HitCount);
@@ -3433,7 +3433,7 @@ internal static partial class Program
 
     private static JToken? TryGetMemoHit(string toolName, JObject args, string queryOverride)
     {
-        if (Environment.GetEnvironmentVariable("OBSIDIANX_DISABLE_MEMO") == "1") return null;
+        if (Environment.GetEnvironmentVariable("BRAINX_DISABLE_MEMO") == "1") return null;
         if (args["bypass_cache"]?.ToObject<bool>() == true) return null;
 
         var key = MakeMemoKey(toolName, args, queryOverride);
@@ -3511,7 +3511,7 @@ internal static partial class Program
     // ~2^48 notes; ample for any brain.
     //
     // Bypass: pass bypass_cache:true on the get_note call. The env
-    // var OBSIDIANX_DISABLE_MEMO=1 disables ALL memos (search + note).
+    // var BRAINX_DISABLE_MEMO=1 disables ALL memos (search + note).
     //
     // Cross-session persistence (Phase C) will hydrate this dict from
     // SQLite at startup and flush back periodically, so a fresh MCP
@@ -3577,7 +3577,7 @@ internal static partial class Program
 
     private static JObject? TryGetNoteMemoHit(string noteId, string sha, NodeSummary node, JObject args)
     {
-        if (Environment.GetEnvironmentVariable("OBSIDIANX_DISABLE_MEMO") == "1") return null;
+        if (Environment.GetEnvironmentVariable("BRAINX_DISABLE_MEMO") == "1") return null;
         if (args["bypass_cache"]?.ToObject<bool>() == true) return null;
 
         lock (_noteMemoLock)
@@ -3711,7 +3711,7 @@ internal static partial class Program
     //
     // MySQL parity: deferred to v2.6.1. The MCP process does not
     // currently connect to MySQL (it's a server-side backend used by
-    // ObsidianX.Server for team setups). Adding a MySQL path here
+    // BrainX.Server for team setups). Adding a MySQL path here
     // would require config plumbing that doesn't pay off until at
     // least one team customer asks for it.
 
@@ -3953,7 +3953,7 @@ internal static partial class Program
 
     private static string ResolveVault(string[] args)
     {
-        var env = Environment.GetEnvironmentVariable("OBSIDIANX_VAULT");
+        var env = Environment.GetEnvironmentVariable("BRAINX_VAULT");
         if (!string.IsNullOrWhiteSpace(env) && Directory.Exists(env)) return env;
         // Args: first arg that's not the .dll path itself
         foreach (var a in args.Skip(1))
@@ -3963,20 +3963,20 @@ internal static partial class Program
 
     private static void Log(string msg)
     {
-        try { Console.Error.WriteLine($"[obsidianx-mcp] {msg}"); } catch { }
+        try { Console.Error.WriteLine($"[brainx-mcp] {msg}"); } catch { }
     }
 
     /// <summary>
     /// Self-healing version stamp in Claude Desktop's config. Walks
     /// %APPDATA%/Claude/claude_desktop_config.json, finds any
-    /// "obsidianx-brain*" entry, and rewrites its OBSIDIANX_MCP_VERSION
+    /// "brainx-brain*" entry, and rewrites its BRAINX_MCP_VERSION
     /// env var to <see cref="ServerVersion"/> if the two disagree.
     ///
     /// Why this exists: Claude Desktop's Settings → Developer UI doesn't
     /// render the MCP <c>serverInfo.version</c> field anywhere, so the
     /// only way to verify "the running binary is what I think it is" is
     /// via the env var shown under Advanced options. If the owner upgrades
-    /// the binary without re-running <c>obsidianx-mcp register-claude</c>,
+    /// the binary without re-running <c>brainx-mcp register-claude</c>,
     /// the env var lies. This method closes that gap automatically —
     /// effect lands on the NEXT Claude Desktop restart, not this session.
     ///
@@ -4004,7 +4004,7 @@ internal static partial class Program
         bool changed = false;
         foreach (var prop in servers.Properties())
         {
-            if (!prop.Name.StartsWith("obsidianx-brain", StringComparison.OrdinalIgnoreCase))
+            if (!prop.Name.StartsWith("brainx-brain", StringComparison.OrdinalIgnoreCase))
                 continue;
             if (prop.Value is not JObject entry) continue;
 
@@ -4015,11 +4015,11 @@ internal static partial class Program
                 entry["env"] = env;
             }
 
-            var current = env["OBSIDIANX_MCP_VERSION"]?.ToString();
+            var current = env["BRAINX_MCP_VERSION"]?.ToString();
             if (!string.Equals(current, ServerVersion, StringComparison.Ordinal))
             {
-                env["OBSIDIANX_MCP_VERSION"] = ServerVersion;
-                Log($"desktop config: bumped OBSIDIANX_MCP_VERSION on \"{prop.Name}\" {current ?? "(unset)"} -> {ServerVersion}");
+                env["BRAINX_MCP_VERSION"] = ServerVersion;
+                Log($"desktop config: bumped BRAINX_MCP_VERSION on \"{prop.Name}\" {current ?? "(unset)"} -> {ServerVersion}");
                 changed = true;
             }
         }
@@ -4032,7 +4032,7 @@ internal static partial class Program
     }
 
     /// <summary>
-    /// Spawn ObsidianX.Client if no instance is already running. Walks
+    /// Spawn BrainX.Client if no instance is already running. Walks
     /// up from the MCP exe's own location to find the Client build
     /// output, respecting both Release and Debug configurations. No-op
     /// if the client is already alive or the exe can't be found — MCP
@@ -4043,13 +4043,13 @@ internal static partial class Program
         try
         {
             // Already running? Leave it alone.
-            if (System.Diagnostics.Process.GetProcessesByName("ObsidianX.Client").Length > 0)
+            if (System.Diagnostics.Process.GetProcessesByName("BrainX.Client").Length > 0)
                 return;
 
             // The MCP exe lives at
-            //   <solnRoot>/ObsidianX.Mcp/bin/<cfg>/net9.0/obsidianx-mcp.exe
+            //   <solnRoot>/BrainX.Mcp/bin/<cfg>/net9.0/brainx-mcp.exe
             // Client sits at
-            //   <solnRoot>/ObsidianX.Client/bin/<cfg>/net10.0-windows/BrainX.Client.exe
+            //   <solnRoot>/BrainX.Client/bin/<cfg>/net10.0-windows/BrainX.Client.exe
             var mcpExe = System.Reflection.Assembly.GetExecutingAssembly().Location;
             if (string.IsNullOrEmpty(mcpExe)) mcpExe = Environment.GetCommandLineArgs()[0];
             var solnRoot = FindSolutionRoot(Path.GetDirectoryName(mcpExe) ?? "");
@@ -4061,8 +4061,8 @@ internal static partial class Program
             // weeks-old binary. Pick the freshest by LastWriteTime instead.
             string[] candidates =
             [
-                Path.Combine(solnRoot, "ObsidianX.Client", "bin", "Release", "net10.0-windows", "BrainX.Client.exe"),
-                Path.Combine(solnRoot, "ObsidianX.Client", "bin", "Debug",   "net10.0-windows", "BrainX.Client.exe")
+                Path.Combine(solnRoot, "BrainX.Client", "bin", "Release", "net10.0-windows", "BrainX.Client.exe"),
+                Path.Combine(solnRoot, "BrainX.Client", "bin", "Debug",   "net10.0-windows", "BrainX.Client.exe")
             ];
 
             var existing = candidates
@@ -4096,7 +4096,7 @@ internal static partial class Program
         var dir = new DirectoryInfo(startDir);
         while (dir != null)
         {
-            if (File.Exists(Path.Combine(dir.FullName, "ObsidianX.slnx"))) return dir.FullName;
+            if (File.Exists(Path.Combine(dir.FullName, "BrainX.slnx"))) return dir.FullName;
             dir = dir.Parent;
         }
         return null;
@@ -4107,7 +4107,7 @@ internal static partial class Program
     // Queue layout
     //   <vault>/.obsidianx/review-queue/<id>.json
     //
-    // Each file is one task. The orchestrator (ObsidianX) writes;
+    // Each file is one task. The orchestrator (BrainX) writes;
     // Claude Desktop reads + writes verdict back; the orchestrator polls
     // for the verdict and then either ships it (approved), sends back to
     // the worker (revise), or escalates (rejected).

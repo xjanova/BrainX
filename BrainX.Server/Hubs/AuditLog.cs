@@ -16,7 +16,7 @@ namespace BrainX.Server.Hubs;
 /// binary. Per-line append, fsync after each write. Single mutex.
 ///
 /// Key handling: derived once at startup from
-/// <c>OBSIDIANX_AUDIT_KEY</c> env var if present, else a random 32 bytes
+/// <c>BRAINX_AUDIT_KEY</c> env var if present, else a random 32 bytes
 /// kept in-memory (logs from one server run can be verified only while
 /// the process lives — fine for dev; ops should set the env var in prod
 /// so chains survive restarts).
@@ -37,13 +37,13 @@ public static class AuditLog
             Directory.CreateDirectory(baseDir);
             _path = Path.Combine(baseDir, "share-audit.log");
 
-            var envKey = Environment.GetEnvironmentVariable("OBSIDIANX_AUDIT_KEY");
+            var envKey = Environment.GetEnvironmentVariable("BRAINX_AUDIT_KEY");
             _hmacKey = !string.IsNullOrWhiteSpace(envKey)
                 ? Encoding.UTF8.GetBytes(envKey)
                 : RandomNumberGenerator.GetBytes(32);
 
             // Rebuild last-hash from existing log so a server restart with
-            // the same OBSIDIANX_AUDIT_KEY continues the chain instead of
+            // the same BRAINX_AUDIT_KEY continues the chain instead of
             // forking it.
             if (File.Exists(_path))
             {

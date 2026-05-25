@@ -258,7 +258,7 @@ public class BrainHub : Hub
             Success = true,
             YourAddress = peerInfo.BrainAddress,
             TotalPeers = totalPeers,
-            Message = $"Welcome to ObsidianX Network! {totalPeers} brains connected."
+            Message = $"Welcome to BrainX Network! {totalPeers} brains connected."
         });
 
         var shortAddr = peerInfo.BrainAddress.Length > 18 ? peerInfo.BrainAddress[..18] + "..." : peerInfo.BrainAddress;

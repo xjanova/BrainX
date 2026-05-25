@@ -6,7 +6,7 @@ namespace BrainX.Core.Services;
 
 /// <summary>
 /// Exports the brain's expertise in formats that Claude and any external
-/// tool can consume without understanding ObsidianX internals.
+/// tool can consume without understanding BrainX internals.
 ///
 /// Produces three artifacts in .obsidianx/:
 ///  • brain-export.json   — full machine-readable index (schema v1)
@@ -272,7 +272,7 @@ public class BrainExporter
     {
         var sb = new StringBuilder();
         sb.AppendLine(ClaudeBeginMarker);
-        sb.AppendLine("<!-- Auto-managed by ObsidianX BrainExporter. Do not edit by hand. -->");
+        sb.AppendLine("<!-- Auto-managed by BrainX BrainExporter. Do not edit by hand. -->");
         sb.AppendLine();
         sb.AppendLine("## Brain Profile (for Claude & external tools)");
         sb.AppendLine();

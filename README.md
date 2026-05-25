@@ -1,4 +1,4 @@
-# ObsidianX — Neural Knowledge Network
+# BrainX — Neural Knowledge Network
 
 <div align="center">
 
@@ -44,9 +44,9 @@
 
 ---
 
-## What is ObsidianX?
+## What is BrainX?
 
-ObsidianX is a **complete Obsidian replacement** that turns a Markdown vault into:
+BrainX is a **complete Obsidian replacement** that turns a Markdown vault into:
 
 - a **living 3D brain** you can rotate, zoom, and dive into
 - a **2D fallback** that's blazingly fast at any node count
@@ -58,7 +58,7 @@ ObsidianX is a **complete Obsidian replacement** that turns a Markdown vault int
 Three processes, one chain:
 
 ```
-Claude Desktop ──spawns──► obsidianx-mcp ──spawns──► ObsidianX.Client ──spawns──► ObsidianX.Server
+Claude Desktop ──spawns──► brainx-mcp ──spawns──► BrainX.Client ──spawns──► BrainX.Server
                               (stdio MCP)              (WPF, 3D + 2D)              (Kestrel :5142)
                                                                                           │
                                                                                           └─ AI Hub: Ollama + NVIDIA NIM
@@ -96,9 +96,9 @@ If any link is missing, the next one to come up resurrects it. **The user never 
 - 🌐 **AI Hub** — single API surface over Ollama (local) + NVIDIA NIM (free tier, Llama 4 / GPT-OSS / DeepSeek / Qwen / Gemma) + OpenRouter + DeepSeek; backend + model picker + per-router stats
 - 🪞 **Claude redirect mode** — toggle Claude Desktop traffic to a local model with full visibility of in/out bytes and request count
 
-## ObsidianX vs Obsidian
+## BrainX vs Obsidian
 
-| Feature | Obsidian | ObsidianX |
+| Feature | Obsidian | BrainX |
 |---------|----------|-----------|
 | Markdown editor | Yes | Yes (AvalonEdit + cyberpunk theme) |
 | `[[wiki-links]]` | Yes | Yes (Ctrl+Click + auto-update on rename) |
@@ -119,8 +119,8 @@ If any link is missing, the next one to come up resurrects it. **The user never 
 ## Architecture
 
 ```
-ObsidianX/
-├── ObsidianX.Core/              # Shared models & services (.NET 9)
+BrainX/
+├── BrainX.Core/              # Shared models & services (.NET 9)
 │   ├── Models/
 │   │   ├── BrainIdentity.cs        # ECDSA crypto identity
 │   │   ├── KnowledgeNode.cs        # Graph nodes & edges
@@ -131,7 +131,7 @@ ObsidianX/
 │       ├── BrainExporter.cs        # JSON export + CLAUDE.md splice
 │       └── ClaudeIntegration.cs    # First-run CLAUDE.md scaffold
 │
-├── ObsidianX.Client/            # WPF Desktop App (.NET 10)
+├── BrainX.Client/            # WPF Desktop App (.NET 10)
 │   ├── App.xaml.cs                 # Auto-shortcut + icon-cache refresh
 │   ├── MainWindow.xaml / .cs       # 11 views, 3D + 2D viewports, status bar
 │   └── Services/
@@ -142,11 +142,11 @@ ObsidianX/
 │       ├── ClusterTree.cs              # Fractal cluster hierarchy
 │       └── NetworkClient.cs            # SignalR client
 │
-├── ObsidianX.Mcp/               # MCP server for Claude (.NET 9, stdio)
+├── BrainX.Mcp/               # MCP server for Claude (.NET 9, stdio)
 │   └── Program.cs                  # JSON-RPC, brain tools, auto-journal,
 │                                   # newest-mtime Client launcher
 │
-└── ObsidianX.Server/            # ASP.NET Core Server (.NET 10)
+└── BrainX.Server/            # ASP.NET Core Server (.NET 10)
     ├── Program.cs                  # REST + SignalR + AI Hub
     ├── Hubs/BrainHub.cs            # Matchmaking + sharing protocol
     ├── Services/AiRouter.cs        # Ollama / NIM / OpenRouter / DeepSeek
@@ -178,15 +178,15 @@ ObsidianX/
 ## Getting started
 
 ```bash
-git clone https://github.com/xjanova/ObsidianX.git
-cd ObsidianX
-dotnet build ObsidianX.slnx -c Release
+git clone https://github.com/xjanova/BrainX.git
+cd BrainX
+dotnet build BrainX.slnx -c Release
 ```
 
 That's it for setup. Now run **just the Client**:
 
 ```bash
-cd ObsidianX.Client
+cd BrainX.Client
 dotnet run -- "C:\path\to\your\markdown\vault"
 ```
 
@@ -201,10 +201,10 @@ To use the brain from Claude Desktop, register the MCP server in `claude_desktop
 ```json
 {
   "mcpServers": {
-    "obsidianx-brain": {
-      "command": "C:\\path\\to\\ObsidianX\\ObsidianX.Mcp\\bin\\Release\\net9.0\\obsidianx-mcp.exe",
+    "brainx-brain": {
+      "command": "C:\\path\\to\\BrainX\\BrainX.Mcp\\bin\\Release\\net9.0\\brainx-mcp.exe",
       "args": [],
-      "env": { "OBSIDIANX_VAULT": "C:\\path\\to\\your\\vault" }
+      "env": { "BRAINX_VAULT": "C:\\path\\to\\your\\vault" }
     }
   }
 }

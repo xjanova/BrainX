@@ -132,7 +132,7 @@ public partial class KnowledgeIndexer
         // ── PDF pass ──
         // Pull text out of every .pdf in the vault and index it as a
         // first-class note. Obsidian itself can't search PDF bodies —
-        // ObsidianX gets this for free via PdfPig.
+        // BrainX gets this for free via PdfPig.
         var pdfFiles = Directory.GetFiles(vaultPath, "*.pdf", SearchOption.AllDirectories)
             .Where(f => !f.Contains(".obsidian") && !f.Contains(".trash"));
         foreach (var pdf in pdfFiles)

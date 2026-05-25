@@ -121,7 +121,7 @@ public class AiHubService
     private string BuildSystemPrompt(string brainContext)
     {
         var sb = new StringBuilder();
-        sb.AppendLine("You are an AI assistant with access to the user's personal knowledge brain (ObsidianX).");
+        sb.AppendLine("You are an AI assistant with access to the user's personal knowledge brain (BrainX).");
         sb.AppendLine("Prefer answers grounded in the owner's notes when relevant; cite note titles in parens.");
         sb.AppendLine("If the user's question isn't covered, say so and answer from general knowledge.");
         if (!string.IsNullOrWhiteSpace(brainContext))

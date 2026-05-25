@@ -13,9 +13,9 @@ namespace BrainX.Core.Services;
 /// CluadeX is a WPF agent app at E:\code\claudeclient\CluadeX. It exposes
 /// its agentic-loop capabilities (48 tools, 15-iter loop, native tool_use,
 /// skill system) over a per-user named pipe at <c>\\.\pipe\cluadex-mcp</c>.
-/// We wire ObsidianX's "Co-Pilot Arena" to it so:
+/// We wire BrainX's "Co-Pilot Arena" to it so:
 ///
-///     Local Ollama (intern, in ObsidianX) → CluadeXClient → CluadeX (worker)
+///     Local Ollama (intern, in BrainX) → CluadeXClient → CluadeX (worker)
 ///                                                  → diff back ← Claude Desktop reviewer
 ///
 /// Each call to <see cref="WriteCodeAsync"/> spawns a NEW visible chat
@@ -321,7 +321,7 @@ public sealed class CluadeXClient : IAsyncDisposable
     }
 
     /// <summary>Ask CluadeX which provider+model it has loaded right now.
-    /// Used for the model-alignment guard: ObsidianX's intern and CluadeX
+    /// Used for the model-alignment guard: BrainX's intern and CluadeX
     /// must run the SAME local model or they'll fight over GPU memory.</summary>
     public async Task<CluadeXModelInfo> GetActiveModelAsync(int timeoutMs = 5000, CancellationToken ct = default)
     {
@@ -348,7 +348,7 @@ public sealed class CluadeXClient : IAsyncDisposable
 
     /// <summary>Force CluadeX to switch its active provider+model so it
     /// aligns with this app. Most common case: pass provider="Ollama" +
-    /// model="qwen2.5:7b" so both ObsidianX intern and CluadeX worker
+    /// model="qwen2.5:7b" so both BrainX intern and CluadeX worker
     /// use the same Ollama daemon entry → one model in VRAM, not two.
     /// Returns the result envelope as a parsed POCO. Throws if the
     /// switch failed at the protocol level (network / auth); a
@@ -505,7 +505,7 @@ public sealed class CluadeXClient : IAsyncDisposable
     }
 
     // ─── Tiny private DTOs ──────────────────────────────────────────────
-    // Don't reuse CluadeX's JsonRpc* models here — keeping ObsidianX.Core
+    // Don't reuse CluadeX's JsonRpc* models here — keeping BrainX.Core
     // clean of cross-project copies. These mirror only what we need.
 
     private sealed class JsonRpcOutboundRequest

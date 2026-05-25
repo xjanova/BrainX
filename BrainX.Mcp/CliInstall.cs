@@ -10,7 +10,7 @@ using BrainX.Core.Services;
 namespace BrainX.Mcp;
 
 /// <summary>
-/// `obsidianx-mcp install` — one command to wire ObsidianX into Claude Code:
+/// `brainx-mcp install` — one command to wire BrainX into Claude Code:
 ///   1. Seed/upgrade per-project memory rules (brain-first protocol)
 ///   2. Print Claude Code MCP registration command (we don't edit
 ///      ~/.claude.json directly — risk of corruption, Claude Code owns it)
@@ -19,7 +19,7 @@ namespace BrainX.Mcp;
 ///   5. Print verification steps
 ///
 /// Single binary that doubles as the MCP server (when invoked without args)
-/// and the installer (when invoked as `obsidianx-mcp install`). Same logic
+/// and the installer (when invoked as `brainx-mcp install`). Same logic
 /// is callable from Client UI and from the npm wrapper, so all four
 /// install surfaces share one code path.
 /// </summary>
@@ -30,30 +30,30 @@ internal static class CliInstall
     /// Desktop config. NEVER suffix this with a version — the label
     /// shown in Claude Desktop's sidebar comes from this key directly,
     /// so baking the version in here freezes the displayed name across
-    /// binary upgrades. Version lives in the OBSIDIANX_MCP_VERSION env
+    /// binary upgrades. Version lives in the BRAINX_MCP_VERSION env
     /// var instead (visible under Advanced options) and the MCP server
     /// self-heals that var to <c>ServerVersion</c> on every boot — see
     /// <c>EnsureDesktopConfigVersion</c> in Program.cs.
     /// </summary>
-    public const string McpServerName = "obsidianx-brain";
+    public const string McpServerName = "brainx-brain";
 
     public static void PrintTopLevelHelp()
     {
-        Console.WriteLine("ObsidianX MCP " + Program.ServerVersion + " — local-first brain for Claude Code");
+        Console.WriteLine("BrainX MCP " + Program.ServerVersion + " — local-first brain for Claude Code");
         Console.WriteLine();
         Console.WriteLine("Usage:");
-        Console.WriteLine("  obsidianx-mcp                           Run as MCP server (default; spawned by Claude Code)");
-        Console.WriteLine("  obsidianx-mcp <vault-path>              Run as MCP server with explicit vault path");
-        Console.WriteLine("  obsidianx-mcp install [options]         Install brain-first rules + print MCP registration");
-        Console.WriteLine("  obsidianx-mcp register-claude [--vault] Re-register this binary with Claude Code (auto-includes");
-        Console.WriteLine("                                          server name stays \"obsidianx-brain\"; OBSIDIANX_MCP_VERSION env var is self-healed on every MCP boot)");
-        Console.WriteLine("  obsidianx-mcp bake-bundles [options]    Pre-bake ~500-token context bundles for top topics so");
+        Console.WriteLine("  brainx-mcp                           Run as MCP server (default; spawned by Claude Code)");
+        Console.WriteLine("  brainx-mcp <vault-path>              Run as MCP server with explicit vault path");
+        Console.WriteLine("  brainx-mcp install [options]         Install brain-first rules + print MCP registration");
+        Console.WriteLine("  brainx-mcp register-claude [--vault] Re-register this binary with Claude Code (auto-includes");
+        Console.WriteLine("                                          server name stays \"brainx-brain\"; BRAINX_MCP_VERSION env var is self-healed on every MCP boot)");
+        Console.WriteLine("  brainx-mcp bake-bundles [options]    Pre-bake ~500-token context bundles for top topics so");
         Console.WriteLine("                                          brain_bundle <topic> answers in ONE cheap MCP call");
-        Console.WriteLine("  obsidianx-mcp --version | -v | version  Print version + binary path + build time");
-        Console.WriteLine("  obsidianx-mcp help                      Show this help");
+        Console.WriteLine("  brainx-mcp --version | -v | version  Print version + binary path + build time");
+        Console.WriteLine("  brainx-mcp help                      Show this help");
         Console.WriteLine();
         Console.WriteLine("`install` options:");
-        Console.WriteLine("  --vault PATH     Vault to install rules for (default: env OBSIDIANX_VAULT or current dir)");
+        Console.WriteLine("  --vault PATH     Vault to install rules for (default: env BRAINX_VAULT or current dir)");
         Console.WriteLine("  --pull-models    Pull nomic-embed-text + gemma3:4b via local Ollama if reachable");
         Console.WriteLine("  --precompute     Run embedding precompute after install (slow first time, ~1-2 min for 600 notes)");
         Console.WriteLine("  --quiet          Suppress section headers; print just status lines");
@@ -69,7 +69,7 @@ internal static class CliInstall
         if (opts.ShowHelp) { PrintInstallHelp(); return 0; }
 
         var vault = ResolveVault(opts.Vault);
-        Section(opts, "ObsidianX install · v" + Program.ServerVersion);
+        Section(opts, "BrainX install · v" + Program.ServerVersion);
         Console.WriteLine($"  MCP ver:   {Program.ServerVersion}");
         Console.WriteLine($"  Rules ver: {ClaudeBrainRulesInstaller.RuleVersion}");
         Console.WriteLine($"  Vault:     {vault}");
@@ -103,7 +103,7 @@ internal static class CliInstall
             Console.WriteLine($"      path:   {exePath}");
             Console.WriteLine($"      issue:  {DescribePathQuality(pathQuality)}");
             Console.WriteLine("      fix:    run this command from the PUBLISHED exe instead, e.g.");
-            Console.WriteLine("              G:\\Obsidian\\ObsidianX\\ObsidianX.Mcp\\bin\\Release\\net9.0\\obsidianx-mcp.exe install");
+            Console.WriteLine("              G:\\Obsidian\\BrainX\\BrainX.Mcp\\bin\\Release\\net9.0\\brainx-mcp.exe install");
             Console.WriteLine("              or use `dotnet publish -c Release` first and run the publish-dir exe.");
             Console.WriteLine();
         }
@@ -111,20 +111,20 @@ internal static class CliInstall
         Console.WriteLine();
         Console.WriteLine("  Run this once to register the MCP server with Claude Code:");
         Console.WriteLine();
-        // Server name stays "obsidianx-brain" forever — no version suffix
-        // in the key. OBSIDIANX_MCP_VERSION env var IS written though, so
+        // Server name stays "brainx-brain" forever — no version suffix
+        // in the key. BRAINX_MCP_VERSION env var IS written though, so
         // Claude Desktop's Advanced options panel can show what's running.
         // To stop the env var from going stale after binary upgrades, the
         // MCP server self-heals it on boot (EnsureDesktopConfigVersion in
         // Program.cs) — the user sees the updated value on the NEXT
         // Claude Desktop restart after upgrading.
         Console.WriteLine($"    claude mcp add {McpServerName} \"{exePath}\" \"{vault}\" \\");
-        Console.WriteLine($"      -e OBSIDIANX_VAULT=\"{vault}\" \\");
-        Console.WriteLine($"      -e OBSIDIANX_MCP_VERSION={Program.ServerVersion}");
+        Console.WriteLine($"      -e BRAINX_VAULT=\"{vault}\" \\");
+        Console.WriteLine($"      -e BRAINX_MCP_VERSION={Program.ServerVersion}");
         Console.WriteLine();
         Console.WriteLine("  Or let this binary do it for you (removes any existing registration first):");
         Console.WriteLine();
-        Console.WriteLine($"    obsidianx-mcp register-claude");
+        Console.WriteLine($"    brainx-mcp register-claude");
         Console.WriteLine();
         Console.WriteLine("  Or add this to your project's .mcp.json:");
         Console.WriteLine();
@@ -138,8 +138,8 @@ internal static class CliInstall
                     ["args"] = new JArray { vault },
                     ["env"] = new JObject
                     {
-                        ["OBSIDIANX_VAULT"] = vault,
-                        ["OBSIDIANX_MCP_VERSION"] = Program.ServerVersion
+                        ["BRAINX_VAULT"] = vault,
+                        ["BRAINX_MCP_VERSION"] = Program.ServerVersion
                     }
                 }
             }
@@ -155,7 +155,7 @@ internal static class CliInstall
         {
             Console.WriteLine("  ⚠  Ollama not reachable at http://localhost:11434");
             Console.WriteLine("      Install: https://ollama.com/download");
-            Console.WriteLine("      Then re-run `obsidianx-mcp install --pull-models` to pull required models.");
+            Console.WriteLine("      Then re-run `brainx-mcp install --pull-models` to pull required models.");
         }
         else
         {
@@ -198,7 +198,7 @@ internal static class CliInstall
             }
             else
             {
-                Console.WriteLine("  ⚠  Could not load graph (no brain-export.json yet?). Open ObsidianX.Client at least once to export, then re-run.");
+                Console.WriteLine("  ⚠  Could not load graph (no brain-export.json yet?). Open BrainX.Client at least once to export, then re-run.");
             }
         }
         else if (!opts.Precompute)
@@ -210,7 +210,7 @@ internal static class CliInstall
 
         // Summary
         Section(opts, "Done — verification");
-        Console.WriteLine("  In Claude Code, try: \"summarize ObsidianX architecture\"");
+        Console.WriteLine("  In Claude Code, try: \"summarize BrainX architecture\"");
         Console.WriteLine("  Expected: Claude calls brain_search/brain_semantic_search BEFORE answering,");
         Console.WriteLine("            and cites note titles in its reply.");
         Console.WriteLine();
@@ -244,17 +244,17 @@ internal static class CliInstall
 
     private static void PrintInstallHelp()
     {
-        Console.WriteLine("Usage: obsidianx-mcp install [--vault PATH] [--pull-models] [--precompute] [--quiet]");
+        Console.WriteLine("Usage: brainx-mcp install [--vault PATH] [--pull-models] [--precompute] [--quiet]");
         Console.WriteLine();
         Console.WriteLine("Options:");
-        Console.WriteLine("  --vault PATH      Vault to install for. Default: env OBSIDIANX_VAULT or current dir.");
+        Console.WriteLine("  --vault PATH      Vault to install for. Default: env BRAINX_VAULT or current dir.");
         Console.WriteLine("  --pull-models     Pull nomic-embed-text + gemma3:4b via local Ollama (else just probe).");
         Console.WriteLine("  --precompute      Run embedding precompute after install.");
         Console.WriteLine("  --quiet           Suppress section headers.");
         Console.WriteLine();
         Console.WriteLine("Examples:");
-        Console.WriteLine("  obsidianx-mcp install --vault G:\\Obsidian");
-        Console.WriteLine("  obsidianx-mcp install --pull-models --precompute");
+        Console.WriteLine("  brainx-mcp install --vault G:\\Obsidian");
+        Console.WriteLine("  brainx-mcp install --pull-models --precompute");
     }
 
     private static void Section(Options opts, string title)
@@ -268,7 +268,7 @@ internal static class CliInstall
     {
         if (!string.IsNullOrWhiteSpace(explicitVault) && Directory.Exists(explicitVault))
             return Path.GetFullPath(explicitVault);
-        var env = Environment.GetEnvironmentVariable("OBSIDIANX_VAULT");
+        var env = Environment.GetEnvironmentVariable("BRAINX_VAULT");
         if (!string.IsNullOrWhiteSpace(env) && Directory.Exists(env))
             return Path.GetFullPath(env);
         return Path.GetFullPath(Environment.CurrentDirectory);
@@ -276,10 +276,10 @@ internal static class CliInstall
 
     /// <summary>
     /// One-shot `claude mcp` registration. Replaces any existing
-    /// "obsidianx-brain*" entry with one that points at THIS exe.
+    /// "brainx-brain*" entry with one that points at THIS exe.
     ///
     /// Server name is the stable <see cref="McpServerName"/> — no version
-    /// suffix in the key. OBSIDIANX_MCP_VERSION env var IS written so the
+    /// suffix in the key. BRAINX_MCP_VERSION env var IS written so the
     /// version is visible in `claude mcp get` and Claude Desktop's
     /// Advanced options panel; the MCP server itself self-heals that env
     /// var on every boot (see <c>EnsureDesktopConfigVersion</c> in
@@ -300,14 +300,14 @@ internal static class CliInstall
         }
         if (showHelp)
         {
-            Console.WriteLine("Usage: obsidianx-mcp register-claude [--vault PATH]");
+            Console.WriteLine("Usage: brainx-mcp register-claude [--vault PATH]");
             Console.WriteLine();
             Console.WriteLine("Registers this binary with Claude Code by running the equivalent of:");
-            Console.WriteLine("  claude mcp remove obsidianx-brain -s local   (if it exists)");
-            Console.WriteLine("  claude mcp add obsidianx-brain <exe> <vault> -e OBSIDIANX_VAULT=<vault> -e OBSIDIANX_MCP_VERSION=<v>");
+            Console.WriteLine("  claude mcp remove brainx-brain -s local   (if it exists)");
+            Console.WriteLine("  claude mcp add brainx-brain <exe> <vault> -e BRAINX_VAULT=<vault> -e BRAINX_MCP_VERSION=<v>");
             Console.WriteLine();
-            Console.WriteLine("Server name is always \"obsidianx-brain\" — no version suffix in the key.");
-            Console.WriteLine("OBSIDIANX_MCP_VERSION env var surfaces the running version under");
+            Console.WriteLine("Server name is always \"brainx-brain\" — no version suffix in the key.");
+            Console.WriteLine("BRAINX_MCP_VERSION env var surfaces the running version under");
             Console.WriteLine("Claude Desktop's Advanced options. The MCP server self-heals this var");
             Console.WriteLine("on every boot if the binary's ServerVersion has moved past it.");
             return 0;
@@ -316,7 +316,7 @@ internal static class CliInstall
         var vault = ResolveVault(vaultArg);
         var exePath = ResolveSelfPath();
         var pathQuality = ClassifyExePath(exePath);
-        Console.WriteLine($"obsidianx-mcp register-claude · v{Program.ServerVersion}");
+        Console.WriteLine($"brainx-mcp register-claude · v{Program.ServerVersion}");
         Console.WriteLine($"  exe:   {exePath}");
         Console.WriteLine($"  vault: {vault}");
         Console.WriteLine();
@@ -335,20 +335,20 @@ internal static class CliInstall
         var rc = await RunClaudeAsync(
             "mcp", "add", McpServerName,
             exePath, vault,
-            "-e", $"OBSIDIANX_VAULT={vault}",
-            "-e", $"OBSIDIANX_MCP_VERSION={Program.ServerVersion}"
+            "-e", $"BRAINX_VAULT={vault}",
+            "-e", $"BRAINX_MCP_VERSION={Program.ServerVersion}"
         ).ConfigureAwait(false);
         if (rc != 0)
         {
             Console.WriteLine($"  ✗ `claude mcp add` exited with code {rc}. Run it manually:");
-            Console.WriteLine($"    claude mcp add {McpServerName} \"{exePath}\" \"{vault}\" -e OBSIDIANX_VAULT=\"{vault}\" -e OBSIDIANX_MCP_VERSION={Program.ServerVersion}");
+            Console.WriteLine($"    claude mcp add {McpServerName} \"{exePath}\" \"{vault}\" -e BRAINX_VAULT=\"{vault}\" -e BRAINX_MCP_VERSION={Program.ServerVersion}");
             return rc;
         }
         Console.WriteLine("[3/3] Claude Desktop: updating claude_desktop_config.json...");
         UpdateClaudeDesktopConfig(exePath, vault);
         Console.WriteLine();
         Console.WriteLine($"✓ Done. Verify in TWO places:");
-        Console.WriteLine($"  • Claude Code CLI: `claude mcp get {McpServerName}` — see OBSIDIANX_MCP_VERSION={Program.ServerVersion}");
+        Console.WriteLine($"  • Claude Code CLI: `claude mcp get {McpServerName}` — see BRAINX_MCP_VERSION={Program.ServerVersion}");
         Console.WriteLine($"  • Claude Desktop:  Settings → Developer → Local MCP servers → \"{McpServerName}\" → Advanced options → Environment variables");
         Console.WriteLine($"  RESTART both Claude Code and Claude Desktop to pick up the new config.");
         return 0;
@@ -359,13 +359,13 @@ internal static class CliInstall
     /// THIS exe under the stable <see cref="McpServerName"/> key. Desktop's
     /// UI shows the key name in its sidebar — keeping it unversioned means
     /// the label stays correct across binary upgrades. The running version
-    /// is stamped into <c>env.OBSIDIANX_MCP_VERSION</c> so it's visible in
+    /// is stamped into <c>env.BRAINX_MCP_VERSION</c> so it's visible in
     /// the Advanced options panel; <c>EnsureDesktopConfigVersion</c>
     /// (Program.cs) self-heals that value on every MCP boot so it never
     /// drifts behind the binary.
     ///
-    /// Removes any existing key starting with "obsidianx-brain" to clean up
-    /// older version-suffixed entries (e.g. legacy "obsidianx-brain v2.4.0"
+    /// Removes any existing key starting with "brainx-brain" to clean up
+    /// older version-suffixed entries (e.g. legacy "brainx-brain v2.4.0"
     /// from the pre-2026-05-20 installer) and to keep the upsert idempotent.
     /// Safe to call even if no config exists yet.
     /// </summary>
@@ -401,11 +401,11 @@ internal static class CliInstall
             json["mcpServers"] = servers;
         }
 
-        // Remove any keys starting with "obsidianx-brain" (with or without
+        // Remove any keys starting with "brainx-brain" (with or without
         // a trailing " v<x.y.z>") — version bumps must not leave stale
         // duplicates in the sidebar.
         var staleKeys = servers.Properties()
-            .Where(p => p.Name.StartsWith("obsidianx-brain", StringComparison.OrdinalIgnoreCase))
+            .Where(p => p.Name.StartsWith("brainx-brain", StringComparison.OrdinalIgnoreCase))
             .Select(p => p.Name)
             .ToList();
         foreach (var k in staleKeys) servers.Remove(k);
@@ -417,8 +417,8 @@ internal static class CliInstall
             ["args"] = new JArray(),
             ["env"] = new JObject
             {
-                ["OBSIDIANX_VAULT"] = vault,
-                ["OBSIDIANX_MCP_VERSION"] = Program.ServerVersion
+                ["BRAINX_VAULT"] = vault,
+                ["BRAINX_MCP_VERSION"] = Program.ServerVersion
             }
         };
 
@@ -546,9 +546,9 @@ internal static class CliInstall
     private static string ResolveSelfPath()
     {
         // Prefer the .exe if we have one; otherwise fall back to the dll
-        // path the user can invoke as `dotnet path/to/obsidianx-mcp.dll`.
+        // path the user can invoke as `dotnet path/to/brainx-mcp.dll`.
         var loc = System.Reflection.Assembly.GetExecutingAssembly().Location;
-        if (string.IsNullOrEmpty(loc)) return "obsidianx-mcp.exe";
+        if (string.IsNullOrEmpty(loc)) return "brainx-mcp.exe";
         var exe = Path.ChangeExtension(loc, ".exe");
         return File.Exists(exe) ? exe : loc;
     }

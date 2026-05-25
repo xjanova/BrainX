@@ -39,7 +39,7 @@ public class EmbeddingService
     /// <summary>
     /// Embed every note that doesn't yet have a fresh sidecar file.
     /// Returns the count of newly written embeddings. Best-effort —
-    /// silently skips when Ollama is unreachable so ObsidianX still
+    /// silently skips when Ollama is unreachable so BrainX still
     /// works fully offline (just without semantic search).
     /// </summary>
     public async Task<int> PrecomputeMissingAsync(string vaultPath, KnowledgeGraph graph,
