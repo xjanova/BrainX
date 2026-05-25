@@ -1591,11 +1591,10 @@
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
-                                <StackPanel Margin="0,0,0,16">
-                                    <TextBlock Text="Network — BrainX Brain Mesh" FontSize="24" FontWeight="Bold"
-                                               Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,4"/>
-                                    <TextBlock Text="Connect your brain to the collective knowledge network"
-                                               FontSize="12" Foreground="{StaticResource TextSecondaryBrush}"/>
+                                <StackPanel Margin="0,0,0,22">
+                                    <TextBlock Text="Network" Style="{StaticResource TypeViewTitle}"/>
+                                    <TextBlock Text="Connect to the BrainX mesh · find brains by overlapping expertise"
+                                               Style="{StaticResource TypeViewSubtitle}"/>
                                 </StackPanel>
                                 <Grid Grid.Row="1">
                                     <Grid.ColumnDefinitions>
@@ -1698,10 +1697,9 @@
                                     <RowDefinition Height="*"/>
                                     <RowDefinition Height="Auto"/>
                                 </Grid.RowDefinitions>
-                                <StackPanel Margin="0,0,0,16">
+                                <StackPanel Margin="0,0,0,22">
                                     <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
-                                        <TextBlock Text="AI Chat" FontSize="24" FontWeight="Bold"
-                                                   Foreground="{StaticResource TextPrimaryBrush}"/>
+                                        <TextBlock Text="AI Brain Assistant" Style="{StaticResource TypeViewTitle}"/>
                                         <!-- Mode selector. Solo = today's behaviour (one model
                                              talks to the user). Co-Pilot Arena = orchestrated
                                              via the CluadeX bridge (named pipe \\.\pipe\cluadex-mcp).
@@ -2041,8 +2039,12 @@
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
-                                <TextBlock Text="Vault Explorer" FontSize="24" FontWeight="Bold"
-                                           Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,16"/>
+                                <StackPanel Margin="0,0,0,22">
+                                    <TextBlock Text="Vault Explorer" Style="{StaticResource TypeViewTitle}"/>
+                                    <TextBlock x:Name="VaultViewSubtitle"
+                                               Text="C:\xman\vault · auto-watched"
+                                               Style="{StaticResource TypeViewSubtitle}"/>
+                                </StackPanel>
                                 <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,12">
                                     <Button Content="New Note" Style="{StaticResource NeonButtonFilled}"
                                             Click="VaultNewNote_Click" Padding="12,6" Margin="0,0,8,0" FontSize="11"/>
@@ -2078,10 +2080,9 @@
                                 </Grid.RowDefinitions>
                                 <Grid Margin="0,0,0,16">
                                     <StackPanel>
-                                        <TextBlock Text="Connected Peers" FontSize="24" FontWeight="Bold"
-                                                   Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,4"/>
+                                        <TextBlock Text="Peers" Style="{StaticResource TypeViewTitle}"/>
                                         <TextBlock x:Name="PeersSubtitle" Text="Join the network to see peers"
-                                                   FontSize="12" Foreground="{StaticResource TextSecondaryBrush}"/>
+                                                   Style="{StaticResource TypeViewSubtitle}"/>
                                     </StackPanel>
                                     <Button Content="&#x1F504; Refresh" Style="{StaticResource NeonButton}"
                                             HorizontalAlignment="Right" VerticalAlignment="Top"
@@ -2112,11 +2113,10 @@
                                         <RowDefinition Height="Auto"/> <!-- activity / audit -->
                                     </Grid.RowDefinitions>
 
-                                    <StackPanel Grid.Row="0" Margin="0,0,0,16">
-                                        <TextBlock Text="Knowledge Sharing" FontSize="24" FontWeight="Bold"
-                                                   Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,4"/>
-                                        <TextBlock Text="Decide which peers see which parts of your brain. Default is deny — peers see nothing until you grant them."
-                                                   FontSize="12" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap"/>
+                                    <StackPanel Grid.Row="0" Margin="0,0,0,22">
+                                        <TextBlock Text="Sharing" Style="{StaticResource TypeViewTitle}"/>
+                                        <TextBlock Text="Review and act on incoming share requests · default-deny, you grant per-peer"
+                                                   Style="{StaticResource TypeViewSubtitle}" TextWrapping="Wrap"/>
                                     </StackPanel>
 
                                     <!-- ─── MY ADDRESS ─── -->
@@ -2492,11 +2492,10 @@
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
-                                <StackPanel Margin="0,0,0,16">
-                                    <TextBlock Text="Import / Scan" FontSize="24" FontWeight="Bold"
-                                               Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,4"/>
-                                    <TextBlock Text="Bring external knowledge into this BrainX vault. Original sources stay untouched."
-                                               FontSize="12" Foreground="{StaticResource TextSecondaryBrush}"/>
+                                <StackPanel Margin="0,0,0,22">
+                                    <TextBlock Text="Import / Scan" Style="{StaticResource TypeViewTitle}"/>
+                                    <TextBlock Text="Bring external knowledge into this BrainX vault — originals stay untouched"
+                                               Style="{StaticResource TypeViewSubtitle}"/>
                                 </StackPanel>
 
                                 <!-- Obsidian Vault Import card -->
@@ -2632,12 +2631,10 @@
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
-                                <StackPanel Margin="0,0,0,16">
-                                    <TextBlock Text="Token Economy" FontSize="24" FontWeight="Bold"
-                                               Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,4"/>
-                                    <TextBlock Text="Per-hour comparison: actual tokens spent (with brain) vs projected without brain. Heuristic estimates from local logs — Anthropic's real API counts are not exposed to us."
-                                               FontSize="12" Foreground="{StaticResource TextSecondaryBrush}"
-                                               TextWrapping="Wrap"/>
+                                <StackPanel Margin="0,0,0,22">
+                                    <TextBlock Text="Token Economy" Style="{StaticResource TypeViewTitle}"/>
+                                    <TextBlock Text="Per-hour comparison: actual tokens (with brain) vs projected without brain — heuristic from local logs"
+                                               Style="{StaticResource TypeViewSubtitle}" TextWrapping="Wrap"/>
                                 </StackPanel>
                                 <!-- Top-line stat cards -->
                                 <Grid Grid.Row="1" Margin="0,0,0,16">
@@ -2849,11 +2846,10 @@
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
-                                <StackPanel Margin="0,0,0,16">
-                                    <TextBlock Text="Brain Insights" FontSize="24" FontWeight="Bold"
-                                               Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,4"/>
-                                    <TextBlock Text="Topics you keep searching for but the brain isn't answering well — candidates for a new note. Two signals: sparse results (brain doesn't have it) + low follow-through (results weren't useful)."
-                                               FontSize="12" Foreground="{StaticResource TextSecondaryBrush}"
+                                <StackPanel Margin="0,0,0,22">
+                                    <TextBlock Text="Brain Insights" Style="{StaticResource TypeViewTitle}"/>
+                                    <TextBlock Text="Topics you keep searching for but the brain isn't answering well — candidates for a new note"
+                                               Style="{StaticResource TypeViewSubtitle}"
                                                TextWrapping="Wrap"/>
                                 </StackPanel>
                                 <!-- Top-line stat cards -->
@@ -3026,11 +3022,10 @@
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
-                                <StackPanel Margin="0,0,0,16">
-                                    <TextBlock Text="Search Vault" FontSize="24" FontWeight="Bold"
-                                               Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,4"/>
+                                <StackPanel Margin="0,0,0,22">
+                                    <TextBlock Text="Search" Style="{StaticResource TypeViewTitle}"/>
                                     <TextBlock Text="Full-text search across all notes"
-                                               FontSize="12" Foreground="{StaticResource TextSecondaryBrush}"/>
+                                               Style="{StaticResource TypeViewSubtitle}"/>
                                 </StackPanel>
                                 <Grid Grid.Row="1" Margin="0,0,0,16">
                                     <Grid.ColumnDefinitions>
@@ -3290,11 +3285,10 @@
                                 <StackPanel Margin="24,16,24,40" MaxWidth="980" HorizontalAlignment="Left">
 
                                     <!-- HEADER -->
-                                    <TextBlock Text="SSH Tools" FontSize="24" FontWeight="Bold"
-                                               Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,4"/>
+                                    <TextBlock Text="SSH Tools" Style="{StaticResource TypeViewTitle}"/>
                                     <TextBlock TextWrapping="Wrap"
-                                               Text="Owner-realm SSH gateway so Claude (via MCP) can grep server logs, check Exim queue, read WP config — without prompting you each time. Whitelisted commands only, audited to the brain."
-                                               FontSize="13" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,20"/>
+                                               Text="Owner-realm SSH gateway so Claude (via MCP) can grep server logs, check Exim queue, read WP config — whitelisted commands only"
+                                               Style="{StaticResource TypeViewSubtitle}" Margin="0,2,0,22"/>
 
                                     <!-- STATUS CARD -->
                                     <Border Style="{StaticResource CardPanel}" Margin="0,0,0,16">
@@ -3779,11 +3773,10 @@
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
-                                <StackPanel Margin="0,0,0,16">
-                                    <TextBlock Text="Settings" FontSize="24" FontWeight="Bold"
-                                               Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,4"/>
-                                    <TextBlock Text="Configure your BrainX brain"
-                                               FontSize="12" Foreground="{StaticResource TextSecondaryBrush}"/>
+                                <StackPanel Margin="0,0,0,22">
+                                    <TextBlock Text="Settings" Style="{StaticResource TypeViewTitle}"/>
+                                    <TextBlock Text="Identity · vault · AI keys · network · system"
+                                               Style="{StaticResource TypeViewSubtitle}"/>
                                 </StackPanel>
                                 <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
                                     <StackPanel>
