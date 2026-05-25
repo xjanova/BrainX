@@ -46,5 +46,13 @@ launchSettings.json
 # Design handoff working files (extracted from brainx.zip — reference
 # material the designer dropped during the UI redesign; not source code).
 .brainx-zip-extracted/
+.theme-zip-extracted/
+.t2-zip-extracted/
 brainx.zip
+theme.zip
+t2.zip
 logobrain.png
+
+# Debug screenshots (PrintWindow captures of running BrainX.Client)
+.brainx-*.png
+.prototype-*.png

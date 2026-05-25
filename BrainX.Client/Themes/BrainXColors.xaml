@@ -176,4 +176,53 @@
     <GradientStop Color="#3a96d8" Offset="1"/>
   </LinearGradientBrush>
 
+  <!-- ═══════════════════════════════════════════════════════════════════
+       PINK / HOT MAGENTA — the actual brand color per theme.zip handoff
+       (claude_handoff_package/CLAUDE_HANDOFF.md §3).
+       The Neural* set above leaned violet because the FIRST design handoff
+       (brainx.zip) was violet-themed; the screenshot-based handoff that
+       overrides it specifies hot pink. Keeping BOTH sets so views migrate
+       independently — Neural keys still work where they're already wired.
+       ═══════════════════════════════════════════════════════════════════ -->
+  <SolidColorBrush x:Key="BrandPink"       Color="#ff2d8f"/>
+  <SolidColorBrush x:Key="BrandPinkBright" Color="#ff5fa8"/>
+  <SolidColorBrush x:Key="BrandPinkDeep"   Color="#c41e6e"/>
+  <SolidColorBrush x:Key="BrandPinkGlow"   Color="#ff2d8f" Opacity="0.45"/>
+
+  <Color x:Key="BrandPinkColor">#ff2d8f</Color>
+  <Color x:Key="BrandPinkBrightColor">#ff5fa8</Color>
+  <Color x:Key="BrandPinkDeepColor">#c41e6e</Color>
+
+  <!-- Pink-tinted hairline / line / accent for the screenshots-aligned look -->
+  <SolidColorBrush x:Key="PinkLine"        Color="#ff2d8f" Opacity="0.10"/>
+  <SolidColorBrush x:Key="PinkLineStrong"  Color="#ff2d8f" Opacity="0.22"/>
+  <SolidColorBrush x:Key="PinkLineAccent"  Color="#ff2d8f" Opacity="0.45"/>
+
+  <!-- Pink primary-button gradient (Ask Claude per screenshot ai-brain-assistant.png) -->
+  <LinearGradientBrush x:Key="PinkPrimaryBtn" StartPoint="0,0" EndPoint="0,1">
+    <GradientStop Color="#ff5fa8" Offset="0"/>
+    <GradientStop Color="#c41e6e" Offset="1"/>
+  </LinearGradientBrush>
+
+  <!-- Pink titlebar / sidebar gradient (screenshots show near-black with
+       slight purple-pink tint, NOT the violet of the brainx.zip design) -->
+  <LinearGradientBrush x:Key="PinkTitlebarBg" StartPoint="0,0" EndPoint="0,1">
+    <GradientStop Color="#120a22" Offset="0"/>
+    <GradientStop Color="#0a0612" Offset="1"/>
+  </LinearGradientBrush>
+  <LinearGradientBrush x:Key="PinkSidebarBg" StartPoint="0,0" EndPoint="0,1">
+    <GradientStop Color="#0c0820" Offset="0"/>
+    <GradientStop Color="#08051a" Offset="1"/>
+  </LinearGradientBrush>
+
+  <!-- Data colors lifted from theme.zip handoff (sec 3) — used by category
+       dots in the Expertise overlay + neural-map nodes -->
+  <SolidColorBrush x:Key="DataPink"   Color="#ff2d8f"/>
+  <SolidColorBrush x:Key="DataCyan"   Color="#4ee7f0"/>
+  <SolidColorBrush x:Key="DataAmber"  Color="#f5b04a"/>
+  <SolidColorBrush x:Key="DataMint"   Color="#4ce3a4"/>
+  <SolidColorBrush x:Key="DataViolet" Color="#9a7cff"/>
+  <SolidColorBrush x:Key="DataOrange" Color="#ff8b4a"/>
+  <SolidColorBrush x:Key="DataSky"    Color="#6cc8ff"/>
+
 </ResourceDictionary>

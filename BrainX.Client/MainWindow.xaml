@@ -342,13 +342,14 @@
                                 <StackPanel Margin="0,8,0,8">
                                     <TextBlock Text="NAVIGATION" FontSize="10" Foreground="{StaticResource TextMutedBrush}"
                                                Margin="22,8,0,12" FontWeight="SemiBold"/>
-                                    <!-- Universe is the default startup view; Dashboard is the
-                                         classic stats overview kept available alongside it.
-                                         BrainGraph nav stays hidden because the Universe HUD has a
-                                         View toggle that flips to 2D Graph inline. -->
+                                    <!-- Per t2.zip handoff: "Brain Graph = Universe" — the sidebar
+                                         item labelled "Brain Graph" opens the Universe view (three.js
+                                         galaxy). NavBrainGraph stays hidden because its old
+                                         BrainGraphView contains a separate WPF viewport that's not
+                                         used anymore; the Universe HUD covers the same job. -->
                                     <Button x:Name="NavDashboard" Content="&#x2B21;  Dashboard"
                                             Style="{StaticResource NavButtonActive}" Click="Nav_Click" Tag="Dashboard"/>
-                                    <Button x:Name="NavUniverse" Content="&#x1F30C;  Universe"
+                                    <Button x:Name="NavUniverse" Content="&#x25C9;  Brain Graph"
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Universe"/>
                                     <Button x:Name="NavBrainGraph" Content="&#x25C9;  Brain Graph"
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="BrainGraph"
@@ -563,14 +564,16 @@
                                                            Foreground="{StaticResource TextMutedBrush}"
                                                            VerticalAlignment="Center"/>
                                                 <TextBlock Grid.Column="1" x:Name="DashHintText"
-                                                           Text="Drag=pan | Hover map + scroll=zoom | Click=info | Right-click=kick"
+                                                           Text="Locked view · open Brain Graph for full controls"
                                                            FontSize="9" Foreground="{StaticResource TextMutedBrush}"
                                                            HorizontalAlignment="Right" Opacity="0.6"
                                                            VerticalAlignment="Center" Margin="0,0,12,0"/>
-                                                <!-- 2D / 3D view toggle. 2D path uses WriteableBitmap and
-                                                     starts smoothly even with hundreds of nodes; 3D mode
-                                                     causes visible stutter on initial load, so default is 2D. -->
-                                                <StackPanel Grid.Column="2" Orientation="Horizontal">
+                                                <!-- 3D / 2D toggle hidden — Dashboard map is now a locked
+                                                     embedded Universe (per user spec "ปรับค่าใดๆไม่ได้").
+                                                     Buttons stay in the tree for code-behind compatibility
+                                                     (Nav_Click + DashViewMode_Click references) but are
+                                                     never shown. -->
+                                                <StackPanel Grid.Column="2" Orientation="Horizontal" Visibility="Collapsed">
                                                     <Button x:Name="DashView3DBtn" Content="3D"
                                                             Style="{StaticResource NeonButton}"
                                                             Padding="10,3" FontSize="10"
@@ -624,8 +627,16 @@
                                                     </Viewport3D>
                                                 </Border>
 
-                                                <!-- 2D primary view — WriteableBitmap renderer, default. -->
+                                                <!-- 2D primary view — WriteableBitmap renderer, default.
+                                                     LOCKED for the Dashboard per user spec ("ปรับค่าใดๆไม่ได้").
+                                                     IsHitTestVisible=False blocks Dash2D_MouseDown/Up/Move/Wheel/
+                                                     RightClick at the WPF level so pan / zoom / click-to-edit /
+                                                     right-click-kick are all disabled. Physics keeps running so
+                                                     nodes still slowly settle / drift (the "ออบิต" feel). To
+                                                     interact with the graph, user navigates to Brain Graph /
+                                                     Universe view from the sidebar where full controls remain. -->
                                                 <Border x:Name="DashView2DBorder" CornerRadius="8" ClipToBounds="True"
+                                                        IsHitTestVisible="False"
                                                         MouseLeftButtonDown="Dash2D_MouseDown"
                                                         MouseLeftButtonUp="Dash2D_MouseUp"
                                                         MouseMove="Dash2D_MouseMove"
