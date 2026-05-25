@@ -2278,44 +2278,54 @@
                             </Grid>
                         </Grid>
 
-                        <!-- ═══ SHARING VIEW ═══ -->
+                        <!-- ═══ SHARING VIEW ═══
+                             Per t2.zip screenshot 10-sharing.png + README §10.
+                             The redesign's 2-column "Incoming Requests | History"
+                             layout is overlaid on the existing wider feature set
+                             (My Address / Demo / Peers with Access kept as
+                             preamble cards above the spec-shaped 2-column row). -->
                         <Grid x:Name="SharingView" Visibility="Collapsed">
                             <!-- Main scrollable content. The Add/Edit dialog at the
                                  bottom of this Grid is positioned as a full-area
                                  overlay (separate Z-layer) so it floats over the
                                  scroll content when Visible. -->
                             <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                                <Grid Margin="24,16,24,16">
+                                <Grid Margin="28,24,28,16">
                                     <Grid.RowDefinitions>
                                         <RowDefinition Height="Auto"/> <!-- header -->
                                         <RowDefinition Height="Auto"/> <!-- my address -->
                                         <RowDefinition Height="Auto"/> <!-- demo peer join -->
                                         <RowDefinition Height="Auto"/> <!-- peers list card -->
-                                        <RowDefinition Height="Auto"/> <!-- incoming -->
-                                        <RowDefinition Height="Auto"/> <!-- activity / audit -->
+                                        <RowDefinition Height="Auto"/> <!-- incoming + history 2-col -->
                                     </Grid.RowDefinitions>
 
                                     <StackPanel Grid.Row="0" Margin="0,0,0,22">
                                         <TextBlock Text="Sharing" Style="{StaticResource TypeViewTitle}"/>
-                                        <TextBlock Text="Review and act on incoming share requests · default-deny, you grant per-peer"
+                                        <TextBlock x:Name="SharingSubtitle"
+                                                   Text="Review and act on incoming share requests · default-deny, you grant per-peer"
                                                    Style="{StaticResource TypeViewSubtitle}" TextWrapping="Wrap"/>
                                     </StackPanel>
 
                                     <!-- ─── MY ADDRESS ─── -->
-                                    <Border Grid.Row="1" Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                    <Border Grid.Row="1" Style="{StaticResource NeuralCard}"
+                                            Padding="22" Margin="0,0,0,14">
                                         <StackPanel>
-                                            <TextBlock Text="MY BRAIN ADDRESS" FontSize="11" FontWeight="SemiBold"
-                                                       Foreground="{StaticResource NeonCyanBrush}" Margin="0,0,0,10"/>
-                                            <TextBlock Text="Share this with peers who want to request access to your knowledge."
-                                                       FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,8" TextWrapping="Wrap"/>
+                                            <StackPanel Margin="0,0,0,14">
+                                                <TextBlock Text="My brain address" FontSize="16" FontWeight="Bold"
+                                                           Foreground="{StaticResource NeuralText}"/>
+                                                <TextBlock Text="Share this with peers who want to request access to your knowledge."
+                                                           FontSize="12.5" FontWeight="Medium"
+                                                           Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0" TextWrapping="Wrap"/>
+                                            </StackPanel>
                                             <Grid>
                                                 <Grid.ColumnDefinitions>
                                                     <ColumnDefinition Width="*"/>
                                                     <ColumnDefinition Width="Auto"/>
                                                 </Grid.ColumnDefinitions>
-                                                <Border Background="{StaticResource SurfaceBrush}" CornerRadius="4" Padding="10,6">
-                                                    <TextBlock x:Name="SharingMyAddressText" Text="—" FontFamily="{StaticResource MonoFont}"
-                                                               FontSize="12" Foreground="{StaticResource TextPrimaryBrush}"
+                                                <Border Background="{StaticResource NeuralBgInset}" CornerRadius="6"
+                                                        BorderBrush="{StaticResource NeuralLine}" BorderThickness="1" Padding="12,8">
+                                                    <TextBlock x:Name="SharingMyAddressText" Text="—" FontFamily="{StaticResource FontMono}"
+                                                               FontSize="12" Foreground="{StaticResource NeuralText1}"
                                                                VerticalAlignment="Center"/>
                                                 </Border>
                                                 <Button x:Name="SharingCopyAddrBtn" Grid.Column="1" Content="&#x1F4CB; Copy"
@@ -2333,19 +2343,25 @@
                                          the Universe tab so the visual effect is
                                          immediately visible. Self-cleaning — fake
                                          peers fade out after 8 seconds. -->
-                                    <Border Grid.Row="2" Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                    <Border Grid.Row="2" Style="{StaticResource NeuralCard}"
+                                            Padding="22" Margin="0,0,0,14">
                                         <StackPanel>
-                                            <TextBlock Text="LIVE PREVIEW" FontSize="11" FontWeight="SemiBold"
-                                                       Foreground="{StaticResource NeonGreenBrush}" Margin="0,0,0,8"/>
+                                            <StackPanel Margin="0,0,0,14">
+                                                <TextBlock Text="Live preview" FontSize="16" FontWeight="Bold"
+                                                           Foreground="{StaticResource NeuralText}"/>
+                                                <TextBlock Text="Visualize how peers appear on the orbit ring around your galaxy."
+                                                           FontSize="12.5" FontWeight="Medium"
+                                                           Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0" TextWrapping="Wrap"/>
+                                            </StackPanel>
                                             <Grid>
                                                 <Grid.ColumnDefinitions>
                                                     <ColumnDefinition Width="*"/>
                                                     <ColumnDefinition Width="Auto"/>
                                                 </Grid.ColumnDefinitions>
                                                 <TextBlock Grid.Column="0"
-                                                           Text="See what a peer joining your brain looks like — 3 simulated peers will appear on the orbit ring around your galaxy, then fade out after 8 seconds. No hub required."
-                                                           FontSize="11" TextWrapping="Wrap"
-                                                           Foreground="{StaticResource TextSecondaryBrush}"
+                                                           Text="3 simulated peers appear on the orbit ring, then fade out after 8 seconds. No hub required."
+                                                           FontSize="12" TextWrapping="Wrap"
+                                                           Foreground="{StaticResource NeuralText2}"
                                                            VerticalAlignment="Center" Margin="0,0,12,0"/>
                                                 <Button Grid.Column="1" x:Name="SharingDemoPeersBtn"
                                                         Content="&#x1F3AC;  Demo peer join"
@@ -2356,40 +2372,48 @@
                                     </Border>
 
                                     <!-- ─── PEERS WITH ACCESS ─── -->
-                                    <Border Grid.Row="3" Style="{StaticResource CardPanel}" Margin="0,0,0,12">
+                                    <Border Grid.Row="3" Style="{StaticResource NeuralCard}"
+                                            Padding="22" Margin="0,0,0,14">
                                         <StackPanel>
-                                            <Grid Margin="0,0,0,10">
+                                            <Grid Margin="0,0,0,12">
                                                 <Grid.ColumnDefinitions>
                                                     <ColumnDefinition Width="*"/>
                                                     <ColumnDefinition Width="Auto"/>
                                                 </Grid.ColumnDefinitions>
-                                                <StackPanel Orientation="Horizontal">
-                                                    <TextBlock Text="PEERS WITH ACCESS" FontSize="11" FontWeight="SemiBold"
-                                                               Foreground="{StaticResource NeonPinkBrush}" VerticalAlignment="Center"/>
-                                                    <Border Background="{StaticResource SurfaceLightBrush}" CornerRadius="8"
-                                                            Padding="6,1" Margin="8,0,0,0" VerticalAlignment="Center">
-                                                        <TextBlock x:Name="SharingScopeCountBadge" Text="0" FontSize="10"
-                                                                   FontWeight="Bold" Foreground="{StaticResource TextPrimaryBrush}"/>
-                                                    </Border>
+                                                <StackPanel>
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <TextBlock Text="Peers with access" FontSize="16" FontWeight="Bold"
+                                                                   Foreground="{StaticResource NeuralText}" VerticalAlignment="Center"/>
+                                                        <Border Background="{StaticResource NeuralBgInset}" CornerRadius="999"
+                                                                BorderBrush="{StaticResource NeuralLine}" BorderThickness="1"
+                                                                Padding="8,2" Margin="10,2,0,0" VerticalAlignment="Center">
+                                                            <TextBlock x:Name="SharingScopeCountBadge" Text="0" FontSize="11"
+                                                                       FontWeight="Bold" Foreground="{StaticResource NeuralText1}"/>
+                                                        </Border>
+                                                    </StackPanel>
+                                                    <TextBlock Text="Default-deny — peers see nothing until you explicitly grant access."
+                                                               FontSize="12.5" FontWeight="Medium"
+                                                               Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0" TextWrapping="Wrap"/>
                                                 </StackPanel>
                                                 <Button Grid.Column="1" x:Name="SharingAddScopeBtn" Content="&#x2795;  Grant access"
                                                         Style="{StaticResource NeonButtonFilled}" Click="SharingAddScopeBtn_Click"
-                                                        Padding="10,5"/>
+                                                        Padding="10,5" VerticalAlignment="Center"/>
                                             </Grid>
 
                                             <!-- Empty state -->
-                                            <Border x:Name="SharingEmptyState" Background="{StaticResource SurfaceBrush}"
-                                                    CornerRadius="6" Padding="16" Margin="0,4,0,0">
+                                            <Border x:Name="SharingEmptyState" Background="{StaticResource NeuralBgInset}"
+                                                    BorderBrush="{StaticResource NeuralLine}" BorderThickness="1"
+                                                    CornerRadius="9" Padding="18" Margin="0,4,0,0">
                                                 <StackPanel HorizontalAlignment="Center">
                                                     <TextBlock Text="&#x1F510;" FontSize="28" HorizontalAlignment="Center"
-                                                               Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,6"/>
+                                                               Foreground="{StaticResource NeuralTextDim}" Margin="0,0,0,6"/>
                                                     <TextBlock Text="No peers granted access yet"
                                                                FontSize="13" FontWeight="SemiBold"
-                                                               Foreground="{StaticResource TextSecondaryBrush}"
+                                                               Foreground="{StaticResource NeuralText2}"
                                                                HorizontalAlignment="Center"/>
                                                     <TextBlock Text="Default-deny is on. Peers can request, but they see nothing until you grant access."
-                                                               FontSize="11" TextWrapping="Wrap" TextAlignment="Center"
-                                                               Foreground="{StaticResource TextMutedBrush}" Margin="0,4,0,0"
+                                                               FontSize="11.5" TextWrapping="Wrap" TextAlignment="Center"
+                                                               Foreground="{StaticResource NeuralText3}" Margin="0,4,0,0"
                                                                MaxWidth="420"/>
                                                 </StackPanel>
                                             </Border>
@@ -2399,38 +2423,53 @@
                                         </StackPanel>
                                     </Border>
 
-                                    <!-- ─── INCOMING REQUESTS ─── -->
-                                    <Border Grid.Row="4" Style="{StaticResource CardPanel}" Margin="0,0,0,12">
-                                        <StackPanel>
-                                            <TextBlock Text="INCOMING REQUESTS" FontSize="11" FontWeight="SemiBold"
-                                                       Foreground="{StaticResource ElectricPurpleBrush}" Margin="0,0,0,10"/>
-                                            <StackPanel x:Name="IncomingSharesList">
-                                                <TextBlock Text="No incoming requests" FontSize="12"
-                                                           Foreground="{StaticResource TextMutedBrush}" FontStyle="Italic"/>
-                                            </StackPanel>
-                                        </StackPanel>
-                                    </Border>
+                                    <!-- ─── 2-COLUMN ROW: INCOMING (left wider) + HISTORY (right) ─── -->
+                                    <Grid Grid.Row="4" Margin="0,0,0,14">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="1.4*"/>
+                                            <ColumnDefinition Width="1*"/>
+                                        </Grid.ColumnDefinitions>
 
-                                    <!-- ─── ACTIVITY / AUDIT LOG ─── -->
-                                    <Border Grid.Row="5" Style="{StaticResource CardPanel}" Margin="0,0,0,12">
-                                        <StackPanel>
-                                            <Grid Margin="0,0,0,10">
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="*"/>
-                                                    <ColumnDefinition Width="Auto"/>
-                                                </Grid.ColumnDefinitions>
-                                                <TextBlock Text="RECENT ACTIVITY" FontSize="11" FontWeight="SemiBold"
-                                                           Foreground="{StaticResource TextMutedBrush}" VerticalAlignment="Center"/>
-                                                <TextBlock Grid.Column="1" Text="(server audit log: audit/share-audit.log)"
-                                                           FontSize="10" FontStyle="Italic"
-                                                           Foreground="{StaticResource TextMutedBrush}" VerticalAlignment="Center"/>
-                                            </Grid>
-                                            <StackPanel x:Name="ShareHistoryList">
-                                                <TextBlock Text="No sharing activity yet" FontSize="12"
-                                                           Foreground="{StaticResource TextMutedBrush}" FontStyle="Italic"/>
+                                        <!-- INCOMING REQUESTS — left wider per spec §10. -->
+                                        <Border Grid.Column="0" Style="{StaticResource NeuralCard}"
+                                                Padding="22" Margin="0,0,7,0">
+                                            <StackPanel>
+                                                <StackPanel Orientation="Horizontal" Margin="0,0,0,14">
+                                                    <TextBlock Text="INCOMING REQUESTS" FontSize="12.5" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText1}"
+                                                               VerticalAlignment="Center"/>
+                                                    <TextBlock Text=" · consent-gated" FontSize="12.5"
+                                                               FontWeight="Medium"
+                                                               Foreground="{StaticResource NeuralText3}"
+                                                               VerticalAlignment="Center"/>
+                                                </StackPanel>
+                                                <StackPanel x:Name="IncomingSharesList">
+                                                    <TextBlock Text="No incoming requests" FontSize="12"
+                                                               Foreground="{StaticResource NeuralText3}" FontStyle="Italic"/>
+                                                </StackPanel>
                                             </StackPanel>
-                                        </StackPanel>
-                                    </Border>
+                                        </Border>
+
+                                        <!-- HISTORY — right narrower per spec §10. -->
+                                        <Border Grid.Column="1" Style="{StaticResource NeuralCard}"
+                                                Padding="22" Margin="7,0,0,0">
+                                            <StackPanel>
+                                                <StackPanel Orientation="Horizontal" Margin="0,0,0,14">
+                                                    <TextBlock Text="HISTORY" FontSize="12.5" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText1}"
+                                                               VerticalAlignment="Center"/>
+                                                    <TextBlock Text=" · last 30 days" FontSize="12.5"
+                                                               FontWeight="Medium"
+                                                               Foreground="{StaticResource NeuralText3}"
+                                                               VerticalAlignment="Center"/>
+                                                </StackPanel>
+                                                <StackPanel x:Name="ShareHistoryList">
+                                                    <TextBlock Text="No sharing activity yet" FontSize="12"
+                                                               Foreground="{StaticResource NeuralText3}" FontStyle="Italic"/>
+                                                </StackPanel>
+                                            </StackPanel>
+                                        </Border>
+                                    </Grid>
                                 </Grid>
                             </ScrollViewer>
 
