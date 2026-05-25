@@ -89,8 +89,19 @@
                     <RowDefinition x:Name="StatusBarRow" Height="32"/>
                 </Grid.RowDefinitions>
 
-                <!-- TITLE BAR -->
-                <Border x:Name="TitleBarBorder" Grid.Row="0" Background="Transparent" MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
+                <!-- TITLE BAR
+                     Phase 1B (partial): swap background to the new neural gradient
+                     + add a 1px hairline bottom. Interior controls (hamburger /
+                     logo / theme picker / window buttons) keep their cyberpunk
+                     skins for now — they'll move to Neural* tokens in a later
+                     pass that also restyles the popup and dim sliders.
+                     The brand-mark + identity-pill rebuild from the prototype
+                     spec is also deferred to that pass. -->
+                <Border x:Name="TitleBarBorder" Grid.Row="0"
+                        Background="{StaticResource NeuralTitlebarBg}"
+                        BorderBrush="{StaticResource NeuralLine}"
+                        BorderThickness="0,0,0,1"
+                        MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
                     <Grid>
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="16,0">
                             <!-- Hamburger: collapses the sidebar (SidebarColumn.Width 220 ↔ 0).
@@ -3939,15 +3950,17 @@
                 <!-- STATUS BAR — 3-column grid so the left status text can
                      truncate gracefully when chips on the right grow long.
                      Old version used a single cell with HorizontalAlignment
-                     and the three sections overlapped each other. -->
+                     and the three sections overlapped each other.
+
+                     Phase 1B (partial): match titlebar — gradient background
+                     + 1px violet-tinted top hairline. Inner status text +
+                     chip pills still on cyberpunk tokens; their migration to
+                     NeuralChip / NeuralStatusDot is deferred to the same
+                     full shell-reskin pass as the titlebar interior. -->
                 <Border x:Name="StatusBarBorder" Grid.Row="2"
+                        Background="{StaticResource NeuralSidebarBg}"
+                        BorderBrush="{StaticResource NeuralLine}"
                         BorderThickness="0,1,0,0">
-                    <Border.Background>
-                        <SolidColorBrush Color="#FF0A081C"/>
-                    </Border.Background>
-                    <Border.BorderBrush>
-                        <SolidColorBrush Color="#446CF0FF"/>
-                    </Border.BorderBrush>
                     <Grid Margin="16,0">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
