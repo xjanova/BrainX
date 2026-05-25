@@ -1,0 +1,166 @@
+<!--
+  BrainXTypography.xaml — type system for the redesigned UI.
+
+  The prototype uses Manrope (UI/body) and JetBrains Mono (code/numerals).
+  JetBrains Mono ships bundled in Assets/Fonts/. Manrope is declared with
+  a fallback chain to Segoe UI Variable so it degrades cleanly on machines
+  where the font isn't installed system-wide — Segoe UI Variable is
+  Windows 11's default, geometrically close to Manrope at small sizes.
+
+  Bundle full Manrope TTFs in a future Phase 1B commit (Google Fonts
+  archive download was failing during initial setup; pulled JetBrains Mono
+  direct from the JetBrains/JetBrainsMono GitHub release instead).
+
+  Naming: "Type" prefix for TextBlock styles, "Font" prefix for FontFamily
+  resources, "Numeral" + tabular for tabular numerals helper styles.
+-->
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       Font families. The "./" pack-URI prefix is read relative to the
+       assembly; pair it with a #FaceName suffix so WPF picks the right
+       TTF when multiple are bundled. Fallback chain in the FontFamily
+       value handles missing-font case at runtime.
+       ═══════════════════════════════════════════════════════════════════ -->
+  <FontFamily x:Key="FontSans">Manrope, Segoe UI Variable, Segoe UI, sans-serif</FontFamily>
+  <FontFamily x:Key="FontMono">./Assets/Fonts/#JetBrains Mono, Consolas, JetBrains Mono, Cascadia Mono, monospace</FontFamily>
+  <FontFamily x:Key="FontDisplay">Manrope, Segoe UI Variable, Segoe UI, sans-serif</FontFamily>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       Type scale — see prototype README "Typography" section.
+       Sizes are device-independent units (1 DIU ≈ 1 CSS px at 96 DPI).
+       ═══════════════════════════════════════════════════════════════════ -->
+
+  <!-- View-level title (the big 26 px heading at the top of every view) -->
+  <Style x:Key="TypeViewTitle" TargetType="TextBlock">
+    <Setter Property="FontFamily" Value="{StaticResource FontSans}"/>
+    <Setter Property="FontSize" Value="26"/>
+    <Setter Property="FontWeight" Value="Bold"/>
+    <Setter Property="Foreground" Value="#FFFFFFFF"/>
+    <Setter Property="TextOptions.TextFormattingMode" Value="Ideal"/>
+    <Setter Property="TextOptions.TextRenderingMode" Value="ClearType"/>
+  </Style>
+
+  <!-- View subtitle ("Your neural knowledge overview · auto-ingested 4 minutes ago") -->
+  <Style x:Key="TypeViewSubtitle" TargetType="TextBlock">
+    <Setter Property="FontFamily" Value="{StaticResource FontSans}"/>
+    <Setter Property="FontSize" Value="13.5"/>
+    <Setter Property="FontWeight" Value="Medium"/>
+    <Setter Property="Foreground" Value="{StaticResource NeuralText2}"/>
+    <Setter Property="Margin" Value="0,2,0,0"/>
+  </Style>
+
+  <!-- Card-head title (UPPERCASE, 13 px, 0.4 px tracking — short labels only) -->
+  <Style x:Key="TypeCardTitle" TargetType="TextBlock">
+    <Setter Property="FontFamily" Value="{StaticResource FontSans}"/>
+    <Setter Property="FontSize" Value="13"/>
+    <Setter Property="FontWeight" Value="Bold"/>
+    <Setter Property="Foreground" Value="{StaticResource NeuralText}"/>
+    <!-- WPF has no text-transform; consumers should ToUpper the text themselves. -->
+    <Setter Property="TextOptions.TextFormattingMode" Value="Ideal"/>
+  </Style>
+
+  <!-- KPI value (36 px display number with tabular figures) -->
+  <Style x:Key="TypeKpiValue" TargetType="TextBlock">
+    <Setter Property="FontFamily" Value="{StaticResource FontSans}"/>
+    <Setter Property="FontSize" Value="36"/>
+    <Setter Property="FontWeight" Value="Bold"/>
+    <Setter Property="Foreground" Value="{StaticResource NeuralText}"/>
+    <Setter Property="Typography.NumeralAlignment" Value="Tabular"/>
+    <Setter Property="LineHeight" Value="40"/>
+  </Style>
+
+  <!-- KPI label (UPPERCASE 11 px, 1.4 px tracking) -->
+  <Style x:Key="TypeKpiLabel" TargetType="TextBlock">
+    <Setter Property="FontFamily" Value="{StaticResource FontSans}"/>
+    <Setter Property="FontSize" Value="11"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="Foreground" Value="{StaticResource NeuralText3}"/>
+  </Style>
+
+  <!-- Body text — the workhorse style, used by default for prose -->
+  <Style x:Key="TypeBody" TargetType="TextBlock">
+    <Setter Property="FontFamily" Value="{StaticResource FontSans}"/>
+    <Setter Property="FontSize" Value="14.5"/>
+    <Setter Property="FontWeight" Value="Normal"/>
+    <Setter Property="Foreground" Value="{StaticResource NeuralText1}"/>
+    <Setter Property="LineHeight" Value="22"/>
+  </Style>
+
+  <!-- Body text, slightly heavier (Medium) for list items and rows -->
+  <Style x:Key="TypeBodyMedium" TargetType="TextBlock" BasedOn="{StaticResource TypeBody}">
+    <Setter Property="FontWeight" Value="Medium"/>
+  </Style>
+
+  <!-- Small / meta — for timestamps, counts, helper text -->
+  <Style x:Key="TypeSmall" TargetType="TextBlock">
+    <Setter Property="FontFamily" Value="{StaticResource FontSans}"/>
+    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="FontWeight" Value="Medium"/>
+    <Setter Property="Foreground" Value="{StaticResource NeuralText2}"/>
+  </Style>
+
+  <!-- Caption (used in tags, badges, very small UI labels) -->
+  <Style x:Key="TypeCaption" TargetType="TextBlock">
+    <Setter Property="FontFamily" Value="{StaticResource FontSans}"/>
+    <Setter Property="FontSize" Value="11.5"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="Foreground" Value="{StaticResource NeuralText2}"/>
+  </Style>
+
+  <!-- Sidebar nav group label (UPPERCASE, 10.5 px, 1.4 tracking, dim) -->
+  <Style x:Key="TypeNavSectionLabel" TargetType="TextBlock">
+    <Setter Property="FontFamily" Value="{StaticResource FontSans}"/>
+    <Setter Property="FontSize" Value="10.5"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="Foreground" Value="{StaticResource NeuralTextDim}"/>
+    <Setter Property="Margin" Value="14,12,14,6"/>
+  </Style>
+
+  <!-- Sidebar nav-item label (13.5 px, Medium) -->
+  <Style x:Key="TypeNavItem" TargetType="TextBlock">
+    <Setter Property="FontFamily" Value="{StaticResource FontSans}"/>
+    <Setter Property="FontSize" Value="13.5"/>
+    <Setter Property="FontWeight" Value="Medium"/>
+    <Setter Property="Foreground" Value="{StaticResource NeuralText1}"/>
+  </Style>
+
+  <!-- Brand text in the titlebar ("BrainX" word mark) -->
+  <Style x:Key="TypeBrandText" TargetType="TextBlock">
+    <Setter Property="FontFamily" Value="{StaticResource FontSans}"/>
+    <Setter Property="FontSize" Value="14"/>
+    <Setter Property="FontWeight" Value="Bold"/>
+    <Setter Property="Foreground" Value="{StaticResource NeuralText}"/>
+  </Style>
+
+  <!-- Brand subtitle in the titlebar (" — Neural Knowledge Engine") -->
+  <Style x:Key="TypeBrandSubtitle" TargetType="TextBlock">
+    <Setter Property="FontFamily" Value="{StaticResource FontSans}"/>
+    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="FontWeight" Value="Normal"/>
+    <Setter Property="Foreground" Value="{StaticResource NeuralText3}"/>
+  </Style>
+
+  <!-- Mono — used for addresses, kbd hints, timestamps, traffic stats -->
+  <Style x:Key="TypeMono" TargetType="TextBlock">
+    <Setter Property="FontFamily" Value="{StaticResource FontMono}"/>
+    <Setter Property="FontSize" Value="11.5"/>
+    <Setter Property="FontWeight" Value="Normal"/>
+    <Setter Property="Foreground" Value="{StaticResource NeuralText1}"/>
+    <Setter Property="Typography.NumeralAlignment" Value="Tabular"/>
+  </Style>
+
+  <!-- Mono small (for status-bar chips, fps counter, etc) -->
+  <Style x:Key="TypeMonoSmall" TargetType="TextBlock" BasedOn="{StaticResource TypeMono}">
+    <Setter Property="FontSize" Value="11"/>
+    <Setter Property="Foreground" Value="{StaticResource NeuralText2}"/>
+  </Style>
+
+  <!-- kbd chip text (10.5 px mono, dim) -->
+  <Style x:Key="TypeKbdText" TargetType="TextBlock" BasedOn="{StaticResource TypeMono}">
+    <Setter Property="FontSize" Value="10.5"/>
+    <Setter Property="Foreground" Value="{StaticResource NeuralTextDim}"/>
+  </Style>
+
+</ResourceDictionary>

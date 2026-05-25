@@ -21,6 +21,18 @@
     <Resource Include="Assets\LogoBanner.png" />
     <Resource Include="Assets\bk1.png" />
     <Resource Include="Assets\bk2.png" />
+    <!--
+      Bundled fonts for the redesigned UI. JetBrains Mono ships in three
+      weights for code / addresses / timestamps. Manrope is the intended
+      sans family but the Google Fonts archive download was failing during
+      Phase 1A bootstrap; falling back to "Manrope, Segoe UI Variable,
+      Segoe UI" in BrainXTypography.xaml means Windows 11 uses Segoe UI
+      Variable (very close geometry) until Manrope TTFs are bundled in
+      Phase 1B.
+    -->
+    <Resource Include="Assets\Fonts\JetBrainsMono-Regular.ttf" />
+    <Resource Include="Assets\Fonts\JetBrainsMono-Medium.ttf" />
+    <Resource Include="Assets\Fonts\JetBrainsMono-Bold.ttf" />
   </ItemGroup>
 
   <!-- Universe view (WebView2 host) — html/js/css copied to bin so the

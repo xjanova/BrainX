@@ -1,0 +1,149 @@
+<!--
+  BrainXColors.xaml — Design token color palette for the redesigned UI.
+
+  Lifted from design_handoff_brainx_redesign/design/styles.css. Every token
+  here maps 1:1 to a CSS custom property in the prototype. Naming convention
+  is "Neural" + role so it doesn't collide with the legacy CyberpunkTheme
+  brushes (BgDark, NeonCyan, …) that the existing views still consume; both
+  dictionaries can coexist during the multi-phase migration.
+
+  When a phase finishes migrating a view, swap the StaticResource references
+  in that view's XAML from the legacy keys to the Neural* keys. When all
+  views are migrated, the legacy dictionary can be retired.
+-->
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       Surfaces (layered depth — see prototype CSS bg tokens)
+       ═══════════════════════════════════════════════════════════════════ -->
+  <SolidColorBrush x:Key="NeuralBgVoid"     Color="#060410"/>
+  <SolidColorBrush x:Key="NeuralBgBase"     Color="#0b0818"/>
+  <SolidColorBrush x:Key="NeuralBgElevated" Color="#14102a"/>
+  <SolidColorBrush x:Key="NeuralBgCard"     Color="#1a1535"/>
+  <SolidColorBrush x:Key="NeuralBgCard2"    Color="#211b40"/>
+  <SolidColorBrush x:Key="NeuralBgInset"    Color="#0d0a1f"/>
+  <!-- WPF lacks backdrop-filter:blur(); approximate "glass" as 72%-opaque card. -->
+  <SolidColorBrush x:Key="NeuralBgGlass"    Color="#1a1535" Opacity="0.72"/>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       Borders / dividers
+       ═══════════════════════════════════════════════════════════════════ -->
+  <SolidColorBrush x:Key="NeuralLine"        Color="#B4A0FF" Opacity="0.08"/>
+  <SolidColorBrush x:Key="NeuralLineStrong"  Color="#B4A0FF" Opacity="0.14"/>
+  <SolidColorBrush x:Key="NeuralLineAccent"  Color="#A078FF" Opacity="0.32"/>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       Brand palette (refined neural — keep in sync with category mapping below)
+       ═══════════════════════════════════════════════════════════════════ -->
+  <SolidColorBrush x:Key="NeuralViolet"      Color="#9d7bff"/>
+  <SolidColorBrush x:Key="NeuralViolet2"     Color="#b89dff"/>
+  <SolidColorBrush x:Key="NeuralVioletDeep"  Color="#6a48d6"/>
+  <SolidColorBrush x:Key="NeuralCyan"        Color="#5be9e9"/>
+  <SolidColorBrush x:Key="NeuralCyanDeep"    Color="#2bb8b8"/>
+  <SolidColorBrush x:Key="NeuralMagenta"     Color="#ff4f9e"/>
+  <SolidColorBrush x:Key="NeuralMagentaDeep" Color="#d62677"/>
+  <SolidColorBrush x:Key="NeuralMint"        Color="#4ae3a7"/>
+  <SolidColorBrush x:Key="NeuralAmber"       Color="#ffc23c"/>
+  <SolidColorBrush x:Key="NeuralRose"        Color="#ff6b6b"/>
+
+  <!-- Raw Color resources (when you need a Color, not a Brush — gradients, drop shadows) -->
+  <Color x:Key="NeuralVioletColor">#9d7bff</Color>
+  <Color x:Key="NeuralViolet2Color">#b89dff</Color>
+  <Color x:Key="NeuralVioletDeepColor">#6a48d6</Color>
+  <Color x:Key="NeuralCyanColor">#5be9e9</Color>
+  <Color x:Key="NeuralMagentaColor">#ff4f9e</Color>
+  <Color x:Key="NeuralMintColor">#4ae3a7</Color>
+  <Color x:Key="NeuralAmberColor">#ffc23c</Color>
+  <Color x:Key="NeuralRoseColor">#ff6b6b</Color>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       Text — five tiers from brightest primary to disabled
+       ═══════════════════════════════════════════════════════════════════ -->
+  <SolidColorBrush x:Key="NeuralText"    Color="#f1ecff"/>
+  <SolidColorBrush x:Key="NeuralText1"   Color="#d8d2f0"/>
+  <SolidColorBrush x:Key="NeuralText2"   Color="#a9a3c2"/>
+  <SolidColorBrush x:Key="NeuralText3"   Color="#7d7796"/>
+  <SolidColorBrush x:Key="NeuralTextDim" Color="#5a546f"/>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       Category colors (24 expertise categories, used as data colors on
+       graph nodes, chart lines, tag pills). Only the top-10 are listed
+       here; the long tail lives in BrainXCategoryColors.xaml (Phase 2).
+       ═══════════════════════════════════════════════════════════════════ -->
+  <SolidColorBrush x:Key="CatProgramming"        Color="#5be9e9"/>
+  <SolidColorBrush x:Key="CatDataScience"        Color="#ffc23c"/>
+  <SolidColorBrush x:Key="CatDesignArt"          Color="#ff4f9e"/>
+  <SolidColorBrush x:Key="CatEngineering"        Color="#4ae3a7"/>
+  <SolidColorBrush x:Key="CatBlockchainWeb3"     Color="#ff8a4f"/>
+  <SolidColorBrush x:Key="CatBusinessFinance"    Color="#7bd87b"/>
+  <SolidColorBrush x:Key="CatWebDevelopment"     Color="#74d2ff"/>
+  <SolidColorBrush x:Key="CatAIMachineLearning"  Color="#9d7bff"/>
+  <SolidColorBrush x:Key="CatSecurityCrypto"     Color="#ff6b6b"/>
+  <SolidColorBrush x:Key="CatMathematics"        Color="#67c8ff"/>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       Ambient gradients (the nebula behind the app shell — three soft
+       radial blobs at fixed positions). WPF radials can't replicate the
+       CSS percent-positioned blobs exactly, so use a single layered
+       LinearGradientBrush as a starter; ambient layer can be refined later.
+       ═══════════════════════════════════════════════════════════════════ -->
+  <LinearGradientBrush x:Key="NeuralNebula" StartPoint="0,0" EndPoint="1,1">
+    <GradientStop Color="#100b28" Offset="0"/>
+    <GradientStop Color="#0b0818" Offset="0.5"/>
+    <GradientStop Color="#0a0720" Offset="1"/>
+  </LinearGradientBrush>
+
+  <!-- Titlebar gradient (top → bottom, slight brightening at very top) -->
+  <LinearGradientBrush x:Key="NeuralTitlebarBg" StartPoint="0,0" EndPoint="0,1">
+    <GradientStop Color="#1b1638" Offset="0"/>
+    <GradientStop Color="#14102a" Offset="1"/>
+  </LinearGradientBrush>
+
+  <!-- Sidebar gradient (top → bottom, slight darkening at bottom) -->
+  <LinearGradientBrush x:Key="NeuralSidebarBg" StartPoint="0,0" EndPoint="0,1">
+    <GradientStop Color="#14102a" Offset="0"/>
+    <GradientStop Color="#0e0a22" Offset="1"/>
+  </LinearGradientBrush>
+
+  <!-- Primary button gradient (violet, lighter on top) -->
+  <LinearGradientBrush x:Key="NeuralPrimaryBtn" StartPoint="0,0" EndPoint="0,1">
+    <GradientStop Color="#b89dff" Offset="0"/>
+    <GradientStop Color="#7b58f0" Offset="1"/>
+  </LinearGradientBrush>
+
+  <!-- Sidebar nav-item active state (violet tint) -->
+  <LinearGradientBrush x:Key="NeuralNavActive" StartPoint="0,0" EndPoint="0,1">
+    <GradientStop Color="#339d7bff" Offset="0"/>
+    <!-- 0x33 = 20% alpha -->
+    <GradientStop Color="#149d7bff" Offset="1"/>
+    <!-- 0x14 = 8% alpha -->
+  </LinearGradientBrush>
+
+  <!-- Brand mark (titlebar 26×26 square) radial -->
+  <RadialGradientBrush x:Key="NeuralBrandMark" GradientOrigin="0.3,0.3" Center="0.5,0.5" RadiusX="0.65" RadiusY="0.65">
+    <GradientStop Color="#b89dff" Offset="0"/>
+    <GradientStop Color="#6a48d6" Offset="0.6"/>
+    <GradientStop Color="#2a1d5c" Offset="1"/>
+  </RadialGradientBrush>
+
+  <!-- User-pill avatar (titlebar right side) -->
+  <LinearGradientBrush x:Key="NeuralUserAvatar" StartPoint="0,0" EndPoint="1,1">
+    <GradientStop Color="#ff4f9e" Offset="0"/>
+    <GradientStop Color="#9d7bff" Offset="1"/>
+  </LinearGradientBrush>
+
+  <!-- User bubble in chat (right-aligned, violet) -->
+  <LinearGradientBrush x:Key="NeuralChatUser" StartPoint="0,0" EndPoint="0,1">
+    <GradientStop Color="#2b2152" Offset="0"/>
+    <GradientStop Color="#1d1640" Offset="1"/>
+  </LinearGradientBrush>
+
+  <!-- Brain-stage map background (cool nebula radial) — used for the graph
+       viewport when no 3D scene is mounted. -->
+  <RadialGradientBrush x:Key="NeuralStageBg" GradientOrigin="0.5,0.3" Center="0.5,0.3" RadiusX="0.8" RadiusY="0.8">
+    <GradientStop Color="#190f3a" Offset="0"/>
+    <GradientStop Color="#0a071a" Offset="0.8"/>
+  </RadialGradientBrush>
+
+</ResourceDictionary>

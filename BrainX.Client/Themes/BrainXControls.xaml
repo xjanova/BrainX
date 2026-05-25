@@ -1,0 +1,418 @@
+<!--
+  BrainXControls.xaml — control styles for the redesigned UI.
+
+  Mirrors the prototype's component CSS (see design_handoff_brainx_redesign/
+  design/styles.css §"Buttons & inputs" and "Toggle / Segmented / Tag").
+  Each style declares the OFF / hover / pressed / disabled states so the
+  controls feel right under interaction, not just in screenshots.
+
+  Convention: all keys are prefixed "Neural" to avoid collisions with the
+  legacy CyberpunkTheme styles. Views opt in by setting
+    Style="{StaticResource NeuralBtnPrimary}"
+  on each control during Phase 2+ migration.
+
+  The 1px top-edge highlight ("lit from above") is achieved per surface via
+  a second layered Border with VerticalAlignment=Top and Height=1 — see
+  NeuralCard below for the pattern. Cheap (no Effect cost) and visually
+  matches the prototype's `box-shadow: inset 0 1px 0 …` exactly.
+-->
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:sys="clr-namespace:System;assembly=mscorlib">
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       Sizing tokens (kept as sys:Double so they can be referenced from
+       Setter Property="Height" / Padding etc.)
+       ═══════════════════════════════════════════════════════════════════ -->
+  <sys:Double x:Key="BtnHeight">32</sys:Double>
+  <sys:Double x:Key="BtnHeightSm">26</sys:Double>
+  <sys:Double x:Key="InputHeight">34</sys:Double>
+  <CornerRadius x:Key="RadiusXs">6</CornerRadius>
+  <CornerRadius x:Key="RadiusSm">8</CornerRadius>
+  <CornerRadius x:Key="RadiusMd">12</CornerRadius>
+  <CornerRadius x:Key="RadiusLg">16</CornerRadius>
+  <CornerRadius x:Key="RadiusXl">22</CornerRadius>
+  <CornerRadius x:Key="RadiusPill">999</CornerRadius>
+  <CornerRadius x:Key="RadiusBtn">9</CornerRadius>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       Button — three variants × two sizes. Implemented with a custom
+       ControlTemplate so we control the corner radius, the layered top
+       highlight, and the press translate-down (1 px).
+       ═══════════════════════════════════════════════════════════════════ -->
+
+  <!-- Default button — "btn" in the prototype. Card-tinted background,
+       hairline border, soft outer shadow, 1px top highlight. -->
+  <Style x:Key="NeuralBtn" TargetType="Button">
+    <Setter Property="Background" Value="{StaticResource NeuralBgCard}"/>
+    <Setter Property="Foreground" Value="{StaticResource NeuralText}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource NeuralLineStrong}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="Height" Value="{StaticResource BtnHeight}"/>
+    <Setter Property="Padding" Value="14,0"/>
+    <Setter Property="FontFamily" Value="{StaticResource FontSans}"/>
+    <Setter Property="FontSize" Value="13"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="Cursor" Value="Hand"/>
+    <Setter Property="HorizontalContentAlignment" Value="Center"/>
+    <Setter Property="VerticalContentAlignment" Value="Center"/>
+    <Setter Property="Effect" Value="{StaticResource Shadow1}"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="Button">
+          <!-- The 1px "press translate-down" is handled via the Bd's Margin
+               trigger below — WPF Triggers can't TargetName a Transform
+               (which isn't a FrameworkElement). Margin-shift is a clean
+               drop-in equivalent without needing a Storyboard. -->
+          <Grid>
+            <Border x:Name="Bd"
+                    Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="9"
+                    SnapsToDevicePixels="True">
+              <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                Margin="{TemplateBinding Padding}"
+                                RecognizesAccessKey="True"/>
+            </Border>
+            <!-- 1px top-edge highlight ("lit from above") — same Border + 1px tall
+                 strip with the 6% white gradient gives the depth read. -->
+            <Border Height="1"
+                    VerticalAlignment="Top"
+                    Margin="1,1,1,0"
+                    CornerRadius="8,8,0,0"
+                    Background="{StaticResource EdgeHighlightFade}"
+                    IsHitTestVisible="False"/>
+          </Grid>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+              <Setter TargetName="Bd" Property="Background" Value="{StaticResource NeuralBgCard2}"/>
+            </Trigger>
+            <Trigger Property="IsPressed" Value="True">
+              <Setter TargetName="Bd" Property="Margin" Value="0,1,0,-1"/>
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+              <Setter Property="Opacity" Value="0.45"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <!-- Ghost — transparent, only border on hover. Used for secondary actions. -->
+  <Style x:Key="NeuralBtnGhost" TargetType="Button" BasedOn="{StaticResource NeuralBtn}">
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="BorderBrush" Value="Transparent"/>
+    <Setter Property="Foreground" Value="{StaticResource NeuralText1}"/>
+    <Setter Property="Effect" Value="{x:Null}"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="Button">
+          <Border x:Name="Bd"
+                  Background="{TemplateBinding Background}"
+                  BorderBrush="{TemplateBinding BorderBrush}"
+                  BorderThickness="1"
+                  CornerRadius="9"
+                  SnapsToDevicePixels="True">
+            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                              Margin="{TemplateBinding Padding}"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+              <Setter TargetName="Bd" Property="Background" Value="#10FFFFFF"/>
+              <Setter TargetName="Bd" Property="BorderBrush" Value="{StaticResource NeuralLine}"/>
+            </Trigger>
+            <Trigger Property="IsPressed" Value="True">
+              <Setter TargetName="Bd" Property="Margin" Value="0,1,0,-1"/>
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+              <Setter Property="Opacity" Value="0.45"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <!-- Primary — violet gradient, white text, accent glow. Used for the
+       single most-important action on a view (New note, Ask Claude, etc). -->
+  <Style x:Key="NeuralBtnPrimary" TargetType="Button" BasedOn="{StaticResource NeuralBtn}">
+    <Setter Property="Background" Value="{StaticResource NeuralPrimaryBtn}"/>
+    <Setter Property="Foreground" Value="#FFFFFF"/>
+    <Setter Property="BorderBrush" Value="#2EFFFFFF"/>
+    <Setter Property="Effect" Value="{StaticResource ShadowAccent}"/>
+    <Style.Triggers>
+      <Trigger Property="IsMouseOver" Value="True">
+        <!-- Slight brighten on hover (CSS filter: brightness(1.06)) -->
+        <Setter Property="Opacity" Value="0.92"/>
+      </Trigger>
+    </Style.Triggers>
+  </Style>
+
+  <!-- Small-size modifier (height 26, padding 10, font 12) — apply to any
+       of the 3 base styles by ALSO setting Style="{StaticResource NeuralBtnSm}" -->
+  <Style x:Key="NeuralBtnSm" TargetType="Button" BasedOn="{StaticResource NeuralBtn}">
+    <Setter Property="Height" Value="{StaticResource BtnHeightSm}"/>
+    <Setter Property="Padding" Value="10,0"/>
+    <Setter Property="FontSize" Value="12"/>
+  </Style>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       Card — the workhorse Border style. The Triple-layer approach
+       (background + soft shadow + 1px top highlight) gives the "lit from
+       above" depth read the prototype is built around.
+
+       Usage:  <Border Style="{StaticResource NeuralCard}">…</Border>
+       Variants: NeuralCardFlat (Shadow1), NeuralCardRaised (Shadow3)
+       ═══════════════════════════════════════════════════════════════════ -->
+  <Style x:Key="NeuralCard" TargetType="Border">
+    <Setter Property="Background" Value="{StaticResource NeuralBgCard}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource NeuralLine}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius" Value="16"/>
+    <Setter Property="Effect" Value="{StaticResource Shadow2}"/>
+    <Setter Property="SnapsToDevicePixels" Value="True"/>
+  </Style>
+  <Style x:Key="NeuralCardFlat" TargetType="Border" BasedOn="{StaticResource NeuralCard}">
+    <Setter Property="Effect" Value="{StaticResource Shadow1}"/>
+  </Style>
+  <Style x:Key="NeuralCardRaised" TargetType="Border" BasedOn="{StaticResource NeuralCard}">
+    <Setter Property="Effect" Value="{StaticResource Shadow3}"/>
+  </Style>
+
+  <!-- Inset surface (recessed wells: inputs, chat stream, code blocks).
+       The inset shadow is faked with a darker fill + outer 1px line. -->
+  <Style x:Key="NeuralInsetWell" TargetType="Border">
+    <Setter Property="Background" Value="{StaticResource NeuralBgInset}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource NeuralLine}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius" Value="9"/>
+    <Setter Property="SnapsToDevicePixels" Value="True"/>
+  </Style>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       Input (TextBox) — uses inset-well surface, violet focus ring
+       ═══════════════════════════════════════════════════════════════════ -->
+  <Style x:Key="NeuralInput" TargetType="TextBox">
+    <Setter Property="Height" Value="{StaticResource InputHeight}"/>
+    <Setter Property="Background" Value="{StaticResource NeuralBgInset}"/>
+    <Setter Property="Foreground" Value="{StaticResource NeuralText}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource NeuralLine}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="Padding" Value="12,0"/>
+    <Setter Property="FontFamily" Value="{StaticResource FontSans}"/>
+    <Setter Property="FontSize" Value="13.5"/>
+    <Setter Property="CaretBrush" Value="{StaticResource NeuralViolet2}"/>
+    <Setter Property="SelectionBrush" Value="{StaticResource NeuralViolet}"/>
+    <Setter Property="VerticalContentAlignment" Value="Center"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="TextBox">
+          <Border x:Name="Bd"
+                  Background="{TemplateBinding Background}"
+                  BorderBrush="{TemplateBinding BorderBrush}"
+                  BorderThickness="{TemplateBinding BorderThickness}"
+                  CornerRadius="9"
+                  SnapsToDevicePixels="True">
+            <ScrollViewer x:Name="PART_ContentHost"
+                          Margin="{TemplateBinding Padding}"
+                          VerticalAlignment="Center"
+                          Focusable="False"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsFocused" Value="True">
+              <Setter TargetName="Bd" Property="BorderBrush" Value="{StaticResource NeuralLineAccent}"/>
+              <Setter TargetName="Bd" Property="Effect" Value="{StaticResource FocusRing}"/>
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+              <Setter Property="Opacity" Value="0.55"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       Toggle (ToggleButton) — 42×24 pill, OFF gray-violet / ON violet
+       ═══════════════════════════════════════════════════════════════════ -->
+  <!-- Two knob gradients as separate resources so the Trigger below can
+       swap them via Setter Property="Background" — WPF Setters can't
+       construct nested Borders, so the "on" knob style needs a key. -->
+  <LinearGradientBrush x:Key="NeuralToggleKnobOff" StartPoint="0,0" EndPoint="0,1">
+    <GradientStop Color="#ddd5ff" Offset="0"/>
+    <GradientStop Color="#8e75cc" Offset="1"/>
+  </LinearGradientBrush>
+  <LinearGradientBrush x:Key="NeuralToggleKnobOn" StartPoint="0,0" EndPoint="0,1">
+    <GradientStop Color="#ffffff" Offset="0"/>
+    <GradientStop Color="#d9cfff" Offset="1"/>
+  </LinearGradientBrush>
+
+  <Style x:Key="NeuralToggle" TargetType="ToggleButton">
+    <Setter Property="Width" Value="42"/>
+    <Setter Property="Height" Value="24"/>
+    <Setter Property="Cursor" Value="Hand"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="ToggleButton">
+          <Grid>
+            <Border x:Name="Track"
+                    Background="{StaticResource NeuralBgInset}"
+                    BorderBrush="{StaticResource NeuralLine}"
+                    BorderThickness="1"
+                    CornerRadius="12"
+                    SnapsToDevicePixels="True"/>
+            <!-- Knob slides via Margin (Trigger can't target Transform). The
+                 off-state margin is "2,0,0,0" so the 18px knob has 2px
+                 padding from the left edge; on-state shifts the left margin
+                 to 22 (2 + 18 + 2) so the knob sits 2px from the right. -->
+            <Border x:Name="Knob"
+                    Width="18" Height="18"
+                    HorizontalAlignment="Left"
+                    Margin="2,0,0,0"
+                    CornerRadius="9"
+                    Background="{StaticResource NeuralToggleKnobOff}"
+                    SnapsToDevicePixels="True">
+              <Border.Effect>
+                <DropShadowEffect Color="Black" BlurRadius="2" ShadowDepth="1" Opacity="0.4"/>
+              </Border.Effect>
+            </Border>
+          </Grid>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsChecked" Value="True">
+              <Setter TargetName="Track" Property="Background" Value="{StaticResource NeuralPrimaryBtn}"/>
+              <Setter TargetName="Track" Property="BorderBrush" Value="#2EFFFFFF"/>
+              <Setter TargetName="Knob" Property="Margin" Value="22,0,0,0"/>
+              <Setter TargetName="Knob" Property="Background" Value="{StaticResource NeuralToggleKnobOn}"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       Tag / category pill — used inline in card heads, peer cards, etc.
+       Default is muted; .accent variant tints violet.
+       ═══════════════════════════════════════════════════════════════════ -->
+  <Style x:Key="NeuralTag" TargetType="Border">
+    <Setter Property="Background" Value="#0AFFFFFF"/>
+    <Setter Property="BorderBrush" Value="{StaticResource NeuralLine}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius" Value="999"/>
+    <Setter Property="Padding" Value="9,2"/>
+    <Setter Property="SnapsToDevicePixels" Value="True"/>
+  </Style>
+  <Style x:Key="NeuralTagAccent" TargetType="Border" BasedOn="{StaticResource NeuralTag}">
+    <Setter Property="Background" Value="#149d7bff"/>
+    <Setter Property="BorderBrush" Value="{StaticResource NeuralLineAccent}"/>
+  </Style>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       Status dot — a small circle with optional glow. Use a Border with
+       width/height equal and CornerRadius half. The glow is added via
+       Effect when the dot is "on".
+       Usage:  <Border Style="{StaticResource NeuralStatusDot}" .../>
+              tag with attached property StateBrush via Background.
+       ═══════════════════════════════════════════════════════════════════ -->
+  <Style x:Key="NeuralStatusDot" TargetType="Border">
+    <Setter Property="Width" Value="8"/>
+    <Setter Property="Height" Value="8"/>
+    <Setter Property="CornerRadius" Value="4"/>
+    <Setter Property="Background" Value="{StaticResource NeuralTextDim}"/>
+    <Setter Property="SnapsToDevicePixels" Value="True"/>
+  </Style>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       Sidebar nav-item — derives from Button so click semantics work.
+       Apply IsHitTestVisible to inner content as needed.
+       Visual: 34 px tall, 9 radius, 18 px icon + label + optional kbd/badge.
+       Active state set via Tag="active" on the Button (or via DataTrigger
+       in MainWindow.xaml MVVM bindings).
+       ═══════════════════════════════════════════════════════════════════ -->
+  <Style x:Key="NeuralNavItem" TargetType="Button">
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="BorderBrush" Value="Transparent"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="Foreground" Value="{StaticResource NeuralText1}"/>
+    <Setter Property="Height" Value="34"/>
+    <Setter Property="Padding" Value="12,0"/>
+    <Setter Property="HorizontalContentAlignment" Value="Left"/>
+    <Setter Property="VerticalContentAlignment" Value="Center"/>
+    <Setter Property="FontFamily" Value="{StaticResource FontSans}"/>
+    <Setter Property="FontSize" Value="13.5"/>
+    <Setter Property="FontWeight" Value="Medium"/>
+    <Setter Property="Cursor" Value="Hand"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="Button">
+          <Border x:Name="Bd"
+                  Background="{TemplateBinding Background}"
+                  BorderBrush="{TemplateBinding BorderBrush}"
+                  BorderThickness="{TemplateBinding BorderThickness}"
+                  CornerRadius="9"
+                  SnapsToDevicePixels="True">
+            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                              Margin="{TemplateBinding Padding}"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+              <Setter TargetName="Bd" Property="Background" Value="#08FFFFFF"/>
+              <Setter Property="Foreground" Value="{StaticResource NeuralText}"/>
+            </Trigger>
+            <!-- Active state: set Tag="active" on the Button at the site. -->
+            <Trigger Property="Tag" Value="active">
+              <Setter TargetName="Bd" Property="Background" Value="{StaticResource NeuralNavActive}"/>
+              <Setter TargetName="Bd" Property="BorderBrush" Value="{StaticResource NeuralLineAccent}"/>
+              <Setter TargetName="Bd" Property="Effect" Value="{StaticResource ShadowAccent}"/>
+              <Setter Property="Foreground" Value="#FFFFFF"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       kbd chip (the ⌘1 / ⌘E hints on sidebar nav items) — small mono
+       pill, dim text, inset background, hairline border.
+       ═══════════════════════════════════════════════════════════════════ -->
+  <Style x:Key="NeuralKbdChip" TargetType="Border">
+    <Setter Property="Background" Value="{StaticResource NeuralBgInset}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource NeuralLine}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius" Value="5"/>
+    <Setter Property="Padding" Value="6,1"/>
+    <Setter Property="VerticalAlignment" Value="Center"/>
+    <Setter Property="SnapsToDevicePixels" Value="True"/>
+  </Style>
+
+  <!-- Magenta badge-count (for sidebar items with counters, e.g. "Sharing 3") -->
+  <Style x:Key="NeuralBadgeCount" TargetType="Border">
+    <Setter Property="Background" Value="{StaticResource NeuralMagenta}"/>
+    <Setter Property="CornerRadius" Value="9"/>
+    <Setter Property="MinWidth" Value="18"/>
+    <Setter Property="Height" Value="18"/>
+    <Setter Property="Padding" Value="5,0"/>
+    <Setter Property="VerticalAlignment" Value="Center"/>
+    <Setter Property="SnapsToDevicePixels" Value="True"/>
+  </Style>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       Status-bar chip (small pill at the bottom bar: CLI ✓, DT ✓, etc).
+       Variants: NeuralChip, NeuralChipOk, NeuralChipWarn, NeuralChipIdle.
+       ═══════════════════════════════════════════════════════════════════ -->
+  <Style x:Key="NeuralChip" TargetType="Border">
+    <Setter Property="Background" Value="#08FFFFFF"/>
+    <Setter Property="BorderBrush" Value="{StaticResource NeuralLine}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius" Value="999"/>
+    <Setter Property="Padding" Value="9,3"/>
+    <Setter Property="SnapsToDevicePixels" Value="True"/>
+  </Style>
+
+</ResourceDictionary>

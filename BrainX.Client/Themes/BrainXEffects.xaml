@@ -1,0 +1,138 @@
+<!--
+  BrainXEffects.xaml — depth + glow effects for the redesigned UI.
+
+  The prototype uses a CSS stack:
+    box-shadow:
+      0 1px 0 0 rgba(255,255,255,X) inset,      ← top-edge highlight ("lit from above")
+      0 Ypx Zpx rgba(0,0,0,W);                  ← outer drop shadow
+
+  WPF can't combine an inset highlight with an outer drop shadow on a
+  single element. So we approximate per surface:
+
+   - Outer shadow → DropShadowEffect resources below (Shadow1/2/3, Accent)
+   - Inset top highlight → a 1-px-tall LinearGradientBrush at the top of
+     each Border, applied as a second Border layer with VerticalAlignment=Top
+     (or via Border.BorderBrush with a top-only gradient when feasible).
+
+  The actual control styles in BrainXControls.xaml use these effects via
+  Setter Property="Effect" Value="{StaticResource Shadow2}".
+
+  Performance: WPF DropShadowEffect IS rasterised every frame; for very
+  large surfaces (e.g. the chat stream) prefer a static BitmapEffect or
+  skip the shadow. Keep shadows on small bounded cards.
+-->
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <!-- Shadow-1 — flat card (most KPI cards, ghost buttons, .btn default) -->
+  <DropShadowEffect x:Key="Shadow1"
+                    Color="Black"
+                    BlurRadius="6"
+                    ShadowDepth="2"
+                    Direction="270"
+                    Opacity="0.35"
+                    RenderingBias="Quality"/>
+
+  <!-- Shadow-2 — standard elevation (the main card type used across views) -->
+  <DropShadowEffect x:Key="Shadow2"
+                    Color="Black"
+                    BlurRadius="16"
+                    ShadowDepth="4"
+                    Direction="270"
+                    Opacity="0.45"
+                    RenderingBias="Quality"/>
+
+  <!-- Shadow-3 — floating panel (Expertise overlay, brain stage, raised cards) -->
+  <DropShadowEffect x:Key="Shadow3"
+                    Color="Black"
+                    BlurRadius="42"
+                    ShadowDepth="12"
+                    Direction="270"
+                    Opacity="0.55"
+                    RenderingBias="Quality"/>
+
+  <!-- Accent shadow — used for the primary button + active nav state.
+       Tinted with violet so it reads as a "glow" of the brand color. -->
+  <DropShadowEffect x:Key="ShadowAccent"
+                    Color="#9d7bff"
+                    BlurRadius="14"
+                    ShadowDepth="0"
+                    Opacity="0.40"
+                    RenderingBias="Quality"/>
+
+  <!-- Magenta accent — for the brand mark in the titlebar (where the
+       prototype uses a 0 0 0 1px violet ring + 10 px shadow) -->
+  <DropShadowEffect x:Key="ShadowBrandMark"
+                    Color="#6a48d6"
+                    BlurRadius="10"
+                    ShadowDepth="4"
+                    Direction="270"
+                    Opacity="0.55"
+                    RenderingBias="Quality"/>
+
+  <!-- Status-dot glow (used by every "online" / "ok" indicator dot — sized
+       to the dot itself so the glow looks right at small sizes). -->
+  <DropShadowEffect x:Key="GlowMint"
+                    Color="#4ae3a7"
+                    BlurRadius="6"
+                    ShadowDepth="0"
+                    Opacity="0.85"
+                    RenderingBias="Performance"/>
+
+  <DropShadowEffect x:Key="GlowAmber"
+                    Color="#ffc23c"
+                    BlurRadius="6"
+                    ShadowDepth="0"
+                    Opacity="0.85"
+                    RenderingBias="Performance"/>
+
+  <DropShadowEffect x:Key="GlowRose"
+                    Color="#ff6b6b"
+                    BlurRadius="6"
+                    ShadowDepth="0"
+                    Opacity="0.85"
+                    RenderingBias="Performance"/>
+
+  <!-- Magenta growth-chart total-line glow (the only chart element that
+       glows — see README "Glow is data, not decoration"). -->
+  <DropShadowEffect x:Key="GlowMagenta"
+                    Color="#ff4f9e"
+                    BlurRadius="10"
+                    ShadowDepth="0"
+                    Opacity="0.65"
+                    RenderingBias="Quality"/>
+
+  <!-- Brand crest glow (the big logo in the sidebar) -->
+  <DropShadowEffect x:Key="GlowCrest"
+                    Color="#9d7bff"
+                    BlurRadius="24"
+                    ShadowDepth="0"
+                    Opacity="0.55"
+                    RenderingBias="Quality"/>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       Edge-highlight brushes (the "lit from above" top sheen on every card)
+       Used as a 1-px-tall Border at top with VerticalAlignment=Top, OR as
+       a thin LinearGradientBrush bordering the top of a single Border.
+       ═══════════════════════════════════════════════════════════════════ -->
+  <SolidColorBrush x:Key="EdgeHighlight1" Color="#FFFFFF" Opacity="0.04"/>
+  <SolidColorBrush x:Key="EdgeHighlight2" Color="#FFFFFF" Opacity="0.05"/>
+  <SolidColorBrush x:Key="EdgeHighlight3" Color="#FFFFFF" Opacity="0.06"/>
+
+  <!-- Linear gradient that fades from the highlight color to transparent
+       — useful as a Border.BorderBrush on the TOP edge of a card. -->
+  <LinearGradientBrush x:Key="EdgeHighlightFade" StartPoint="0,0" EndPoint="0,1">
+    <GradientStop Color="#10FFFFFF" Offset="0"/>
+    <!-- 6% white -->
+    <GradientStop Color="#00FFFFFF" Offset="1"/>
+  </LinearGradientBrush>
+
+  <!-- Focus ring (3 px violet halo on focused inputs) -->
+  <DropShadowEffect x:Key="FocusRing"
+                    Color="#9d7bff"
+                    BlurRadius="3"
+                    ShadowDepth="0"
+                    Opacity="0.45"
+                    RenderingBias="Performance"/>
+
+</ResourceDictionary>

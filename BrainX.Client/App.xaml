@@ -4,7 +4,25 @@
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
+                <!--
+                  Legacy cyberpunk theme — drives the existing MainWindow shell and
+                  all 11 view templates. Stays merged FIRST so the Neural* tokens
+                  below can override on demand without breaking unmigrated views.
+                -->
                 <ResourceDictionary Source="Themes/CyberpunkTheme.xaml"/>
+
+                <!--
+                  Neural redesign tokens — see design_handoff_brainx_redesign/.
+                  Loaded in dependency order: colors → effects → typography →
+                  controls. Typography references colors (Foreground), controls
+                  reference all three. ResourceDictionary lookup is by key, not
+                  by load order, but keeping them ordered makes the dependency
+                  graph obvious to future readers.
+                -->
+                <ResourceDictionary Source="Themes/BrainXColors.xaml"/>
+                <ResourceDictionary Source="Themes/BrainXEffects.xaml"/>
+                <ResourceDictionary Source="Themes/BrainXTypography.xaml"/>
+                <ResourceDictionary Source="Themes/BrainXControls.xaml"/>
             </ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>
     </Application.Resources>
