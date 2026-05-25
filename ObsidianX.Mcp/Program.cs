@@ -21,7 +21,7 @@ internal static partial class Program
 {
     private const string ProtocolVersion = "2025-06-18";
     private const string ServerName = "obsidianx-brain";
-    internal const string ServerVersion = "2.5.1";
+    internal const string ServerVersion = "2.6.0";
 
     /// <summary>
     /// Build a one-line version string including the bound assembly's
@@ -98,6 +98,17 @@ internal static partial class Program
         Console.OutputEncoding = new UTF8Encoding(false);
 
         Log($"Starting MCP server · vault={_vaultPath}");
+
+        // Phase C (v2.6.0): warm the note-memo from the prior MCP
+        // process's sha history. 24-hour window keeps the cache fresh
+        // without dragging in week-old shas that probably no longer
+        // match. Safe + lazy — no-op when brain.db doesn't exist yet.
+        try
+        {
+            var loaded = HydrateNoteMemoFromDisk(TimeSpan.FromHours(24));
+            if (loaded > 0) Log($"note-memo: hydrated {loaded} sha record(s) from disk");
+        }
+        catch (Exception ex) { Log($"note-memo hydrate skipped: {ex.Message}"); }
 
         // Self-install brain-first memory rules into the user's Claude
         // Code project memory dir, idempotently. Mirrors what
@@ -230,6 +241,12 @@ internal static partial class Program
             "Prefer brain_walk over chained brain_search + brain_get_backlinks when exploring 'what's near X'. One walk = one call = one logged event.\n" +
             "For known hot topics (top tags, recurring concepts), call brain_bundles_list first to see if a pre-baked ~500-token bundle exists; brain_bundle <topic> is way cheaper than brain_search + N×brain_get_note. brain_synthesize remains the on-demand full-content option (~8000 tokens).\n" +
             "If a tool response has cached=true, an identical call ran in this MCP process within the last 10 minutes — full results are still in your earlier turn. Do NOT re-narrate them; reference what you already saw. Pass bypass_cache:true to force a fresh run.\n" +
+            "SMART CACHE (v2.6.0):\n" +
+            "  • brain_get_note → {cached:true, sha, ageSeconds}: the note's content is BIT-IDENTICAL to what you saw earlier (sha matched). Do NOT re-fetch. The full content is still in your context window.\n" +
+            "  • brain_append_note → {diff:'@@...', previousSha, newSha}: the diff shows EXACTLY what was appended. Do NOT brain_get_note to verify — the diff IS the verification. Mentally append the diff to your prior memory of the note.\n" +
+            "  • brain_walk → nodes with {cached:true, sha}: you already loaded these notes this session. Only brain_get_note the UNMARKED nodes; cached ones are already in your context.\n" +
+            "  • Sha persistence: when you reconnect to a fresh MCP process, the cache is HYDRATED from disk (last 24h) — sha hits work across MCP restarts too.\n" +
+            "  • Force fresh: bypass_cache:true on any get_note / search call skips both the in-process memo AND the disk-warmed sha (re-reads from filesystem).\n" +
             "When the user's question is clearly scoped to one project/area (mentions a project name, a folder, or 'in my X notes'), pass scope='Notes/...' or 'Programming/...' to brain_search/list/walk — this fences the result to that namespace. Use brain_scope_list first if you don't know what scopes exist.\n\n" +
             "═══ HONESTY ═════════════════════════════════════════════════\n\n" +
             "When a tool returns mode='keyword-fallback' or 'legacy-heuristic', the smart path degraded — tell the user briefly and suggest precompute. When mode='semantic' or 'llm-verified', that's the real thing.\n\n" +
@@ -259,7 +276,7 @@ internal static partial class Program
                     ["required"] = new JArray { "query" }
                 }),
             Tool("brain_get_note",
-                "Fetch a note by id. By default returns FULL content (can be 5-20k tokens). For token efficiency: pass truncate:N to cap content at N chars, OR section:'## Heading' to return only that section, OR metadata_only:true to skip content entirely.",
+                "Fetch a note by id. By default returns FULL content (can be 5-20k tokens). For token efficiency: pass truncate:N to cap content at N chars, OR section:'## Heading' to return only that section, OR metadata_only:true to skip content entirely. NOTE-MEMO (v2.6.0): identical id+content within 10min returns {cached:true,sha,ageSeconds} — content is unchanged so don't re-narrate. Pass bypass_cache:true to force fresh read.",
                 new JObject
                 {
                     ["type"] = "object",
@@ -268,7 +285,8 @@ internal static partial class Program
                         ["id"] = new JObject { ["type"] = "string" },
                         ["truncate"] = new JObject { ["type"] = "integer", ["description"] = "if >0, return only first N chars of content + truncated:true flag", ["default"] = 0 },
                         ["section"] = new JObject { ["type"] = "string", ["description"] = "if set, return only the section under this heading (case-insensitive match on '# Heading' / '## Heading' etc.)" },
-                        ["metadata_only"] = new JObject { ["type"] = "boolean", ["description"] = "if true, omit content field entirely (id, title, path, tags, wordCount only)", ["default"] = false }
+                        ["metadata_only"] = new JObject { ["type"] = "boolean", ["description"] = "if true, omit content field entirely (id, title, path, tags, wordCount only)", ["default"] = false },
+                        ["bypass_cache"] = new JObject { ["type"] = "boolean", ["description"] = "if true, skip the note-memo cache and always re-read + re-ship full content", ["default"] = false }
                     },
                     ["required"] = new JArray { "id" }
                 }),
@@ -756,6 +774,10 @@ internal static partial class Program
         var resultsArr = new JArray(matches.Select(x => BuildSearchResult(x.Node, x.Score, previewChars, compact)));
         StoreMemo("brain_search", args, query, resultsArr);
 
+        // Phase D (v2.6.0): warm the note-memo for the top-3 hits so a
+        // follow-up brain_get_note on any of them is a guaranteed hit.
+        PrefetchNoteShas(matches.Select(m => m.Node.Id), export);
+
         return new JObject
         {
             ["query"] = query,
@@ -828,6 +850,21 @@ internal static partial class Program
         var raw = File.Exists(fullPath) ? File.ReadAllText(fullPath) : node.Preview ?? "";
         LogAccess(node.Id, "get_note", node.Title);
 
+        // Note-memo short-circuit (v2.6.0). Only applies to full-content
+        // reads — partial-content responses (section / truncated /
+        // metadata_only) have a different shape and skip the memo
+        // entirely. The sha must match what we last shipped; otherwise
+        // the note was edited between calls and we serve fresh.
+        var sha = Sha256Short(raw);
+        var canCache = !metadataOnly
+                       && string.IsNullOrEmpty(section)
+                       && !(truncate > 0 && raw.Length > truncate);
+        if (canCache)
+        {
+            var hit = TryGetNoteMemoHit(nodeId, sha, node, args);
+            if (hit != null) return hit;
+        }
+
         var result = new JObject
         {
             ["id"] = node.Id,
@@ -836,7 +873,8 @@ internal static partial class Program
             ["category"] = node.PrimaryCategory,
             ["tags"] = new JArray(node.Tags),
             ["wordCount"] = node.WordCount,
-            ["modifiedAt"] = node.ModifiedAt
+            ["modifiedAt"] = node.ModifiedAt,
+            ["sha"] = sha
         };
 
         if (metadataOnly)
@@ -862,6 +900,8 @@ internal static partial class Program
             content = raw;
         }
         result["content"] = content;
+
+        if (canCache) StoreNoteMemo(nodeId, sha, raw.Length);
         return result;
     }
 
@@ -984,6 +1024,17 @@ internal static partial class Program
         var total = hits + misses;
         var hitRate = total == 0 ? 0.0 : Math.Round((double)hits / total, 3);
 
+        int noteMemoSize, noteHits, noteMisses, prefetched;
+        lock (_noteMemoLock)
+        {
+            noteMemoSize = _noteMemo.Count;
+            noteHits = _noteMemoHits;
+            noteMisses = _noteMemoMisses;
+            prefetched = _noteMemoPrefetched;
+        }
+        var noteTotal = noteHits + noteMisses;
+        var noteHitRate = noteTotal == 0 ? 0.0 : Math.Round((double)noteHits / noteTotal, 3);
+
         // ServerInfo block — surfaces the running MCP version inline so a
         // single brain_stats call answers "which build of the brain am I
         // talking to?" without the user needing a CLI flag. The version
@@ -1032,6 +1083,16 @@ internal static partial class Program
                 ["misses"] = misses,
                 ["hitRate"] = hitRate,
                 ["ttlMinutes"] = (int)MemoTtl.TotalMinutes
+            },
+            ["noteMemo"] = new JObject
+            {
+                ["entries"] = noteMemoSize,
+                ["hits"] = noteHits,
+                ["misses"] = noteMisses,
+                ["hitRate"] = noteHitRate,
+                ["prefetched"] = prefetched,
+                ["ttlMinutes"] = (int)MemoTtl.TotalMinutes,
+                ["maxEntries"] = NoteMemoMaxEntries
             },
             ["bundles"] = BundleSummaryForStats()
         };
@@ -1582,8 +1643,29 @@ internal static partial class Program
 
         // Append with a blank-line separator
         var existing = File.ReadAllText(fullPath);
+        var previousSha = Sha256Short(existing);
         var separator = existing.EndsWith("\n\n") ? "" : existing.EndsWith("\n") ? "\n" : "\n\n";
-        File.AppendAllText(fullPath, separator + content + "\n");
+        var appendBlock = separator + content + "\n";
+        File.AppendAllText(fullPath, appendBlock);
+
+        // Construct the new content in-memory (avoid re-reading the file —
+        // we already know what we wrote) so we can compute the diff + new
+        // sha and refresh the note-memo without touching disk twice.
+        var newContent = existing + appendBlock;
+        var newSha = Sha256Short(newContent);
+
+        // Unified diff for an append-only write (v2.6.0). Cheaper than
+        // an LCS: we KNOW the operation appended a known block of bytes
+        // at the end, so the hunk is just "+ each appended line" rooted
+        // at the original last line. DiffPlex was overkill here.
+        string? diff = AppendOnlyUnifiedDiff(
+            existing, appendBlock,
+            Path.GetFileName(fullPath), previousSha, newSha);
+
+        // Refresh the note-memo with the post-write sha. Next get_note
+        // on this id will short-circuit with cached:true and Claude
+        // won't re-fetch content it can reconstruct from the diff.
+        StoreNoteMemo(resolvedId, newSha, newContent.Length);
 
         LogAccess(resolvedId, "write", Path.GetFileNameWithoutExtension(fullPath));
 
@@ -1613,8 +1695,11 @@ internal static partial class Program
             ["path"] = fullPath,
             ["id"] = resolvedId,
             ["appendedBytes"] = content.Length,
-            ["hint"] = "Re-index in ObsidianX to update the graph."
+            ["previousSha"] = previousSha,
+            ["newSha"] = newSha,
+            ["hint"] = "Re-index in ObsidianX to update the graph. The diff shows what was appended — no need to brain_get_note this id to verify."
         };
+        if (diff != null) result["diff"] = diff;
         if (hygiene != null) result["hygiene"] = hygiene;
         return result;
     }
@@ -1884,8 +1969,25 @@ internal static partial class Program
         var logCtx = ql ?? string.Join(",", validSeeds.Take(2));
         foreach (var (node, _, _) in scored) LogAccess(node.Id, "walk", logCtx);
 
+        // Phase E (v2.6.0): walk-aware compaction. For nodes Claude has
+        // already loaded in this session (HasNoteMemo true), emit a
+        // tiny stub instead of preview+tags+category — saves ~120
+        // chars per cached node. The {cached:true} marker tells Claude
+        // not to re-fetch.
         var nodes = new JArray(scored.Select(t =>
         {
+            if (HasNoteMemo(t.node.Id, out var memoSha))
+            {
+                return new JObject
+                {
+                    ["id"] = t.node.Id,
+                    ["title"] = t.node.Title,
+                    ["score"] = Math.Round(t.score, 4),
+                    ["distance"] = t.dist,
+                    ["cached"] = true,
+                    ["sha"] = memoSha
+                };
+            }
             var o = (JObject)BuildSearchResult(t.node, Math.Round(t.score, 4), previewChars, compact);
             o["distance"] = t.dist;
             return o;
@@ -1984,6 +2086,10 @@ internal static partial class Program
         foreach (var (n, _) in ranked) LogAccess(n.Id, "semantic_search", query);
         var resultsArr = new JArray(ranked.Select(x => BuildSearchResult(x.node, Math.Round(x.score, 4), previewChars, compact)));
         StoreMemo("brain_semantic_search", args, query, resultsArr);
+
+        // Phase D (v2.6.0): prefetch top-3 for the inevitable get_note
+        PrefetchNoteShas(ranked.Select(r => r.node.Id), export);
+
         return new JObject
         {
             ["query"] = query,
@@ -3388,6 +3494,340 @@ internal static partial class Program
                 _searchMemo.Remove(oldest);
             }
             _searchMemo[key] = new MemoEntry(DateTime.UtcNow, compact, fullResults.Count, 0);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //   NOTE MEMO (v2.6.0) — borrowed from cachebro's hash+diff idea
+    // ═══════════════════════════════════════════════════════════════
+    // Same shape as the search-memo above, but for brain_get_note. Key
+    // is the noteId; value is the sha of the LAST full content we
+    // shipped to Claude in this process, plus when. A subsequent
+    // get_note for the same id+sha within MemoTtl short-circuits with
+    // a tiny {cached:true} response instead of re-shipping 5-20k of
+    // markdown that's already in Claude's context.
+    //
+    // Sha is 24 hex chars (96 bits) of SHA-256 — collision-safe to
+    // ~2^48 notes; ample for any brain.
+    //
+    // Bypass: pass bypass_cache:true on the get_note call. The env
+    // var OBSIDIANX_DISABLE_MEMO=1 disables ALL memos (search + note).
+    //
+    // Cross-session persistence (Phase C) will hydrate this dict from
+    // SQLite at startup and flush back periodically, so a fresh MCP
+    // process inherits the prior incarnation's sha history.
+
+    private record NoteSnapshot(string Sha, DateTime AtUtc, int HitCount, long ByteSize);
+
+    private static readonly Dictionary<string, NoteSnapshot> _noteMemo = new();
+    private static readonly object _noteMemoLock = new();
+    private const int NoteMemoMaxEntries = 200;
+    private static int _noteMemoHits;
+    private static int _noteMemoMisses;
+    private static int _noteMemoPrefetched;   // populated by Phase D (search prefetch)
+
+    /// <summary>Short content hash — 24 hex chars (96 bits) of SHA-256. Used as the cache discriminant for brain_get_note.</summary>
+    internal static string Sha256Short(string content)
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes(content ?? string.Empty);
+        var hash = System.Security.Cryptography.SHA256.HashData(bytes);
+        return Convert.ToHexString(hash, 0, 12).ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// Build a unified-diff string for an APPEND-ONLY write. Cheaper than
+    /// a full LCS — we know the operation only added bytes at the tail,
+    /// so the hunk is just the appended lines with up to 3 lines of
+    /// preceding context. Returns null when nothing was appended.
+    /// </summary>
+    internal static string? AppendOnlyUnifiedDiff(string existing, string appendBlock, string fileName, string oldSha, string newSha)
+    {
+        if (string.IsNullOrEmpty(appendBlock)) return null;
+
+        var existingLines = (existing ?? string.Empty).Split('\n');
+        var appendLines = appendBlock.Split('\n');
+
+        // Strip the trailing empty entry that arises from a final '\n'
+        if (appendLines.Length > 0 && string.IsNullOrEmpty(appendLines[^1]))
+            appendLines = appendLines[..^1];
+        if (appendLines.Length == 0) return null;
+
+        // Existing line count for the hunk header. If existing ends with
+        // a newline its split produces a trailing empty — drop it for
+        // counting too, so line numbers match a 1-based reader's view.
+        int existingCount = existingLines.Length;
+        if (existingCount > 0 && string.IsNullOrEmpty(existingLines[^1]))
+            existingCount--;
+
+        const int ContextLines = 3;
+        int ctxStart = Math.Max(0, existingCount - ContextLines);
+        int ctxCount = existingCount - ctxStart;
+
+        var sb = new StringBuilder();
+        sb.Append("--- a/").Append(fileName).Append(" (sha=").Append(oldSha.AsSpan(0, Math.Min(8, oldSha.Length))).AppendLine(")");
+        sb.Append("+++ b/").Append(fileName).Append(" (sha=").Append(newSha.AsSpan(0, Math.Min(8, newSha.Length))).AppendLine(")");
+        sb.Append("@@ -").Append(ctxStart + 1).Append(',').Append(ctxCount)
+          .Append(" +").Append(ctxStart + 1).Append(',').Append(ctxCount + appendLines.Length).AppendLine(" @@");
+        for (int i = ctxStart; i < ctxStart + ctxCount; i++)
+            sb.Append(' ').AppendLine(existingLines[i]);
+        foreach (var ln in appendLines)
+            sb.Append('+').AppendLine(ln);
+        return sb.ToString();
+    }
+
+    private static JObject? TryGetNoteMemoHit(string noteId, string sha, NodeSummary node, JObject args)
+    {
+        if (Environment.GetEnvironmentVariable("OBSIDIANX_DISABLE_MEMO") == "1") return null;
+        if (args["bypass_cache"]?.ToObject<bool>() == true) return null;
+
+        lock (_noteMemoLock)
+        {
+            if (!_noteMemo.TryGetValue(noteId, out var entry))
+            {
+                _noteMemoMisses++;
+                return null;
+            }
+            if (!string.Equals(entry.Sha, sha, StringComparison.Ordinal))
+            {
+                // Content changed since we last shipped — miss. Caller
+                // will re-StoreNoteMemo with the new sha.
+                _noteMemoMisses++;
+                return null;
+            }
+            if (DateTime.UtcNow - entry.AtUtc > MemoTtl)
+            {
+                _noteMemo.Remove(noteId);
+                _noteMemoMisses++;
+                return null;
+            }
+            var bumped = entry with { HitCount = entry.HitCount + 1 };
+            _noteMemo[noteId] = bumped;
+            _noteMemoHits++;
+            var ageSeconds = (int)(DateTime.UtcNow - entry.AtUtc).TotalSeconds;
+            return new JObject
+            {
+                ["cached"] = true,
+                ["id"] = noteId,
+                ["title"] = node.Title,
+                ["path"] = node.RelativePath,
+                ["category"] = node.PrimaryCategory.ToString(),
+                ["tags"] = new JArray(node.Tags),
+                ["wordCount"] = node.WordCount,
+                ["modifiedAt"] = node.ModifiedAt,
+                ["sha"] = sha,
+                ["byteSize"] = entry.ByteSize,
+                ["ageSeconds"] = ageSeconds,
+                ["hitCount"] = bumped.HitCount,
+                ["note"] = $"Note content unchanged since your earlier turn ({ageSeconds}s ago, sha={sha[..8]}…) — the full content is still in your context window. Do NOT re-narrate. Pass bypass_cache:true to force a fresh read."
+            };
+        }
+    }
+
+    internal static void StoreNoteMemo(string noteId, string sha, long byteSize)
+    {
+        lock (_noteMemoLock)
+        {
+            if (_noteMemo.Count >= NoteMemoMaxEntries && !_noteMemo.ContainsKey(noteId))
+            {
+                var oldest = _noteMemo.OrderBy(kv => kv.Value.AtUtc).First().Key;
+                _noteMemo.Remove(oldest);
+            }
+            _noteMemo[noteId] = new NoteSnapshot(sha, DateTime.UtcNow, 0, byteSize);
+        }
+        // Phase C: fire-and-forget disk persistence so the next MCP
+        // process (or a sibling instance) sees what we shipped.
+        PersistNoteShaAsync(noteId, sha, byteSize);
+    }
+
+    /// <summary>Used by Phase E (walk compaction) to peek without mutating hit/miss counters.</summary>
+    internal static bool HasNoteMemo(string noteId, out string? sha)
+    {
+        lock (_noteMemoLock)
+        {
+            if (_noteMemo.TryGetValue(noteId, out var entry) && DateTime.UtcNow - entry.AtUtc <= MemoTtl)
+            {
+                sha = entry.Sha;
+                return true;
+            }
+        }
+        sha = null;
+        return false;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //   SEMANTIC PREFETCH (Phase D — BEYOND cachebro)
+    // ═══════════════════════════════════════════════════════════════
+    // Typical Claude flow: brain_search X → brain_get_note <top result>.
+    // We exploit the wiki-link graph cachebro can't see: right after a
+    // search, async-hash the top-N hits so the inevitable get_note
+    // call moments later is a guaranteed cache hit (no file read,
+    // tiny response). Fire-and-forget — never blocks the search.
+
+    internal static void PrefetchNoteShas(IEnumerable<string> noteIds, BrainExport export, int topN = 3)
+    {
+        var ids = noteIds.Take(topN).ToList();
+        if (ids.Count == 0) return;
+        _ = Task.Run(() =>
+        {
+            foreach (var id in ids)
+            {
+                try
+                {
+                    var node = export.Nodes.FirstOrDefault(n => n.Id == id);
+                    if (node == null) continue;
+                    var fp = Path.Combine(export.VaultPath, node.RelativePath);
+                    if (!File.Exists(fp)) continue;
+                    var raw = File.ReadAllText(fp);
+                    var sha = Sha256Short(raw);
+                    // Skip if already memoed at this sha — don't waste a
+                    // disk write reaffirming what we already know.
+                    if (HasNoteMemo(id, out var existing) && string.Equals(existing, sha, StringComparison.Ordinal))
+                        continue;
+                    StoreNoteMemo(id, sha, raw.Length);
+                    Interlocked.Increment(ref _noteMemoPrefetched);
+                }
+                catch
+                {
+                    // Best-effort. A prefetch failure leaves the next
+                    // get_note to do a normal read.
+                }
+            }
+        });
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //   NOTE-SHA HISTORY (Phase C — cross-session persistence)
+    // ═══════════════════════════════════════════════════════════════
+    // Goes beyond cachebro: persists the sha→noteId mapping to disk so a
+    // fresh MCP process inherits its predecessor's cache. Without this,
+    // every MCP restart = token cliff (cache cold for the first 5-10
+    // calls). With it, the 7 parallel MCP processes also share state
+    // through brain.db + WAL.
+    //
+    // Storage: piggybacks on .obsidianx/brain.db (the SQLite db the WPF
+    // client + Server already maintain). Adds ONE new table; never
+    // touches the existing ones. If brain.db doesn't exist yet (CLI-
+    // only install), CREATE-IF-NOT-EXISTS makes one on first call.
+    //
+    // MySQL parity: deferred to v2.6.1. The MCP process does not
+    // currently connect to MySQL (it's a server-side backend used by
+    // ObsidianX.Server for team setups). Adding a MySQL path here
+    // would require config plumbing that doesn't pay off until at
+    // least one team customer asks for it.
+
+    private static string ShaDbPath => Path.Combine(_vaultPath, ".obsidianx", "brain.db");
+    private static bool _shaDbInitialized;
+    private static readonly object _shaDbLock = new();
+
+    private static Microsoft.Data.Sqlite.SqliteConnection OpenShaDb()
+    {
+        var path = ShaDbPath;
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var c = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={path};Cache=Shared");
+        c.Open();
+        if (!_shaDbInitialized)
+        {
+            lock (_shaDbLock)
+            {
+                if (!_shaDbInitialized)
+                {
+                    using var init = c.CreateCommand();
+                    init.CommandText = """
+                        PRAGMA journal_mode = WAL;
+                        PRAGMA synchronous = NORMAL;
+                        CREATE TABLE IF NOT EXISTS note_sha_history (
+                            note_id        TEXT NOT NULL,
+                            sha            TEXT NOT NULL,
+                            first_seen_at  TEXT NOT NULL,
+                            last_seen_at   TEXT NOT NULL,
+                            hit_count      INTEGER NOT NULL DEFAULT 1,
+                            byte_size      INTEGER NOT NULL,
+                            PRIMARY KEY (note_id, sha)
+                        );
+                        CREATE INDEX IF NOT EXISTS ix_note_sha_last_seen
+                            ON note_sha_history(last_seen_at DESC);
+                    """;
+                    init.ExecuteNonQuery();
+                    _shaDbInitialized = true;
+                }
+            }
+        }
+        return c;
+    }
+
+    /// <summary>Persist a sha record asynchronously. Fire-and-forget — never blocks the caller.</summary>
+    private static void PersistNoteShaAsync(string noteId, string sha, long byteSize)
+    {
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                using var c = OpenShaDb();
+                using var cmd = c.CreateCommand();
+                cmd.CommandText = """
+                    INSERT INTO note_sha_history (note_id, sha, first_seen_at, last_seen_at, hit_count, byte_size)
+                    VALUES (@id, @sha, @now, @now, 1, @sz)
+                    ON CONFLICT(note_id, sha) DO UPDATE SET
+                        last_seen_at = excluded.last_seen_at,
+                        hit_count    = note_sha_history.hit_count + 1;
+                """;
+                var now = DateTime.UtcNow.ToString("O");
+                cmd.Parameters.AddWithValue("@id", noteId);
+                cmd.Parameters.AddWithValue("@sha", sha);
+                cmd.Parameters.AddWithValue("@now", now);
+                cmd.Parameters.AddWithValue("@sz", byteSize);
+                cmd.ExecuteNonQuery();
+            }
+            catch
+            {
+                // Persistence is best-effort. Disk errors must never
+                // break the in-memory cache or the user-facing tool call.
+            }
+        });
+    }
+
+    /// <summary>Load recent sha records into _noteMemo. Called once at startup.</summary>
+    private static int HydrateNoteMemoFromDisk(TimeSpan window)
+    {
+        try
+        {
+            var cutoff = DateTime.UtcNow - window;
+            using var c = OpenShaDb();
+            using var cmd = c.CreateCommand();
+            cmd.CommandText = """
+                SELECT note_id, sha, last_seen_at, byte_size
+                FROM note_sha_history
+                WHERE last_seen_at >= @cutoff
+                ORDER BY last_seen_at DESC
+                LIMIT @cap;
+            """;
+            cmd.Parameters.AddWithValue("@cutoff", cutoff.ToString("O"));
+            cmd.Parameters.AddWithValue("@cap", NoteMemoMaxEntries);
+            using var r = cmd.ExecuteReader();
+            int loaded = 0;
+            while (r.Read())
+            {
+                var id = r.GetString(0);
+                var sha = r.GetString(1);
+                var when = DateTime.Parse(r.GetString(2)).ToUniversalTime();
+                var size = r.GetInt64(3);
+                lock (_noteMemoLock)
+                {
+                    if (_noteMemo.Count >= NoteMemoMaxEntries) break;
+                    // Use the persisted timestamp so TTL math against the
+                    // ORIGINAL shipment still applies after restart. If the
+                    // entry already aged out, it'll miss on first lookup
+                    // and self-correct.
+                    _noteMemo[id] = new NoteSnapshot(sha, when, 0, size);
+                }
+                loaded++;
+            }
+            return loaded;
+        }
+        catch
+        {
+            // Brand-new vault with no brain.db yet → empty hydrate is fine.
+            return 0;
         }
     }
 
