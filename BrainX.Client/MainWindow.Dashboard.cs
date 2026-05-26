@@ -47,6 +47,23 @@ public partial class MainWindow
         public Color CategoryColor { get; init; } = Colors.Gray;
     }
 
+    // Row model for the new Expertise Profile card (Pro Insights strip).
+    public sealed class DashExpertiseRow
+    {
+        public string Name { get; init; } = "";
+        public string PercentLabel { get; init; } = "0%";
+        public double BarWidth { get; init; }            // bound to Border.Width — px
+        public Brush CategoryBrush { get; init; } = Brushes.Gray;
+    }
+
+    // Row model for the Top Tags pill cloud.
+    public sealed class DashTagPill
+    {
+        public string TagLabel { get; init; } = "";      // "#barnes-hut"
+        public string CountLabel { get; init; } = "";    // "12"
+        public Brush TagBrush { get; init; } = Brushes.White;
+    }
+
     // ═════════════════════════════════════════════════════════════════
     // Entry point — call once after IndexVault. Idempotent.
     // ═════════════════════════════════════════════════════════════════
@@ -58,6 +75,12 @@ public partial class MainWindow
             PopulateDashActivity();
             PopulateDashRecent();
             StartDashRecentRefreshTimer();
+            // Pro Insights strip — 4 cards across the bottom of the dashboard.
+            PopulateDashExpertise();
+            PopulateDashTopTags();
+            PopulateDashMcpActivity();
+            PopulateDashHealth();
+            StartDashProInsightsRefreshTimer();
         }
         catch (Exception ex)
         {
@@ -584,5 +607,379 @@ public partial class MainWindow
                 b.Style = navButton;
         }
         btn.Style = navButtonActive;
+    }
+
+    // ═════════════════════════════════════════════════════════════════
+    // PRO INSIGHTS STRIP — 4 cards across the bottom of the Dashboard.
+    // Each populator reads from in-memory state (no disk I/O on every
+    // tick) so the strip stays cheap to refresh every 8 s. Cards:
+    //   A · Expertise Profile   — top 6 categories with horizontal bars
+    //   B · Top Tags            — most-used #hashtags pill cloud
+    //   C · MCP Activity 24 h   — sparkline + counts + top tool
+    //   D · System Health       — vault / db / index / ai / mesh / version
+    // ═════════════════════════════════════════════════════════════════
+
+    private System.Windows.Threading.DispatcherTimer? _dashProInsightsTimer;
+
+    private void StartDashProInsightsRefreshTimer()
+    {
+        if (_dashProInsightsTimer != null) return;
+        _dashProInsightsTimer = new System.Windows.Threading.DispatcherTimer(
+            System.Windows.Threading.DispatcherPriority.Background)
+        {
+            Interval = System.TimeSpan.FromSeconds(8)
+        };
+        _dashProInsightsTimer.Tick += (_, _) =>
+        {
+            // Only refresh when Dashboard view is actually visible.
+            if (DashboardView?.Visibility != System.Windows.Visibility.Visible) return;
+            try
+            {
+                PopulateDashExpertise();
+                PopulateDashTopTags();
+                PopulateDashMcpActivity();
+                PopulateDashHealth();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Pro Insights refresh: {ex.Message}");
+            }
+        };
+        _dashProInsightsTimer.Start();
+    }
+
+    // ─── A · EXPERTISE PROFILE ────────────────────────────────────────
+    // Groups _graph.Nodes by PrimaryCategory, takes top 6 by count, and
+    // emits DashExpertiseRow items with horizontal bar widths sized to
+    // a fixed 120 px max so they fit the narrow card.
+    private void PopulateDashExpertise()
+    {
+        if (DashExpertiseList == null) return;
+        if (_graph == null || _graph.TotalNodes == 0)
+        {
+            DashExpertiseList.ItemsSource = Array.Empty<DashExpertiseRow>();
+            if (DashExpertiseSummaryText != null)
+                DashExpertiseSummaryText.Text = "—";
+            return;
+        }
+
+        var groups = _graph.Nodes
+            .Where(n => n != null)
+            .GroupBy(n => n.PrimaryCategory)
+            .Select(g => new { Cat = g.Key, Count = g.Count() })
+            .OrderByDescending(x => x.Count)
+            .Take(6)
+            .ToList();
+
+        if (groups.Count == 0)
+        {
+            DashExpertiseList.ItemsSource = Array.Empty<DashExpertiseRow>();
+            return;
+        }
+
+        int topCount = groups[0].Count;
+        const double MaxBarPx = 120.0;
+
+        var rows = groups.Select(g =>
+        {
+            var color = GetCategoryColor(g.Cat);
+            double pct = (double)g.Count / _graph.TotalNodes * 100.0;
+            return new DashExpertiseRow
+            {
+                Name = g.Cat.ToString().Replace('_', ' '),
+                PercentLabel = $"{pct:0.#}%",
+                BarWidth = Math.Max(8, (g.Count / (double)topCount) * MaxBarPx),
+                CategoryBrush = new SolidColorBrush(color),
+            };
+        }).ToList();
+        DashExpertiseList.ItemsSource = rows;
+
+        if (DashExpertiseSummaryText != null)
+        {
+            int totalCats = _graph.Nodes
+                .Select(n => n.PrimaryCategory)
+                .Distinct()
+                .Count();
+            DashExpertiseSummaryText.Text =
+                $"{totalCats} active categories · top: {groups[0].Cat.ToString().Replace('_', ' ')}";
+        }
+    }
+
+    // ─── B · TOP TAGS ─────────────────────────────────────────────────
+    // Flattens all KnowledgeNode.Tags into one frequency map, picks top
+    // 12 by count, and emits DashTagPill items. Each tag's color is
+    // mapped from the category color of the most common node it appears
+    // on (visual continuity with the graph).
+    private void PopulateDashTopTags()
+    {
+        if (DashTopTagsPanel == null) return;
+        if (_graph == null || _graph.TotalNodes == 0)
+        {
+            DashTopTagsPanel.ItemsSource = Array.Empty<DashTagPill>();
+            if (DashTagsTotalText != null) DashTagsTotalText.Text = " · 0 total";
+            return;
+        }
+
+        var tagCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var tagCats   = new Dictionary<string, KnowledgeCategory>(StringComparer.OrdinalIgnoreCase);
+        foreach (var n in _graph.Nodes)
+        {
+            if (n?.Tags == null) continue;
+            foreach (var tagRaw in n.Tags)
+            {
+                if (string.IsNullOrWhiteSpace(tagRaw)) continue;
+                var tag = tagRaw.Trim().TrimStart('#');
+                if (tag.Length == 0) continue;
+                if (!tagCounts.TryGetValue(tag, out int c)) c = 0;
+                tagCounts[tag] = c + 1;
+                if (!tagCats.ContainsKey(tag)) tagCats[tag] = n.PrimaryCategory;
+            }
+        }
+
+        var top = tagCounts
+            .OrderByDescending(kv => kv.Value)
+            .Take(12)
+            .Select(kv =>
+            {
+                var color = tagCats.TryGetValue(kv.Key, out var cat)
+                    ? GetCategoryColor(cat)
+                    : Colors.White;
+                return new DashTagPill
+                {
+                    TagLabel = "#" + kv.Key,
+                    CountLabel = kv.Value.ToString("N0"),
+                    TagBrush = new SolidColorBrush(color),
+                };
+            })
+            .ToList();
+        DashTopTagsPanel.ItemsSource = top;
+        if (DashTagsTotalText != null)
+            DashTagsTotalText.Text = $" · {tagCounts.Count:N0} total";
+    }
+
+    // ─── C · MCP ACTIVITY 24 H ────────────────────────────────────────
+    // Tails .obsidianx/access-log.ndjson, buckets events by hour for the
+    // last 24 hours, draws a 24-bar sparkline into DashMcpSparkCanvas,
+    // shows total + top-tool name.
+    private void PopulateDashMcpActivity()
+    {
+        if (DashMcpSparkCanvas == null) return;
+        DashMcpSparkCanvas.Children.Clear();
+
+        var bins24 = new int[24];
+        int total = 0;
+        var toolCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var path = System.IO.Path.Combine(_vaultPath, ".obsidianx", "access-log.ndjson");
+        var since = DateTime.UtcNow.AddHours(-24);
+
+        try
+        {
+            if (System.IO.File.Exists(path))
+            {
+                // Read the tail — capped at last ~3000 lines so we don't
+                // scan a multi-MB log on every tick.
+                var lines = SafeReadTailLines(path, 3000);
+                foreach (var line in lines)
+                {
+                    if (string.IsNullOrWhiteSpace(line)) continue;
+                    try
+                    {
+                        var obj = Newtonsoft.Json.Linq.JObject.Parse(line);
+                        var ts = obj["ts"]?.ToString();
+                        if (!DateTime.TryParse(ts, null,
+                            System.Globalization.DateTimeStyles.AssumeUniversal |
+                            System.Globalization.DateTimeStyles.AdjustToUniversal,
+                            out var dt)) continue;
+                        if (dt < since) continue;
+                        var hourAgo = (int)(DateTime.UtcNow - dt).TotalHours;
+                        if (hourAgo < 0 || hourAgo >= 24) continue;
+                        bins24[23 - hourAgo]++;
+                        total++;
+
+                        var op = obj["op"]?.ToString() ?? "";
+                        var tool = op.StartsWith("mcp.", StringComparison.OrdinalIgnoreCase)
+                            ? op.Substring(4)
+                            : op;
+                        if (!string.IsNullOrEmpty(tool))
+                        {
+                            if (!toolCounts.TryGetValue(tool, out int c)) c = 0;
+                            toolCounts[tool] = c + 1;
+                        }
+                    }
+                    catch { /* skip malformed lines */ }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"PopulateDashMcpActivity read: {ex.Message}");
+        }
+
+        if (DashMcpCalls24hText != null)
+            DashMcpCalls24hText.Text = total.ToString("N0");
+
+        if (DashMcpTopToolText != null)
+        {
+            var topTool = toolCounts
+                .OrderByDescending(kv => kv.Value)
+                .Select(kv => $"{kv.Key} · {kv.Value:N0}×")
+                .FirstOrDefault();
+            DashMcpTopToolText.Text = string.IsNullOrEmpty(topTool) ? "—" : topTool;
+        }
+
+        if (DashMcpDeltaText != null)
+        {
+            // Crude delta: compare last 12h to the 12h before that.
+            int recent = 0, prior = 0;
+            for (int i = 0; i < 24; i++)
+                if (i >= 12) recent += bins24[i]; else prior += bins24[i];
+            int delta = recent - prior;
+            string sign = delta >= 0 ? "+" : "";
+            DashMcpDeltaText.Text = $"{sign}{delta} vs prev 12 h";
+            DashMcpDeltaText.Foreground = delta >= 0
+                ? (Brush)(System.Windows.Application.Current.TryFindResource("NeuralMint") ?? Brushes.LightGreen)
+                : (Brush)(System.Windows.Application.Current.TryFindResource("NeuralRose") ?? Brushes.IndianRed);
+        }
+
+        // Draw sparkline: 24 vertical bars across DashMcpSparkCanvas width.
+        DashMcpSparkCanvas.UpdateLayout();
+        double w = DashMcpSparkCanvas.ActualWidth;
+        double h = DashMcpSparkCanvas.ActualHeight;
+        if (w <= 0) w = 220;
+        if (h <= 0) h = 46;
+        int max = Math.Max(1, bins24.Max());
+        double slot = w / 24.0;
+        var barBrush = (Brush)(System.Windows.Application.Current.TryFindResource("NeuralViolet2")
+                              ?? Brushes.MediumPurple);
+        for (int i = 0; i < 24; i++)
+        {
+            double bh = Math.Max(2.0, (bins24[i] / (double)max) * (h - 4));
+            var rect = new System.Windows.Shapes.Rectangle
+            {
+                Width = Math.Max(2.0, slot - 2),
+                Height = bh,
+                RadiusX = 1.5,
+                RadiusY = 1.5,
+                Fill = bins24[i] == 0
+                    ? (Brush)(System.Windows.Application.Current.TryFindResource("NeuralLine") ?? Brushes.Gray)
+                    : barBrush,
+                Opacity = bins24[i] == 0 ? 0.4 : 0.9,
+            };
+            System.Windows.Controls.Canvas.SetLeft(rect, i * slot + 1);
+            System.Windows.Controls.Canvas.SetTop(rect, h - bh - 2);
+            DashMcpSparkCanvas.Children.Add(rect);
+        }
+    }
+
+    // ─── D · SYSTEM HEALTH ────────────────────────────────────────────
+    // Six rows of compact key/value: vault path + size, DB size, index
+    // age, AI backend, mesh peer count, app version. Status dot turns
+    // amber if anything is unhealthy (no AI / DB missing / vault unset).
+    private void PopulateDashHealth()
+    {
+        if (DashHealthVaultText == null) return;
+        try
+        {
+            string vaultPath = _vaultPath ?? "";
+            long vaultBytes = 0;
+            try
+            {
+                if (!string.IsNullOrEmpty(vaultPath) && System.IO.Directory.Exists(vaultPath))
+                {
+                    // Cheap heuristic: sum file lengths only at vault root +
+                    // first-level subdirs. Full walk is too slow for an 8 s tick.
+                    foreach (var f in System.IO.Directory.EnumerateFiles(vaultPath, "*.md",
+                        System.IO.SearchOption.TopDirectoryOnly))
+                    {
+                        try { vaultBytes += new System.IO.FileInfo(f).Length; } catch { }
+                    }
+                    foreach (var d in System.IO.Directory.EnumerateDirectories(vaultPath))
+                    {
+                        try
+                        {
+                            foreach (var f in System.IO.Directory.EnumerateFiles(d, "*.md",
+                                System.IO.SearchOption.TopDirectoryOnly))
+                            {
+                                try { vaultBytes += new System.IO.FileInfo(f).Length; } catch { }
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
+
+            string vaultShort = string.IsNullOrEmpty(vaultPath) ? "—" : vaultPath;
+            if (vaultShort.Length > 24) vaultShort = "…" + vaultShort.Substring(vaultShort.Length - 23);
+            DashHealthVaultText.Text = $"{vaultShort} · {FormatBytesDash(vaultBytes)}";
+
+            if (DashHealthDbText != null)
+            {
+                long dbBytes = 0;
+                try
+                {
+                    var dbPath = System.IO.Path.Combine(vaultPath, ".obsidianx", "brain.db");
+                    if (System.IO.File.Exists(dbPath))
+                        dbBytes = new System.IO.FileInfo(dbPath).Length;
+                }
+                catch { }
+                DashHealthDbText.Text = dbBytes > 0
+                    ? $"SQLite · {FormatBytesDash(dbBytes)}"
+                    : "SQLite · not initialised";
+            }
+
+            if (DashHealthIndexText != null)
+            {
+                DashHealthIndexText.Text = _graph != null
+                    ? $"{_graph.TotalNodes:N0} nodes · {_graph.TotalEdges:N0} links"
+                    : "not indexed";
+            }
+
+            if (DashHealthAiText != null)
+            {
+                // Try to read the active backend label from the AI status bar.
+                string aiText = AiBackendStatus?.Text ?? "AI ?";
+                DashHealthAiText.Text = string.IsNullOrEmpty(aiText) ? "—" : aiText;
+            }
+
+            if (DashHealthMeshText != null)
+            {
+                string mesh = PeerCountText?.Text ?? "0 peers";
+                DashHealthMeshText.Text = mesh;
+            }
+
+            if (DashHealthVersionText != null)
+            {
+                DashHealthVersionText.Text = VersionText?.Text ?? "v—";
+            }
+
+            // Status dot: amber if AI or DB missing.
+            if (DashHealthDot != null)
+            {
+                bool aiOk = (AiBackendDot?.Fill is SolidColorBrush sb)
+                            && (sb.Color.G > 0x80 || sb.Color.B > 0x80);
+                bool indexOk = _graph != null && _graph.TotalNodes > 0;
+                if (aiOk && indexOk)
+                    DashHealthDot.Fill = (Brush)(System.Windows.Application.Current.TryFindResource("NeuralMint")
+                                                ?? Brushes.LightGreen);
+                else
+                    DashHealthDot.Fill = (Brush)(System.Windows.Application.Current.TryFindResource("NeuralAmber")
+                                                ?? Brushes.Orange);
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"PopulateDashHealth: {ex.Message}");
+        }
+    }
+
+    private static string FormatBytesDash(long bytes)
+    {
+        if (bytes <= 0) return "0 B";
+        string[] units = { "B", "KB", "MB", "GB", "TB" };
+        double v = bytes;
+        int u = 0;
+        while (v >= 1024 && u < units.Length - 1) { v /= 1024; u++; }
+        return $"{v:0.#} {units[u]}";
     }
 }

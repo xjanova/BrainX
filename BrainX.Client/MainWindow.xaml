@@ -647,10 +647,11 @@
                                  the remaining vertical space cleanly. -->
                             <Grid Margin="28,24,28,16">
                                 <Grid.RowDefinitions>
-                                    <RowDefinition Height="Auto"/>
-                                    <RowDefinition Height="Auto"/>
-                                    <RowDefinition Height="*"/>
-                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/> <!-- header -->
+                                    <RowDefinition Height="Auto"/> <!-- KPI grid -->
+                                    <RowDefinition Height="*"/>    <!-- main 2-col map + live -->
+                                    <RowDefinition Height="Auto"/> <!-- NEW pro insights strip (4 cards) -->
+                                    <RowDefinition Height="Auto"/> <!-- quick actions -->
                                 </Grid.RowDefinitions>
                                 <!-- View header — Row 0 -->
                                 <Grid Grid.Row="0" Margin="0,0,0,22">
@@ -1215,12 +1216,278 @@
                                     </Grid>
                                     <!-- end DASH-GRID 2-col -->
 
-                                    <!-- Quick Actions — Row 3 (Auto, pinned to the bottom).
+                                    <!-- ═══════════════════════════════════════════════════════════
+                                         PRO INSIGHTS STRIP — Row 3
+                                         4 dense cards giving a "god-tier" knowledge dashboard read
+                                         (user: "อยากให้รายละเอียดแดชบอร์ดเยอะครบถ้วนกว่านี้ แบบ
+                                         มืออาชีพ ตัวเล็กอัดแน่นไม่เป็นไร"). Cards LTR:
+                                           A · Expertise Profile — top 6 categories with % bars
+                                           B · Top Tags — pill cloud, 12 tags by frequency
+                                           C · MCP Activity 24 h — sparkline + total + top tool
+                                           D · System Health — vault / DB / AI / peers / version
+                                         All four populate from code-behind via x:Names. The Universe
+                                         row above is unchanged (user: "universe เท่าเดิม").
+                                         ═══════════════════════════════════════════════════════════ -->
+                                    <Grid Grid.Row="3" Margin="0,0,0,16">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+
+                                        <!-- ▼ CARD A — EXPERTISE PROFILE ▼ -->
+                                        <Border Grid.Column="0" Style="{StaticResource NeuralCard}"
+                                                Padding="16,14,16,14" Margin="0,0,7,0">
+                                            <Grid>
+                                                <Grid.RowDefinitions>
+                                                    <RowDefinition Height="Auto"/>
+                                                    <RowDefinition Height="Auto"/>
+                                                    <RowDefinition Height="*"/>
+                                                </Grid.RowDefinitions>
+                                                <StackPanel Grid.Row="0" Orientation="Horizontal">
+                                                    <TextBlock Text="EXPERTISE PROFILE" Style="{StaticResource TypeCardTitle}"
+                                                               VerticalAlignment="Center"/>
+                                                    <TextBlock x:Name="DashExpertiseCountText" Text=" · top 6"
+                                                               FontSize="11" Foreground="{StaticResource NeuralText3}"
+                                                               VerticalAlignment="Center" Margin="6,0,0,0"/>
+                                                </StackPanel>
+                                                <TextBlock Grid.Row="1" x:Name="DashExpertiseSummaryText"
+                                                           Text="—" FontSize="11" Margin="0,3,0,10"
+                                                           Foreground="{StaticResource NeuralText3}"/>
+                                                <ItemsControl Grid.Row="2" x:Name="DashExpertiseList">
+                                                    <ItemsControl.ItemTemplate>
+                                                        <DataTemplate>
+                                                            <Grid Margin="0,3,0,3">
+                                                                <Grid.RowDefinitions>
+                                                                    <RowDefinition Height="Auto"/>
+                                                                    <RowDefinition Height="Auto"/>
+                                                                </Grid.RowDefinitions>
+                                                                <Grid Grid.Row="0">
+                                                                    <Grid.ColumnDefinitions>
+                                                                        <ColumnDefinition Width="Auto"/>
+                                                                        <ColumnDefinition Width="*"/>
+                                                                        <ColumnDefinition Width="Auto"/>
+                                                                    </Grid.ColumnDefinitions>
+                                                                    <Border Grid.Column="0" Width="7" Height="7" CornerRadius="3.5"
+                                                                            Background="{Binding CategoryBrush}"
+                                                                            VerticalAlignment="Center" Margin="0,0,7,0"/>
+                                                                    <TextBlock Grid.Column="1" Text="{Binding Name}"
+                                                                               FontSize="11.5" FontWeight="Medium"
+                                                                               Foreground="{StaticResource NeuralText1}"
+                                                                               TextTrimming="CharacterEllipsis"
+                                                                               VerticalAlignment="Center"/>
+                                                                    <TextBlock Grid.Column="2" Text="{Binding PercentLabel}"
+                                                                               FontSize="11" FontFamily="{StaticResource FontMono}"
+                                                                               Foreground="{StaticResource NeuralText2}"
+                                                                               VerticalAlignment="Center"/>
+                                                                </Grid>
+                                                                <Border Grid.Row="1" Height="3" CornerRadius="2"
+                                                                        Background="{StaticResource NeuralBgInset}"
+                                                                        Margin="0,3,0,0">
+                                                                    <Border Width="{Binding BarWidth}" Height="3"
+                                                                            CornerRadius="2"
+                                                                            HorizontalAlignment="Left"
+                                                                            Background="{Binding CategoryBrush}"/>
+                                                                </Border>
+                                                            </Grid>
+                                                        </DataTemplate>
+                                                    </ItemsControl.ItemTemplate>
+                                                </ItemsControl>
+                                            </Grid>
+                                        </Border>
+
+                                        <!-- ▼ CARD B — TOP TAGS ▼ -->
+                                        <Border Grid.Column="1" Style="{StaticResource NeuralCard}"
+                                                Padding="16,14,16,14" Margin="3,0,4,0">
+                                            <Grid>
+                                                <Grid.RowDefinitions>
+                                                    <RowDefinition Height="Auto"/>
+                                                    <RowDefinition Height="Auto"/>
+                                                    <RowDefinition Height="*"/>
+                                                </Grid.RowDefinitions>
+                                                <StackPanel Grid.Row="0" Orientation="Horizontal">
+                                                    <TextBlock Text="TOP TAGS" Style="{StaticResource TypeCardTitle}"
+                                                               VerticalAlignment="Center"/>
+                                                    <TextBlock x:Name="DashTagsTotalText" Text=" · 0 total"
+                                                               FontSize="11" Foreground="{StaticResource NeuralText3}"
+                                                               VerticalAlignment="Center" Margin="6,0,0,0"/>
+                                                </StackPanel>
+                                                <TextBlock Grid.Row="1" Text="most-used #hashtags · click pill to filter (soon)"
+                                                           FontSize="11" Margin="0,3,0,10"
+                                                           Foreground="{StaticResource NeuralText3}"/>
+                                                <ItemsControl Grid.Row="2" x:Name="DashTopTagsPanel">
+                                                    <ItemsControl.ItemsPanel>
+                                                        <ItemsPanelTemplate>
+                                                            <WrapPanel/>
+                                                        </ItemsPanelTemplate>
+                                                    </ItemsControl.ItemsPanel>
+                                                    <ItemsControl.ItemTemplate>
+                                                        <DataTemplate>
+                                                            <Border CornerRadius="999" Padding="9,3" Margin="0,3,5,3"
+                                                                    Background="{StaticResource NeuralBgInset}"
+                                                                    BorderBrush="{StaticResource NeuralLine}"
+                                                                    BorderThickness="1">
+                                                                <StackPanel Orientation="Horizontal">
+                                                                    <TextBlock Text="{Binding TagLabel}" FontSize="11"
+                                                                               FontWeight="Medium"
+                                                                               Foreground="{Binding TagBrush}"
+                                                                               VerticalAlignment="Center"/>
+                                                                    <TextBlock Text="{Binding CountLabel}" FontSize="10.5"
+                                                                               FontFamily="{StaticResource FontMono}"
+                                                                               Foreground="{StaticResource NeuralText3}"
+                                                                               VerticalAlignment="Center" Margin="6,0,0,0"/>
+                                                                </StackPanel>
+                                                            </Border>
+                                                        </DataTemplate>
+                                                    </ItemsControl.ItemTemplate>
+                                                </ItemsControl>
+                                            </Grid>
+                                        </Border>
+
+                                        <!-- ▼ CARD C — MCP ACTIVITY 24 H ▼ -->
+                                        <Border Grid.Column="2" Style="{StaticResource NeuralCard}"
+                                                Padding="16,14,16,14" Margin="4,0,3,0">
+                                            <Grid>
+                                                <Grid.RowDefinitions>
+                                                    <RowDefinition Height="Auto"/>
+                                                    <RowDefinition Height="Auto"/>
+                                                    <RowDefinition Height="Auto"/>
+                                                    <RowDefinition Height="*"/>
+                                                    <RowDefinition Height="Auto"/>
+                                                </Grid.RowDefinitions>
+                                                <StackPanel Grid.Row="0" Orientation="Horizontal">
+                                                    <TextBlock Text="MCP ACTIVITY" Style="{StaticResource TypeCardTitle}"
+                                                               VerticalAlignment="Center"/>
+                                                    <TextBlock Text=" · 24 h" FontSize="11"
+                                                               Foreground="{StaticResource NeuralText3}"
+                                                               VerticalAlignment="Center" Margin="6,0,0,0"/>
+                                                </StackPanel>
+                                                <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,8,0,0">
+                                                    <TextBlock x:Name="DashMcpCalls24hText" Text="0"
+                                                               FontSize="26" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText}"
+                                                               Typography.NumeralAlignment="Tabular"
+                                                               VerticalAlignment="Bottom"/>
+                                                    <TextBlock Text="calls" FontSize="11.5"
+                                                               Foreground="{StaticResource NeuralText3}"
+                                                               VerticalAlignment="Bottom"
+                                                               Margin="6,0,0,5"/>
+                                                </StackPanel>
+                                                <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,2,0,8">
+                                                    <Ellipse Width="6" Height="6" Fill="{StaticResource NeuralMint}"
+                                                             VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                                    <TextBlock x:Name="DashMcpDeltaText" Text="+0 vs prev 24 h"
+                                                               FontSize="11"
+                                                               Foreground="{StaticResource NeuralMint}"
+                                                               VerticalAlignment="Center"/>
+                                                </StackPanel>
+                                                <!-- Sparkline canvas — code-behind draws 24 rect bars. -->
+                                                <Canvas Grid.Row="3" x:Name="DashMcpSparkCanvas"
+                                                        Background="{StaticResource NeuralBgInset}"
+                                                        MinHeight="46" ClipToBounds="True"/>
+                                                <StackPanel Grid.Row="4" Orientation="Horizontal" Margin="0,8,0,0">
+                                                    <TextBlock Text="top tool · " FontSize="11"
+                                                               Foreground="{StaticResource NeuralText3}"
+                                                               VerticalAlignment="Center"/>
+                                                    <TextBlock x:Name="DashMcpTopToolText" Text="—"
+                                                               FontSize="11.5" FontWeight="SemiBold"
+                                                               FontFamily="{StaticResource FontMono}"
+                                                               Foreground="{StaticResource NeuralViolet2}"
+                                                               VerticalAlignment="Center"/>
+                                                </StackPanel>
+                                            </Grid>
+                                        </Border>
+
+                                        <!-- ▼ CARD D — SYSTEM HEALTH ▼ -->
+                                        <Border Grid.Column="3" Style="{StaticResource NeuralCard}"
+                                                Padding="16,14,16,14" Margin="7,0,0,0">
+                                            <Grid>
+                                                <Grid.RowDefinitions>
+                                                    <RowDefinition Height="Auto"/>
+                                                    <RowDefinition Height="Auto"/>
+                                                    <RowDefinition Height="*"/>
+                                                </Grid.RowDefinitions>
+                                                <StackPanel Grid.Row="0" Orientation="Horizontal">
+                                                    <TextBlock Text="SYSTEM HEALTH" Style="{StaticResource TypeCardTitle}"
+                                                               VerticalAlignment="Center"/>
+                                                    <Ellipse x:Name="DashHealthDot" Width="8" Height="8"
+                                                             Fill="{StaticResource NeuralMint}"
+                                                             Effect="{StaticResource GlowMint}"
+                                                             VerticalAlignment="Center" Margin="8,0,0,0"/>
+                                                </StackPanel>
+                                                <TextBlock Grid.Row="1" Text="vault · db · backends · mesh"
+                                                           FontSize="11" Margin="0,3,0,10"
+                                                           Foreground="{StaticResource NeuralText3}"/>
+                                                <Grid Grid.Row="2">
+                                                    <Grid.RowDefinitions>
+                                                        <RowDefinition Height="Auto"/>
+                                                        <RowDefinition Height="Auto"/>
+                                                        <RowDefinition Height="Auto"/>
+                                                        <RowDefinition Height="Auto"/>
+                                                        <RowDefinition Height="Auto"/>
+                                                        <RowDefinition Height="Auto"/>
+                                                    </Grid.RowDefinitions>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                        <ColumnDefinition Width="*"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="VAULT"
+                                                               FontSize="9.5" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource NeuralText3}"
+                                                               VerticalAlignment="Center" Margin="0,0,10,0"/>
+                                                    <TextBlock Grid.Row="0" Grid.Column="1" x:Name="DashHealthVaultText"
+                                                               Text="—" FontSize="11" FontFamily="{StaticResource FontMono}"
+                                                               Foreground="{StaticResource NeuralText1}"
+                                                               TextTrimming="CharacterEllipsis"/>
+                                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="DB"
+                                                               FontSize="9.5" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource NeuralText3}"
+                                                               VerticalAlignment="Center" Margin="0,4,10,0"/>
+                                                    <TextBlock Grid.Row="1" Grid.Column="1" x:Name="DashHealthDbText"
+                                                               Text="—" FontSize="11" FontFamily="{StaticResource FontMono}"
+                                                               Foreground="{StaticResource NeuralText1}" Margin="0,4,0,0"/>
+                                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="INDEX"
+                                                               FontSize="9.5" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource NeuralText3}"
+                                                               VerticalAlignment="Center" Margin="0,4,10,0"/>
+                                                    <TextBlock Grid.Row="2" Grid.Column="1" x:Name="DashHealthIndexText"
+                                                               Text="—" FontSize="11" FontFamily="{StaticResource FontMono}"
+                                                               Foreground="{StaticResource NeuralText1}" Margin="0,4,0,0"/>
+                                                    <TextBlock Grid.Row="3" Grid.Column="0" Text="AI"
+                                                               FontSize="9.5" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource NeuralText3}"
+                                                               VerticalAlignment="Center" Margin="0,4,10,0"/>
+                                                    <TextBlock Grid.Row="3" Grid.Column="1" x:Name="DashHealthAiText"
+                                                               Text="—" FontSize="11" FontFamily="{StaticResource FontMono}"
+                                                               Foreground="{StaticResource NeuralText1}" Margin="0,4,0,0"
+                                                               TextTrimming="CharacterEllipsis"/>
+                                                    <TextBlock Grid.Row="4" Grid.Column="0" Text="MESH"
+                                                               FontSize="9.5" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource NeuralText3}"
+                                                               VerticalAlignment="Center" Margin="0,4,10,0"/>
+                                                    <TextBlock Grid.Row="4" Grid.Column="1" x:Name="DashHealthMeshText"
+                                                               Text="—" FontSize="11" FontFamily="{StaticResource FontMono}"
+                                                               Foreground="{StaticResource NeuralText1}" Margin="0,4,0,0"/>
+                                                    <TextBlock Grid.Row="5" Grid.Column="0" Text="VER"
+                                                               FontSize="9.5" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource NeuralText3}"
+                                                               VerticalAlignment="Center" Margin="0,4,10,0"/>
+                                                    <TextBlock Grid.Row="5" Grid.Column="1" x:Name="DashHealthVersionText"
+                                                               Text="—" FontSize="11" FontFamily="{StaticResource FontMono}"
+                                                               Foreground="{StaticResource NeuralText2}" Margin="0,4,0,0"/>
+                                                </Grid>
+                                            </Grid>
+                                        </Border>
+                                    </Grid>
+                                    <!-- end PRO INSIGHTS STRIP -->
+
+                                    <!-- Quick Actions — Row 4 (was Row 3 before the insights strip).
                                          NeuralCard wrapper + TypeCardTitle label + NeuralBtn / NeuralBtnPrimary
                                          buttons. Re-index Vault is the only action with a side effect on the
                                          entire knowledge graph, so it gets the primary violet treatment; the
                                          other three are secondary (ghost = no decoration, default = card-tinted). -->
-                                    <Border Grid.Row="3" Style="{StaticResource NeuralCard}" Padding="22,18">
+                                    <Border Grid.Row="4" Style="{StaticResource NeuralCard}" Padding="22,18">
                                         <StackPanel>
                                             <TextBlock Text="QUICK ACTIONS"
                                                        Style="{StaticResource TypeCardTitle}"
