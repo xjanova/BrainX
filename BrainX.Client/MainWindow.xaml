@@ -684,86 +684,24 @@
                                         </StackPanel>
                                     </Grid>
 
-                                    <!-- KPI grid — Row 1 -->
-                                    <Grid Grid.Row="1" Margin="0,0,0,22">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="*"/>
-                                            <ColumnDefinition Width="*"/>
-                                            <ColumnDefinition Width="*"/>
-                                            <ColumnDefinition Width="*"/>
-                                        </Grid.ColumnDefinitions>
-                                        <!-- KPI cards per t2.zip screenshot — no left thumb, label TOP,
-                                             big white value, trend line at bottom (mint delta + gray label) -->
-                                        <Border Grid.Column="0" Style="{StaticResource NeuralCard}"
-                                                Padding="22,16,22,18" Margin="0,0,8,0">
-                                            <StackPanel>
-                                                <TextBlock Text="KNOWLEDGE NODES" Style="{StaticResource TypeKpiLabel}"/>
-                                                <TextBlock x:Name="StatNotes" Text="0"
-                                                           Style="{StaticResource TypeKpiValue}" Margin="0,6,0,8"/>
-                                                <StackPanel Orientation="Horizontal">
-                                                    <TextBlock Text="+" FontSize="12" FontWeight="Bold"
-                                                               Foreground="{StaticResource NeuralMint}"
-                                                               Margin="0,0,4,0" VerticalAlignment="Center"/>
-                                                    <TextBlock x:Name="StatNotesDelta" Text="63" FontSize="12" FontWeight="Bold"
-                                                               Foreground="{StaticResource NeuralMint}"
-                                                               Margin="0,0,6,0" VerticalAlignment="Center"/>
-                                                    <TextBlock Text="this week" FontSize="12"
-                                                               Foreground="{StaticResource NeuralText3}"
-                                                               VerticalAlignment="Center"/>
-                                                </StackPanel>
-                                            </StackPanel>
-                                        </Border>
-                                        <Border Grid.Column="1" Style="{StaticResource NeuralCard}"
-                                                Padding="22,16,22,18" Margin="4,0,4,0">
-                                            <StackPanel>
-                                                <TextBlock Text="TOTAL WORDS" Style="{StaticResource TypeKpiLabel}"/>
-                                                <TextBlock x:Name="StatWords" Text="0"
-                                                           Style="{StaticResource TypeKpiValue}" Margin="0,6,0,8"/>
-                                                <StackPanel Orientation="Horizontal">
-                                                    <TextBlock Text="+" FontSize="12" FontWeight="Bold"
-                                                               Foreground="{StaticResource NeuralMint}"
-                                                               Margin="0,0,4,0" VerticalAlignment="Center"/>
-                                                    <TextBlock x:Name="StatWordsDelta" Text="41.2K" FontSize="12" FontWeight="Bold"
-                                                               Foreground="{StaticResource NeuralMint}"
-                                                               Margin="0,0,6,0" VerticalAlignment="Center"/>
-                                                    <TextBlock Text="last 14 days" FontSize="12"
-                                                               Foreground="{StaticResource NeuralText3}"
-                                                               VerticalAlignment="Center"/>
-                                                </StackPanel>
-                                            </StackPanel>
-                                        </Border>
-                                        <Border Grid.Column="2" Style="{StaticResource NeuralCard}"
-                                                Padding="22,16,22,18" Margin="4,0,4,0">
-                                            <StackPanel>
-                                                <TextBlock Text="CONNECTIONS" Style="{StaticResource TypeKpiLabel}"/>
-                                                <TextBlock x:Name="StatLinks" Text="0"
-                                                           Style="{StaticResource TypeKpiValue}" Margin="0,6,0,8"/>
-                                                <StackPanel Orientation="Horizontal">
-                                                    <TextBlock x:Name="StatLinksTrend"
-                                                               Text="20 wiki · 2,704 auto-detected" FontSize="12"
-                                                               Foreground="{StaticResource NeuralText3}"
-                                                               VerticalAlignment="Center"/>
-                                                </StackPanel>
-                                            </StackPanel>
-                                        </Border>
-                                        <Border Grid.Column="3" Style="{StaticResource NeuralCard}"
-                                                Padding="22,16,22,18" Margin="8,0,0,0">
-                                            <StackPanel>
-                                                <TextBlock Text="EXPERTISE AREAS" Style="{StaticResource TypeKpiLabel}"/>
-                                                <StackPanel Orientation="Horizontal" Margin="0,6,0,8" VerticalAlignment="Bottom">
-                                                    <TextBlock x:Name="StatCategories" Text="0"
-                                                               Style="{StaticResource TypeKpiValue}"/>
-                                                    <TextBlock Text=" /24" FontSize="20" FontWeight="SemiBold"
-                                                               Foreground="{StaticResource NeuralText3}"
-                                                               VerticalAlignment="Bottom" Margin="6,0,0,5"/>
-                                                </StackPanel>
-                                                <TextBlock x:Name="StatCategoriesTrend"
-                                                           Text="4 above 80% mastery" FontSize="12"
-                                                           Foreground="{StaticResource NeuralText3}"
-                                                           VerticalAlignment="Center"/>
-                                            </StackPanel>
-                                        </Border>
-                                    </Grid>
+                                    <!-- KPI Row 1 — REMOVED. User: "ให้ universe สูงสุด แทนบล๊อก
+                                         knowledge node และ total words เพราะมีบอกในนั้นแล้ว".
+                                         Universe overlay already shows Notes/Words/Wiki-links/
+                                         Galaxies in its top-left tile, so the two redundant KPI
+                                         cards (KNOWLEDGE NODES + TOTAL WORDS) are removed. The
+                                         row collapses to 0 height because the hidden container
+                                         below has Visibility=Collapsed.
+                                         CONNECTIONS + EXPERTISE AREAS moved to the top of the
+                                         right column (just above Activity Feed) so they remain
+                                         visible. StatNotes/StatWords/*Delta x:Names kept as
+                                         zero-size dummies so the existing UpdateDashStats code
+                                         in MainWindow.xaml.cs that writes to them stays valid. -->
+                                    <StackPanel Grid.Row="1" Visibility="Collapsed">
+                                        <TextBlock x:Name="StatNotes"/>
+                                        <TextBlock x:Name="StatNotesDelta"/>
+                                        <TextBlock x:Name="StatWords"/>
+                                        <TextBlock x:Name="StatWordsDelta"/>
+                                    </StackPanel>
 
                                     <!-- DASH-GRID — Row 2 (* — fills remaining height).
                                          2 columns (1.6fr Neural Map · 1fr Activity + Recent).
@@ -1052,6 +990,55 @@
                                                       HorizontalScrollBarVisibility="Disabled"
                                                       PanningMode="VerticalOnly">
                                         <StackPanel>
+                                            <!-- ── KPI mini-strip (Connections + Expertise) ──────────────
+                                                 Moved here from the old Row 1 KPI band so the Universe
+                                                 (Col 0) can extend up to the header and become the
+                                                 tallest element on the dashboard. Compact 2-col layout. -->
+                                            <Grid Margin="0,0,0,12">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+                                                <Border Grid.Column="0" Style="{StaticResource NeuralCard}"
+                                                        Padding="16,12,16,14" Margin="0,0,5,0">
+                                                    <StackPanel>
+                                                        <TextBlock Text="CONNECTIONS" Style="{StaticResource TypeKpiLabel}"
+                                                                   FontSize="10"/>
+                                                        <TextBlock x:Name="StatLinks" Text="0"
+                                                                   FontSize="26" FontWeight="Bold"
+                                                                   Foreground="{StaticResource NeuralText}"
+                                                                   Typography.NumeralAlignment="Tabular"
+                                                                   Margin="0,4,0,4"/>
+                                                        <TextBlock x:Name="StatLinksTrend"
+                                                                   Text="20 wiki · 2,704 auto"
+                                                                   FontSize="10.5"
+                                                                   Foreground="{StaticResource NeuralText3}"
+                                                                   TextTrimming="CharacterEllipsis"/>
+                                                    </StackPanel>
+                                                </Border>
+                                                <Border Grid.Column="1" Style="{StaticResource NeuralCard}"
+                                                        Padding="16,12,16,14" Margin="5,0,0,0">
+                                                    <StackPanel>
+                                                        <TextBlock Text="EXPERTISE AREAS" Style="{StaticResource TypeKpiLabel}"
+                                                                   FontSize="10"/>
+                                                        <StackPanel Orientation="Horizontal" Margin="0,4,0,4"
+                                                                    VerticalAlignment="Bottom">
+                                                            <TextBlock x:Name="StatCategories" Text="0"
+                                                                       FontSize="26" FontWeight="Bold"
+                                                                       Foreground="{StaticResource NeuralText}"
+                                                                       Typography.NumeralAlignment="Tabular"/>
+                                                            <TextBlock Text=" /24" FontSize="14" FontWeight="SemiBold"
+                                                                       Foreground="{StaticResource NeuralText3}"
+                                                                       VerticalAlignment="Bottom" Margin="4,0,0,4"/>
+                                                        </StackPanel>
+                                                        <TextBlock x:Name="StatCategoriesTrend"
+                                                                   Text="4 above 80% mastery"
+                                                                   FontSize="10.5"
+                                                                   Foreground="{StaticResource NeuralText3}"
+                                                                   TextTrimming="CharacterEllipsis"/>
+                                                    </StackPanel>
+                                                </Border>
+                                            </Grid>
                                             <!-- ── Activity Feed card ─────────────────────────────────── -->
                                             <Border Style="{StaticResource NeuralCard}" Margin="0,0,0,12">
                                                 <Grid>
