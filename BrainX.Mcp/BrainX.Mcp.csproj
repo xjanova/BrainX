@@ -7,9 +7,9 @@
     <Nullable>enable</Nullable>
     <AssemblyName>brainx-mcp</AssemblyName>
     <RootNamespace>BrainX.Mcp</RootNamespace>
-    <Version>2.6.0</Version>
-    <AssemblyVersion>2.6.0.0</AssemblyVersion>
-    <FileVersion>2.6.0.0</FileVersion>
+    <Version>2.7.0</Version>
+    <AssemblyVersion>2.7.0.0</AssemblyVersion>
+    <FileVersion>2.7.0.0</FileVersion>
     <Product>BrainX MCP Server</Product>
     <!-- v2.6.0+: cross-platform headless MCP. WPF Client stays Windows
          only (System.Windows.* deps), but the brain server is pure

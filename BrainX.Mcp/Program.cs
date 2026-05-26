@@ -21,7 +21,7 @@ internal static partial class Program
 {
     private const string ProtocolVersion = "2025-06-18";
     private const string ServerName = "brainx-brain";
-    internal const string ServerVersion = "2.6.0";
+    internal const string ServerVersion = "2.7.0";
 
     /// <summary>
     /// Build a one-line version string including the bound assembly's
