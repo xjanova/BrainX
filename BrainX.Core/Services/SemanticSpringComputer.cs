@@ -94,8 +94,9 @@ public class SemanticSpringComputer
                 var vecB = vectors[idB];
                 if (vecA.Length != vecB.Length) continue;
 
-                double dot = 0;
-                for (int k = 0; k < vecA.Length; k++) dot += vecA[k] * vecB[k];
+                // Vectors are pre-normalized above so dot == cosine.
+                // SIMD kernel (Vector<float>) — see VectorMath.Dot.
+                double dot = VectorMath.Dot(vecA, vecB);
                 if (dot < SimilarityThreshold) continue;
 
                 result.PairsAboveThreshold++;
