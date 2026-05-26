@@ -81,6 +81,8 @@ public partial class MainWindow
             PopulateDashMcpActivity();
             PopulateDashHealth();
             StartDashProInsightsRefreshTimer();
+            // System load card (replaces TOP TAGS) — GPU + CPU sparklines.
+            StartDashSystemLoadTimer();
         }
         catch (Exception ex)
         {
@@ -981,5 +983,200 @@ public partial class MainWindow
         int u = 0;
         while (v >= 1024 && u < units.Length - 1) { v /= 1024; u++; }
         return $"{v:0.#} {units[u]}";
+    }
+
+    // ═════════════════════════════════════════════════════════════════
+    // SYSTEM LOAD CARD — GPU + CPU live sparklines (replaces TOP TAGS).
+    // Samples PerformanceCounter for CPU + sums "GPU Engine" counter for
+    // GPU every 1.5 s. Keeps a 60-sample ring buffer per metric (= 90 s
+    // of history at 1.5 s tick) and redraws both sparklines on each
+    // tick. Sampling stops when the Dashboard view isn't visible to
+    // avoid background CPU drain.
+    // ═════════════════════════════════════════════════════════════════
+    private System.Diagnostics.PerformanceCounter? _dashCpuCounter;
+    private System.Diagnostics.PerformanceCounter[]? _dashGpuCounters;
+    private System.Windows.Threading.DispatcherTimer? _dashLoadTimer;
+    private readonly System.Collections.Generic.Queue<double> _dashCpuSamples = new(60);
+    private readonly System.Collections.Generic.Queue<double> _dashGpuSamples = new(60);
+    private const int DashLoadCap = 60;
+
+    private void StartDashSystemLoadTimer()
+    {
+        if (_dashLoadTimer != null) return;
+
+        // CPU counter — single "_Total" instance, first read returns 0
+        // so we prime it on a worker thread immediately.
+        try
+        {
+            _dashCpuCounter = new System.Diagnostics.PerformanceCounter(
+                "Processor", "% Processor Time", "_Total", readOnly: true);
+            try { _dashCpuCounter.NextValue(); } catch { }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"CPU counter init: {ex.Message}");
+            _dashCpuCounter = null;
+        }
+
+        // GPU counters — sum "% Utilization" across every "GPU Engine"
+        // instance (one per engine type per adapter). Each instance name
+        // looks like "pid_1234_luid_0x0_0x12345_phys_0_eng_0_engtype_3D".
+        // We pre-resolve all instances at startup; the timer only sums
+        // their values, so even mid-tick instance churn (new processes
+        // creating new GPU engines) is harmless — they just don't get
+        // counted until the next app launch.
+        try
+        {
+            var cat = new System.Diagnostics.PerformanceCounterCategory("GPU Engine");
+            var instances = cat.GetInstanceNames()
+                .Where(n => n.Contains("engtype_3D") || n.Contains("engtype_Compute"))
+                .ToArray();
+            _dashGpuCounters = instances
+                .Select(n => new System.Diagnostics.PerformanceCounter(
+                    "GPU Engine", "Utilization Percentage", n, readOnly: true))
+                .ToArray();
+            foreach (var c in _dashGpuCounters)
+            {
+                try { c.NextValue(); } catch { }
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"GPU counter init: {ex.Message}");
+            _dashGpuCounters = null;
+        }
+
+        _dashLoadTimer = new System.Windows.Threading.DispatcherTimer(
+            System.Windows.Threading.DispatcherPriority.Background)
+        {
+            Interval = System.TimeSpan.FromMilliseconds(1500)
+        };
+        _dashLoadTimer.Tick += async (_, _) =>
+        {
+            if (DashboardView?.Visibility != System.Windows.Visibility.Visible) return;
+            try
+            {
+                // Sample on a worker so the UI never stalls on counter I/O.
+                var sample = await System.Threading.Tasks.Task.Run(() =>
+                {
+                    double cpu = 0, gpu = 0;
+                    try { cpu = _dashCpuCounter?.NextValue() ?? 0; } catch { }
+                    if (_dashGpuCounters != null)
+                    {
+                        foreach (var c in _dashGpuCounters)
+                        {
+                            try { gpu += c.NextValue(); } catch { }
+                        }
+                    }
+                    return (cpu, Math.Min(100, gpu));
+                });
+
+                PushDashLoadSample(_dashCpuSamples, sample.cpu);
+                PushDashLoadSample(_dashGpuSamples, sample.Item2);
+
+                if (DashCpuValueText != null)
+                    DashCpuValueText.Text = $"{sample.cpu:0}%";
+                if (DashGpuValueText != null)
+                    DashGpuValueText.Text = $"{sample.Item2:0}%";
+
+                // Status dot: amber if either > 85%, mint otherwise.
+                if (DashLoadDot != null)
+                {
+                    var hot = sample.cpu > 85 || sample.Item2 > 85;
+                    DashLoadDot.Fill = hot
+                        ? (Brush)(System.Windows.Application.Current.TryFindResource("NeuralAmber")
+                                  ?? Brushes.Orange)
+                        : (Brush)(System.Windows.Application.Current.TryFindResource("NeuralMint")
+                                  ?? Brushes.LightGreen);
+                }
+
+                DrawDashLoadSparkline(DashGpuSparkCanvas, _dashGpuSamples,
+                    Color.FromRgb(0xFF, 0x4F, 0x9E));   // magenta
+                DrawDashLoadSparkline(DashCpuSparkCanvas, _dashCpuSamples,
+                    Color.FromRgb(0x5B, 0xE9, 0xE9));   // cyan
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"System load tick: {ex.Message}");
+            }
+        };
+        _dashLoadTimer.Start();
+    }
+
+    private static void PushDashLoadSample(System.Collections.Generic.Queue<double> q, double v)
+    {
+        if (q.Count >= DashLoadCap) q.Dequeue();
+        q.Enqueue(System.Math.Max(0, System.Math.Min(100, v)));
+    }
+
+    private static void DrawDashLoadSparkline(
+        System.Windows.Controls.Canvas? canvas,
+        System.Collections.Generic.Queue<double> samples,
+        Color color)
+    {
+        if (canvas == null) return;
+        canvas.Children.Clear();
+        if (samples.Count == 0) return;
+
+        canvas.UpdateLayout();
+        double w = canvas.ActualWidth;
+        double h = canvas.ActualHeight;
+        if (w <= 0) w = 240;
+        if (h <= 0) h = 34;
+
+        // Render as a smoothed polyline filled below — gives the "cool"
+        // analytics look the user asked for ("เท่ๆ"). Two layers:
+        //   1. Filled Polygon under the line (alpha 0x22 → 0x66 gradient)
+        //   2. Polyline stroke on top in full color
+        var pts = samples.ToArray();
+        int n = pts.Length;
+        double slot = w / System.Math.Max(1, DashLoadCap - 1);
+        var stroke = new System.Windows.Media.PointCollection(n);
+        for (int i = 0; i < n; i++)
+        {
+            double x = i * slot;
+            double y = h - 2 - (pts[i] / 100.0) * (h - 4);
+            stroke.Add(new System.Windows.Point(x, y));
+        }
+
+        // Filled area underneath
+        var fillPts = new System.Windows.Media.PointCollection(stroke.Count + 2);
+        foreach (var p in stroke) fillPts.Add(p);
+        fillPts.Add(new System.Windows.Point((n - 1) * slot, h));
+        fillPts.Add(new System.Windows.Point(0, h));
+        var fillBrush = new LinearGradientBrush(
+            System.Windows.Media.Color.FromArgb(0x66, color.R, color.G, color.B),
+            System.Windows.Media.Color.FromArgb(0x10, color.R, color.G, color.B),
+            new System.Windows.Point(0, 0), new System.Windows.Point(0, 1));
+        var poly = new System.Windows.Shapes.Polygon
+        {
+            Points = fillPts,
+            Fill = fillBrush,
+        };
+        canvas.Children.Add(poly);
+
+        // Stroke line on top
+        var line = new System.Windows.Shapes.Polyline
+        {
+            Points = stroke,
+            Stroke = new SolidColorBrush(color),
+            StrokeThickness = 1.6,
+            StrokeLineJoin = PenLineJoin.Round,
+        };
+        canvas.Children.Add(line);
+
+        // End-of-line dot for the current value
+        if (n > 0)
+        {
+            var last = stroke[n - 1];
+            var dot = new System.Windows.Shapes.Ellipse
+            {
+                Width = 5, Height = 5,
+                Fill = new SolidColorBrush(color),
+            };
+            System.Windows.Controls.Canvas.SetLeft(dot, last.X - 2.5);
+            System.Windows.Controls.Canvas.SetTop(dot, last.Y - 2.5);
+            canvas.Children.Add(dot);
+        }
     }
 }

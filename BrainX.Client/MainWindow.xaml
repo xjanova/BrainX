@@ -714,7 +714,13 @@
                                             <ColumnDefinition Width="*"/>
                                         </Grid.ColumnDefinitions>
                                         <Border Grid.Column="0" Style="{StaticResource NeuralCard}"
-                                                Margin="0,0,8,0" Padding="0">
+                                                Margin="0,0,8,0" Padding="0"
+                                                MinWidth="420" MinHeight="340">
+                                        <!-- MinWidth/MinHeight per user "อย่าให้ univers หายไป ต้องมี
+                                             minimum อย่าให้หายเมื่อถูกย่อ" — when the window is
+                                             squeezed small, the * row + 1.6* column can shrink
+                                             freely without these constraints and the WebView2
+                                             ends up at 0×0 (looks like the universe vanished). -->
                                         <Grid>
                                             <Grid.RowDefinitions>
                                                 <RowDefinition Height="*"/>
@@ -1284,7 +1290,14 @@
                                             </Grid>
                                         </Border>
 
-                                        <!-- ▼ CARD B — TOP TAGS ▼ -->
+                                        <!-- ▼ CARD B — SYSTEM LOAD (GPU + CPU live sparklines) ▼
+                                             User: "top tag เปลี่ยนเป็นกราฟ gpu use และ cpu เท่ๆ".
+                                             Replaces the prior TOP TAGS pill cloud. Two stacked
+                                             rows, each with: label + current % value + small
+                                             violet-tinted sparkline canvas. 60-sample ring
+                                             buffer ticks every 1.5 s from PerformanceCounter.
+                                             DashTopTagsPanel x:Name preserved as a 0-size dummy
+                                             so PopulateDashTopTags writes don't crash. -->
                                         <Border Grid.Column="1" Style="{StaticResource NeuralCard}"
                                                 Padding="16,14,16,14" Margin="3,0,4,0">
                                             <Grid>
@@ -1292,43 +1305,92 @@
                                                     <RowDefinition Height="Auto"/>
                                                     <RowDefinition Height="Auto"/>
                                                     <RowDefinition Height="*"/>
+                                                    <RowDefinition Height="*"/>
                                                 </Grid.RowDefinitions>
                                                 <StackPanel Grid.Row="0" Orientation="Horizontal">
-                                                    <TextBlock Text="TOP TAGS" Style="{StaticResource TypeCardTitle}"
+                                                    <TextBlock Text="SYSTEM LOAD" Style="{StaticResource TypeCardTitle}"
                                                                VerticalAlignment="Center"/>
-                                                    <TextBlock x:Name="DashTagsTotalText" Text=" · 0 total"
-                                                               FontSize="11" Foreground="{StaticResource NeuralText3}"
+                                                    <TextBlock Text=" · live" FontSize="11"
+                                                               Foreground="{StaticResource NeuralText3}"
                                                                VerticalAlignment="Center" Margin="6,0,0,0"/>
+                                                    <Ellipse x:Name="DashLoadDot" Width="6" Height="6"
+                                                             Fill="{StaticResource NeuralMint}"
+                                                             Effect="{StaticResource GlowMint}"
+                                                             Margin="8,0,0,0" VerticalAlignment="Center"/>
                                                 </StackPanel>
-                                                <TextBlock Grid.Row="1" Text="most-used #hashtags · click pill to filter (soon)"
+                                                <TextBlock Grid.Row="1" Text="GPU + CPU usage · 90 s rolling"
                                                            FontSize="11" Margin="0,3,0,10"
                                                            Foreground="{StaticResource NeuralText3}"/>
-                                                <ItemsControl Grid.Row="2" x:Name="DashTopTagsPanel">
-                                                    <ItemsControl.ItemsPanel>
-                                                        <ItemsPanelTemplate>
-                                                            <WrapPanel/>
-                                                        </ItemsPanelTemplate>
-                                                    </ItemsControl.ItemsPanel>
-                                                    <ItemsControl.ItemTemplate>
-                                                        <DataTemplate>
-                                                            <Border CornerRadius="999" Padding="9,3" Margin="0,3,5,3"
-                                                                    Background="{StaticResource NeuralBgInset}"
-                                                                    BorderBrush="{StaticResource NeuralLine}"
-                                                                    BorderThickness="1">
-                                                                <StackPanel Orientation="Horizontal">
-                                                                    <TextBlock Text="{Binding TagLabel}" FontSize="11"
-                                                                               FontWeight="Medium"
-                                                                               Foreground="{Binding TagBrush}"
-                                                                               VerticalAlignment="Center"/>
-                                                                    <TextBlock Text="{Binding CountLabel}" FontSize="10.5"
-                                                                               FontFamily="{StaticResource FontMono}"
-                                                                               Foreground="{StaticResource NeuralText3}"
-                                                                               VerticalAlignment="Center" Margin="6,0,0,0"/>
-                                                                </StackPanel>
-                                                            </Border>
-                                                        </DataTemplate>
-                                                    </ItemsControl.ItemTemplate>
-                                                </ItemsControl>
+
+                                                <!-- GPU row -->
+                                                <Grid Grid.Row="2" Margin="0,0,0,6">
+                                                    <Grid.RowDefinitions>
+                                                        <RowDefinition Height="Auto"/>
+                                                        <RowDefinition Height="*"/>
+                                                    </Grid.RowDefinitions>
+                                                    <Grid Grid.Row="0">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                            <ColumnDefinition Width="*"/>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                        </Grid.ColumnDefinitions>
+                                                        <Border Grid.Column="0" Width="6" Height="6" CornerRadius="3"
+                                                                Background="#FF4F9E" VerticalAlignment="Center"
+                                                                Margin="0,0,7,0"/>
+                                                        <TextBlock Grid.Column="1" Text="GPU"
+                                                                   FontSize="10.5" FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource NeuralText3}"
+                                                                   VerticalAlignment="Center"/>
+                                                        <TextBlock Grid.Column="2" x:Name="DashGpuValueText" Text="0%"
+                                                                   FontSize="13" FontWeight="Bold"
+                                                                   FontFamily="{StaticResource FontMono}"
+                                                                   Foreground="{StaticResource NeuralText}"
+                                                                   VerticalAlignment="Center"
+                                                                   Typography.NumeralAlignment="Tabular"/>
+                                                    </Grid>
+                                                    <Canvas Grid.Row="1" x:Name="DashGpuSparkCanvas"
+                                                            Background="{StaticResource NeuralBgInset}"
+                                                            MinHeight="34" Margin="0,4,0,0" ClipToBounds="True"/>
+                                                </Grid>
+
+                                                <!-- CPU row -->
+                                                <Grid Grid.Row="3" Margin="0,4,0,0">
+                                                    <Grid.RowDefinitions>
+                                                        <RowDefinition Height="Auto"/>
+                                                        <RowDefinition Height="*"/>
+                                                    </Grid.RowDefinitions>
+                                                    <Grid Grid.Row="0">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                            <ColumnDefinition Width="*"/>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                        </Grid.ColumnDefinitions>
+                                                        <Border Grid.Column="0" Width="6" Height="6" CornerRadius="3"
+                                                                Background="#5BE9E9" VerticalAlignment="Center"
+                                                                Margin="0,0,7,0"/>
+                                                        <TextBlock Grid.Column="1" Text="CPU"
+                                                                   FontSize="10.5" FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource NeuralText3}"
+                                                                   VerticalAlignment="Center"/>
+                                                        <TextBlock Grid.Column="2" x:Name="DashCpuValueText" Text="0%"
+                                                                   FontSize="13" FontWeight="Bold"
+                                                                   FontFamily="{StaticResource FontMono}"
+                                                                   Foreground="{StaticResource NeuralText}"
+                                                                   VerticalAlignment="Center"
+                                                                   Typography.NumeralAlignment="Tabular"/>
+                                                    </Grid>
+                                                    <Canvas Grid.Row="1" x:Name="DashCpuSparkCanvas"
+                                                            Background="{StaticResource NeuralBgInset}"
+                                                            MinHeight="34" Margin="0,4,0,0" ClipToBounds="True"/>
+                                                </Grid>
+
+                                                <!-- 0-size dummies — preserve x:Names for
+                                                     PopulateDashTopTags (deprecated populator
+                                                     kept for backwards-compat). -->
+                                                <StackPanel Visibility="Collapsed">
+                                                    <TextBlock x:Name="DashTagsTotalText"/>
+                                                    <ItemsControl x:Name="DashTopTagsPanel"/>
+                                                </StackPanel>
                                             </Grid>
                                         </Border>
 
