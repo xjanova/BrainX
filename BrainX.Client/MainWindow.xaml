@@ -647,11 +647,11 @@
                                  the remaining vertical space cleanly. -->
                             <Grid Margin="28,24,28,16">
                                 <Grid.RowDefinitions>
-                                    <RowDefinition Height="Auto"/> <!-- header -->
-                                    <RowDefinition Height="Auto"/> <!-- KPI grid -->
-                                    <RowDefinition Height="*"/>    <!-- main 2-col map + live -->
-                                    <RowDefinition Height="Auto"/> <!-- NEW pro insights strip (4 cards) -->
-                                    <RowDefinition Height="Auto"/> <!-- quick actions -->
+                                    <RowDefinition Height="Auto"/>                  <!-- header -->
+                                    <RowDefinition Height="Auto"/>                  <!-- (collapsed) -->
+                                    <RowDefinition Height="*" MinHeight="340"/>     <!-- main 2-col map + live -->
+                                    <RowDefinition Height="Auto"/>                  <!-- pro insights strip -->
+                                    <RowDefinition Height="Auto"/>                  <!-- quick actions -->
                                 </Grid.RowDefinitions>
                                 <!-- View header — Row 0 -->
                                 <Grid Grid.Row="0" Margin="0,0,0,22">
@@ -705,22 +705,26 @@
 
                                     <!-- DASH-GRID — Row 2 (* — fills remaining height).
                                          2 columns (1.6fr Neural Map · 1fr Activity + Recent).
-                                         MinHeight removed because the Grid's * row now sizes us
-                                         exactly to the available space — no overflow into the
-                                         status bar (the original "map view ทะลุบาร์ล่าง" bug). -->
+                                         MinHeight on RowDefinition (not on the Border child) so
+                                         the row itself reserves at least 340 px for the universe
+                                         when the window is squeezed — and the Grid honors that
+                                         constraint without letting the universe paint over Row 3.
+                                         MinWidth on the universe ColumnDefinition guarantees a
+                                         420 px viewport even when the user narrows the window. -->
                                     <Grid Grid.Row="2" Margin="0,0,0,16">
                                         <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="1.6*"/>
-                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="1.6*" MinWidth="420"/>
+                                            <ColumnDefinition Width="*" MinWidth="280"/>
                                         </Grid.ColumnDefinitions>
                                         <Border Grid.Column="0" Style="{StaticResource NeuralCard}"
-                                                Margin="0,0,8,0" Padding="0"
-                                                MinWidth="420" MinHeight="340">
-                                        <!-- MinWidth/MinHeight per user "อย่าให้ univers หายไป ต้องมี
-                                             minimum อย่าให้หายเมื่อถูกย่อ" — when the window is
-                                             squeezed small, the * row + 1.6* column can shrink
-                                             freely without these constraints and the WebView2
-                                             ends up at 0×0 (looks like the universe vanished). -->
+                                                Margin="0,0,8,0" Padding="0">
+                                        <!-- MinHeight + MinWidth previously here caused the Border
+                                             to OVERFLOW into Row 3's cell space (user screenshot:
+                                             "กลายเป็นทับคนอื่นไป") because WPF Grid doesn't clip
+                                             children to cell bounds. Constraints moved to the
+                                             RowDefinition + ColumnDefinition above so the Grid
+                                             respects them at layout-pass time and never lets the
+                                             universe encroach on Row 3 (Pro Insights strip). -->
                                         <Grid>
                                             <Grid.RowDefinitions>
                                                 <RowDefinition Height="*"/>
