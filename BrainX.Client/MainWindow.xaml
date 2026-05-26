@@ -775,48 +775,71 @@
                                             <ColumnDefinition Width="*"/>
                                         </Grid.ColumnDefinitions>
                                         <Border Grid.Column="0" Style="{StaticResource NeuralCard}"
-                                                Margin="0,0,8,0" Padding="16,12">
+                                                Margin="0,0,8,0" Padding="0">
                                         <Grid>
                                             <Grid.RowDefinitions>
-                                                <RowDefinition Height="Auto"/>
                                                 <RowDefinition Height="*"/>
                                                 <RowDefinition Height="Auto"/>
                                             </Grid.RowDefinitions>
 
-                                            <Grid Grid.Row="0">
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="Auto"/>
-                                                    <ColumnDefinition Width="*"/>
-                                                    <ColumnDefinition Width="Auto"/>
-                                                </Grid.ColumnDefinitions>
-                                                <TextBlock Grid.Column="0" Text="NEURAL KNOWLEDGE MAP"
-                                                           FontSize="11" FontWeight="SemiBold"
-                                                           Foreground="{StaticResource TextMutedBrush}"
-                                                           VerticalAlignment="Center"/>
-                                                <TextBlock Grid.Column="1" x:Name="DashHintText"
-                                                           Text="Drag = rotate · Wheel = zoom · Click = info · Right-click = kick"
-                                                           FontSize="11" FontFamily="{StaticResource FontMono}"
-                                                           Foreground="{StaticResource NeuralText3}" Opacity="0.7"
-                                                           HorizontalAlignment="Right"
-                                                           VerticalAlignment="Center" Margin="0,0,12,0"/>
-                                                <!-- 3D / 2D segmented toggle per screenshot — 3D active = violet -->
-                                                <StackPanel Grid.Column="2" Orientation="Horizontal">
-                                                    <Button x:Name="DashView3DBtn" Content="3D"
-                                                            Style="{StaticResource NeuralBtnGhost}"
-                                                            Padding="10,3" FontSize="10"
-                                                            Tag="3D" Click="DashViewMode_Click"/>
-                                                    <Button x:Name="DashView2DBtn" Content="2D"
-                                                            Style="{StaticResource NeuralBtnPrimary}"
-                                                            Padding="10,3" FontSize="10" Margin="4,0,0,0"
-                                                            Tag="2D" Click="DashViewMode_Click"/>
-                                                </StackPanel>
-                                            </Grid>
+                                            <!-- Hidden 3D/2D toggle (kept off-screen so the toggle handlers
+                                                 + Tag wiring stay valid for code-behind that flips
+                                                 DashView3DBorder/DashView2DBorder/DashUniverseBorder
+                                                 visibility). User removed the entire header bar. -->
+                                            <StackPanel Visibility="Collapsed">
+                                                <Button x:Name="DashView3DBtn" Tag="3D" Click="DashViewMode_Click"/>
+                                                <Button x:Name="DashView2DBtn" Tag="2D" Click="DashViewMode_Click"/>
+                                                <TextBlock x:Name="DashHintText" Text=""/>
+                                            </StackPanel>
 
-                                            <!-- Map area: viewport + transparent glass overlay sit in same Grid cell.
-                                                 Mouse wheel only zooms when cursor is over the viewport background;
-                                                 the overlay's ScrollViewer captures wheel for its own scroll. -->
-                                            <Grid Grid.Row="1" Margin="0,8,0,0">
-                                                <Border x:Name="DashView3DBorder" CornerRadius="8" ClipToBounds="True"
+                                            <!-- Map area: Universe fills the whole card edge-to-edge. The
+                                                 RGB glow ring is the animated layer right behind the
+                                                 universe disc (Layer 0). -->
+                                            <Grid Grid.Row="0" Margin="0">
+                                                <!-- ▼ LAYER 0 — Subtle animated RGB glow BEHIND the universe.
+                                                     A 1.4 px gradient border ring on a slightly inset rectangle,
+                                                     animated via RotateTransform on the gradient brush so the
+                                                     colors sweep around the card. Inside is invisible (Transparent
+                                                     fill); only the border shows. The RotateTransform on
+                                                     LinearGradientBrush.Transform makes the gradient angle
+                                                     animate without rotating the geometry. -->
+                                                <Border CornerRadius="15" BorderThickness="1.4"
+                                                        IsHitTestVisible="False">
+                                                    <Border.BorderBrush>
+                                                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                                                            <LinearGradientBrush.GradientStops>
+                                                                <GradientStop Color="#66FF2D3E" Offset="0"/>
+                                                                <GradientStop Color="#66FF8A2D" Offset="0.18"/>
+                                                                <GradientStop Color="#66FFD23C" Offset="0.33"/>
+                                                                <GradientStop Color="#664AE3A7" Offset="0.5"/>
+                                                                <GradientStop Color="#665BE9E9" Offset="0.66"/>
+                                                                <GradientStop Color="#669D7BFF" Offset="0.83"/>
+                                                                <GradientStop Color="#66FF4F9E" Offset="1"/>
+                                                            </LinearGradientBrush.GradientStops>
+                                                            <LinearGradientBrush.RelativeTransform>
+                                                                <RotateTransform x:Name="DashGlowRotate"
+                                                                                 CenterX="0.5" CenterY="0.5" Angle="0"/>
+                                                            </LinearGradientBrush.RelativeTransform>
+                                                        </LinearGradientBrush>
+                                                    </Border.BorderBrush>
+                                                    <Border.Effect>
+                                                        <BlurEffect Radius="3"/>
+                                                    </Border.Effect>
+                                                    <Border.Triggers>
+                                                        <EventTrigger RoutedEvent="Loaded">
+                                                            <BeginStoryboard>
+                                                                <Storyboard RepeatBehavior="Forever">
+                                                                    <DoubleAnimation
+                                                                        Storyboard.TargetName="DashGlowRotate"
+                                                                        Storyboard.TargetProperty="Angle"
+                                                                        From="0" To="360" Duration="0:0:12"/>
+                                                                </Storyboard>
+                                                            </BeginStoryboard>
+                                                        </EventTrigger>
+                                                    </Border.Triggers>
+                                                </Border>
+                                                <Border x:Name="DashView3DBorder" CornerRadius="14" ClipToBounds="True"
+                                                        Margin="3"
                                                         Visibility="Collapsed"
                                                         MouseLeftButtonDown="Viewport_MouseDown"
                                                         MouseLeftButtonUp="Viewport_MouseUp"
@@ -861,8 +884,8 @@
                                                      so the camera auto-orbits and the in-scene UI hides.
                                                      IsHitTestVisible=False blocks mouse events at WPF
                                                      level so pan/zoom/click are locked. -->
-                                                <Border x:Name="DashUniverseBorder" CornerRadius="8" ClipToBounds="True"
-                                                        Background="#FF0a0612">
+                                                <Border x:Name="DashUniverseBorder" CornerRadius="14" ClipToBounds="True"
+                                                        Margin="3" Background="#FF0a0612">
                                                     <wv2:WebView2 x:Name="DashUniverseWebView"
                                                                   DefaultBackgroundColor="Black"
                                                                   IsHitTestVisible="False"/>
@@ -872,8 +895,8 @@
                                                      Universe WebView2 above. Kept in tree because
                                                      Dash2D_* handlers + DashGraph2D renderer init are
                                                      wired in code-behind. -->
-                                                <Border x:Name="DashView2DBorder" CornerRadius="8" ClipToBounds="True"
-                                                        Visibility="Collapsed"
+                                                <Border x:Name="DashView2DBorder" CornerRadius="14" ClipToBounds="True"
+                                                        Margin="3" Visibility="Collapsed"
                                                         MouseLeftButtonDown="Dash2D_MouseDown"
                                                         MouseLeftButtonUp="Dash2D_MouseUp"
                                                         MouseMove="Dash2D_MouseMove"
@@ -946,7 +969,7 @@
 
                                                 <!-- Node Info Panel (shows on click) -->
                                                 <!-- Auto-hides after 15s idle · Close with × · Edit & save inline -->
-                                                <Border x:Name="NodeInfoPanel" Grid.Row="2" Visibility="Collapsed"
+                                                <Border x:Name="NodeInfoPanel" Grid.Row="1" Visibility="Collapsed"
                                                         Background="{StaticResource SurfaceBrush}" CornerRadius="8"
                                                         Padding="14,10" Margin="0,8,0,0" MaxHeight="260"
                                                         BorderBrush="{StaticResource NeonCyanBrush}" BorderThickness="1"
@@ -1020,7 +1043,14 @@
                                              prototype right-rail; bound via DashActivityList +
                                              DashRecentNotesList in MainWindow.Dashboard.cs.
                                              ═══════════════════════════════════════════════════════════ -->
-                                        <StackPanel Grid.Column="1" Margin="8,0,0,0">
+                                        <!-- RIGHT COLUMN wrapped in ScrollViewer so when the window
+                                             is squeezed small, both cards remain reachable via scrollbar.
+                                             User: "ตอนนี้ถ้าบีบเล็ก สกรอดูไม่ได้". -->
+                                        <ScrollViewer Grid.Column="1" Margin="8,0,0,0"
+                                                      VerticalScrollBarVisibility="Auto"
+                                                      HorizontalScrollBarVisibility="Disabled"
+                                                      PanningMode="VerticalOnly">
+                                        <StackPanel>
                                             <!-- ── Activity Feed card ─────────────────────────────────── -->
                                             <Border Style="{StaticResource NeuralCard}" Margin="0,0,0,12">
                                                 <Grid>
@@ -1059,9 +1089,12 @@
                                                     <!-- divider -->
                                                     <Border Grid.Row="0" Height="1" VerticalAlignment="Bottom"
                                                             Background="{StaticResource NeuralLine}"/>
-                                                    <!-- activity-list (bound to DashActivityList) -->
-                                                    <ScrollViewer Grid.Row="1" MaxHeight="320"
-                                                                  VerticalScrollBarVisibility="Auto"
+                                                    <!-- activity-list (bound to DashActivityList).
+                                                         No inner MaxHeight — outer right-column ScrollViewer
+                                                         handles overflow when the window is squeezed small. -->
+                                                    <ScrollViewer Grid.Row="1"
+                                                                  VerticalScrollBarVisibility="Disabled"
+                                                                  HorizontalScrollBarVisibility="Disabled"
                                                                   Padding="0,4">
                                                         <ItemsControl x:Name="DashActivityList">
                                                             <ItemsControl.ItemTemplate>
@@ -1178,6 +1211,7 @@
                                                 </Grid>
                                             </Border>
                                         </StackPanel>
+                                        </ScrollViewer>
                                     </Grid>
                                     <!-- end DASH-GRID 2-col -->
 

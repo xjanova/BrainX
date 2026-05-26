@@ -12191,6 +12191,13 @@ public partial class MainWindow : Window
 
     private void HandleAccessLine(string json)
     {
+        // Stream the raw NDJSON line to the dashboard Activity Feed so
+        // the right-rail card shows real MCP / save / index / share events
+        // in real time (user: "activity feed ต้องรายงาน real time"). This
+        // also drives the recently-edited refresh below via _recentEditTick.
+        try { PushAccessLogToDashActivity(json); }
+        catch { /* dashboard feed is best-effort; never let it break pulse */ }
+
         try
         {
             var obj = Newtonsoft.Json.Linq.JObject.Parse(json);

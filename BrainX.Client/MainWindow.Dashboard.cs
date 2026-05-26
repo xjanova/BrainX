@@ -57,11 +57,41 @@ public partial class MainWindow
         {
             PopulateDashActivity();
             PopulateDashRecent();
+            StartDashRecentRefreshTimer();
         }
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"PopulateDashSidebar failed: {ex.Message}");
         }
+    }
+
+    // ═════════════════════════════════════════════════════════════════
+    // Recently Edited refresh timer — every 4 s the right-rail "RECENTLY
+    // EDITED" card re-builds from _graph.Nodes ordered by ModifiedAt so
+    // it picks up file-save events the existing FileSystemWatcher
+    // notifies _graph about. Lightweight: just sorts the in-memory node
+    // list, no disk I/O.
+    // ═════════════════════════════════════════════════════════════════
+    private System.Windows.Threading.DispatcherTimer? _dashRecentTimer;
+
+    private void StartDashRecentRefreshTimer()
+    {
+        if (_dashRecentTimer != null) return;
+        _dashRecentTimer = new System.Windows.Threading.DispatcherTimer(
+            System.Windows.Threading.DispatcherPriority.Background)
+        {
+            Interval = System.TimeSpan.FromSeconds(4)
+        };
+        _dashRecentTimer.Tick += (_, _) =>
+        {
+            // Only refresh if the Dashboard view is actually visible — saves
+            // CPU when the user is on another view.
+            if (DashboardView?.Visibility == System.Windows.Visibility.Visible)
+            {
+                PopulateDashRecent();
+            }
+        };
+        _dashRecentTimer.Start();
     }
 
     // ═════════════════════════════════════════════════════════════════
@@ -71,36 +101,230 @@ public partial class MainWindow
     // in real time via the existing access-log watcher.
     // ═════════════════════════════════════════════════════════════════
 
+    // Backing collection so PushAccessLogToDashActivity can prepend new
+    // rows live (ItemsSource = ObservableCollection updates the UI without
+    // re-binding). Kept private; PopulateDashActivity seeds it from the
+    // existing access-log tail on startup, and PushAccessLogToDashActivity
+    // adds rows as new lines stream in via PollAccessLog.
+    private System.Collections.ObjectModel.ObservableCollection<DashActivityRow>? _dashActivityRows;
+    private const int DashActivityCap = 60;
+
     private void PopulateDashActivity()
     {
         if (DashActivityList == null) return;
 
-        Brush B(string key) =>
-            (Brush)(System.Windows.Application.Current.TryFindResource(key) ?? Brushes.Gray);
+        _dashActivityRows = new System.Collections.ObjectModel.ObservableCollection<DashActivityRow>();
+        DashActivityList.ItemsSource = _dashActivityRows;
 
-        // Format times as HH:MM:SS per t2.zip screenshot (was "Nm ago" relative).
-        var now = DateTime.Now;
-        string T(int minutesAgo) => now.AddMinutes(-minutesAgo).ToString("HH:mm:ss");
-
-        var rows = new List<DashActivityRow>
+        // Seed with the last N entries from .obsidianx/access-log.ndjson so
+        // the feed isn't empty on cold start. New events stream in via
+        // PushAccessLogToDashActivity called from HandleAccessLine.
+        try
         {
-            new() { Time = T(0),  KindLabel = "MCP", KindBrush = B("ActKindMcp"),
-                    Message = "brain_search \"barnes-hut quadtree\" → 3 notes" },
-            new() { Time = T(1),  KindLabel = "SAV", KindBrush = B("ActKindSave"),
-                    Message = "Auto-saved findings → Programming/CSharp/Barnes-Hut.md" },
-            new() { Time = T(3),  KindLabel = "IND", KindBrush = B("ActKindIndex"),
-                    Message = $"Re-indexed CLAUDE.md (changed) · {_graph?.TotalNodes ?? 0:N0} nodes · {_graph?.TotalEdges ?? 0:N0} links" },
-            new() { Time = T(6),  KindLabel = "AI",  KindBrush = B("ActKindAi"),
-                    Message = "AiRouter: ollama/deepseek-r1:8b · 1.2k tok in, 980 tok out" },
-            new() { Time = T(10), KindLabel = "MCP", KindBrush = B("ActKindMcp"),
-                    Message = "brain_expertise → 14 categories returned" },
-            new() { Time = T(18), KindLabel = "PEE", KindBrush = B("ActKindPeer"),
-                    Message = "Peer joined: novaCortex.0xBR41N-72e9..." },
-            new() { Time = T(34), KindLabel = "SHA", KindBrush = B("ActKindShare"),
-                    Message = "Share request received: DataScience bundle" },
-        };
+            var path = System.IO.Path.Combine(_vaultPath, ".obsidianx", "access-log.ndjson");
+            if (System.IO.File.Exists(path))
+            {
+                // Read tail — last 30 lines is plenty for the visible feed.
+                var lines = SafeReadTailLines(path, 30);
+                foreach (var line in lines)
+                {
+                    var row = TryBuildActivityRowFromAccessLog(line);
+                    if (row != null) _dashActivityRows.Add(row);
+                }
+            }
+        }
+        catch (System.Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"PopulateDashActivity seed failed: {ex.Message}");
+        }
 
-        DashActivityList.ItemsSource = rows;
+        // If the access-log is empty / missing on first run, show a single
+        // placeholder so the card doesn't look broken. Real events will
+        // replace it as they arrive.
+        if (_dashActivityRows.Count == 0)
+        {
+            Brush B(string key) =>
+                (Brush)(System.Windows.Application.Current.TryFindResource(key) ?? Brushes.Gray);
+            _dashActivityRows.Add(new DashActivityRow
+            {
+                Time = System.DateTime.Now.ToString("HH:mm:ss"),
+                KindLabel = "IND", KindBrush = B("ActKindIndex"),
+                Message = _graph == null
+                    ? "Waiting for brain index…"
+                    : $"Indexed {_graph.TotalNodes:N0} notes · {_graph.TotalEdges:N0} links — feed will start when Claude pulls knowledge"
+            });
+        }
+    }
+
+    /// <summary>
+    /// Called from HandleAccessLine when a new access-log line is observed.
+    /// Builds a DashActivityRow + prepends it to the live feed, capping at
+    /// DashActivityCap rows. Must run on the UI thread.
+    /// </summary>
+    internal void PushAccessLogToDashActivity(string json)
+    {
+        if (_dashActivityRows == null) return;
+        try
+        {
+            var row = TryBuildActivityRowFromAccessLog(json);
+            if (row == null) return;
+
+            // Dispatch in case the caller is on a worker thread.
+            if (Dispatcher.CheckAccess())
+            {
+                _dashActivityRows.Insert(0, row);
+                while (_dashActivityRows.Count > DashActivityCap)
+                    _dashActivityRows.RemoveAt(_dashActivityRows.Count - 1);
+            }
+            else
+            {
+                Dispatcher.BeginInvoke(new System.Action(() =>
+                {
+                    _dashActivityRows.Insert(0, row);
+                    while (_dashActivityRows.Count > DashActivityCap)
+                        _dashActivityRows.RemoveAt(_dashActivityRows.Count - 1);
+                }));
+            }
+        }
+        catch (System.Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"PushAccessLogToDashActivity: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Parses one access-log NDJSON line into a DashActivityRow. The MCP
+    /// server emits records like:
+    ///   {"ts":"2026-05-26T11:28:42Z","op":"mcp.brain_search","node_id":"a1b…","context":"barnes-hut quadtree"}
+    /// We extract the timestamp + op + context and pick a kind label
+    /// (MCP / SAV / IND / AI / PEE / SHA) from the op prefix.
+    /// </summary>
+    private DashActivityRow? TryBuildActivityRowFromAccessLog(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try
+        {
+            var obj = Newtonsoft.Json.Linq.JObject.Parse(json);
+            var ts = obj["ts"]?.ToString();
+            var op = obj["op"]?.ToString() ?? "";
+            var ctx = obj["context"]?.ToString() ?? "";
+            var nodeId = obj["node_id"]?.ToString() ?? "";
+
+            // Time — parse ISO 8601 if present, else fall back to NOW
+            string timeStr;
+            if (System.DateTime.TryParse(ts, null,
+                System.Globalization.DateTimeStyles.AssumeUniversal |
+                System.Globalization.DateTimeStyles.AdjustToUniversal,
+                out var dt))
+            {
+                timeStr = dt.ToLocalTime().ToString("HH:mm:ss");
+            }
+            else
+            {
+                timeStr = System.DateTime.Now.ToString("HH:mm:ss");
+            }
+
+            // Kind classification from op prefix
+            string kindLabel;
+            string brushKey;
+            string message;
+            if (op.StartsWith("mcp.", System.StringComparison.OrdinalIgnoreCase) || op == "mcp")
+            {
+                kindLabel = "MCP";
+                brushKey  = "ActKindMcp";
+                var tool = op.StartsWith("mcp.") ? op.Substring(4) : "tool";
+                message = string.IsNullOrEmpty(ctx)
+                    ? $"{tool} · node={Shorten(nodeId, 12)}"
+                    : $"{tool} \"{Shorten(ctx, 60)}\"";
+            }
+            else if (op.Contains("save", System.StringComparison.OrdinalIgnoreCase) ||
+                     op.Contains("write", System.StringComparison.OrdinalIgnoreCase))
+            {
+                kindLabel = "SAV";
+                brushKey  = "ActKindSave";
+                message   = $"Saved → {Shorten(ctx, 80)}";
+            }
+            else if (op.Contains("index", System.StringComparison.OrdinalIgnoreCase) ||
+                     op.Contains("reindex", System.StringComparison.OrdinalIgnoreCase))
+            {
+                kindLabel = "IND";
+                brushKey  = "ActKindIndex";
+                message   = $"Re-indexed {Shorten(ctx, 60)} · {_graph?.TotalNodes ?? 0:N0} nodes";
+            }
+            else if (op.Contains("ai", System.StringComparison.OrdinalIgnoreCase) ||
+                     op.Contains("router", System.StringComparison.OrdinalIgnoreCase) ||
+                     op.Contains("model", System.StringComparison.OrdinalIgnoreCase))
+            {
+                kindLabel = "AI";
+                brushKey  = "ActKindAi";
+                message   = $"AiRouter: {Shorten(ctx, 80)}";
+            }
+            else if (op.Contains("peer", System.StringComparison.OrdinalIgnoreCase) ||
+                     op.Contains("mesh", System.StringComparison.OrdinalIgnoreCase))
+            {
+                kindLabel = "PEE";
+                brushKey  = "ActKindPeer";
+                message   = Shorten(ctx, 90);
+            }
+            else if (op.Contains("share", System.StringComparison.OrdinalIgnoreCase))
+            {
+                kindLabel = "SHA";
+                brushKey  = "ActKindShare";
+                message   = Shorten(ctx, 90);
+            }
+            else
+            {
+                kindLabel = op.Length >= 3 ? op.Substring(0, 3).ToUpperInvariant() : op.ToUpperInvariant();
+                brushKey  = "ActKindMcp";
+                message   = string.IsNullOrEmpty(ctx) ? $"{op} · {Shorten(nodeId, 16)}" : $"{op}: {Shorten(ctx, 80)}";
+            }
+
+            Brush brush = (Brush)(System.Windows.Application.Current.TryFindResource(brushKey)
+                                  ?? System.Windows.Media.Brushes.Gray);
+
+            return new DashActivityRow
+            {
+                Time = timeStr,
+                KindLabel = kindLabel,
+                KindBrush = brush,
+                Message = message
+            };
+        }
+        catch (Newtonsoft.Json.JsonException) { return null; }
+        catch (System.Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"TryBuildActivityRow: {ex.Message}");
+            return null;
+        }
+    }
+
+    private static string Shorten(string s, int max)
+    {
+        if (string.IsNullOrEmpty(s)) return "";
+        if (s.Length <= max) return s;
+        return s.Substring(0, max - 1).TrimEnd() + "…";
+    }
+
+    private static System.Collections.Generic.List<string> SafeReadTailLines(string path, int count)
+    {
+        var result = new System.Collections.Generic.List<string>();
+        try
+        {
+            using var fs = new System.IO.FileStream(path, System.IO.FileMode.Open,
+                System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite);
+            using var sr = new System.IO.StreamReader(fs);
+            var ring = new System.Collections.Generic.Queue<string>(count);
+            string? line;
+            while ((line = sr.ReadLine()) != null)
+            {
+                if (ring.Count == count) ring.Dequeue();
+                ring.Enqueue(line);
+            }
+            result.AddRange(ring);
+        }
+        catch (System.IO.IOException) { }
+        catch (System.UnauthorizedAccessException) { }
+        return result;
     }
 
     // ═════════════════════════════════════════════════════════════════
