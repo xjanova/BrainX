@@ -12281,7 +12281,12 @@ public partial class MainWindow : Window
     /// </summary>
     private void BroadcastPulseToUniverse(string noteId, string op, string? context)
     {
-        if (!_universeInitialized && _wallpapers.Count == 0 && _setupInstance == null) return;
+        // Include _dashUniverseInitialized in the bail check — without it,
+        // a user who only ever sits on Dashboard (never opens the main
+        // Universe view) would get NO pulse flashes at all because the
+        // early return skipped before the dash fan-out below.
+        if (!_universeInitialized && _wallpapers.Count == 0 && _setupInstance == null
+            && !_dashUniverseInitialized) return;
         try
         {
             // Hand-rolled JSON so we don't pull a serializer for a 4-field
@@ -12295,11 +12300,14 @@ public partial class MainWindow : Window
             sb.Append('}');
             var json = sb.ToString();
             // Fan out to ALL WebView surfaces so every Universe (main app +
-            // each per-monitor wallpaper + setup preview if active) stays
-            // perfectly synced. Every MCP touch flashes the same star on
-            // each surface.
+            // dashboard embed + each per-monitor wallpaper + setup preview
+            // if active) stays perfectly synced. Every MCP touch flashes
+            // the same star on each surface — user: "เอฟเฟค ของ univers
+            // เมื่อมีการค้นหา ที่เป็นการกระพริบ หายไปไหน".
             try { UniverseWebView?.CoreWebView2?.PostWebMessageAsJson(json); }
             catch (Exception ex) { Debug.WriteLine($"main pulse: {ex.Message}"); }
+            try { DashUniverseWebView?.CoreWebView2?.PostWebMessageAsJson(json); }
+            catch (Exception ex) { Debug.WriteLine($"dash pulse: {ex.Message}"); }
             foreach (var inst in _wallpapers)
             {
                 try { inst.WebView?.CoreWebView2?.PostWebMessageAsJson(json); }
