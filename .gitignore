@@ -56,3 +56,23 @@ logobrain.png
 # Debug screenshots (PrintWindow captures of running BrainX.Client)
 .brainx-*.png
 .prototype-*.png
+.shot-*.png
+.peers-verify.png
+
+# Debug screenshot/automation helper scripts
+.shot*.ps1
+.tab-shot.ps1
+.click-shot.ps1
+.key-shot.ps1
+.nav-shot.ps1
+
+# Build / packaging artifacts
+*.zip
+dist/
+t2/
+
+# Claude Code project tooling (local, not app source)
+.claude/
+
+# Personal ops runbook — contains real host/domain/email/paths; keep local
+BrainX.Server/DEPLOY.md

@@ -32,7 +32,17 @@ public partial class MainWindow : Window
 
     // Network
     private readonly NetworkClient _network = new();
-    private string _serverUrl = "http://localhost:5142/brain-hub";
+
+    // Mesh-hub-only model (see RemoteNodeConfig):
+    //  _hubUrl      — the brain NETWORK rendezvous (SignalR /brain-hub). Public
+    //                 bootnode by default; the client "joins the network" here.
+    //  _localAiBase — this client's OWN local node (REST + AI Hub). Stays local.
+    private string _hubUrl = RemoteNodeConfig.DefaultHubUrl;
+    private string _localAiBase = RemoteNodeConfig.DefaultLocalAiBase;
+
+    // Embedded = the LOCAL AI/brain node runs on this machine (client auto-launches
+    // it). This governs ONLY the local node — the mesh hub is always remote.
+    private bool _embeddedMode = true;
     private readonly List<ShareRequest> _incomingShares = [];
     private readonly List<string> _shareHistory = [];
 
@@ -242,6 +252,88 @@ public partial class MainWindow : Window
         // Standard WPF Maximize on a WindowStyle=None window only fills
         // the work area; this mode manually overrides bounds + Topmost.
         PreviewKeyDown += OnGlobalPreviewKeyDown;
+    }
+
+    // ── Maximize honours the taskbar (WM_GETMINMAXINFO) ──────────────
+    // With WindowStyle=None + AllowsTransparency=True, the default WPF
+    // Maximize fills the ENTIRE monitor — including the taskbar — so
+    // user reported "เมื่อ maximize มันควรอยู่เหนือทาร์กบาร์ ไม่งั้น
+    // มันบัง" (2026-05-27). Hooking WM_GETMINMAXINFO lets us return
+    // the monitor WorkArea (which excludes the taskbar) for max size.
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        var handle = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+        var source = System.Windows.Interop.HwndSource.FromHwnd(handle);
+        source?.AddHook(WindowProc);
+    }
+
+    private IntPtr WindowProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        const int WM_GETMINMAXINFO = 0x0024;
+        if (msg == WM_GETMINMAXINFO)
+        {
+            WmGetMinMaxInfo(hwnd, lParam);
+            handled = true;
+        }
+        return IntPtr.Zero;
+    }
+
+    private void WmGetMinMaxInfo(IntPtr hwnd, IntPtr lParam)
+    {
+        var mmi = System.Runtime.InteropServices.Marshal.PtrToStructure<MINMAXINFO>(lParam);
+
+        const int MONITOR_DEFAULTTONEAREST = 0x00000002;
+        var monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if (monitor != IntPtr.Zero)
+        {
+            var info = new MONITORINFO();
+            info.cbSize = System.Runtime.InteropServices.Marshal.SizeOf(info);
+            if (GetMonitorInfo(monitor, ref info))
+            {
+                var work = info.rcWork;
+                var mon  = info.rcMonitor;
+                mmi.ptMaxPosition.x = Math.Abs(work.left  - mon.left);
+                mmi.ptMaxPosition.y = Math.Abs(work.top   - mon.top);
+                mmi.ptMaxSize.x     = Math.Abs(work.right - work.left);
+                mmi.ptMaxSize.y     = Math.Abs(work.bottom - work.top);
+                // Keep the window's MinTrackSize so WPF MinWidth/MinHeight win.
+                mmi.ptMinTrackSize.x = (int)MinWidth;
+                mmi.ptMinTrackSize.y = (int)MinHeight;
+            }
+        }
+        System.Runtime.InteropServices.Marshal.StructureToPtr(mmi, lParam, true);
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(IntPtr hwnd, int flags);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
+    private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct POINT { public int x; public int y; }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct RECT { public int left, top, right, bottom; }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct MONITORINFO
+    {
+        public int cbSize;
+        public RECT rcMonitor;
+        public RECT rcWork;
+        public int dwFlags;
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct MINMAXINFO
+    {
+        public POINT ptReserved;
+        public POINT ptMaxSize;
+        public POINT ptMaxPosition;
+        public POINT ptMinTrackSize;
+        public POINT ptMaxTrackSize;
     }
 
     // ── Fullscreen state ─────────────────────────────────────────────
@@ -5468,6 +5560,16 @@ public partial class MainWindow : Window
         StatLinks.Text = _graph.TotalEdges.ToString("N0");
         StatCategories.Text = _graph.ExpertiseMap.Count.ToString();
         VaultPathText.Text = _vaultPath;
+        // Dashboard floating chips (now WPF Popups — see MainWindow.xaml).
+        // Popups render in their own top-level Win32 window so they bypass
+        // WebView2 airspace clipping that hides regular WPF children
+        // sharing a Grid cell with the WebView2.
+        if (DashOvNodesText != null) DashOvNodesText.Text = _graph.TotalNodes.ToString("N0");
+        if (DashOvWordsText != null) DashOvWordsText.Text = _graph.TotalWords.ToString("N0");
+        // Mirror into the DOM chip (top-left of universe). The WPF
+        // TextBlocks above are 0-size dummies kept only so this code
+        // doesn't NPE; the real surface is wwwroot/universe.
+        PostDashStats(_graph.TotalNodes, _graph.TotalWords);
         BuildExpertiseBars();
         PopulateVaultTree();
     }
@@ -6326,7 +6428,7 @@ public partial class MainWindow : Window
             model,
         });
         using var req = new HttpRequestMessage(HttpMethod.Post,
-            _serverUrl.Replace("/brain-hub", "") + "/api/ai/chat")
+            AiServerBase + "/api/ai/chat")
         {
             Content = new StringContent(payload, System.Text.Encoding.UTF8, "application/json"),
         };
@@ -7851,7 +7953,7 @@ public partial class MainWindow : Window
             JoinedAt = DateTime.UtcNow
         };
 
-        var success = await _network.ConnectAsync(_serverUrl, myInfo, _identity);
+        var success = await _network.ConnectAsync(_hubUrl, myInfo, _identity);
         if (success)
         {
             JoinNetworkBtn.Content = "\u2705 Connected";
@@ -7864,9 +7966,10 @@ public partial class MainWindow : Window
             JoinNetworkBtn.IsEnabled = true;
             StatusText.Text = "Failed to connect. Is the server running?";
             MessageBox.Show(
-                "Could not connect to BrainX Server.\n\n" +
-                "Start the server first:\n  cd BrainX.Server && dotnet run\n\n" +
-                $"Server URL: {_serverUrl}",
+                "Could not connect to the BrainX mesh hub.\n\n" +
+                "The hub is the public bootnode that brokers peers. If it's down, " +
+                "you can point at a local one in Settings → Server URL.\n\n" +
+                $"Hub URL: {_hubUrl}",
                 "Connection Failed", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }
@@ -7994,17 +8097,114 @@ public partial class MainWindow : Window
 
     private void ExportStats_Click(object s, RoutedEventArgs e)
     {
-        var path = Path.Combine(_vaultPath, ".obsidianx", "brain_stats.json");
-        var dir = Path.GetDirectoryName(path)!;
-        if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
-        File.WriteAllText(path, Newtonsoft.Json.JsonConvert.SerializeObject(new
+        try
         {
-            identity = new { _identity.Address, _identity.DisplayName, _identity.CreatedAt },
-            stats = new { _graph.TotalNodes, _graph.TotalEdges, _graph.TotalWords },
-            expertise = _graph.ExpertiseMap.ToDictionary(kv => kv.Key.ToString(),
-                kv => new { kv.Value.Score, kv.Value.NoteCount, kv.Value.TotalWords })
-        }, Newtonsoft.Json.Formatting.Indented));
-        StatusText.Text = $"Stats exported: {path}";
+            var path = Path.Combine(_vaultPath, ".obsidianx", "brain_stats.json");
+            var dir = Path.GetDirectoryName(path)!;
+            if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+            File.WriteAllText(path, Newtonsoft.Json.JsonConvert.SerializeObject(new
+            {
+                identity = new { _identity.Address, _identity.DisplayName, _identity.CreatedAt },
+                stats = new { _graph.TotalNodes, _graph.TotalEdges, _graph.TotalWords },
+                expertise = _graph.ExpertiseMap.ToDictionary(kv => kv.Key.ToString(),
+                    kv => new { kv.Value.Score, kv.Value.NoteCount, kv.Value.TotalWords })
+            }, Newtonsoft.Json.Formatting.Indented));
+            StatusText.Text = $"Stats exported: {path}";
+
+            // Open File Explorer with brain_stats.json pre-selected so the user
+            // can actually find what was just written.
+            try
+            {
+                Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{path}\"")
+                    { UseShellExecute = true });
+            }
+            catch { /* best-effort — file already exists either way */ }
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = $"Export failed: {ex.Message}";
+            MessageBox.Show($"Could not export stats:\n{ex.Message}",
+                "BrainX", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Dashboard Quick Actions — new buttons + wrappers added 2026-05-27
+    // per user: "ปุ่ม quick actions ทำให้ใช้ได้จริงทุกปุ่ม และควรเพิ่ม
+    // ปุ่มอะไรก็ใส่ไป".
+    // ─────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Reveal the vault folder in File Explorer.
+    /// </summary>
+    private void DashRevealVault_Click(object s, RoutedEventArgs e)
+    {
+        try
+        {
+            if (!Directory.Exists(_vaultPath))
+            {
+                MessageBox.Show($"Vault folder not found:\n{_vaultPath}",
+                    "BrainX", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            Process.Start(new ProcessStartInfo("explorer.exe", $"\"{_vaultPath}\"")
+                { UseShellExecute = true });
+            StatusText.Text = $"Opened vault folder: {_vaultPath}";
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = $"Could not open vault: {ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// Copy this brain's 0xBRAIN-... address to the clipboard so the user
+    /// can paste it into chats / shares.
+    /// </summary>
+    private void DashCopyAddress_Click(object s, RoutedEventArgs e)
+    {
+        try
+        {
+            var addr = _identity?.Address;
+            if (string.IsNullOrWhiteSpace(addr))
+            {
+                StatusText.Text = "Brain address not ready yet";
+                return;
+            }
+            Clipboard.SetText(addr);
+            StatusText.Text = $"Copied to clipboard · {addr}";
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = $"Copy failed: {ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// Wrapper for the dashboard Quick Action: switch to the Network view
+    /// first (so the user sees the Join button + status flip live) and
+    /// then trigger the same Join handler the Network view's button uses.
+    /// </summary>
+    private void DashJoinNetwork_Click(object s, RoutedEventArgs e)
+    {
+        try
+        {
+            // Navigate via the existing Nav_Click pattern — set a synthetic
+            // sender with Tag="Network" so the same switching logic runs.
+            var fakeSender = new System.Windows.Controls.Button { Tag = "Network" };
+            Nav_Click(fakeSender, e);
+        }
+        catch { /* navigation is best-effort */ }
+
+        // If already connected, just stop — Network view will show "Connected".
+        if (_network?.IsConnected == true)
+        {
+            StatusText.Text = "Already connected to BrainX Network";
+            return;
+        }
+
+        // Reuse the real handler — it owns the connect flow + UI flip.
+        JoinNetwork_Click(s, e);
     }
 
     private async void AskClaude_Click(object s, RoutedEventArgs e)
@@ -8027,7 +8227,7 @@ public partial class MainWindow : Window
             {
                 message = q, backend, model, stream = true
             });
-            using var req = new HttpRequestMessage(HttpMethod.Post, _serverUrl.Replace("/brain-hub", "") + "/api/ai/stream")
+            using var req = new HttpRequestMessage(HttpMethod.Post, AiServerBase + "/api/ai/stream")
             {
                 Content = new StringContent(payload, System.Text.Encoding.UTF8, "application/json")
             };
@@ -8102,11 +8302,10 @@ public partial class MainWindow : Window
     {
         if (AiBackendCombo == null) return;
 
-        // Auto-launch the Server if nothing is listening on 5142. This is
-        // the symmetric counterpart to MCP launching the Client — without
-        // it, opening the Client cold leaves AI/model dropdowns empty
-        // because the backends API never responds.
-        TryLaunchServerIfNotRunning();
+        // Auto-launch the Server only in embedded mode. When pointing at a
+        // remote brainx-node we must NOT spawn a local one — just hit the
+        // remote AI base below. (Symmetric counterpart to MCP launching us.)
+        if (_embeddedMode) TryLaunchServerIfNotRunning(_vaultPath);
 
         // Retry a few times — Kestrel takes 1-3 seconds to bind after
         // launch, so the first request often misses if we just spawned it.
@@ -8116,7 +8315,7 @@ public partial class MainWindow : Window
             try
             {
                 using var http = BuildLocalHttpClient();
-                var url = _serverUrl.Replace("/brain-hub", "") + "/api/ai/backends";
+                var url = AiServerBase + "/api/ai/backends";
                 var json = await http.GetStringAsync(url);
                 var root = Newtonsoft.Json.Linq.JObject.Parse(json);
 
@@ -8161,7 +8360,7 @@ public partial class MainWindow : Window
     /// model dropdowns and several other Client features are blank
     /// without it.
     /// </summary>
-    private static void TryLaunchServerIfNotRunning()
+    private static void TryLaunchServerIfNotRunning(string vaultPath)
     {
         try
         {
@@ -8199,6 +8398,12 @@ public partial class MainWindow : Window
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
             };
+            // Hand the embedded server the vault path + mark it embedded, so it
+            // no longer relies on a hardcoded G:\Obsidian fallback and stays in
+            // wide-open localhost mode (no bearer auth for the local client).
+            if (!string.IsNullOrWhiteSpace(vaultPath))
+                psi.EnvironmentVariables["BrainX__VaultPath"] = vaultPath;
+            psi.EnvironmentVariables["BrainX__EmbeddedMode"] = "true";
             var proc = Process.Start(psi);
             // Drain stdout/err so the buffer never fills and blocks the
             // Server process. We don't show this output; if you need it,
@@ -8327,7 +8532,7 @@ public partial class MainWindow : Window
         // Reflect current env-var state (User scope)
         var curBase = Environment.GetEnvironmentVariable(RedirectEnvBaseUrl, EnvironmentVariableTarget.User);
         var active = !string.IsNullOrEmpty(curBase)
-                  && curBase.Contains("localhost:5142", StringComparison.OrdinalIgnoreCase);
+                  && curBase.Contains(RemoteNodeConfig.HostLabel(AiServerBase), StringComparison.OrdinalIgnoreCase);
         RedirectToggle.IsChecked = active;
         UpdateRedirectStatusText(active);
 
@@ -8345,7 +8550,7 @@ public partial class MainWindow : Window
     {
         if (RedirectStatusText == null) return;
         RedirectStatusText.Text = active
-            ? "✅ ON — Claude Desktop routes to http://localhost:5142 (local Ollama + brain). Restart Claude Desktop after toggling."
+            ? $"✅ ON — Claude Desktop routes to {AiServerBase} (local Ollama + brain). Restart Claude Desktop after toggling."
             : "OFF — Claude Desktop talks to api.anthropic.com (cloud)";
     }
 
@@ -8498,6 +8703,12 @@ public partial class MainWindow : Window
                     StatLinks.Text = _graph.TotalEdges.ToString("N0");
                     StatCategories.Text = _graph.ExpertiseMap.Count.ToString();
                     VaultPathText.Text = _vaultPath;
+                    // Mirror into the dashboard floating Popups (WPF — see
+                    // MainWindow.xaml for the Popup definitions). Popups
+                    // bypass WebView2 airspace by living in their own Win32
+                    // top-level window.
+                    if (DashOvNodesText != null) DashOvNodesText.Text = _graph.TotalNodes.ToString("N0");
+                    if (DashOvWordsText != null) DashOvWordsText.Text = _graph.TotalWords.ToString("N0");
 
                     // Expertise bars: only rebuild the panel that's
                     // currently on-screen. The other one will refresh when
@@ -8585,7 +8796,8 @@ public partial class MainWindow : Window
     // OLLAMA MODEL MANAGER
     // ═══════════════════════════════════════
 
-    private string AiServerBase => _serverUrl.Replace("/brain-hub", "");
+    // AI Chat + brain REST always hit the LOCAL node — never the remote mesh hub.
+    private string AiServerBase => RemoteNodeConfig.RestBase(_localAiBase);
 
     private async void ToggleModelManager_Click(object s, RoutedEventArgs e)
     {
@@ -8868,19 +9080,28 @@ public partial class MainWindow : Window
     private void OnNetworkStatus(string status)
     {
         NetworkStatusText.Text = status;
+        // Dashboard NETWORK card (replaces SYSTEM LOAD per user spec).
+        // Same status text but a shorter/punchier rendering.
+        if (DashNetStatusText != null) DashNetStatusText.Text = status;
         if (status == "Connected")
         {
             NetworkDot.Fill = (SolidColorBrush)FindResource("NeonGreenBrush");
             StatusDot.Fill = (SolidColorBrush)FindResource("NeonGreenBrush");
+            if (DashNetDot != null) DashNetDot.Fill = (SolidColorBrush)FindResource("NeonGreenBrush");
+            if (DashNetSubtitle != null) DashNetSubtitle.Text = "Online · sharing expertise with peers";
         }
         else if (status == "Disconnected")
         {
             NetworkDot.Fill = (SolidColorBrush)FindResource("TextMutedBrush");
             StatusDot.Fill = (SolidColorBrush)FindResource("NeonGreenBrush");
+            if (DashNetDot != null) DashNetDot.Fill = (SolidColorBrush)FindResource("TextMutedBrush");
+            if (DashNetSubtitle != null) DashNetSubtitle.Text = "Tap NETWORK in sidebar to join";
         }
         else
         {
             NetworkDot.Fill = (SolidColorBrush)FindResource("NeonPinkBrush");
+            if (DashNetDot != null) DashNetDot.Fill = (SolidColorBrush)FindResource("NeonPinkBrush");
+            if (DashNetSubtitle != null) DashNetSubtitle.Text = status;
         }
     }
 
@@ -8889,6 +9110,9 @@ public partial class MainWindow : Window
         PeerCountText.Text = $"{count} peer{(count != 1 ? "s" : "")} connected";
         NetworkPeerCount.Text = count.ToString();
         PeersSubtitle.Text = $"{count} brain{(count != 1 ? "s" : "")} online";
+        // Dashboard NETWORK card mirror.
+        if (DashNetPeerCountText != null) DashNetPeerCountText.Text = count.ToString();
+        if (DashNetPeersText != null) DashNetPeersText.Text = $"{count} peer{(count != 1 ? "s" : "")} connected";
     }
 
     private void OnPeerJoined(PeerInfo peer)
@@ -10777,7 +11001,7 @@ public partial class MainWindow : Window
         SettingsBrainName.Text = _identity.DisplayName;
         SettingsBrainAddress.Text = _identity.Address;
         SettingsVaultPath.Text = _vaultPath;
-        SettingsServerUrl.Text = _serverUrl;
+        SettingsServerUrl.Text = _hubUrl;
     }
 
     private void PopulateMatchCategories()
@@ -10817,9 +11041,10 @@ public partial class MainWindow : Window
     {
         var url = SettingsServerUrl.Text.Trim();
         if (string.IsNullOrEmpty(url)) return;
-        _serverUrl = url;
+        // This is the MESH hub (network rendezvous), not the local AI base.
+        _hubUrl = url;
         SaveSettingsToFile();
-        StatusText.Text = $"Server URL saved: {url}";
+        StatusText.Text = $"Mesh hub URL saved: {url}";
     }
 
     private string SettingsFilePath => Path.Combine(_vaultPath, ".obsidianx", "settings.json");
@@ -10832,7 +11057,9 @@ public partial class MainWindow : Window
             if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
             var settings = new Dictionary<string, object>
             {
-                ["ServerUrl"] = _serverUrl,
+                ["HubUrl"] = _hubUrl,
+                ["LocalAiBase"] = _localAiBase,
+                ["EmbeddedMode"] = _embeddedMode,
                 ["BrainName"] = _identity.DisplayName,
                 ["ScanPaths"] = _scanPaths,
                 ["ScanWholeMachine"] = _scanWholeMachine,
@@ -10866,8 +11093,17 @@ public partial class MainWindow : Window
             var json = File.ReadAllText(SettingsFilePath);
             var settings = Newtonsoft.Json.JsonConvert.DeserializeObject<Dictionary<string, object>>(json);
             if (settings == null) return;
-            if (settings.TryGetValue("ServerUrl", out var url) && url != null)
-                _serverUrl = url.ToString() ?? _serverUrl;
+            // New keys (HubUrl + LocalAiBase). Back-compat: an older single
+            // "ServerUrl" was the local-or-merged endpoint — migrate it to the
+            // local AI base (the mesh hub now defaults to the public bootnode).
+            if (settings.TryGetValue("HubUrl", out var hu) && hu != null)
+                _hubUrl = hu.ToString() ?? _hubUrl;
+            if (settings.TryGetValue("LocalAiBase", out var lab) && lab != null)
+                _localAiBase = lab.ToString() ?? _localAiBase;
+            else if (settings.TryGetValue("ServerUrl", out var legacy) && legacy != null)
+                _localAiBase = RemoteNodeConfig.RestBase(legacy.ToString() ?? _localAiBase);
+            if (settings.TryGetValue("EmbeddedMode", out var em) && em != null)
+                bool.TryParse(em.ToString(), out _embeddedMode);
             if (settings.TryGetValue("ScanWholeMachine", out var swm) && swm != null)
                 bool.TryParse(swm.ToString(), out _scanWholeMachine);
             if (settings.TryGetValue("ScanPatterns", out var sp) && sp != null)
@@ -11467,7 +11703,7 @@ public partial class MainWindow : Window
             ServerStatusDot.Fill = status == "Healthy"
                 ? (SolidColorBrush)FindResource("NeonGreenBrush")
                 : new SolidColorBrush(Color.FromRgb(0xCC, 0x88, 0x44));
-            ServerStatusText.Text = "Srv ✓ :5142";
+            ServerStatusText.Text = (_embeddedMode ? "Srv ✓ " : "Node ✓ ") + RemoteNodeConfig.HostLabel(AiServerBase);
         }
         catch (Exception ex)
         {
@@ -11492,9 +11728,9 @@ public partial class MainWindow : Window
     {
         // Prefer "open the dashboard in browser" — Server has its own
         // cyberpunk web UI at root. If it's down, try to launch it.
-        if (Process.GetProcessesByName("BrainX.Server").Length == 0)
+        if (_embeddedMode && Process.GetProcessesByName("BrainX.Server").Length == 0)
         {
-            TryLaunchServerIfNotRunning();
+            TryLaunchServerIfNotRunning(_vaultPath);
             StatusText.Text = "Starting Server… (chip will go green when healthy)";
             return;
         }
@@ -11763,7 +11999,7 @@ public partial class MainWindow : Window
                 "$p = $j.file_path; " +
                 "if ($p -and ($p -like '*.md')) { " +
                 $"  $body = @{{ path = $p }} | ConvertTo-Json; " +
-                $"  try {{ Invoke-RestMethod -Uri 'http://localhost:5142/api/brain/auto-ingest' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 3 | Out-Null }} catch {{ }} " +
+                $"  try {{ Invoke-RestMethod -Uri '{AiServerBase}/api/brain/auto-ingest' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 3 | Out-Null }} catch {{ }} " +
                 "}\" # " + BrainAutoIngestHookMarker;
 
             postToolUse.Add(new Newtonsoft.Json.Linq.JObject
@@ -12202,9 +12438,25 @@ public partial class MainWindow : Window
         {
             var obj = Newtonsoft.Json.Linq.JObject.Parse(json);
             var nodeId = obj["node_id"]?.ToString();
-            if (string.IsNullOrEmpty(nodeId)) return;
-
             var op = obj["op"]?.ToString() ?? "mcp";
+
+            // No specific node on this line (e.g. brain_stats / brain_list /
+            // brain_create_note, or a search that pinned nothing). Per the
+            // user spec "ทุก MCP call ต้องกระพริบ" we still flash a fallback
+            // pulse for MCP activity so every brain access is visible — the
+            // scene flashes a random star (no camera move) when noteId is
+            // blank. Non-MCP node-less lines (index ticks etc.) stay silent.
+            if (string.IsNullOrEmpty(nodeId))
+            {
+                var client0 = obj["client"]?.ToString() ?? "";
+                bool isMcp = client0.Equals("mcp", StringComparison.OrdinalIgnoreCase)
+                          || op.StartsWith("mcp.", StringComparison.OrdinalIgnoreCase)
+                          || op.Equals("mcp", StringComparison.OrdinalIgnoreCase);
+                if (isMcp)
+                    BroadcastPulseToUniverse("", op, obj["context"]?.ToString());
+                return;
+            }
+
             var bumped = BumpPulseForNode(_dashPhysics, nodeId, op)
                        | BumpPulseForNode(_graphPhysics, nodeId, op);
 

@@ -101,6 +101,104 @@
          for the few users who still want to see it. -->
     <!-- (token-chip div intentionally removed) -->
 
+    <!-- ───────────────────────────────────────────────────────────────
+         Dashboard floating chips — moved here from MainWindow.xaml
+         because WPF Border children of the universe Grid get clobbered
+         by the WebView2 HwndHost surface (modern composition claim was
+         wrong for WebView2 1.0.2792). Living in the DOM means they're
+         part of the WebView2's own DComp surface — no airspace issues,
+         no z-order tricks, no Popup bleed-through.
+         Only visible when `body.wallpaper-active` is set, which the
+         dashboard universe (loaded with ?mode=wallpaper-active) does
+         by default. -->
+    <div id="dash-overlay-nodes" class="dash-overlay dash-overlay-tl" hidden>
+        <div class="dash-chip-col">
+            <div class="dash-chip-label">NODES</div>
+            <div class="dash-chip-value" id="dash-nodes-value">0</div>
+        </div>
+        <div class="dash-chip-sep"></div>
+        <div class="dash-chip-col">
+            <div class="dash-chip-label">WORDS</div>
+            <div class="dash-chip-value" id="dash-words-value">0</div>
+        </div>
+    </div>
+
+    <div id="dash-overlay-load" class="dash-overlay dash-overlay-bl" hidden>
+        <div class="dash-load-header">
+            <span class="dash-load-dot" id="dash-load-dot"></span>
+            <span class="dash-load-title">SYSTEM LOAD</span>
+            <span class="dash-load-subtitle">last 90 s</span>
+        </div>
+
+        <!-- GPU row -->
+        <div class="dash-metric-row" data-metric="gpu">
+            <div class="dash-metric-head">
+                <div class="dash-metric-bar dash-metric-bar-gpu"></div>
+                <span class="dash-metric-label">GPU</span>
+                <span class="dash-metric-value" id="dash-gpu-value">0%</span>
+            </div>
+            <svg class="dash-spark" viewBox="0 0 240 32" preserveAspectRatio="none"
+                 xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                <defs>
+                    <linearGradient id="dash-spark-fill-gpu" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0"    stop-color="#FF4F9E" stop-opacity="0.55"/>
+                        <stop offset="0.55" stop-color="#FF4F9E" stop-opacity="0.2"/>
+                        <stop offset="1"    stop-color="#FF4F9E" stop-opacity="0"/>
+                    </linearGradient>
+                    <linearGradient id="dash-spark-stroke-gpu" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0"    stop-color="#FFB0CB"/>
+                        <stop offset="0.55" stop-color="#FF4F9E"/>
+                        <stop offset="1"    stop-color="#C84080"/>
+                    </linearGradient>
+                </defs>
+                <line class="dash-spark-baseline" x1="0" x2="240" y1="31.5" y2="31.5"/>
+                <line class="dash-spark-gridline" x1="0" x2="240" y1="16" y2="16"/>
+                <path class="dash-spark-fill"   id="dash-spark-fill-path-gpu"
+                      fill="url(#dash-spark-fill-gpu)"/>
+                <path class="dash-spark-stroke" id="dash-spark-stroke-path-gpu"
+                      stroke="url(#dash-spark-stroke-gpu)"/>
+                <circle class="dash-spark-halo" id="dash-spark-halo-gpu"
+                        r="6" fill="#FF4F9E" opacity="0.35"/>
+                <circle class="dash-spark-dot"  id="dash-spark-dot-gpu"
+                        r="2.25" fill="#FFB0CB" stroke="#FFFFFF" stroke-width="0.6"/>
+            </svg>
+        </div>
+
+        <!-- CPU row -->
+        <div class="dash-metric-row" data-metric="cpu">
+            <div class="dash-metric-head">
+                <div class="dash-metric-bar dash-metric-bar-cpu"></div>
+                <span class="dash-metric-label">CPU</span>
+                <span class="dash-metric-value" id="dash-cpu-value">0%</span>
+            </div>
+            <svg class="dash-spark" viewBox="0 0 240 32" preserveAspectRatio="none"
+                 xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                <defs>
+                    <linearGradient id="dash-spark-fill-cpu" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0"    stop-color="#5BE9E9" stop-opacity="0.55"/>
+                        <stop offset="0.55" stop-color="#5BE9E9" stop-opacity="0.2"/>
+                        <stop offset="1"    stop-color="#5BE9E9" stop-opacity="0"/>
+                    </linearGradient>
+                    <linearGradient id="dash-spark-stroke-cpu" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0"    stop-color="#AEF5F5"/>
+                        <stop offset="0.55" stop-color="#5BE9E9"/>
+                        <stop offset="1"    stop-color="#3FB8B8"/>
+                    </linearGradient>
+                </defs>
+                <line class="dash-spark-baseline" x1="0" x2="240" y1="31.5" y2="31.5"/>
+                <line class="dash-spark-gridline" x1="0" x2="240" y1="16" y2="16"/>
+                <path class="dash-spark-fill"   id="dash-spark-fill-path-cpu"
+                      fill="url(#dash-spark-fill-cpu)"/>
+                <path class="dash-spark-stroke" id="dash-spark-stroke-path-cpu"
+                      stroke="url(#dash-spark-stroke-cpu)"/>
+                <circle class="dash-spark-halo" id="dash-spark-halo-cpu"
+                        r="6" fill="#5BE9E9" opacity="0.35"/>
+                <circle class="dash-spark-dot"  id="dash-spark-dot-cpu"
+                        r="2.25" fill="#AEF5F5" stroke="#FFFFFF" stroke-width="0.6"/>
+            </svg>
+        </div>
+    </div>
+
     <!-- floating info card revealed on hover/click of a star.
          Auto-fades after 10 s of no hover; mouse-enter cancels the timer.
          Edit button swaps preview → textarea + Save/Cancel inline. -->

@@ -24,6 +24,14 @@ public class BrainHub : Hub
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<ScopeKey, ShareScope> Scopes = new();
     private readonly record struct ScopeKey(string Owner, string Peer);
 
+    /// <summary>
+    /// Durable scope store (SQLite/MySQL via IBrainStorage), assigned at startup
+    /// in Program.cs. When set, scopes survive restarts and can be shared across a
+    /// pool brain on MySQL; the <see cref="Scopes"/> dict above is a hot cache. When
+    /// null (no storage), scopes live only in memory for the process lifetime.
+    /// </summary>
+    public static BrainX.Core.Services.IBrainStorage? Store;
+
     // Join Brain v2 — Phase 3 hardening #1: challenge-response register.
     // Per-connection nonces issued by RequestChallenge and consumed by
     // RegisterBrain. Without this, RegisterBrain trusted the client's
@@ -427,6 +435,8 @@ public class BrainHub : Hub
         // (where the note content lives) — see ShareScopeEvaluator. The
         // hub only does the rules that don't need note metadata.
         Scopes.TryGetValue(new ScopeKey(request.ToAddress, request.FromAddress), out var scope);
+        if (scope == null && Store != null)
+            scope = await Store.GetScopeAsync(request.ToAddress, request.FromAddress);  // cold cache after restart
         var preflightReason = PreflightDeny(scope);
         if (preflightReason != ShareDenyReason.None)
         {
@@ -495,18 +505,18 @@ public class BrainHub : Hub
     // SignalR can't trust client-supplied "owner" parameters on its own, so
     // we look up the caller's registered address via Context.ConnectionId.
 
-    public Task<List<ShareScope>> GetMyScopes()
+    public async Task<List<ShareScope>> GetMyScopes()
     {
         var addr = CallerBrainAddress();
-        if (string.IsNullOrEmpty(addr)) return Task.FromResult(new List<ShareScope>());
-        var mine = Scopes.Values
+        if (string.IsNullOrEmpty(addr)) return new List<ShareScope>();
+        if (Store != null) return await Store.ListScopesAsync(addr);   // durable source of truth
+        return Scopes.Values
             .Where(s => s.OwnerAddress == addr)
             .OrderByDescending(s => s.UpdatedAt)
             .ToList();
-        return Task.FromResult(mine);
     }
 
-    public Task SetScope(ShareScope? scope)
+    public async Task SetScope(ShareScope? scope)
     {
         if (!RateLimiter.TryConsume(Context.ConnectionId, "SetScope", 10, TimeSpan.FromMinutes(1)))
         {
@@ -545,8 +555,14 @@ public class BrainHub : Hub
         // and must be strictly greater than any prior version we hold. This
         // means a captured SetScope payload can't be re-submitted to undo a
         // later change (e.g. attacker replays "Full" after owner revokes).
+        // Replay protection — UpdatedAt must strictly advance. Warm the prior
+        // value from the durable store when the in-memory cache is cold (after a
+        // restart), so a captured old SetScope can't be replayed post-reboot.
         var key = new ScopeKey(scope.OwnerAddress, scope.PeerAddress);
-        if (Scopes.TryGetValue(key, out var existing) && scope.UpdatedAt <= existing.UpdatedAt)
+        ShareScope? existing = Scopes.TryGetValue(key, out var cached)
+            ? cached
+            : (Store != null ? await Store.GetScopeAsync(scope.OwnerAddress, scope.PeerAddress) : null);
+        if (existing != null && scope.UpdatedAt <= existing.UpdatedAt)
             throw new HubException(
                 $"scope.UpdatedAt must be greater than the stored value " +
                 $"(got {scope.UpdatedAt:O}, have {existing.UpdatedAt:O})");
@@ -554,26 +570,24 @@ public class BrainHub : Hub
         // Server preserves whatever the client signed — bumping UpdatedAt
         // here would invalidate the signature. Client owns the timestamp.
         Scopes.AddOrUpdate(key, scope, (_, _) => scope);
+        if (Store != null) await Store.UpsertScopeAsync(scope);   // durable
 
         var shortPeer = scope.PeerAddress.Length > 18 ? scope.PeerAddress[..18] + "..." : scope.PeerAddress;
         LogActivity($"Scope set: {scope.Level} → {shortPeer}");
         AuditLog.Record("scope.set", caller, $"peer={scope.PeerAddress} level={scope.Level} expiresAt={scope.ExpiresAt:O}");
-        return Task.CompletedTask;
     }
 
-    public Task RevokeScope(string? peerAddress)
+    public async Task RevokeScope(string? peerAddress)
     {
-        if (string.IsNullOrWhiteSpace(peerAddress)) return Task.CompletedTask;
+        if (string.IsNullOrWhiteSpace(peerAddress)) return;
         var caller = CallerBrainAddress();
-        if (string.IsNullOrEmpty(caller)) return Task.CompletedTask;
+        if (string.IsNullOrEmpty(caller)) return;
 
-        if (Scopes.TryRemove(new ScopeKey(caller, peerAddress), out _))
-        {
-            var shortPeer = peerAddress.Length > 18 ? peerAddress[..18] + "..." : peerAddress;
-            LogActivity($"Scope revoked: → {shortPeer}");
-            AuditLog.Record("scope.revoke", caller, $"peer={peerAddress}");
-        }
-        return Task.CompletedTask;
+        Scopes.TryRemove(new ScopeKey(caller, peerAddress), out _);
+        if (Store != null) await Store.DeleteScopeAsync(caller, peerAddress);   // durable
+        var shortPeer = peerAddress.Length > 18 ? peerAddress[..18] + "..." : peerAddress;
+        LogActivity($"Scope revoked: → {shortPeer}");
+        AuditLog.Record("scope.revoke", caller, $"peer={peerAddress}");
     }
 
     private string CallerBrainAddress()

@@ -83,6 +83,15 @@ public partial class MainWindow
             StartDashProInsightsRefreshTimer();
             // System load card (replaces TOP TAGS) — GPU + CPU sparklines.
             StartDashSystemLoadTimer();
+            // Hybrid Claude-usage card — local tally always-on,
+            // claude.ai scraper layered on top when signed-in via Edge.
+            StartDashClaudeUsage();
+            // Mouse-wheel bubble: when an inner ScrollViewer (Activity Feed,
+            // Recently Edited) hits its top/bottom, hand the wheel event off
+            // to the outer DashOuterScroll. Without this the inner viewer
+            // silently swallows every wheel tick at the extents — user
+            // can't scroll the dashboard down to reach hidden cards.
+            WireUpDashboardWheelBubble();
         }
         catch (Exception ex)
         {
@@ -234,6 +243,7 @@ public partial class MainWindow
             var op = obj["op"]?.ToString() ?? "";
             var ctx = obj["context"]?.ToString() ?? "";
             var nodeId = obj["node_id"]?.ToString() ?? "";
+            var client = obj["client"]?.ToString() ?? "";
 
             // Time — parse ISO 8601 if present, else fall back to NOW
             string timeStr;
@@ -253,11 +263,18 @@ public partial class MainWindow
             string kindLabel;
             string brushKey;
             string message;
-            if (op.StartsWith("mcp.", System.StringComparison.OrdinalIgnoreCase) || op == "mcp")
+            // MCP tool calls. New access-log schema is {"op":"<tool>","client":"mcp"};
+            // the old schema was {"op":"mcp.<tool>"}. Accept both so the feed keeps
+            // labelling MCP rows correctly after the log-format change.
+            bool isMcp = client.Equals("mcp", System.StringComparison.OrdinalIgnoreCase)
+                      || op.StartsWith("mcp.", System.StringComparison.OrdinalIgnoreCase)
+                      || op == "mcp";
+            if (isMcp)
             {
                 kindLabel = "MCP";
                 brushKey  = "ActKindMcp";
-                var tool = op.StartsWith("mcp.") ? op.Substring(4) : "tool";
+                var tool = op.StartsWith("mcp.") ? op.Substring(4)
+                         : (string.IsNullOrEmpty(op) ? "tool" : op);
                 message = string.IsNullOrEmpty(ctx)
                     ? $"{tool} · node={Shorten(nodeId, 12)}"
                     : $"{tool} \"{Shorten(ctx, 60)}\"";
@@ -459,14 +476,25 @@ public partial class MainWindow
             core.WebMessageReceived += OnDashUniverseMessage;
 
             DashUniverseWebView.Source = new System.Uri(
-                "https://universe.local/universe/index.html?cameraMode=orbit&mode=wallpaper-active");
+                "https://universe.local/universe/index.html?cameraMode=follow&mode=wallpaper-active");
             _dashUniverseInitialized = true;
+
+            // Chips moved from Popup → Border (sibling of WebView2 in the
+            // universe Grid) to fix the "ทับ chrome" bleed-through. No
+            // imperative wiring needed — WPF layout handles positioning.
         }
         catch (System.Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"DashUniverse init failed: {ex.Message}");
         }
     }
+
+    // Legacy Popup helpers DELETED — chips moved to Border children of
+    // the universe Grid in MainWindow.xaml. HookDashPopups,
+    // UpdateDashPopupOpenState, UpdateDashLoadPopupPosition,
+    // RepositionDashPopups, NudgePopup, RepositionDashPopupsThrottled
+    // all removed along with the DashOv*Popup x:Names they referenced.
+    // WPF layout now handles positioning + z-order natively.
 
     private void OnDashUniverseMessage(object? sender,
         Microsoft.Web.WebView2.Core.CoreWebView2WebMessageReceivedEventArgs e)
@@ -479,6 +507,16 @@ public partial class MainWindow
             if (msg?.type == "ready")
             {
                 PushBrainSnapshotToDashUniverse();
+                // Repush NODES/WORDS so the chip populates immediately on
+                // first load. UpdateUI() fires PostDashStats before the
+                // dash universe WebView2 finishes EnsureCoreWebView2Async,
+                // so without this the chip stays at "0".
+                try
+                {
+                    if (_graph != null)
+                        PostDashStats(_graph.TotalNodes, _graph.TotalWords);
+                }
+                catch { }
             }
         }
         catch (System.Exception ex)
@@ -1071,29 +1109,12 @@ public partial class MainWindow
                     return (cpu, Math.Min(100, gpu));
                 });
 
-                PushDashLoadSample(_dashCpuSamples, sample.cpu);
-                PushDashLoadSample(_dashGpuSamples, sample.Item2);
-
-                if (DashCpuValueText != null)
-                    DashCpuValueText.Text = $"{sample.cpu:0}%";
-                if (DashGpuValueText != null)
-                    DashGpuValueText.Text = $"{sample.Item2:0}%";
-
-                // Status dot: amber if either > 85%, mint otherwise.
-                if (DashLoadDot != null)
-                {
-                    var hot = sample.cpu > 85 || sample.Item2 > 85;
-                    DashLoadDot.Fill = hot
-                        ? (Brush)(System.Windows.Application.Current.TryFindResource("NeuralAmber")
-                                  ?? Brushes.Orange)
-                        : (Brush)(System.Windows.Application.Current.TryFindResource("NeuralMint")
-                                  ?? Brushes.LightGreen);
-                }
-
-                DrawDashLoadSparkline(DashGpuSparkCanvas, _dashGpuSamples,
-                    Color.FromRgb(0xFF, 0x4F, 0x9E));   // magenta
-                DrawDashLoadSparkline(DashCpuSparkCanvas, _dashCpuSamples,
-                    Color.FromRgb(0x5B, 0xE9, 0xE9));   // cyan
+                // Push the sample to the universe DOM. The chip + sparkline
+                // live in wwwroot/universe (handleDashLoad → drawDashSpark)
+                // because WPF Border/Popup overlays over WebView2 either
+                // get clobbered (HwndHost airspace) or leak above other
+                // apps (Popup is a separate Win32 window).
+                PostDashLoad(sample.Item2, sample.cpu);
             }
             catch (Exception ex)
             {
@@ -1109,6 +1130,56 @@ public partial class MainWindow
         q.Enqueue(System.Math.Max(0, System.Math.Min(100, v)));
     }
 
+    // ── DOM-chip bridges ─────────────────────────────────────────────
+    // Push values to the universe WebView2 where the floating chips
+    // actually live (handleDashStats / handleDashLoad in app.js).
+    // No-op when the WebView2 isn't initialized yet — values just don't
+    // appear in the chip until the next push after init completes.
+    private void PostDashStats(long nodes, long words)
+    {
+        try
+        {
+            var core = DashUniverseWebView?.CoreWebView2;
+            if (core == null) return;
+            if (!_dashUniverseInitialized) return;
+            var json = $"{{\"type\":\"dashStats\",\"nodes\":{nodes},\"words\":{words}}}";
+            core.PostWebMessageAsJson(json);
+        }
+        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"PostDashStats: {ex.Message}"); }
+    }
+
+    private void PostDashLoad(double gpu, double cpu)
+    {
+        try
+        {
+            var core = DashUniverseWebView?.CoreWebView2;
+            if (core == null) return;
+            if (!_dashUniverseInitialized) return;
+            // Format with 1 decimal — handleDashLoad clamps + rounds so
+            // either works, but staying compact saves bytes per tick.
+            var json = $"{{\"type\":\"dashLoad\",\"gpu\":{gpu:0.0},\"cpu\":{cpu:0.0}}}";
+            core.PostWebMessageAsJson(json);
+        }
+        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"PostDashLoad: {ex.Message}"); }
+    }
+
+    // ── (legacy) Pro WPF sparkline ───────────────────────────────────
+    // Kept compiled — no longer called from the load timer (that now
+    // pushes samples via PostDashLoad → DOM sparkline). Left in place
+    // because BrainGraph view's other sparkline callers may still need
+    // it; safe to delete in a later cleanup once those are migrated.
+    //
+    // Layered render, back→front:
+    //   1. Baseline at y=h-0.5 (1 px, alpha 0x14) — anchors the eye
+    //   2. 50 % dashed gridline (alpha 0x18) — visual reference
+    //   3. Multi-stop gradient FILL under the curve (alpha 0x80→0x18→0x00)
+    //   4. Smoothed Catmull-Rom→Bezier PATH stroked with a top-bright,
+    //      bottom-faded vertical gradient + BlurEffect for soft glow
+    //   5. End-cap halo (BlurRadius 8) + opaque dot at the rightmost sample
+    //
+    // The straight-line polyline from the previous impl looked like a
+    // generic Windows perf counter; smooth curves + chained gradients
+    // sell the "analytics-dashboard" aesthetic the user asked for.
     private static void DrawDashLoadSparkline(
         System.Windows.Controls.Canvas? canvas,
         System.Collections.Generic.Queue<double> samples,
@@ -1122,61 +1193,395 @@ public partial class MainWindow
         double w = canvas.ActualWidth;
         double h = canvas.ActualHeight;
         if (w <= 0) w = 240;
-        if (h <= 0) h = 34;
+        if (h <= 0) h = 32;
 
-        // Render as a smoothed polyline filled below — gives the "cool"
-        // analytics look the user asked for ("เท่ๆ"). Two layers:
-        //   1. Filled Polygon under the line (alpha 0x22 → 0x66 gradient)
-        //   2. Polyline stroke on top in full color
+        // Map sample i → screen point.
         var pts = samples.ToArray();
         int n = pts.Length;
         double slot = w / System.Math.Max(1, DashLoadCap - 1);
-        var stroke = new System.Windows.Media.PointCollection(n);
+        var screenPts = new System.Windows.Point[n];
         for (int i = 0; i < n; i++)
         {
             double x = i * slot;
-            double y = h - 2 - (pts[i] / 100.0) * (h - 4);
-            stroke.Add(new System.Windows.Point(x, y));
+            // Inset by 1 px top + 2 px bottom so the gradient + glow
+            // never clip on the chip's CornerRadius.
+            double y = h - 2 - (System.Math.Clamp(pts[i], 0, 100) / 100.0) * (h - 3);
+            screenPts[i] = new System.Windows.Point(x, y);
         }
 
-        // Filled area underneath
-        var fillPts = new System.Windows.Media.PointCollection(stroke.Count + 2);
-        foreach (var p in stroke) fillPts.Add(p);
-        fillPts.Add(new System.Windows.Point((n - 1) * slot, h));
-        fillPts.Add(new System.Windows.Point(0, h));
-        var fillBrush = new LinearGradientBrush(
-            System.Windows.Media.Color.FromArgb(0x66, color.R, color.G, color.B),
-            System.Windows.Media.Color.FromArgb(0x10, color.R, color.G, color.B),
-            new System.Windows.Point(0, 0), new System.Windows.Point(0, 1));
-        var poly = new System.Windows.Shapes.Polygon
+        // 1. Baseline.
+        canvas.Children.Add(new System.Windows.Shapes.Line
         {
-            Points = fillPts,
+            X1 = 0, X2 = w, Y1 = h - 0.5, Y2 = h - 0.5,
+            Stroke = new SolidColorBrush(System.Windows.Media.Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF)),
+            StrokeThickness = 1,
+        });
+
+        // 2. 50 % gridline (dashed).
+        canvas.Children.Add(new System.Windows.Shapes.Line
+        {
+            X1 = 0, X2 = w,
+            Y1 = h / 2.0, Y2 = h / 2.0,
+            Stroke = new SolidColorBrush(System.Windows.Media.Color.FromArgb(0x18, 0xFF, 0xFF, 0xFF)),
+            StrokeThickness = 0.6,
+            StrokeDashArray = new DoubleCollection { 2, 3 },
+            SnapsToDevicePixels = true,
+        });
+
+        // Smooth curve via Catmull-Rom → cubic Bezier conversion.
+        // Tension 0.5 (classic spline). With 60 samples the
+        // visual difference vs a straight polyline is dramatic —
+        // curves feel like an analytics dashboard, not a tooltip.
+        var geom = new System.Windows.Media.PathGeometry();
+        var figure = new System.Windows.Media.PathFigure { StartPoint = screenPts[0], IsClosed = false };
+        for (int i = 0; i < n - 1; i++)
+        {
+            var p0 = screenPts[System.Math.Max(0, i - 1)];
+            var p1 = screenPts[i];
+            var p2 = screenPts[i + 1];
+            var p3 = screenPts[System.Math.Min(n - 1, i + 2)];
+            // Cubic control points (Catmull-Rom α=0.5).
+            var c1 = new System.Windows.Point(
+                p1.X + (p2.X - p0.X) / 6.0,
+                p1.Y + (p2.Y - p0.Y) / 6.0);
+            var c2 = new System.Windows.Point(
+                p2.X - (p3.X - p1.X) / 6.0,
+                p2.Y - (p3.Y - p1.Y) / 6.0);
+            figure.Segments.Add(new System.Windows.Media.BezierSegment(c1, c2, p2, true));
+        }
+        geom.Figures.Add(figure);
+
+        // 3. Filled area below the curve. Re-trace the same bezier path,
+        // then drop two points to close the polygon at the canvas floor.
+        var fillFigure = new System.Windows.Media.PathFigure { StartPoint = screenPts[0], IsClosed = true };
+        foreach (var seg in figure.Segments)
+            fillFigure.Segments.Add(seg.Clone());
+        fillFigure.Segments.Add(new System.Windows.Media.LineSegment(new System.Windows.Point((n - 1) * slot, h), true));
+        fillFigure.Segments.Add(new System.Windows.Media.LineSegment(new System.Windows.Point(0, h), true));
+        var fillGeom = new System.Windows.Media.PathGeometry();
+        fillGeom.Figures.Add(fillFigure);
+        var fillBrush = new LinearGradientBrush
+        {
+            StartPoint = new System.Windows.Point(0, 0),
+            EndPoint   = new System.Windows.Point(0, 1),
+            GradientStops = new GradientStopCollection
+            {
+                new GradientStop(System.Windows.Media.Color.FromArgb(0x88, color.R, color.G, color.B), 0.0),
+                new GradientStop(System.Windows.Media.Color.FromArgb(0x33, color.R, color.G, color.B), 0.55),
+                new GradientStop(System.Windows.Media.Color.FromArgb(0x00, color.R, color.G, color.B), 1.0),
+            }
+        };
+        canvas.Children.Add(new System.Windows.Shapes.Path
+        {
+            Data = fillGeom,
             Fill = fillBrush,
-        };
-        canvas.Children.Add(poly);
+            IsHitTestVisible = false,
+        });
 
-        // Stroke line on top
-        var line = new System.Windows.Shapes.Polyline
+        // 4. Stroke gradient (vertical: brighter at top of any peak).
+        var strokeBrush = new LinearGradientBrush
         {
-            Points = stroke,
-            Stroke = new SolidColorBrush(color),
-            StrokeThickness = 1.6,
-            StrokeLineJoin = PenLineJoin.Round,
+            StartPoint = new System.Windows.Point(0, 0),
+            EndPoint   = new System.Windows.Point(0, 1),
+            GradientStops = new GradientStopCollection
+            {
+                new GradientStop(BrightenColor(color, 1.18), 0.0),
+                new GradientStop(color, 0.55),
+                new GradientStop(System.Windows.Media.Color.FromArgb(0xCC, color.R, color.G, color.B), 1.0),
+            }
         };
-        canvas.Children.Add(line);
+        canvas.Children.Add(new System.Windows.Shapes.Path
+        {
+            Data = geom,
+            Stroke = strokeBrush,
+            StrokeThickness = 1.5,
+            StrokeLineJoin = PenLineJoin.Round,
+            StrokeStartLineCap = PenLineCap.Round,
+            StrokeEndLineCap = PenLineCap.Round,
+            IsHitTestVisible = false,
+            Effect = new System.Windows.Media.Effects.DropShadowEffect
+            {
+                Color = color,
+                BlurRadius = 4,
+                ShadowDepth = 0,
+                Opacity = 0.55,
+            },
+        });
 
-        // End-of-line dot for the current value
+        // 5. Glowing end-cap (halo + bright core).
         if (n > 0)
         {
-            var last = stroke[n - 1];
+            var last = screenPts[n - 1];
+            var halo = new System.Windows.Shapes.Ellipse
+            {
+                Width = 12, Height = 12,
+                Fill = new SolidColorBrush(System.Windows.Media.Color.FromArgb(0x55, color.R, color.G, color.B)),
+                IsHitTestVisible = false,
+                Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 6 }
+            };
+            System.Windows.Controls.Canvas.SetLeft(halo, last.X - 6);
+            System.Windows.Controls.Canvas.SetTop(halo, last.Y - 6);
+            canvas.Children.Add(halo);
+
             var dot = new System.Windows.Shapes.Ellipse
             {
-                Width = 5, Height = 5,
-                Fill = new SolidColorBrush(color),
+                Width = 4.5, Height = 4.5,
+                Fill = new SolidColorBrush(BrightenColor(color, 1.25)),
+                Stroke = new SolidColorBrush(System.Windows.Media.Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF)),
+                StrokeThickness = 0.6,
+                IsHitTestVisible = false,
             };
-            System.Windows.Controls.Canvas.SetLeft(dot, last.X - 2.5);
-            System.Windows.Controls.Canvas.SetTop(dot, last.Y - 2.5);
+            System.Windows.Controls.Canvas.SetLeft(dot, last.X - 2.25);
+            System.Windows.Controls.Canvas.SetTop(dot, last.Y - 2.25);
             canvas.Children.Add(dot);
         }
+    }
+
+    private static Color BrightenColor(Color c, double factor)
+    {
+        byte clamp(double v) => (byte)System.Math.Clamp(v, 0, 255);
+        return Color.FromArgb(c.A,
+            clamp(c.R * factor),
+            clamp(c.G * factor),
+            clamp(c.B * factor));
+    }
+
+    // ═════════════════════════════════════════════════════════════════
+    // CLAUDE USAGE CARD — local tally subtitle + plan-limit bars.
+    //
+    // Two data sources:
+    //   1. ClaudeTranscriptTally — scans ~/.claude/projects/**/*.jsonl,
+    //      always works. Drives the "🪙 12.4M · 5h · 187 msg" subtitle.
+    //   2. ClaudeUsageProbe — hidden WebView2 → claude.ai/settings/usage.
+    //      Only works when the user is signed into claude.ai in Edge.
+    //      Drives the 4 % bars + plan label + reset timestamps.
+    //
+    // Status dot:
+    //   green  = scraper authenticated + bars live
+    //   amber  = local tally only (Phase 1 / not signed in)
+    //   red    = neither source producing data (unlikely)
+    // ═════════════════════════════════════════════════════════════════
+
+    private BrainX.Client.Services.ClaudeTranscriptTally? _claudeTally;
+    private BrainX.Client.Services.ClaudeUsageProbe? _claudeProbe;
+    private bool _claudeScraperAlive;
+
+    private void StartDashClaudeUsage()
+    {
+        try
+        {
+            _claudeTally = new BrainX.Client.Services.ClaudeTranscriptTally();
+            _claudeTally.Updated += (_, snap) =>
+            {
+                if (DashboardView?.Visibility != System.Windows.Visibility.Visible
+                    && _dashClaudeFirstUpdate) return;
+                _dashClaudeFirstUpdate = true;
+                if (!Dispatcher.CheckAccess())
+                {
+                    Dispatcher.BeginInvoke(new Action(() => ApplyClaudeTallySnapshot(snap)));
+                }
+                else ApplyClaudeTallySnapshot(snap);
+            };
+            _claudeTally.Start();
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"StartDashClaudeUsage tally: {ex.Message}");
+        }
+
+        try
+        {
+            _claudeProbe = new BrainX.Client.Services.ClaudeUsageProbe(this);
+            _claudeProbe.Updated += (_, snap) =>
+            {
+                if (!Dispatcher.CheckAccess())
+                    Dispatcher.BeginInvoke(new Action(() => ApplyClaudeProbeSnapshot(snap)));
+                else
+                    ApplyClaudeProbeSnapshot(snap);
+            };
+            _ = _claudeProbe.StartAsync();
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"StartDashClaudeUsage probe: {ex.Message}");
+        }
+    }
+
+    private bool _dashClaudeFirstUpdate;
+
+    private void ApplyClaudeTallySnapshot(BrainX.Client.Services.ClaudeTranscriptTally.TallySnapshot snap)
+    {
+        if (DashClaudeLocalText != null)
+        {
+            // "🪙 12.4M tokens · 5h · 187 msg"
+            DashClaudeLocalText.Text =
+                $"{snap.Tokens5hLabel} tokens · 5h · {snap.Messages5h} msg";
+            DashClaudeLocalText.ToolTip =
+                $"Last 5 h:    {snap.Tokens5h:N0} tokens · {snap.Messages5h} msgs\n" +
+                $"Last 24 h:   {snap.Tokens24h:N0} tokens · {snap.Messages24h} msgs\n" +
+                $"Last 7 d:    {snap.Tokens7d:N0} tokens · {snap.Messages7d} msgs\n" +
+                $"All time:    {snap.TokensTotal:N0} tokens · {snap.MessagesTotal} msgs\n" +
+                (snap.TokensByModel.Count > 0
+                    ? "\nBy model:\n" + string.Join("\n",
+                        snap.TokensByModel
+                            .OrderByDescending(kv => kv.Value)
+                            .Take(4)
+                            .Select(kv => $"  {kv.Key}: {kv.Value:N0}"))
+                    : "");
+        }
+
+        // Until the scraper authenticates, the dot stays amber.
+        if (!_claudeScraperAlive)
+            SetClaudeDot("amber");
+    }
+
+    private void ApplyClaudeProbeSnapshot(BrainX.Client.Services.ClaudeUsageProbe.UsageSnapshot snap)
+    {
+        _claudeScraperAlive = snap.Authenticated;
+        SetClaudeDot(snap.Authenticated ? "green" : "amber");
+
+        if (DashClaudePlanText != null && !string.IsNullOrWhiteSpace(snap.PlanLabel))
+            DashClaudePlanText.Text = snap.PlanLabel!;
+
+        void Apply(System.Windows.Controls.TextBlock? pct,
+                    System.Windows.Controls.TextBlock? reset,
+                    System.Windows.FrameworkElement? bar,
+                    BrainX.Client.Services.ClaudeUsageProbe.UsageRow? row)
+        {
+            if (row == null) return;
+            if (pct != null) pct.Text = row.Percent >= 0 ? $"{row.Percent:0}% used" : "—";
+            if (reset != null) reset.Text = row.ResetLabel ?? "—";
+            if (bar is System.Windows.Controls.Border b)
+            {
+                // Bar's parent Border defines the track width. Read it to compute width.
+                if (b.Parent is System.Windows.Controls.Border track && track.ActualWidth > 0)
+                {
+                    double pctClamped = Math.Clamp(row.Percent / 100.0, 0, 1);
+                    b.Width = Math.Max(2, track.ActualWidth * pctClamped);
+                }
+            }
+        }
+
+        Apply(DashClaudeSessionPct, DashClaudeSessionReset, DashClaudeSessionBar, snap.Session);
+        Apply(DashClaudeWeeklyPct, DashClaudeWeeklyReset, DashClaudeWeeklyBar, snap.WeeklyAll);
+        Apply(DashClaudeSonnetPct, DashClaudeSonnetReset, DashClaudeSonnetBar, snap.SonnetOnly);
+        Apply(DashClaudeCreditsPct, DashClaudeCreditsReset, DashClaudeCreditsBar, snap.Credits);
+    }
+
+    private void SetClaudeDot(string state)
+    {
+        if (DashClaudeDot == null) return;
+        Brush brush = state switch
+        {
+            "green" => (Brush)(System.Windows.Application.Current.TryFindResource("NeuralMint")
+                              ?? Brushes.LightGreen),
+            "red"   => (Brush)(System.Windows.Application.Current.TryFindResource("NeuralPink")
+                              ?? Brushes.IndianRed),
+            _       => (Brush)(System.Windows.Application.Current.TryFindResource("NeuralAmber")
+                              ?? Brushes.Orange),
+        };
+        DashClaudeDot.Fill = brush;
+        DashClaudeDot.ToolTip = state switch
+        {
+            "green" => "Live · signed into claude.ai (click to re-open the usage page)",
+            "red"   => "No data — neither claude.ai nor local transcripts available",
+            _       => "Click to sign into claude.ai · cookies stay private to BrainX",
+        };
+        // Hide the "Sign in →" link once authenticated; it's only useful
+        // when the user actually needs to log in.
+        if (DashClaudeSignInLink != null)
+        {
+            DashClaudeSignInLink.Visibility = state == "green"
+                ? System.Windows.Visibility.Collapsed
+                : System.Windows.Visibility.Visible;
+        }
+    }
+
+    // Click handler for both DashClaudeDot and the "Sign in →" link.
+    // Pops the modal ClaudeUsageLoginWindow, which shares the same
+    // WebView2 UserDataFolder as the hidden probe — so any cookies
+    // the user receives in the modal flow straight through to the
+    // background scraper on its next tick.
+    private void DashClaudeDot_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        try
+        {
+            var win = new BrainX.Client.Services.ClaudeUsageLoginWindow { Owner = this };
+            win.Closed += async (_, _) =>
+            {
+                // Immediately re-inject any newly-stored cookies (no-op if
+                // the user closed without logging in) and trigger a
+                // fresh tick so the dashboard updates right away instead
+                // of waiting up to 60 s.
+                if (_claudeProbe != null)
+                    await _claudeProbe.ReloadAsync();
+            };
+            win.Show();
+        }
+        catch (System.Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"DashClaudeDot_Click: {ex.Message}");
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════
+    // Mouse-wheel bubble — handed to every inner ScrollViewer inside
+    // DashboardView so that when the inner viewer hits its top/bottom
+    // edge the wheel event is re-raised on the parent (= outer
+    // DashOuterScroll).
+    //
+    // WPF default: a ScrollViewer that receives a MouseWheel event
+    // always marks it Handled — even at VerticalOffset 0 or
+    // ScrollableHeight. That means scrolling inside Activity Feed or
+    // Recently Edited can never page the dashboard body. This handler
+    // relaxes that: while inner has room, it scrolls normally; the
+    // moment it's at an extent, the event is rebroadcast on the
+    // parent so the outer ScrollViewer takes over.
+    // ═════════════════════════════════════════════════════════════════
+    private readonly System.Collections.Generic.HashSet<System.Windows.Controls.ScrollViewer> _dashWheelBubbleWired = new();
+
+    private void WireUpDashboardWheelBubble()
+    {
+        if (DashboardView == null) return;
+        if (DashboardView.IsLoaded)
+            AttachWheelBubbleRecursive(DashboardView);
+        else
+            DashboardView.Loaded += (_, _) => AttachWheelBubbleRecursive(DashboardView);
+    }
+
+    private void AttachWheelBubbleRecursive(System.Windows.DependencyObject root)
+    {
+        if (root is System.Windows.Controls.ScrollViewer sv
+            && sv.Name != "DashOuterScroll"
+            && _dashWheelBubbleWired.Add(sv))
+        {
+            sv.PreviewMouseWheel += InnerScroll_PreviewMouseWheel;
+        }
+        int count = System.Windows.Media.VisualTreeHelper.GetChildrenCount(root);
+        for (int i = 0; i < count; i++)
+            AttachWheelBubbleRecursive(System.Windows.Media.VisualTreeHelper.GetChild(root, i));
+    }
+
+    private void InnerScroll_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.ScrollViewer sv) return;
+
+        bool atTop = sv.VerticalOffset <= 0.001;
+        bool atBottom = sv.VerticalOffset >= sv.ScrollableHeight - 0.001;
+        bool spillUp = e.Delta > 0 && atTop;
+        bool spillDown = e.Delta < 0 && atBottom;
+
+        if (spillUp || spillDown)
+        {
+            e.Handled = true;
+            var bubbled = new System.Windows.Input.MouseWheelEventArgs(
+                e.MouseDevice, e.Timestamp, e.Delta)
+            {
+                RoutedEvent = System.Windows.UIElement.MouseWheelEvent,
+                Source = sv
+            };
+            (sv.Parent as System.Windows.UIElement)?.RaiseEvent(bubbled);
+        }
+        // else: inner has room; default ScrollViewer behavior scrolls it.
     }
 }

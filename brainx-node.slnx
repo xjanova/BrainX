@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="BrainX.Core/BrainX.Core.csproj" />
+  <Project Path="BrainX.NodeMonitor/BrainX.NodeMonitor.csproj" />
+  <Project Path="BrainX.Server/BrainX.Server.csproj" />
+</Solution>

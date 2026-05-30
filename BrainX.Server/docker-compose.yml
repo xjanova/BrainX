@@ -1,0 +1,41 @@
+# brainx-node — local/VPS runner. Run from the repo root, e.g.:
+#   BRAINX_BEARER_TOKEN=$(openssl rand -hex 24) \
+#   BRAINX_VAULT_DIR=/srv/brainx/vault \
+#     docker compose -f BrainX.Server/docker-compose.yml up --build
+#
+# Phase 0 = single-tenant (one brain's vault mounted). Put this behind your own
+# TLS-terminating reverse proxy (nginx/Apache/Caddy/Cloudflare) that forwards
+# https://your-node.example.com → this container's :8080 with WebSocket upgrade
+# for the SignalR /brain-hub endpoint.
+
+services:
+  brainx-node:
+    build:
+      context: ..
+      dockerfile: BrainX.Server/Dockerfile
+    image: brainx-node:latest
+    container_name: brainx-node
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      BrainX__EmbeddedMode: "false"
+      BrainX__RequireAuth: "true"
+      # Required — write endpoints fail closed without it.
+      BrainX__BearerToken: "${BRAINX_BEARER_TOKEN:?set BRAINX_BEARER_TOKEN}"
+      BrainX__VaultPath: "/vault"
+      # The control panel is same-origin so it needs no CORS entry; this only
+      # matters for cross-origin browser callers. Defaults to the public domain.
+      BrainX__AllowedOrigins: "${BRAINX_ALLOWED_ORIGINS:-https://your-node.example.com}"
+      # Ollama usually isn't on the VPS; point at the host for local testing.
+      BRAINX_OLLAMA_URL: "${BRAINX_OLLAMA_URL:-http://host.docker.internal:11434}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Brain vault, read-only — Phase 0 node serves it, never mutates it.
+      - "${BRAINX_VAULT_DIR:?set BRAINX_VAULT_DIR}:/vault:ro"
+      # Tamper-evident audit log persists across redeploys.
+      - "brainx-audit:/app/audit"
+
+volumes:
+  brainx-audit:

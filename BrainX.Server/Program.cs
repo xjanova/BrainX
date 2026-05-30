@@ -1,8 +1,14 @@
 using System.Text;
 using BrainX.Server.Hubs;
 using BrainX.Core.Services;
+using BrainX.Core.Models;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Resolve node config from appsettings + environment (env wins). This is
+// what lets the same binary run two ways: bundled-with-client (EmbeddedMode,
+// wide-open localhost) or standalone on a VPS (auth + restricted CORS).
+NodeConfig.Init(builder.Configuration);
 
 // Force-enable static web assets in any environment (Development OR
 // Production). WebApplication.CreateBuilder only auto-enables this in
@@ -16,7 +22,14 @@ builder.Services.AddCors(options =>
 {
     options.AddDefaultPolicy(policy =>
     {
-        policy.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader();
+        // Embedded (localhost, bundled with client) → wide open, no friction.
+        // Standalone with explicit AllowedOrigins → lock to those.
+        // Standalone with none set → still any-origin, but writes are
+        // bearer-gated below, so this only affects read endpoints.
+        if (!NodeConfig.EmbeddedMode && NodeConfig.AllowedOrigins.Length > 0)
+            policy.WithOrigins(NodeConfig.AllowedOrigins).AllowAnyMethod().AllowAnyHeader();
+        else
+            policy.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader();
     });
 });
 
@@ -28,7 +41,53 @@ var app = builder.Build();
 BrainX.Server.Hubs.AuditLog.Initialize(
     Path.Combine(AppContext.BaseDirectory, "audit"));
 
+// ── Storage backend: SQLite (default) or MySQL, via BrainStorageFactory ──
+// Files on disk stay the source of truth; this backs FTS search + durable
+// BrainHub scope persistence. SQLite writes <vault>/.obsidianx/brain.db; if no
+// vault is configured, it lands next to the binary so the node still works.
+IBrainStorage? storage = null;
+try
+{
+    var storageDir = !string.IsNullOrWhiteSpace(NodeConfig.VaultPath)
+        ? NodeConfig.VaultPath!
+        : Path.Combine(AppContext.BaseDirectory, "data");
+    storage = BrainStorageFactory.Create(NodeConfig.StorageProvider, storageDir, NodeConfig.MySqlConnString);
+    BrainHub.Store = storage;
+    Console.WriteLine($"[storage] {storage.ProviderName} ready ({NodeConfig.StorageProvider})");
+    // Seed the search index from the current brain export (best-effort).
+    PopulateStorageFromExport(storage);
+}
+catch (Exception ex)
+{
+    Console.WriteLine($"[storage] init failed ({NodeConfig.StorageProvider}): {ex.Message} — search falls back to the JSON export.");
+}
+
 app.UseCors();
+
+// Loud warning when a non-embedded (remote/VPS) node is left unauthenticated —
+// /api/ai/keys and /api/brain/auto-ingest write to disk, so exposing them
+// without a bearer token is a remote-write hole.
+if (!NodeConfig.EmbeddedMode && (!NodeConfig.RequireAuth || string.IsNullOrEmpty(NodeConfig.BearerToken)))
+{
+    Console.ForegroundColor = ConsoleColor.Red;
+    Console.WriteLine("  [WARN] Standalone node with NO auth — set BrainX__RequireAuth=true + BrainX__BearerToken before exposing publicly.");
+    Console.ResetColor();
+}
+
+// Bearer-token gate for write endpoints. Only enforced when RequireAuth=true
+// (standalone/remote). Embedded localhost stays friction-free. Read endpoints
+// are never gated here — the sensitive surface is the two writers below.
+app.Use(async (ctx, next) =>
+{
+    if (NodeConfig.RequireAuth && IsProtectedWrite(ctx.Request) && !BearerOk(ctx.Request))
+    {
+        ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        await ctx.Response.WriteAsJsonAsync(new { error = "unauthorized — bearer token required" });
+        return;
+    }
+    await next();
+});
+
 app.UseDefaultFiles();
 app.UseStaticFiles();
 
@@ -65,17 +124,19 @@ app.Use(async (ctx, next) =>
 
 // ASCII art banner
 Console.ForegroundColor = ConsoleColor.Cyan;
+// Pure ASCII so it renders identically on any console codepage (the box-
+// drawing version garbled to Thai glyphs under CP874).
 Console.WriteLine(@"
-   ____  _         _     _ _             __  __
-  / __ \| |__  ___(_) __| (_) __ _ _ __ \ \/ /
- | |  | | '_ \/ __| |/ _` | |/ _` | '_ \ \  /
- | |__| | |_) \__ \ | (_| | | (_| | | | |/  \
-  \____/|_.__/|___/_|\__,_|_|\__,_|_| |_/_/\_\
+ ____            _        __  __
+| __ ) _ __ __ _(_)_ __   \ \/ /
+|  _ \| '__/ _` | | '_ \   \  /
+| |_) | | | (_| | | | | |  /  \
+|____/|_|  \__,_|_|_| |_| /_/\_\
 
-  ╔══════════════════════════════════════════════╗
-  ║   BrainX Server — Brain Matchmaking Hub   ║
-  ║   Neural Knowledge Network v2.0.0             ║
-  ╚══════════════════════════════════════════════╝
+  +----------------------------------------------+
+  |   BrainX Server - Brain Matchmaking Hub      |
+  |   Neural Knowledge Network v2.0.0            |
+  +----------------------------------------------+
 ");
 Console.ResetColor();
 
@@ -87,6 +148,19 @@ app.MapGet("/api/health", () => new
     Uptime = Environment.TickCount64 / 1000
 });
 
+// Liveness probe for container orchestration — never touches the vault, so it
+// answers even when the node is misconfigured. Surfaces config state so a bad
+// deploy is visible (vaultConfigured=false) instead of failing silently.
+app.MapGet("/health", () => Results.Ok(new
+{
+    status = "ok",
+    embedded = NodeConfig.EmbeddedMode,
+    vaultConfigured = !string.IsNullOrWhiteSpace(NodeConfig.VaultPath),
+    authRequired = NodeConfig.RequireAuth,
+    storage = storage?.ProviderName ?? "none",
+    uptimeSec = Environment.TickCount64 / 1000
+}));
+
 app.MapGet("/api/peers", () =>
 {
     return BrainHub.GetPeersSnapshot();
@@ -97,28 +171,138 @@ app.MapGet("/api/stats", () =>
     return BrainHub.GetStatsSnapshot();
 });
 
+// ─────────────── Server info (for the control-panel Settings view) ───────────────
+// Read-only node facts the dashboard surfaces. Does NOT echo secrets; vaultPath
+// is shown because this is a same-origin operator panel (the brain address is
+// already exposed via /api/brain/expertise).
+app.MapGet("/api/server/info", () => Results.Ok(new
+{
+    version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "0.0.0",
+    embedded = NodeConfig.EmbeddedMode,
+    requireAuth = NodeConfig.RequireAuth,
+    vaultPath = NodeConfig.VaultPath ?? "",
+    vaultConfigured = !string.IsNullOrWhiteSpace(NodeConfig.VaultPath),
+    storageProvider = NodeConfig.StorageProvider,
+    storage = storage?.ProviderName ?? "none",
+    storageNodes = storage?.NodeCount() ?? 0
+}));
+
+// ─────────────── Audit chain (for the control-panel Audit view) ───────────────
+// Exposes AuditLog's HMAC-chained JSONL over HTTP. We can't recompute the HMAC
+// without BRAINX_AUDIT_KEY, but we CAN verify the structural linkage (each
+// entry's PrevHmac must equal the previous entry's Hmac) — a real tamper signal
+// that needs no secret. Read-only; returns newest-first.
+app.MapGet("/api/audit", (int? limit) =>
+{
+    // Matches AuditLog.Initialize(baseDir) call below: <BaseDirectory>/audit/share-audit.log
+    var path = Path.Combine(AppContext.BaseDirectory, "audit", "share-audit.log");
+    if (!File.Exists(path))
+        return Results.Ok(new { count = 0, integrity = "EMPTY", entries = Array.Empty<object>() });
+
+    List<string> lines;
+    try { lines = File.ReadAllLines(path).Where(l => !string.IsNullOrWhiteSpace(l)).ToList(); }
+    catch (Exception ex) { return Results.Json(new { error = ex.Message }, statusCode: 500); }
+
+    const string sentinel = "0000000000000000000000000000000000000000000000000000000000000000";
+    bool unbroken = true;
+    var expectedPrev = sentinel;
+    var parsed = new List<(int seq, Newtonsoft.Json.Linq.JObject o)>();
+    for (int i = 0; i < lines.Count; i++)
+    {
+        try
+        {
+            var o = Newtonsoft.Json.Linq.JObject.Parse(lines[i]);
+            if ((o["PrevHmac"]?.ToString() ?? "") != expectedPrev) unbroken = false;
+            expectedPrev = o["Hmac"]?.ToString() ?? expectedPrev;
+            parsed.Add((i + 1, o));
+        }
+        catch { unbroken = false; }
+    }
+
+    var take = Math.Clamp(limit.GetValueOrDefault(100), 1, 1000);
+    var entries = parsed
+        .Skip(Math.Max(0, parsed.Count - take))
+        .Select(p =>
+        {
+            var ev = p.o["Event"]?.ToString() ?? "";
+            var deny = ev.Contains("fail") || ev.Contains("deny") || ev.Contains("limit") || ev.Contains("reject");
+            return new
+            {
+                seq = p.seq,
+                ts = p.o["Ts"]?.ToString(),
+                method = ev,
+                peer = p.o["Actor"]?.ToString() ?? "",
+                detail = p.o["Detail"]?.ToString() ?? "",
+                result = deny ? "DENY" : "OK",
+                prev = p.o["PrevHmac"]?.ToString() ?? "",
+                hash = p.o["Hmac"]?.ToString() ?? ""
+            };
+        })
+        .Reverse()
+        .ToList();
+
+    return Results.Ok(new { count = parsed.Count, integrity = unbroken ? "UNBROKEN" : "BROKEN", entries });
+});
+
 // ─────────────── Brain Export endpoints ───────────────
 // These read the local vault's brain-export.json, so external tools
 // (Claude, other apps) can fetch the current owner's expertise over HTTP
 // without needing filesystem access.
 //
 // Configure via BrainX__VaultPath environment variable.
-static string ResolveVaultPath()
-{
-    var v = Environment.GetEnvironmentVariable("BrainX__VaultPath");
-    if (!string.IsNullOrWhiteSpace(v)) return v;
-    return @"G:\Obsidian";
-}
+// Vault path comes from config/env only — no hardcoded G:\Obsidian fallback.
+// A standalone node with no vault configured returns clean errors from the
+// /api/brain/* endpoints instead of silently reading the wrong machine's vault.
+static string ResolveVaultPath() => NodeConfig.VaultPath ?? "";
 
 static BrainExport? LoadExport()
 {
-    var path = Path.Combine(ResolveVaultPath(), ".obsidianx", "brain-export.json");
+    var vault = ResolveVaultPath();
+    if (string.IsNullOrWhiteSpace(vault)) return null; // vault not configured
+    var path = Path.Combine(vault, ".obsidianx", "brain-export.json");
     if (!File.Exists(path)) return null;
     try
     {
         return Newtonsoft.Json.JsonConvert.DeserializeObject<BrainExport>(File.ReadAllText(path));
     }
     catch { return null; }
+}
+
+// Load the brain export and push it into the storage backend so /api/brain/search
+// can use FTS5 (SQLite) / FULLTEXT (MySQL). Best-effort: a missing export or a
+// storage hiccup just leaves search on the JSON fallback.
+static void PopulateStorageFromExport(IBrainStorage store)
+{
+    var export = LoadExport();
+    if (export == null) { Console.WriteLine("[storage] no brain-export.json yet — search uses JSON until one exists."); return; }
+    store.UpsertGraph(ExportToGraph(export));
+    Console.WriteLine($"[storage] indexed {store.NodeCount()} nodes from brain-export.json");
+}
+
+// Map the export snapshot (NodeSummary) onto the graph shape UpsertGraph expects.
+static KnowledgeGraph ExportToGraph(BrainExport e)
+{
+    var vault = !string.IsNullOrWhiteSpace(e.VaultPath) ? e.VaultPath : ResolveVaultPath();
+    var g = new KnowledgeGraph();
+    foreach (var n in e.Nodes)
+    {
+        Enum.TryParse<KnowledgeCategory>(n.PrimaryCategory, ignoreCase: true, out var cat);
+        g.Nodes.Add(new KnowledgeNode
+        {
+            Id = n.Id,
+            Title = n.Title,
+            FilePath = Path.IsPathRooted(n.RelativePath) ? n.RelativePath : Path.Combine(vault, n.RelativePath),
+            PrimaryCategory = cat,
+            Tags = n.Tags ?? [],
+            WordCount = n.WordCount,
+            Importance = n.Importance,
+            CreatedAt = n.ModifiedAt,
+            ModifiedAt = n.ModifiedAt,
+        });
+        foreach (var lid in n.LinkedNodeIds ?? [])
+            g.Edges.Add(new KnowledgeEdge { SourceId = n.Id, TargetId = lid });
+    }
+    return g;
 }
 
 // ─────────────── Auto-ingest ───────────────
@@ -129,6 +313,13 @@ static BrainExport? LoadExport()
 
 app.MapPost("/api/brain/auto-ingest", async (HttpContext ctx) =>
 {
+    // Auto-ingest takes a LOCAL file path and opens it server-side. That only
+    // works when the server shares a filesystem with the caller (embedded
+    // localhost). On a standalone node the path won't resolve — reject clearly
+    // rather than fail mysteriously. A content-push variant is a later phase.
+    if (!NodeConfig.EmbeddedMode)
+        return Results.Json(new { error = "auto-ingest is path-based and local-only — disabled on standalone node" }, statusCode: 501);
+
     using var sr = new StreamReader(ctx.Request.Body);
     var body = Newtonsoft.Json.Linq.JObject.Parse(await sr.ReadToEndAsync());
     var filePath = body["path"]?.ToString();
@@ -136,6 +327,8 @@ app.MapPost("/api/brain/auto-ingest", async (HttpContext ctx) =>
         return Results.BadRequest(new { error = "path required" });
     if (!File.Exists(filePath))
         return Results.BadRequest(new { error = $"file not found: {filePath}" });
+    if (string.IsNullOrWhiteSpace(ResolveVaultPath()))
+        return Results.Json(new { error = "vault not configured" }, statusCode: 503);
 
     var policy = new IngestPolicy();
     var verdict = policy.Evaluate(filePath);
@@ -205,11 +398,24 @@ app.MapGet("/api/brain/expertise", () =>
 
 app.MapGet("/api/brain/search", (string q, int? limit) =>
 {
+    if (string.IsNullOrWhiteSpace(q)) return Results.BadRequest(new { error = "q is required" });
+    var max = limit.GetValueOrDefault(25);
+
+    // Preferred path: the storage backend's FTS5/FULLTEXT index.
+    if (storage != null && storage.NodeCount() > 0)
+    {
+        var hits = storage.Search(q, max);
+        var results = hits.Select(h => new
+        {
+            h.Score, h.Title, RelativePath = h.RelativePath,
+            PrimaryCategory = h.Category, Tags = Array.Empty<string>(), Preview = h.Snippet
+        }).ToList();
+        return Results.Ok(new { query = q, count = results.Count, results, backend = storage.ProviderName });
+    }
+
+    // Fallback: linear scan over the JSON export (when storage is empty/unavailable).
     var export = LoadExport();
     if (export is null) return Results.NotFound(new { error = "no export" });
-    if (string.IsNullOrWhiteSpace(q)) return Results.BadRequest(new { error = "q is required" });
-
-    var max = limit.GetValueOrDefault(25);
     var ql = q.ToLowerInvariant();
 
     var matches = export.Nodes.Select(n => new
@@ -224,7 +430,7 @@ app.MapGet("/api/brain/search", (string q, int? limit) =>
         x.Node.PrimaryCategory, x.Node.Tags, x.Node.Preview })
     .ToList();
 
-    return Results.Ok(new { query = q, count = matches.Count, results = matches });
+    return Results.Ok(new { query = q, count = matches.Count, results = matches, backend = "json" });
 
     static double Score(NodeSummary n, string ql)
     {
@@ -295,7 +501,9 @@ static string? ReadKey(string envName, string jsonField)
 
     try
     {
-        var path = Path.Combine(ResolveVaultPath(), ".obsidianx", "ai-keys.json");
+        var vault = ResolveVaultPath();
+        if (string.IsNullOrWhiteSpace(vault)) return null;
+        var path = Path.Combine(vault, ".obsidianx", "ai-keys.json");
         if (!File.Exists(path)) return null;
         var root = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(path));
         return root[jsonField]?.ToString();
@@ -680,7 +888,10 @@ app.MapPost("/api/ai/keys", async (HttpContext ctx) =>
     using var sr = new StreamReader(ctx.Request.Body);
     var body = Newtonsoft.Json.Linq.JObject.Parse(await sr.ReadToEndAsync());
 
-    var path = Path.Combine(ResolveVaultPath(), ".obsidianx", "ai-keys.json");
+    var vault = ResolveVaultPath();
+    if (string.IsNullOrWhiteSpace(vault))
+        return Results.Json(new { error = "vault not configured — set BrainX__VaultPath" }, statusCode: 503);
+    var path = Path.Combine(vault, ".obsidianx", "ai-keys.json");
     Directory.CreateDirectory(Path.GetDirectoryName(path)!);
     Newtonsoft.Json.Linq.JObject existing;
     if (File.Exists(path))
@@ -705,7 +916,95 @@ app.MapPost("/api/ai/keys", async (HttpContext ctx) =>
 app.MapGet("/api/ai/stats/router", () => Results.Ok(RouterStats.Snapshot()));
 app.MapPost("/api/ai/stats/router/reset", () => { RouterStats.Reset(); return Results.Ok(); });
 
-app.Run("http://0.0.0.0:5142");
+// Which requests the bearer gate protects — the two endpoints that write to
+// disk. Everything else is read-only and harmless to leave open.
+static bool IsProtectedWrite(HttpRequest r) =>
+    HttpMethods.IsPost(r.Method) &&
+    (r.Path.StartsWithSegments("/api/ai/keys")
+     || r.Path.StartsWithSegments("/api/brain/auto-ingest"));
+
+// Constant-time bearer-token check (avoids leaking the token via compare
+// timing). Returns false when no token is configured so a misconfigured
+// node fails closed rather than open.
+static bool BearerOk(HttpRequest r)
+{
+    var token = NodeConfig.BearerToken;
+    if (string.IsNullOrEmpty(token)) return false;
+    var hdr = r.Headers.Authorization.ToString();
+    const string prefix = "Bearer ";
+    if (!hdr.StartsWith(prefix, StringComparison.Ordinal)) return false;
+    var got = System.Text.Encoding.UTF8.GetBytes(hdr[prefix.Length..]);
+    var want = System.Text.Encoding.UTF8.GetBytes(token);
+    return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(got, want);
+}
+
+// Bind precedence: explicit BrainX:Urls (our config/env) → host-provided
+// ASPNETCORE_URLS (e.g. VS launchSettings, which may be a ';'-separated list) →
+// :5142 default (keeps the embedded local client working untouched).
+//
+// IMPORTANT: never hand a ';'-separated list to app.Run(singleUrl). That overload
+// feeds ONE address to Kestrel's AddressBinder.ParseAddress, which reads the second
+// "https://..." as a path and throws "A path base can only be configured using
+// IApplicationBuilder.UsePathBase()". When URLs come from the environment we let the
+// host bind them via parameterless app.Run() (it splits ';' and wires the https dev
+// cert correctly); only when WE supply BrainX:Urls do we add each address ourselves.
+if (!string.IsNullOrWhiteSpace(NodeConfig.Urls))
+{
+    foreach (var u in NodeConfig.Urls.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        app.Urls.Add(u);
+    app.Run();
+}
+else if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ASPNETCORE_URLS")))
+{
+    app.Run();
+}
+else
+{
+    app.Run("http://0.0.0.0:5142");
+}
+
+/// <summary>
+/// Node configuration resolved once at startup from IConfiguration (appsettings
+/// + environment, env winning). The single switch between "embedded with the
+/// client on localhost" and "standalone node on a VPS". Env var names use the
+/// ASP.NET double-underscore convention: BrainX__VaultPath → BrainX:VaultPath.
+/// </summary>
+public static class NodeConfig
+{
+    public static string? VaultPath { get; private set; }
+    public static bool EmbeddedMode { get; private set; } = true;
+    public static bool RequireAuth { get; private set; }
+    public static string? BearerToken { get; private set; }
+    public static string? Urls { get; private set; }
+    public static string[] AllowedOrigins { get; private set; } = [];
+
+    /// <summary>"sqlite" (default) or "mysql". Picks the IBrainStorage backend.</summary>
+    public static string StorageProvider { get; private set; } = "sqlite";
+    /// <summary>MySQL connection string — required when StorageProvider=mysql.</summary>
+    public static string? MySqlConnString { get; private set; }
+
+    public static void Init(IConfiguration cfg)
+    {
+        var b = cfg.GetSection("BrainX");
+        // The client already sets BrainX__VaultPath when it spawns us; read it
+        // explicitly as a safety net, then fall back to the config section.
+        VaultPath = FirstNonEmpty(Environment.GetEnvironmentVariable("BrainX__VaultPath"), b["VaultPath"]);
+        EmbeddedMode = ParseBool(b["EmbeddedMode"], defaultValue: true);
+        RequireAuth = ParseBool(b["RequireAuth"], defaultValue: false);
+        BearerToken = FirstNonEmpty(b["BearerToken"]);
+        Urls = FirstNonEmpty(b["Urls"]);
+        AllowedOrigins = (b["AllowedOrigins"] ?? "")
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        StorageProvider = (FirstNonEmpty(b["StorageProvider"]) ?? "sqlite").ToLowerInvariant();
+        MySqlConnString = FirstNonEmpty(b["MySqlConnString"]);
+    }
+
+    static string? FirstNonEmpty(params string?[] vals)
+        => vals.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
+
+    static bool ParseBool(string? s, bool defaultValue)
+        => bool.TryParse(s, out var v) ? v : defaultValue;
+}
 
 /// <summary>
 /// Global in-memory counter for the proxy endpoints. Tracks total

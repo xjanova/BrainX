@@ -890,13 +890,20 @@ export function createScene(canvas, callbacks = {}) {
     // to run every frame (one max+write per edge); we skip the work entirely
     // when nothing is moving and selection state hasn't changed.
     let _lastSelectionWriteIdx = -2;
+    let _lastWriteHadPulses = false;
     function recomputeEdgeAlphas(force) {
         if (!edgeAlphaAttr || !edgeBaseAlpha) return;
         const N = universe.edges.length;
-        // Fast path: if no pulse boosts are live AND selection hasn't moved
-        // since last write, the buffer is already correct.
+        const hasPulses = activeEdgeBoosts.size > 0;
+        // Fast path: skip work only when no pulses are live AND the previous
+        // write also had no pulses AND selection hasn't moved. The
+        // `_lastWriteHadPulses` guard is critical — without it, the frame
+        // where the last pulse expires writes pulseEdgeBoost[i]=0 into the
+        // CPU array but the early-exit blocks the upload, so the GPU buffer
+        // stays pinned at boosted alpha values until selection changes.
         if (!force
-            && activeEdgeBoosts.size === 0
+            && !hasPulses
+            && !_lastWriteHadPulses
             && _lastSelectionWriteIdx === selectedIndex) return;
 
         for (let i = 0; i < N; i++) {
@@ -912,6 +919,7 @@ export function createScene(canvas, callbacks = {}) {
         }
         edgeAlphaAttr.needsUpdate = true;
         _lastSelectionWriteIdx = selectedIndex;
+        _lastWriteHadPulses = hasPulses;
     }
 
     function highlightConnectedEdges(idx) {
@@ -1383,36 +1391,24 @@ export function createScene(canvas, callbacks = {}) {
      * through this part of the brain right now". Tint by op: cyan = read,
      * magenta-orange = write.
      */
-    function firePulse(noteId, op) {
-        if (!pulseAttr || !idToIndex) return;
-        const idx = idToIndex.get(noteId);
-        if (idx == null) {
-            // B3: rate-limited miss diagnostic. Silent fall-through is too
-            // hard to debug when access-log ids drift away from brain-export.
-            _missCount++;
-            const now = performance.now();
-            if (now - _lastMissLogAt > 30000) {
-                console.warn(`[Universe] firePulse miss: ${_missCount} unmatched noteIds (most recent: "${noteId}"). brain-export may be stale — try re-export.`);
-                _lastMissLogAt = now;
-                _missCount = 0;
-            }
-            return;
-        }
+    // Core star-flash: seed the lightning envelope on star `idx`, fan out a
+    // few edge arcs, and (when focus=true) fly the follow-camera to it.
+    // Shared by firePulse (exact node) + firePulseRandom (node-less fallback).
+    function pulseStarAtIndex(idx, focus) {
+        if (!pulseAttr || idx == null || idx < 0) return;
         // Record the start time and seed the buffer with the t=0 amplitude.
-        // stepPulses will recompute every frame from the lightning envelope.
+        // stepPulses recomputes every frame from the lightning envelope.
         // Re-firing on a star already lit just resets t0 → fresh flash.
         const now = performance.now();
         pulseAttr.array[idx] = lightningAmpStar(0);
         pulseAttr.needsUpdate = true;
         activePulses.set(idx, now);
 
-        // Camera-follow mode: when a pulse fires, the camera flies to that
-        // star automatically — the "AI is reading your brain right now"
-        // framing. Limited to one fly at a time (overwrites any in-flight).
-        // Plus schedule an auto-return to home pose after FOLLOW_IDLE_RETURN_MS
-        // of no new pulse activity — so the camera doesn't get stranded on
-        // the last pulsed star forever.
-        if (settings.cameraMode === 'follow') {
+        // Camera-follow mode: fly to the touched star — the "AI is reading
+        // your brain right now" framing. Suppressed for fallback pulses
+        // (focus=false) so node-less MCP calls don't yank the camera to a
+        // random star on every brain_stats / brain_list tick.
+        if (focus && settings.cameraMode === 'follow') {
             focusNode(idx);
             scheduleFollowIdleReturn();
         }
@@ -1429,6 +1425,36 @@ export function createScene(canvas, callbacks = {}) {
             activeEdgeBoosts.set(i, now);
             count++;
         }
+    }
+
+    function firePulse(noteId, op) {
+        if (!pulseAttr || !idToIndex) return;
+        const idx = idToIndex.get(noteId);
+        if (idx == null) {
+            // B3: rate-limited miss diagnostic. Silent fall-through is too
+            // hard to debug when access-log ids drift away from brain-export.
+            _missCount++;
+            const now = performance.now();
+            if (now - _lastMissLogAt > 30000) {
+                console.warn(`[Universe] firePulse miss: ${_missCount} unmatched noteIds (most recent: "${noteId}"). brain-export may be stale — try re-export.`);
+                _lastMissLogAt = now;
+                _missCount = 0;
+            }
+            // A stale id must NOT read as "pulse dead" — the user wants every
+            // MCP call visible. Fall back to a random star (no camera move).
+            firePulseRandom(op);
+            return;
+        }
+        pulseStarAtIndex(idx, true);
+    }
+
+    // Node-less MCP fallback: flash a random star (no camera move) so every
+    // MCP call — including brain_stats / brain_list / brain_create_note that
+    // carry no node_id — stays visibly "alive" (user spec: ทุก MCP call กระพริบ).
+    function firePulseRandom(op) {
+        if (!pulseAttr || !universe?.nodes?.length) return;
+        const idx = Math.floor(Math.random() * universe.nodes.length);
+        pulseStarAtIndex(idx, false);
     }
 
     /**
@@ -2001,6 +2027,7 @@ export function createScene(canvas, callbacks = {}) {
         resetView,
         resettle,
         firePulse,
+        firePulseRandom,
         // Peer-halo API — see addPeer / removePeer / pulsePeerActivity
         // declarations above. Idempotent + safe to call before brain mount.
         addPeer,

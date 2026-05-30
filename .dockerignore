@@ -1,0 +1,20 @@
+# Keep the brainx-node build context small. The Dockerfile only needs the
+# BrainX.Core and BrainX.Server sources; everything below is noise or
+# host-specific build output that must not leak into the Linux image.
+**/bin/
+**/obj/
+.git/
+.vs/
+.idea/
+
+# Other projects the node image doesn't build.
+BrainX.Client/
+BrainX.Mcp/
+
+# Dev scratch / screenshots / scripts at repo root.
+t2/
+*.png
+*.ps1
+
+# Plans / local notes.
+*.md

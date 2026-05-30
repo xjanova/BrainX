@@ -603,10 +603,15 @@ function onHostMessage(evt) {
             handleBrain(msg.payload);
             break;
         case 'pulse':
-            // C# forwards every MCP read/write touch as {noteId, op}.
-            // We just hand it to the scene, which flashes the matching
-            // star + fans out a few edge arcs.
-            if (scene && msg.noteId) scene.firePulse(msg.noteId, msg.op);
+            // C# forwards every MCP read/write touch as {noteId, op}. When
+            // noteId is present we flash that exact star; when it's blank
+            // (node-less MCP call — brain_stats / list / create) we flash a
+            // random star so every MCP call stays visibly "alive"
+            // (user spec: ทุก MCP call ต้องกระพริบ).
+            if (scene) {
+                if (msg.noteId) scene.firePulse(msg.noteId, msg.op);
+                else scene.firePulseRandom?.(msg.op);
+            }
             break;
         case 'peerJoined':
             // Join Brain demo / live: C# forwards every PeerJoined hub
@@ -635,6 +640,16 @@ function onHostMessage(evt) {
                 $tokenChip.title = msg.tooltip || '';
                 $tokenChip.hidden = false;
             }
+            break;
+        case 'dashStats':
+            // Brain growth numbers for the top-left dashboard chip.
+            // { nodes: 746, words: 1111607 } → {NODES 746 · WORDS 1.1M}.
+            handleDashStats(msg);
+            break;
+        case 'dashLoad':
+            // GPU + CPU samples for the bottom-left sparkline chip.
+            // { gpu: 33, cpu: 37 } → push into 60-sample ring + redraw.
+            handleDashLoad(msg);
             break;
         case 'finalizeWallpaper':
             // C# has just reparented us to WorkerW. Transition this page
@@ -767,16 +782,73 @@ function mountScene(brain) {
         } else {
             setStatus(`Universe rendered · ${universe.nodes.length.toLocaleString()} stars · ${universe.edges.length.toLocaleString()} wiki-links · ${universe.galaxies.length} galaxies`);
         }
+        // Dashboard preview: galaxy must always sit nicely in frame +
+        // camera should auto-fly to MCP-pulsed stars (user spec
+        // "ออโต้จัดให้พอดีตลอด และเป็น follow ด้วย"). Re-snap fit + ensure
+        // follow mode is active right after mount, and again after physics
+        // settles in case the centroid moved.
+        if (IS_WALLPAPER_ACTIVE && universe.nodes.length > 0) {
+            requestAnimationFrame(() => {
+                scene.fitToScreen?.({ duration: 0, keepDirection: false });
+                scene.setCameraMode?.('follow');   // captures the just-fitted pose as home
+            });
+            // Settle pass: physics still pushes nodes for ~3s after mount.
+            // Re-fit and refresh follow-home so the resting pose matches
+            // the final layout, not the chaotic initial one.
+            setTimeout(() => {
+                if (!scene) return;
+                scene.setCameraMode?.('free');
+                scene.fitToScreen?.({ duration: 0.8, keepDirection: false });
+                setTimeout(() => scene.setCameraMode?.('follow'), 900);
+            }, 3500);
+            // Periodic gentle re-fit so drift (when settings.drift > 0)
+            // never strands the galaxy half-off-screen.
+            _startDashAutoFitLoop();
+        }
     } catch (err) {
         console.error('[Universe] mount failed', err);
         setStatus('Render failed — see DevTools (F12)', true);
     }
 }
 
+// ── Dashboard auto-fit loop ──────────────────────────────────────────
+// Only used in wallpaper-active (dashboard) mode. Fires every ~18 s
+// and quietly re-frames the galaxy without disturbing an in-flight
+// pulse-follow (the brief mode toggle still respects FOLLOW_IDLE_RETURN
+// so a fresh pulse interrupts the fit). Idempotent — re-calling
+// _startDashAutoFitLoop() just resets the interval.
+let _dashAutoFitTimer = null;
+function _startDashAutoFitLoop() {
+    if (_dashAutoFitTimer) clearInterval(_dashAutoFitTimer);
+    _dashAutoFitTimer = setInterval(() => {
+        if (!scene) return;
+        if (!IS_WALLPAPER_ACTIVE) { clearInterval(_dashAutoFitTimer); _dashAutoFitTimer = null; return; }
+        // Exit follow → fit → re-enter follow. The mode toggle is what
+        // refreshes the follow "home" pose so idle-return after the next
+        // MCP pulse lands at the new fitted view rather than a stale one.
+        scene.setCameraMode?.('free');
+        scene.fitToScreen?.({ duration: 0.9, keepDirection: false });
+        setTimeout(() => scene?.setCameraMode?.('follow'), 1000);
+    }, 18000);
+}
+
 // ── settings (Glow / Stars / Motion) ─────────────────────────────────
 function loadSettings() {
     try {
-        const raw = localStorage.getItem(SETTINGS_KEY);
+        // When running in any wallpaper-related context (the setup window,
+        // a finalized wallpaper clone, OR the dashboard preview tagged
+        // ?mode=wallpaper-active), pull settings from the SAME wallpaper
+        // prefs that the wallpaper itself writes to. Without this the
+        // dashboard read SETTINGS_KEY (main-app settings) and looked
+        // disconnected from the wallpaper — even though saveSettings was
+        // already routing writes here. This makes the dashboard "look like
+        // the wallpaper" per user spec.
+        let raw = null;
+        if (window.location.search.includes('mode=wallpaper')) {
+            const prefs = loadWallpaperPrefs();
+            if (prefs && prefs.settings) raw = JSON.stringify(prefs.settings);
+        }
+        if (!raw) raw = localStorage.getItem(SETTINGS_KEY);
         if (!raw) return { ...DEFAULT_SETTINGS };
         const parsed = JSON.parse(raw);
         const num = (v, def) => typeof v === 'number' ? v : def;
@@ -878,13 +950,63 @@ function applySettingsToScene(s) {
     scene.setEdgeAlpha?.(s.edges);
     scene.setDrift?.(s.drift);
     scene.setMotion(s.motion);
-    scene.setLightning?.(s.lightning, s.lightningSpeed);
+    // The dashboard (mode=wallpaper-active) inherits the desktop wallpaper's
+    // prefs, but its MCP-activity pulse is a FUNCTIONAL signal ("Claude is
+    // reading your brain") — it must stay visible even when the wallpaper's
+    // DECORATIVE Lightning is dialed to 0. So floor it on the dashboard only;
+    // the real desktop wallpaper keeps the user's chosen value. This is the
+    // root-cause fix for "เอฟเฟค universe ที่กระพริบตอนทำงานหาย" — the dashboard
+    // was inheriting wallpaper lightning=0 and silently swallowing every pulse.
+    const _isDash = window.location.search.includes('mode=wallpaper-active');
+    const _lightning = _isDash ? Math.max(s.lightning, 1.0) : s.lightning;
+    scene.setLightning?.(_lightning, s.lightningSpeed > 0 ? s.lightningSpeed : 1.0);
     scene.setLockSelected?.(s.lockSelected);
     scene.setCameraMode?.(s.cameraMode);
     applyBackground(s.background);
 }
 
 let currentSettings = loadSettings();
+
+// URL override: ?cameraMode=orbit (or free/follow/random) pins the camera
+// regardless of saved/inherited settings. The dashboard preview uses
+// `?cameraMode=orbit&mode=wallpaper-active` to inherit the wallpaper's
+// APPEARANCE (glow/lightning/background/sliders) while keeping its own
+// independent orbiting camera per user spec ("Same look, independent
+// camera"). Without honoring the URL override, the dashboard would also
+// inherit the wallpaper's camera mode (e.g. follow/random) and the user
+// couldn't pin it.
+const _URL_CAMERA_OVERRIDE = (() => {
+    const m = new URLSearchParams(location.search).get('cameraMode');
+    return (m && ['free','orbit','follow','random'].includes(m)) ? m : null;
+})();
+if (_URL_CAMERA_OVERRIDE) {
+    currentSettings = { ...currentSettings, cameraMode: _URL_CAMERA_OVERRIDE };
+}
+
+// Cross-WebView live sync: when the wallpaper (setup window OR finalized
+// clone) saves new appearance settings, WebView2 instances sharing the
+// same UserDataFolder + origin fire a `storage` event in every OTHER
+// browsing context. The dashboard preview rides this to re-apply settings
+// live — no polling, no host round-trip — so wallpaper tweaks show up in
+// the dashboard immediately.
+//
+// We preserve `cameraMode` from the URL override (if any) so the
+// dashboard's independent camera doesn't get yanked back to whatever the
+// wallpaper just saved.
+if (window.location.search.includes('mode=wallpaper-active')) {
+    window.addEventListener('storage', (ev) => {
+        if (ev.key !== WALLPAPER_PREFS_KEY) return;
+        const prefs = loadWallpaperPrefs();
+        if (!prefs || !prefs.settings) return;
+        currentSettings = {
+            ...currentSettings,
+            ...prefs.settings,
+            cameraMode: _URL_CAMERA_OVERRIDE || currentSettings.cameraMode
+        };
+        try { applySettingsToUI(currentSettings); } catch {}
+        try { applySettingsToScene(currentSettings); } catch {}
+    });
+}
 
 function wireSettingsPanel() {
     if (!$settingsToggle || !$settingsPanel) return;
@@ -1055,10 +1177,17 @@ function wireSettingsPanel() {
 // C# spawns in 'setup' first; when user clicks Apply, JS posts wallpaperApply
 // → C# reparents + JS adds wallpaper-mode class. Cancel → C# closes window.
 const URL_MODE = new URLSearchParams(location.search).get('mode');
-const IS_WALLPAPER_SETUP = URL_MODE === 'wallpaper-setup';
-const IS_WALLPAPER_MODE  = URL_MODE === 'wallpaper';
-if (IS_WALLPAPER_SETUP) document.body.classList.add('wallpaper-setup');
-if (IS_WALLPAPER_MODE)  document.body.classList.add('wallpaper-mode');
+const IS_WALLPAPER_SETUP  = URL_MODE === 'wallpaper-setup';
+const IS_WALLPAPER_MODE   = URL_MODE === 'wallpaper';
+// `wallpaper-active` is the dashboard preview: visually identical to
+// wallpaper-mode (no HUD, no settings panel, no info-card on hover) but
+// keeps mouse interaction so the user can still drag/zoom/orbit. Settings
+// can't be edited (settings panel never wires up) — matches user spec
+// "ไม่มีตัวหนังสือบัง ตั้งค่าก็ไม่ได้ แต่ลากเลื่อนได้ด้วยเม้า".
+const IS_WALLPAPER_ACTIVE = URL_MODE === 'wallpaper-active';
+if (IS_WALLPAPER_SETUP)  document.body.classList.add('wallpaper-setup');
+if (IS_WALLPAPER_MODE)   document.body.classList.add('wallpaper-mode');
+if (IS_WALLPAPER_ACTIVE) document.body.classList.add('wallpaper-active');
 
 async function init() {
     applyCanvasSize();
@@ -1099,9 +1228,12 @@ async function init() {
     // (e.g. low glow) survives a reload.
     applySettingsToUI(currentSettings);
     applySettingsToScene(currentSettings);
-    // Wallpaper mode (final state) = no interactive UI; skip the panel + card.
+    // Wallpaper mode (final state)   = no HUD, no input → skip both.
+    // Wallpaper-active (dash preview) = no HUD but mouse drag still works
+    //   → skip wireSettingsPanel + wireInfoCard so no text overlays/tooltips,
+    //   but OrbitControls in scene.js still handle pointer events directly.
     // Wallpaper setup = full interactivity + extra Apply/Cancel/Randomize bar.
-    if (!IS_WALLPAPER_MODE) {
+    if (!IS_WALLPAPER_MODE && !IS_WALLPAPER_ACTIVE) {
         wireSettingsPanel();
         wireInfoCard();
     }
@@ -1180,3 +1312,103 @@ window.UniverseHost = {
     canvas: () => $canvas,
     refresh: () => pendingBrain && handleBrain(pendingBrain)
 };
+
+// ─── Dashboard floating chips ─────────────────────────────────────
+// Lives in the DOM (not WPF Border) so the chips share the WebView2
+// DComp surface — no HwndHost airspace bleed-through, no Popup z-order
+// hacks. C# pushes values via PostWebMessageAsJson:
+//   { type: "dashStats", nodes: N,    words: M }     once per index
+//   { type: "dashLoad",  gpu:   33.4, cpu:   37.2 }  every 1.5 s
+const DASH_SPARK_CAP = 60;
+const _dashGpuRing = [];
+const _dashCpuRing = [];
+
+function fmtBig(n) {
+    if (n == null) return '0';
+    n = +n;
+    if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e4) return (n / 1e3).toFixed(0) + 'k';
+    return n.toLocaleString('en-US');
+}
+
+function handleDashStats(msg) {
+    const nodes = document.getElementById('dash-nodes-value');
+    const words = document.getElementById('dash-words-value');
+    if (nodes && typeof msg.nodes === 'number') nodes.textContent = msg.nodes.toLocaleString('en-US');
+    if (words && typeof msg.words === 'number') words.textContent = fmtBig(msg.words);
+}
+
+function handleDashLoad(msg) {
+    const gpu = typeof msg.gpu === 'number' ? Math.max(0, Math.min(100, msg.gpu)) : null;
+    const cpu = typeof msg.cpu === 'number' ? Math.max(0, Math.min(100, msg.cpu)) : null;
+    if (gpu != null) {
+        _dashGpuRing.push(gpu);
+        if (_dashGpuRing.length > DASH_SPARK_CAP) _dashGpuRing.shift();
+        const v = document.getElementById('dash-gpu-value');
+        if (v) v.textContent = Math.round(gpu) + '%';
+        drawDashSpark('gpu', _dashGpuRing);
+    }
+    if (cpu != null) {
+        _dashCpuRing.push(cpu);
+        if (_dashCpuRing.length > DASH_SPARK_CAP) _dashCpuRing.shift();
+        const v = document.getElementById('dash-cpu-value');
+        if (v) v.textContent = Math.round(cpu) + '%';
+        drawDashSpark('cpu', _dashCpuRing);
+    }
+    // "Hot" dot when either is >85 %.
+    const dot = document.getElementById('dash-load-dot');
+    if (dot) {
+        const hot = (gpu != null && gpu > 85) || (cpu != null && cpu > 85);
+        dot.classList.toggle('hot', hot);
+    }
+}
+
+// Catmull-Rom → cubic Bezier, tension 0.5. Produces SVG path "d"
+// strings for the stroke layer + closed fill layer. ViewBox is 240×32
+// with `preserveAspectRatio="none"`, so the path stretches to whatever
+// width the chip ends up rendering at.
+function drawDashSpark(which, samples) {
+    const w = 240, h = 32;
+    const stroke = document.getElementById('dash-spark-stroke-path-' + which);
+    const fill   = document.getElementById('dash-spark-fill-path-'   + which);
+    const halo   = document.getElementById('dash-spark-halo-' + which);
+    const dot    = document.getElementById('dash-spark-dot-'  + which);
+    if (!stroke || !fill) return;
+
+    const n = samples.length;
+    if (n === 0) { stroke.setAttribute('d', ''); fill.setAttribute('d', ''); return; }
+
+    const pts = new Array(n);
+    const slot = w / Math.max(1, DASH_SPARK_CAP - 1);
+    for (let i = 0; i < n; i++) {
+        const x = i * slot;
+        const y = h - 2 - (samples[i] / 100) * (h - 3);
+        pts[i] = { x, y };
+    }
+
+    // Build the smooth path.
+    let d = `M ${pts[0].x.toFixed(2)} ${pts[0].y.toFixed(2)}`;
+    for (let i = 0; i < n - 1; i++) {
+        const p0 = pts[Math.max(0, i - 1)];
+        const p1 = pts[i];
+        const p2 = pts[i + 1];
+        const p3 = pts[Math.min(n - 1, i + 2)];
+        const c1x = p1.x + (p2.x - p0.x) / 6;
+        const c1y = p1.y + (p2.y - p0.y) / 6;
+        const c2x = p2.x - (p3.x - p1.x) / 6;
+        const c2y = p2.y - (p3.y - p1.y) / 6;
+        d += ` C ${c1x.toFixed(2)} ${c1y.toFixed(2)}, ${c2x.toFixed(2)} ${c2y.toFixed(2)}, ${p2.x.toFixed(2)} ${p2.y.toFixed(2)}`;
+    }
+    stroke.setAttribute('d', d);
+    fill.setAttribute('d', d + ` L ${pts[n - 1].x.toFixed(2)} ${h} L 0 ${h} Z`);
+
+    // End-cap halo + dot.
+    if (halo && dot) {
+        const last = pts[n - 1];
+        halo.setAttribute('cx', last.x.toFixed(2));
+        halo.setAttribute('cy', last.y.toFixed(2));
+        dot.setAttribute('cx', last.x.toFixed(2));
+        dot.setAttribute('cy', last.y.toFixed(2));
+    }
+}

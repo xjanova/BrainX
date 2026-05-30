@@ -271,13 +271,50 @@
                                     </StackPanel>
                                 </Border>
                             </Popup>
+                            <!-- Window-chrome buttons: inline templates because the global
+                                 NavButton style is built for sidebar nav (Margin=10,1 +
+                                 Padding=14,9) and clips the glyph inside a 36x28 button —
+                                 user: "ปุ่ม mini max ไม่เห็น" (2026-05-27 screenshot). -->
                             <Button Content="—" Click="Minimize_Click" Width="36" Height="28"
-                                    Style="{StaticResource NavButton}" FontSize="12"/>
+                                    FontSize="12" Foreground="{StaticResource TextSecondaryBrush}"
+                                    Background="Transparent" BorderThickness="0" Cursor="Hand"
+                                    ToolTip="Minimize">
+                                <Button.Template>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border x:Name="Bd" Background="Transparent" CornerRadius="6" Width="36" Height="28">
+                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Bd" Property="Background" Value="#22FFFFFF"/>
+                                                <Setter Property="Foreground" Value="White"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Button.Template>
+                            </Button>
                             <Button Content="□" Click="Maximize_Click" Width="36" Height="28"
-                                    Style="{StaticResource NavButton}" FontSize="12"/>
+                                    FontSize="12" Foreground="{StaticResource TextSecondaryBrush}"
+                                    Background="Transparent" BorderThickness="0" Cursor="Hand"
+                                    ToolTip="Maximize / Restore">
+                                <Button.Template>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border x:Name="Bd" Background="Transparent" CornerRadius="6" Width="36" Height="28">
+                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Bd" Property="Background" Value="#22FFFFFF"/>
+                                                <Setter Property="Foreground" Value="White"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Button.Template>
+                            </Button>
                             <Button Content="✕" Click="Close_Click" Width="36" Height="28"
                                     FontSize="12" Foreground="{StaticResource TextSecondaryBrush}"
-                                    Background="Transparent" BorderThickness="0" Cursor="Hand">
+                                    Background="Transparent" BorderThickness="0" Cursor="Hand"
+                                    ToolTip="Close">
                                 <Button.Template>
                                     <ControlTemplate TargetType="Button">
                                         <Border x:Name="Bd" Background="Transparent" CornerRadius="6" Width="36" Height="28">
@@ -635,23 +672,31 @@
                         <!-- Dashboard — default startup (per user "เพิ่ม หน้า dashboard").
                              KPI cards + Activity Feed + Recently Edited inside. -->
                         <Grid x:Name="DashboardView" Visibility="Visible">
-                            <!-- Refactored from ScrollViewer/StackPanel → 4-row Grid
-                                 (Auto header · Auto KPI · *  map row · Auto quick actions).
-                                 WebView2 = HwndHost native window; ScrollViewer's clip
-                                 region doesn't constrain HwndHost so when the StackPanel
-                                 was taller than the viewport, the map's WebView2 painted
-                                 PAST the bottom into the status bar (user: "map view
-                                 ทะลุบาร์ล่าง"). Fixed by removing scroll so every child
-                                 sits inside an explicit grid row that fits within the
-                                 visible content area. Map gets the * row so it absorbs
-                                 the remaining vertical space cleanly. -->
+                            <!-- Hidden WebView2 used by ClaudeUsageProbe to scrape
+                                 claude.ai/settings/usage. 1×1, transparent, hit-test
+                                 off — present in the visual tree so its HwndHost
+                                 stays alive, but invisible to the user. Cookies
+                                 from Edge are injected into its CookieManager on
+                                 startup so navigation auto-authenticates. -->
+                            <wv2:WebView2 x:Name="DashClaudeProbeWebView"
+                                          Width="1" Height="1"
+                                          IsHitTestVisible="False"
+                                          HorizontalAlignment="Left" VerticalAlignment="Top"
+                                          Panel.ZIndex="-1"/>
+                            <!-- Layout: NO outer ScrollViewer (DashOuterScroll removed 2026-05-27).
+                                 WebView2 = HwndHost; a parent ScrollViewer's transform does NOT
+                                 translate the Win32 child surface — universe stayed pinned to its
+                                 original screen position and painted UP past the titlebar when the
+                                 user scrolled down (user: "universe ทะลุไปด้านบนเมื่อสกอร์ลงมา
+                                 เยอะ"). Restored to a pure Grid; only the bottom row (Pro Insights
+                                 + Quick Actions) gets an inner ScrollViewer where airspace doesn't
+                                 matter — no WebView2 in that row. -->
                             <Grid Margin="28,24,28,16">
                                 <Grid.RowDefinitions>
-                                    <RowDefinition Height="Auto"/>                  <!-- header -->
-                                    <RowDefinition Height="Auto"/>                  <!-- (collapsed) -->
-                                    <RowDefinition Height="*" MinHeight="340"/>     <!-- main 2-col map + live -->
-                                    <RowDefinition Height="Auto"/>                  <!-- pro insights strip -->
-                                    <RowDefinition Height="Auto"/>                  <!-- quick actions -->
+                                    <RowDefinition Height="Auto"/>                      <!-- header -->
+                                    <RowDefinition Height="Auto"/>                      <!-- (collapsed) -->
+                                    <RowDefinition Height="1.5*" MinHeight="320"/>      <!-- map row (universe + right col) -->
+                                    <RowDefinition Height="1*" MinHeight="200"/>        <!-- pro insights + quick actions (scrollable) -->
                                 </Grid.RowDefinitions>
                                 <!-- View header — Row 0 -->
                                 <Grid Grid.Row="0" Margin="0,0,0,22">
@@ -717,14 +762,25 @@
                                             <ColumnDefinition Width="*" MinWidth="280"/>
                                         </Grid.ColumnDefinitions>
                                         <Border Grid.Column="0" Style="{StaticResource NeuralCard}"
-                                                Margin="0,0,8,0" Padding="0">
+                                                Margin="0,0,8,0" Padding="0"
+                                                MinHeight="320">
+                                        <!-- MinHeight here is REQUIRED again now that Row 2 is Auto
+                                             (was *). With Auto sizing the Row no longer reserves
+                                             space; the Border MUST self-size or the WebView2
+                                             collapses to 0. The earlier "overflow into Row 3"
+                                             bug from putting MinHeight here is no longer a risk
+                                             because the outer ScrollViewer wraps the inner Grid
+                                             — if total content > viewport it scrolls, doesn't
+                                             paint into adjacent rows. -->
                                         <!-- MinHeight + MinWidth previously here caused the Border
                                              to OVERFLOW into Row 3's cell space (user screenshot:
                                              "กลายเป็นทับคนอื่นไป") because WPF Grid doesn't clip
                                              children to cell bounds. Constraints moved to the
                                              RowDefinition + ColumnDefinition above so the Grid
                                              respects them at layout-pass time and never lets the
-                                             universe encroach on Row 3 (Pro Insights strip). -->
+                                             universe encroach on Row 3 (Pro Insights strip).
+                                             — Reinstated on 2026-05-27 with safer ScrollViewer
+                                             wrapper so the older overflow problem doesn't return. -->
                                         <Grid>
                                             <Grid.RowDefinitions>
                                                 <RowDefinition Height="*"/>
@@ -826,18 +882,28 @@
                                                     </Viewport3D>
                                                 </Border>
 
-                                                <!-- Dashboard Universe embed — user spec "ใช้ univers ล๊อค
-                                                     ออบิท และปรับไม่ได้ใช้ค่าของ univers". Loads the same
-                                                     three.js scene the main Brain Graph uses, but with
-                                                     URL params `?cameraMode=orbit&mode=wallpaper-active`
-                                                     so the camera auto-orbits and the in-scene UI hides.
-                                                     IsHitTestVisible=False blocks mouse events at WPF
-                                                     level so pan/zoom/click are locked. -->
+                                                <!-- Dashboard Universe embed — user spec evolved to
+                                                     "ไม่มีตัวหนังสือบัง · ตั้งค่าไม่ได้ · ลากเลื่อนได้ด้วยเม้า".
+                                                     Loads the same three.js scene the main Brain Graph uses
+                                                     but with `?cameraMode=orbit&mode=wallpaper-active` →
+                                                     camera auto-orbits, ALL HUD (settings panel, info card,
+                                                     legend, token chip, hud-top/bottom) hidden via the
+                                                     wallpaper-active body class, but pointer-events stay
+                                                     enabled so OrbitControls handles user drag/zoom. Also
+                                                     inherits the wallpaper's appearance settings (glow,
+                                                     lightning, background) — see Dashboard universe inherits
+                                                     wallpaper appearance via storage event. -->
                                                 <Border x:Name="DashUniverseBorder" CornerRadius="14" ClipToBounds="True"
                                                         Margin="3" Background="#FF0a0612">
+                                                    <!-- IsHitTestVisible=True so mouse drag/wheel reach the
+                                                         WebView2 → OrbitControls inside scene.js handles
+                                                         orbit/zoom. The wallpaper-active CSS class hides every
+                                                         HUD/setting so no text overlays cover the universe,
+                                                         per user spec "ไม่มีตัวหนังสือบัง · ตั้งค่าไม่ได้ ·
+                                                         เลื่อนได้ด้วยเม้า". -->
                                                     <wv2:WebView2 x:Name="DashUniverseWebView"
                                                                   DefaultBackgroundColor="Black"
-                                                                  IsHitTestVisible="False"/>
+                                                                  IsHitTestVisible="True"/>
                                                 </Border>
 
                                                 <!-- Legacy 2D primary view — hidden; replaced by the
@@ -913,6 +979,40 @@
                                                             </Border>
                                                         </StackPanel>
                                                     </ScrollViewer>
+                                                </Border>
+
+                                                <!-- Chips MOVED to DOM (wwwroot/universe/index.html + style.css
+                                                     + app.js: handleDashStats / handleDashLoad / drawDashSpark).
+                                                     WPF Border children of this Grid kept getting clobbered
+                                                     by the WebView2 HwndHost surface, and WPF Popup leaked
+                                                     above other apps (bleed-through). The DOM is the only
+                                                     surface that ALWAYS composites correctly with the
+                                                     WebView2's three.js canvas. C# pushes values via
+                                                     PostDashStats / PostDashLoad → PostWebMessageAsJson.
+                                                     Dummy x:Name nodes kept (Visibility=Collapsed, 0 size)
+                                                     so any leftover code-behind writes don't NPE. -->
+                                                <Border Visibility="Collapsed" Width="0" Height="0">
+                                                    <StackPanel>
+                                                        <TextBlock x:Name="DashOvNodesText"/>
+                                                        <TextBlock x:Name="DashOvWordsText"/>
+                                                    </StackPanel>
+                                                </Border>
+
+                                                <!-- LOAD chip MOVED to DOM. The Border below is a 0-size
+                                                     shell that keeps the x:Names alive for any code-behind
+                                                     write that hasn't been re-routed through PostDashLoad yet.
+                                                     Once everything writes via PostDashLoad these dummies can
+                                                     come out — but until then they prevent NPEs in callers. -->
+                                                <Border Visibility="Collapsed" Width="0" Height="0"
+                                                        IsHitTestVisible="False">
+                                                    <StackPanel>
+                                                        <Ellipse x:Name="DashLoadDot" Width="0" Height="0"/>
+                                                        <TextBlock x:Name="DashLoadSubtitleText" Text="last 90 s"/>
+                                                        <TextBlock x:Name="DashGpuValueText" Text="0%"/>
+                                                        <TextBlock x:Name="DashCpuValueText" Text="0%"/>
+                                                        <Canvas x:Name="DashGpuSparkCanvas" Width="0" Height="0"/>
+                                                        <Canvas x:Name="DashCpuSparkCanvas" Width="0" Height="0"/>
+                                                    </StackPanel>
                                                 </Border>
                                             </Grid>
 
@@ -992,19 +1092,27 @@
                                              prototype right-rail; bound via DashActivityList +
                                              DashRecentNotesList in MainWindow.Dashboard.cs.
                                              ═══════════════════════════════════════════════════════════ -->
-                                        <!-- RIGHT COLUMN wrapped in ScrollViewer so when the window
-                                             is squeezed small, both cards remain reachable via scrollbar.
-                                             User: "ตอนนี้ถ้าบีบเล็ก สกรอดูไม่ได้". -->
-                                        <ScrollViewer Grid.Column="1" Margin="8,0,0,0"
-                                                      VerticalScrollBarVisibility="Auto"
-                                                      HorizontalScrollBarVisibility="Disabled"
-                                                      PanningMode="VerticalOnly">
-                                        <StackPanel>
+                                        <!-- RIGHT COLUMN: 3-row Grid (KPIs Auto · Activity 3* ·
+                                             Recently 2*) so the Activity Feed CANNOT push the
+                                             Recently Edited card off-screen. Each scrolling card
+                                             handles its own overflow internally with its own
+                                             ScrollViewer. Previously the column was a StackPanel
+                                             in a ScrollViewer, and as the live access-log streamed
+                                             rows into DashActivityList (cap 60) the feed card
+                                             ballooned and pushed the Recently card below the fold
+                                             — user: "activity feed มันดันจน การ์ด recently
+                                             หายไปผู้ใช้ไม่รู้ถ้าไม่สกรอ". -->
+                                        <Grid Grid.Column="1" Margin="8,0,0,0" MinHeight="320">
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto"/>
+                                                <RowDefinition Height="3*" MinHeight="160"/>
+                                                <RowDefinition Height="2*" MinHeight="120"/>
+                                            </Grid.RowDefinitions>
                                             <!-- ── KPI mini-strip (Connections + Expertise) ──────────────
                                                  Moved here from the old Row 1 KPI band so the Universe
                                                  (Col 0) can extend up to the header and become the
                                                  tallest element on the dashboard. Compact 2-col layout. -->
-                                            <Grid Margin="0,0,0,12">
+                                            <Grid Grid.Row="0" Margin="0,0,0,12">
                                                 <Grid.ColumnDefinitions>
                                                     <ColumnDefinition Width="*"/>
                                                     <ColumnDefinition Width="*"/>
@@ -1050,7 +1158,14 @@
                                                 </Border>
                                             </Grid>
                                             <!-- ── Activity Feed card ─────────────────────────────────── -->
-                                            <Border Style="{StaticResource NeuralCard}" Margin="0,0,0,12">
+                                            <!-- MaxHeight tuned to keep Row 2 (universe + right col) inside
+                                                 the default viewport. Old DashOuterScroll context (which
+                                                 measured Infinity) is gone, but the * sizing still works
+                                                 fine and we keep the cap conservative so first paint shows
+                                                 universe + Activity preview + Recently preview without
+                                                 scrolling the dashboard at all. -->
+                                            <Border Grid.Row="1" Style="{StaticResource NeuralCard}" Margin="0,0,0,12"
+                                                    MaxHeight="220">
                                                 <Grid>
                                                     <Grid.RowDefinitions>
                                                         <RowDefinition Height="Auto"/>
@@ -1088,12 +1203,16 @@
                                                     <Border Grid.Row="0" Height="1" VerticalAlignment="Bottom"
                                                             Background="{StaticResource NeuralLine}"/>
                                                     <!-- activity-list (bound to DashActivityList).
-                                                         No inner MaxHeight — outer right-column ScrollViewer
-                                                         handles overflow when the window is squeezed small. -->
+                                                         Internal scroll is now Auto — the card lives in a
+                                                         3* row of the right-column Grid, so growth is capped
+                                                         and the user can scroll WITHIN this card without
+                                                         pushing Recently Edited off the page. -->
                                                     <ScrollViewer Grid.Row="1"
-                                                                  VerticalScrollBarVisibility="Disabled"
+                                                                  VerticalScrollBarVisibility="Auto"
                                                                   HorizontalScrollBarVisibility="Disabled"
-                                                                  Padding="0,4">
+                                                                  Padding="0,4"
+                                                                  PanningMode="VerticalOnly"
+                                                                  CanContentScroll="False">
                                                         <ItemsControl x:Name="DashActivityList">
                                                             <ItemsControl.ItemTemplate>
                                                                 <DataTemplate>
@@ -1139,7 +1258,9 @@
                                             </Border>
 
                                             <!-- ── Recently Edited card ───────────────────────────────── -->
-                                            <Border Style="{StaticResource NeuralCard}">
+                                            <!-- Cap to keep dashboard first paint clean. -->
+                                            <Border Grid.Row="2" Style="{StaticResource NeuralCard}"
+                                                    MaxHeight="160">
                                                 <Grid>
                                                     <Grid.RowDefinitions>
                                                         <RowDefinition Height="Auto"/>
@@ -1167,7 +1288,14 @@
                                                     </Grid>
                                                     <Border Grid.Row="0" Height="1" VerticalAlignment="Bottom"
                                                             Background="{StaticResource NeuralLine}"/>
-                                                    <ItemsControl Grid.Row="1" x:Name="DashRecentNotesList"
+                                                    <!-- Wrap the recently-edited list in its own ScrollViewer so
+                                                         it doesn't overflow when its row is squeezed small. -->
+                                                    <ScrollViewer Grid.Row="1"
+                                                                  VerticalScrollBarVisibility="Auto"
+                                                                  HorizontalScrollBarVisibility="Disabled"
+                                                                  PanningMode="VerticalOnly"
+                                                                  CanContentScroll="False">
+                                                    <ItemsControl x:Name="DashRecentNotesList"
                                                                   Margin="6,4,6,10">
                                                         <ItemsControl.ItemTemplate>
                                                             <DataTemplate>
@@ -1206,10 +1334,10 @@
                                                             </DataTemplate>
                                                         </ItemsControl.ItemTemplate>
                                                     </ItemsControl>
+                                                    </ScrollViewer>
                                                 </Grid>
                                             </Border>
-                                        </StackPanel>
-                                        </ScrollViewer>
+                                        </Grid>
                                     </Grid>
                                     <!-- end DASH-GRID 2-col -->
 
@@ -1225,7 +1353,20 @@
                                          All four populate from code-behind via x:Names. The Universe
                                          row above is unchanged (user: "universe เท่าเดิม").
                                          ═══════════════════════════════════════════════════════════ -->
-                                    <Grid Grid.Row="3" Margin="0,0,0,16">
+                                    <!-- Row 3 now bundles Pro Insights + Quick Actions inside a single
+                                         ScrollViewer because they're the only rows the dashboard CAN scroll
+                                         safely (no WebView2 = no HwndHost airspace). Scrollbar visibility
+                                         set to Visible (not Auto) so users see right away that the section
+                                         can be scrolled — addresses user's "ทำไงให้ผู้ใช้รู้ว่าสกรอร์
+                                         ลงได้". -->
+                                    <ScrollViewer Grid.Row="3"
+                                                  VerticalScrollBarVisibility="Visible"
+                                                  HorizontalScrollBarVisibility="Disabled"
+                                                  CanContentScroll="False"
+                                                  PanningMode="VerticalOnly"
+                                                  Padding="0,0,4,0">
+                                    <StackPanel>
+                                    <Grid Margin="0,0,0,16">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*"/>
                                             <ColumnDefinition Width="*"/>
@@ -1294,98 +1435,74 @@
                                             </Grid>
                                         </Border>
 
-                                        <!-- ▼ CARD B — SYSTEM LOAD (GPU + CPU live sparklines) ▼
-                                             User: "top tag เปลี่ยนเป็นกราฟ gpu use และ cpu เท่ๆ".
-                                             Replaces the prior TOP TAGS pill cloud. Two stacked
-                                             rows, each with: label + current % value + small
-                                             violet-tinted sparkline canvas. 60-sample ring
-                                             buffer ticks every 1.5 s from PerformanceCounter.
-                                             DashTopTagsPanel x:Name preserved as a 0-size dummy
-                                             so PopulateDashTopTags writes don't crash. -->
+                                        <!-- ▼ CARD B — NETWORK (Join Brain connection status) ▼
+                                             User: "ส่วนการ์ด system load ก็แทนด้วยข้อมูลอื่น เช่น
+                                             network join connect status". GPU + CPU sparklines
+                                             moved to a floating overlay over the universe (see
+                                             DashGpuSparkCanvas / DashCpuSparkCanvas above).
+                                             This card now surfaces Join-Brain state: connection
+                                             status, peer count, status dot. Updated by C# from
+                                             NetworkClient.StatusChanged / PeerCountChanged via
+                                             new x:Names DashNetStatusText / DashNetPeersText /
+                                             DashNetDot. DashTopTagsPanel + DashTagsTotalText
+                                             kept as 0-size dummies for legacy
+                                             PopulateDashTopTags writes. -->
                                         <Border Grid.Column="1" Style="{StaticResource NeuralCard}"
                                                 Padding="16,14,16,14" Margin="3,0,4,0">
                                             <Grid>
                                                 <Grid.RowDefinitions>
                                                     <RowDefinition Height="Auto"/>
                                                     <RowDefinition Height="Auto"/>
-                                                    <RowDefinition Height="*"/>
+                                                    <RowDefinition Height="Auto"/>
                                                     <RowDefinition Height="*"/>
                                                 </Grid.RowDefinitions>
                                                 <StackPanel Grid.Row="0" Orientation="Horizontal">
-                                                    <TextBlock Text="SYSTEM LOAD" Style="{StaticResource TypeCardTitle}"
+                                                    <TextBlock Text="NETWORK" Style="{StaticResource TypeCardTitle}"
                                                                VerticalAlignment="Center"/>
-                                                    <TextBlock Text=" · live" FontSize="11"
+                                                    <TextBlock Text=" · join brain" FontSize="11"
                                                                Foreground="{StaticResource NeuralText3}"
                                                                VerticalAlignment="Center" Margin="6,0,0,0"/>
-                                                    <Ellipse x:Name="DashLoadDot" Width="6" Height="6"
-                                                             Fill="{StaticResource NeuralMint}"
-                                                             Effect="{StaticResource GlowMint}"
+                                                    <Ellipse x:Name="DashNetDot" Width="7" Height="7"
+                                                             Fill="{StaticResource TextMutedBrush}"
                                                              Margin="8,0,0,0" VerticalAlignment="Center"/>
                                                 </StackPanel>
-                                                <TextBlock Grid.Row="1" Text="GPU + CPU usage · 90 s rolling"
-                                                           FontSize="11" Margin="0,3,0,10"
-                                                           Foreground="{StaticResource NeuralText3}"/>
+                                                <TextBlock Grid.Row="1" x:Name="DashNetStatusText"
+                                                           Text="Disconnected"
+                                                           FontSize="18" FontWeight="Bold"
+                                                           Foreground="{StaticResource NeuralText}"
+                                                           Margin="0,8,0,2"/>
+                                                <TextBlock Grid.Row="2" x:Name="DashNetPeersText"
+                                                           Text="0 peers connected"
+                                                           FontSize="11"
+                                                           Foreground="{StaticResource NeuralText3}"
+                                                           Margin="0,0,0,8"/>
 
-                                                <!-- GPU row -->
-                                                <Grid Grid.Row="2" Margin="0,0,0,6">
-                                                    <Grid.RowDefinitions>
-                                                        <RowDefinition Height="Auto"/>
-                                                        <RowDefinition Height="*"/>
-                                                    </Grid.RowDefinitions>
-                                                    <Grid Grid.Row="0">
-                                                        <Grid.ColumnDefinitions>
-                                                            <ColumnDefinition Width="Auto"/>
-                                                            <ColumnDefinition Width="*"/>
-                                                            <ColumnDefinition Width="Auto"/>
-                                                        </Grid.ColumnDefinitions>
-                                                        <Border Grid.Column="0" Width="6" Height="6" CornerRadius="3"
-                                                                Background="#FF4F9E" VerticalAlignment="Center"
-                                                                Margin="0,0,7,0"/>
-                                                        <TextBlock Grid.Column="1" Text="GPU"
-                                                                   FontSize="10.5" FontWeight="SemiBold"
-                                                                   Foreground="{StaticResource NeuralText3}"
-                                                                   VerticalAlignment="Center"/>
-                                                        <TextBlock Grid.Column="2" x:Name="DashGpuValueText" Text="0%"
-                                                                   FontSize="13" FontWeight="Bold"
-                                                                   FontFamily="{StaticResource FontMono}"
-                                                                   Foreground="{StaticResource NeuralText}"
-                                                                   VerticalAlignment="Center"
-                                                                   Typography.NumeralAlignment="Tabular"/>
-                                                    </Grid>
-                                                    <Canvas Grid.Row="1" x:Name="DashGpuSparkCanvas"
-                                                            Background="{StaticResource NeuralBgInset}"
-                                                            MinHeight="34" Margin="0,4,0,0" ClipToBounds="True"/>
-                                                </Grid>
-
-                                                <!-- CPU row -->
-                                                <Grid Grid.Row="3" Margin="0,4,0,0">
-                                                    <Grid.RowDefinitions>
-                                                        <RowDefinition Height="Auto"/>
-                                                        <RowDefinition Height="*"/>
-                                                    </Grid.RowDefinitions>
-                                                    <Grid Grid.Row="0">
-                                                        <Grid.ColumnDefinitions>
-                                                            <ColumnDefinition Width="Auto"/>
-                                                            <ColumnDefinition Width="*"/>
-                                                            <ColumnDefinition Width="Auto"/>
-                                                        </Grid.ColumnDefinitions>
-                                                        <Border Grid.Column="0" Width="6" Height="6" CornerRadius="3"
-                                                                Background="#5BE9E9" VerticalAlignment="Center"
-                                                                Margin="0,0,7,0"/>
-                                                        <TextBlock Grid.Column="1" Text="CPU"
-                                                                   FontSize="10.5" FontWeight="SemiBold"
-                                                                   Foreground="{StaticResource NeuralText3}"
-                                                                   VerticalAlignment="Center"/>
-                                                        <TextBlock Grid.Column="2" x:Name="DashCpuValueText" Text="0%"
-                                                                   FontSize="13" FontWeight="Bold"
-                                                                   FontFamily="{StaticResource FontMono}"
-                                                                   Foreground="{StaticResource NeuralText}"
-                                                                   VerticalAlignment="Center"
-                                                                   Typography.NumeralAlignment="Tabular"/>
-                                                    </Grid>
-                                                    <Canvas Grid.Row="1" x:Name="DashCpuSparkCanvas"
-                                                            Background="{StaticResource NeuralBgInset}"
-                                                            MinHeight="34" Margin="0,4,0,0" ClipToBounds="True"/>
+                                                <!-- Peer-count tile + hint -->
+                                                <Grid Grid.Row="3" VerticalAlignment="Bottom">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                        <ColumnDefinition Width="*"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <Border Grid.Column="0" CornerRadius="8" Padding="10,6"
+                                                            Background="#22000000" Margin="0,0,10,0"
+                                                            VerticalAlignment="Center">
+                                                        <StackPanel>
+                                                            <TextBlock Text="PEERS" FontSize="9"
+                                                                       FontWeight="SemiBold"
+                                                                       Foreground="{StaticResource NeuralText3}"/>
+                                                            <TextBlock x:Name="DashNetPeerCountText" Text="0"
+                                                                       FontSize="22" FontWeight="Bold"
+                                                                       FontFamily="{StaticResource FontMono}"
+                                                                       Typography.NumeralAlignment="Tabular"
+                                                                       Foreground="{StaticResource NeuralText}"/>
+                                                        </StackPanel>
+                                                    </Border>
+                                                    <TextBlock Grid.Column="1" x:Name="DashNetSubtitle"
+                                                               Text="Tap NETWORK in sidebar to join"
+                                                               TextWrapping="Wrap"
+                                                               FontSize="10.5"
+                                                               Foreground="{StaticResource NeuralText3}"
+                                                               VerticalAlignment="Center"/>
                                                 </Grid>
 
                                                 <!-- 0-size dummies — preserve x:Names for
@@ -1452,7 +1569,16 @@
                                             </Grid>
                                         </Border>
 
-                                        <!-- ▼ CARD D — SYSTEM HEALTH ▼ -->
+                                        <!-- ▼ CARD D — CLAUDE USAGE ▼
+                                             Hybrid usage panel. Four progress rows mirror the layout
+                                             of claude.ai/settings/usage so the user sees the exact
+                                             same numbers they'd see on the web (Current session,
+                                             Weekly all-models, Sonnet only, Usage credits). The
+                                             values come from a hidden WebView2 probe of that page
+                                             when the user is signed in via Edge — when not, the
+                                             dot turns amber and the bars stay at the last known
+                                             reading while the local tally subtitle still updates
+                                             in real time from ~/.claude/projects/**/*.jsonl. -->
                                         <Border Grid.Column="3" Style="{StaticResource NeuralCard}"
                                                 Padding="16,14,16,14" Margin="7,0,0,0">
                                             <Grid>
@@ -1460,76 +1586,202 @@
                                                     <RowDefinition Height="Auto"/>
                                                     <RowDefinition Height="Auto"/>
                                                     <RowDefinition Height="*"/>
+                                                    <RowDefinition Height="Auto"/>
                                                 </Grid.RowDefinitions>
-                                                <StackPanel Grid.Row="0" Orientation="Horizontal">
-                                                    <TextBlock Text="SYSTEM HEALTH" Style="{StaticResource TypeCardTitle}"
-                                                               VerticalAlignment="Center"/>
-                                                    <Ellipse x:Name="DashHealthDot" Width="8" Height="8"
-                                                             Fill="{StaticResource NeuralMint}"
-                                                             Effect="{StaticResource GlowMint}"
-                                                             VerticalAlignment="Center" Margin="8,0,0,0"/>
-                                                </StackPanel>
-                                                <TextBlock Grid.Row="1" Text="vault · db · backends · mesh"
-                                                           FontSize="11" Margin="0,3,0,10"
-                                                           Foreground="{StaticResource NeuralText3}"/>
-                                                <Grid Grid.Row="2">
-                                                    <Grid.RowDefinitions>
-                                                        <RowDefinition Height="Auto"/>
-                                                        <RowDefinition Height="Auto"/>
-                                                        <RowDefinition Height="Auto"/>
-                                                        <RowDefinition Height="Auto"/>
-                                                        <RowDefinition Height="Auto"/>
-                                                        <RowDefinition Height="Auto"/>
-                                                    </Grid.RowDefinitions>
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="Auto"/>
-                                                        <ColumnDefinition Width="*"/>
-                                                    </Grid.ColumnDefinitions>
-                                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="VAULT"
-                                                               FontSize="9.5" FontWeight="SemiBold"
-                                                               Foreground="{StaticResource NeuralText3}"
-                                                               VerticalAlignment="Center" Margin="0,0,10,0"/>
-                                                    <TextBlock Grid.Row="0" Grid.Column="1" x:Name="DashHealthVaultText"
-                                                               Text="—" FontSize="11" FontFamily="{StaticResource FontMono}"
-                                                               Foreground="{StaticResource NeuralText1}"
-                                                               TextTrimming="CharacterEllipsis"/>
-                                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="DB"
-                                                               FontSize="9.5" FontWeight="SemiBold"
-                                                               Foreground="{StaticResource NeuralText3}"
-                                                               VerticalAlignment="Center" Margin="0,4,10,0"/>
-                                                    <TextBlock Grid.Row="1" Grid.Column="1" x:Name="DashHealthDbText"
-                                                               Text="—" FontSize="11" FontFamily="{StaticResource FontMono}"
-                                                               Foreground="{StaticResource NeuralText1}" Margin="0,4,0,0"/>
-                                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="INDEX"
-                                                               FontSize="9.5" FontWeight="SemiBold"
-                                                               Foreground="{StaticResource NeuralText3}"
-                                                               VerticalAlignment="Center" Margin="0,4,10,0"/>
-                                                    <TextBlock Grid.Row="2" Grid.Column="1" x:Name="DashHealthIndexText"
-                                                               Text="—" FontSize="11" FontFamily="{StaticResource FontMono}"
-                                                               Foreground="{StaticResource NeuralText1}" Margin="0,4,0,0"/>
-                                                    <TextBlock Grid.Row="3" Grid.Column="0" Text="AI"
-                                                               FontSize="9.5" FontWeight="SemiBold"
-                                                               Foreground="{StaticResource NeuralText3}"
-                                                               VerticalAlignment="Center" Margin="0,4,10,0"/>
-                                                    <TextBlock Grid.Row="3" Grid.Column="1" x:Name="DashHealthAiText"
-                                                               Text="—" FontSize="11" FontFamily="{StaticResource FontMono}"
-                                                               Foreground="{StaticResource NeuralText1}" Margin="0,4,0,0"
-                                                               TextTrimming="CharacterEllipsis"/>
-                                                    <TextBlock Grid.Row="4" Grid.Column="0" Text="MESH"
-                                                               FontSize="9.5" FontWeight="SemiBold"
-                                                               Foreground="{StaticResource NeuralText3}"
-                                                               VerticalAlignment="Center" Margin="0,4,10,0"/>
-                                                    <TextBlock Grid.Row="4" Grid.Column="1" x:Name="DashHealthMeshText"
-                                                               Text="—" FontSize="11" FontFamily="{StaticResource FontMono}"
-                                                               Foreground="{StaticResource NeuralText1}" Margin="0,4,0,0"/>
-                                                    <TextBlock Grid.Row="5" Grid.Column="0" Text="VER"
-                                                               FontSize="9.5" FontWeight="SemiBold"
-                                                               Foreground="{StaticResource NeuralText3}"
-                                                               VerticalAlignment="Center" Margin="0,4,10,0"/>
-                                                    <TextBlock Grid.Row="5" Grid.Column="1" x:Name="DashHealthVersionText"
-                                                               Text="—" FontSize="11" FontFamily="{StaticResource FontMono}"
-                                                               Foreground="{StaticResource NeuralText2}" Margin="0,4,0,0"/>
+                                                <Grid Grid.Row="0">
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <TextBlock Text="CLAUDE USAGE" Style="{StaticResource TypeCardTitle}"
+                                                                   VerticalAlignment="Center"/>
+                                                        <Ellipse x:Name="DashClaudeDot" Width="8" Height="8"
+                                                                 Fill="{StaticResource NeuralAmber}"
+                                                                 VerticalAlignment="Center" Margin="8,0,0,0"
+                                                                 Cursor="Hand"
+                                                                 MouseLeftButtonDown="DashClaudeDot_Click"
+                                                                 ToolTip="Click to sign into claude.ai · cookies stay private to BrainX"/>
+                                                    </StackPanel>
+                                                    <TextBlock x:Name="DashClaudePlanText" Text="Max (5x)"
+                                                               HorizontalAlignment="Right" VerticalAlignment="Center"
+                                                               FontSize="10" FontWeight="SemiBold"
+                                                               FontFamily="{StaticResource FontMono}"
+                                                               Foreground="{StaticResource NeuralText3}"/>
                                                 </Grid>
+                                                <Grid Grid.Row="1" Margin="0,3,0,10">
+                                                    <TextBlock x:Name="DashClaudeSubtitleText"
+                                                               Text="plan limits · live from claude.ai"
+                                                               FontSize="11"
+                                                               Foreground="{StaticResource NeuralText3}"/>
+                                                    <TextBlock x:Name="DashClaudeSignInLink"
+                                                               Text="Sign in →"
+                                                               HorizontalAlignment="Right"
+                                                               FontSize="11" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource NeuralViolet2}"
+                                                               Cursor="Hand"
+                                                               MouseLeftButtonDown="DashClaudeDot_Click"
+                                                               TextDecorations="Underline"
+                                                               ToolTip="Open the claude.ai login in a private BrainX window"/>
+                                                </Grid>
+
+                                                <!-- 4 progress rows. Each is a 2-row grid: line 1 = label
+                                                     + percent (right), line 2 = the actual bar + small
+                                                     reset hint underneath the percent. Bars are plain
+                                                     Border + nested Border so we can width-bind to a
+                                                     code-set value without ProgressBar's chrome. -->
+                                                <StackPanel Grid.Row="2">
+                                                    <!-- Current session -->
+                                                    <Grid Margin="0,0,0,9">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="*"/>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                        </Grid.ColumnDefinitions>
+                                                        <Grid.RowDefinitions>
+                                                            <RowDefinition Height="Auto"/>
+                                                            <RowDefinition Height="Auto"/>
+                                                            <RowDefinition Height="Auto"/>
+                                                        </Grid.RowDefinitions>
+                                                        <TextBlock Grid.Row="0" Grid.Column="0"
+                                                                   Text="Current session"
+                                                                   FontSize="10.5" FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource NeuralText1}"/>
+                                                        <TextBlock Grid.Row="0" Grid.Column="1"
+                                                                   x:Name="DashClaudeSessionPct" Text="—"
+                                                                   FontSize="10.5" FontWeight="SemiBold"
+                                                                   FontFamily="{StaticResource FontMono}"
+                                                                   Foreground="{StaticResource NeuralText2}"/>
+                                                        <TextBlock Grid.Row="1" Grid.Column="0"
+                                                                   x:Name="DashClaudeSessionReset"
+                                                                   Text="Sign in to track"
+                                                                   FontSize="9" Margin="0,1,0,4"
+                                                                   Foreground="{StaticResource NeuralText3}"/>
+                                                        <Border Grid.Row="2" Grid.ColumnSpan="2"
+                                                                Height="5" CornerRadius="3"
+                                                                Background="#22FFFFFF">
+                                                            <Border x:Name="DashClaudeSessionBar"
+                                                                    HorizontalAlignment="Left" Width="0"
+                                                                    CornerRadius="3"
+                                                                    Background="{StaticResource NeuralViolet2}"/>
+                                                        </Border>
+                                                    </Grid>
+
+                                                    <!-- Weekly · all models -->
+                                                    <Grid Margin="0,0,0,9">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="*"/>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                        </Grid.ColumnDefinitions>
+                                                        <Grid.RowDefinitions>
+                                                            <RowDefinition Height="Auto"/>
+                                                            <RowDefinition Height="Auto"/>
+                                                            <RowDefinition Height="Auto"/>
+                                                        </Grid.RowDefinitions>
+                                                        <TextBlock Grid.Row="0" Grid.Column="0"
+                                                                   Text="Weekly · all models"
+                                                                   FontSize="10.5" FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource NeuralText1}"/>
+                                                        <TextBlock Grid.Row="0" Grid.Column="1"
+                                                                   x:Name="DashClaudeWeeklyPct" Text="—"
+                                                                   FontSize="10.5" FontWeight="SemiBold"
+                                                                   FontFamily="{StaticResource FontMono}"
+                                                                   Foreground="{StaticResource NeuralText2}"/>
+                                                        <TextBlock Grid.Row="1" Grid.Column="0"
+                                                                   x:Name="DashClaudeWeeklyReset"
+                                                                   Text="—"
+                                                                   FontSize="9" Margin="0,1,0,4"
+                                                                   Foreground="{StaticResource NeuralText3}"/>
+                                                        <Border Grid.Row="2" Grid.ColumnSpan="2"
+                                                                Height="5" CornerRadius="3"
+                                                                Background="#22FFFFFF">
+                                                            <Border x:Name="DashClaudeWeeklyBar"
+                                                                    HorizontalAlignment="Left" Width="0"
+                                                                    CornerRadius="3"
+                                                                    Background="#FFB840"/>
+                                                        </Border>
+                                                    </Grid>
+
+                                                    <!-- Sonnet only -->
+                                                    <Grid Margin="0,0,0,9">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="*"/>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                        </Grid.ColumnDefinitions>
+                                                        <Grid.RowDefinitions>
+                                                            <RowDefinition Height="Auto"/>
+                                                            <RowDefinition Height="Auto"/>
+                                                            <RowDefinition Height="Auto"/>
+                                                        </Grid.RowDefinitions>
+                                                        <TextBlock Grid.Row="0" Grid.Column="0"
+                                                                   Text="Sonnet only"
+                                                                   FontSize="10.5" FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource NeuralText1}"/>
+                                                        <TextBlock Grid.Row="0" Grid.Column="1"
+                                                                   x:Name="DashClaudeSonnetPct" Text="—"
+                                                                   FontSize="10.5" FontWeight="SemiBold"
+                                                                   FontFamily="{StaticResource FontMono}"
+                                                                   Foreground="{StaticResource NeuralText2}"/>
+                                                        <TextBlock Grid.Row="1" Grid.Column="0"
+                                                                   x:Name="DashClaudeSonnetReset"
+                                                                   Text="—"
+                                                                   FontSize="9" Margin="0,1,0,4"
+                                                                   Foreground="{StaticResource NeuralText3}"/>
+                                                        <Border Grid.Row="2" Grid.ColumnSpan="2"
+                                                                Height="5" CornerRadius="3"
+                                                                Background="#22FFFFFF">
+                                                            <Border x:Name="DashClaudeSonnetBar"
+                                                                    HorizontalAlignment="Left" Width="0"
+                                                                    CornerRadius="3"
+                                                                    Background="#4AE3A7"/>
+                                                        </Border>
+                                                    </Grid>
+
+                                                    <!-- Usage credits -->
+                                                    <Grid Margin="0,0,0,4">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="*"/>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                        </Grid.ColumnDefinitions>
+                                                        <Grid.RowDefinitions>
+                                                            <RowDefinition Height="Auto"/>
+                                                            <RowDefinition Height="Auto"/>
+                                                            <RowDefinition Height="Auto"/>
+                                                        </Grid.RowDefinitions>
+                                                        <TextBlock Grid.Row="0" Grid.Column="0"
+                                                                   Text="Usage credits"
+                                                                   FontSize="10.5" FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource NeuralText1}"/>
+                                                        <TextBlock Grid.Row="0" Grid.Column="1"
+                                                                   x:Name="DashClaudeCreditsPct" Text="—"
+                                                                   FontSize="10.5" FontWeight="SemiBold"
+                                                                   FontFamily="{StaticResource FontMono}"
+                                                                   Foreground="{StaticResource NeuralText2}"/>
+                                                        <TextBlock Grid.Row="1" Grid.Column="0"
+                                                                   x:Name="DashClaudeCreditsReset"
+                                                                   Text="—"
+                                                                   FontSize="9" Margin="0,1,0,4"
+                                                                   Foreground="{StaticResource NeuralText3}"/>
+                                                        <Border Grid.Row="2" Grid.ColumnSpan="2"
+                                                                Height="5" CornerRadius="3"
+                                                                Background="#22FFFFFF">
+                                                            <Border x:Name="DashClaudeCreditsBar"
+                                                                    HorizontalAlignment="Left" Width="0"
+                                                                    CornerRadius="3"
+                                                                    Background="#5BE9E9"/>
+                                                        </Border>
+                                                    </Grid>
+                                                </StackPanel>
+
+                                                <!-- Local-tally subtitle. Always populated from the
+                                                     transcript scanner so the card is never empty,
+                                                     even before claude.ai authentication succeeds. -->
+                                                <StackPanel Grid.Row="3" Orientation="Horizontal"
+                                                            Margin="0,10,0,0">
+                                                    <TextBlock Text="🪙"
+                                                               FontSize="10" VerticalAlignment="Center"
+                                                               Margin="0,0,5,0"/>
+                                                    <TextBlock x:Name="DashClaudeLocalText"
+                                                               Text="— · 5h"
+                                                               FontSize="10.5" FontFamily="{StaticResource FontMono}"
+                                                               Foreground="{StaticResource NeuralText2}"
+                                                               VerticalAlignment="Center"/>
+                                                </StackPanel>
                                             </Grid>
                                         </Border>
                                     </Grid>
@@ -1540,27 +1792,144 @@
                                          buttons. Re-index Vault is the only action with a side effect on the
                                          entire knowledge graph, so it gets the primary violet treatment; the
                                          other three are secondary (ghost = no decoration, default = card-tinted). -->
-                                    <Border Grid.Row="4" Style="{StaticResource NeuralCard}" Padding="22,18">
-                                        <StackPanel>
-                                            <TextBlock Text="QUICK ACTIONS"
-                                                       Style="{StaticResource TypeCardTitle}"
-                                                       Margin="0,0,0,14"/>
-                                            <WrapPanel>
-                                                <Button Content="&#x1F504;  Re-index Vault"
-                                                        Style="{StaticResource NeuralBtnPrimary}"
-                                                        Click="ReindexVault_Click" Margin="0,0,10,10"/>
-                                                <Button Content="&#x1F4D6;  Open in Obsidian"
-                                                        Style="{StaticResource NeuralBtn}"
-                                                        Click="OpenObsidian_Click" Margin="0,0,10,10"/>
-                                                <Button Content="&#x1F310;  Join Network"
-                                                        Style="{StaticResource NeuralBtn}"
-                                                        Click="JoinNetwork_Click" Margin="0,0,10,10"/>
-                                                <Button Content="&#x1F4CA;  Export Stats"
-                                                        Style="{StaticResource NeuralBtnGhost}"
-                                                        Click="ExportStats_Click" Margin="0,0,10,10"/>
-                                            </WrapPanel>
-                                        </StackPanel>
+                                    <Border Style="{StaticResource NeuralCard}" Padding="22,18">
+                                        <!-- 2-col layout: left = original Quick Actions header + WrapPanel;
+                                             right = compact SYSTEM HEALTH chip (moved here from the
+                                             Pro Insights strip so its slot could host CLAUDE USAGE).
+                                             Same x:Names as before so PopulateDashHealth() in the
+                                             Dashboard partial keeps working unchanged. -->
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+
+                                            <StackPanel Grid.Column="0">
+                                                <TextBlock Text="QUICK ACTIONS"
+                                                           Style="{StaticResource TypeCardTitle}"
+                                                           Margin="0,0,0,14"/>
+                                                <WrapPanel>
+                                                    <!-- Primary action — only one violet button per card per
+                                                         the t2.zip spec; everything else stays ghost/secondary. -->
+                                                    <Button Content="&#x1F504;  Re-index Vault"
+                                                            Style="{StaticResource NeuralBtnPrimary}"
+                                                            Click="ReindexVault_Click" Margin="0,0,10,10"
+                                                            ToolTip="Re-scan all notes, rebuild graph + expertise"/>
+                                                    <Button Content="&#x1F4D6;  Open in Obsidian"
+                                                            Style="{StaticResource NeuralBtn}"
+                                                            Click="OpenObsidian_Click" Margin="0,0,10,10"
+                                                            ToolTip="Launch Obsidian with this vault"/>
+                                                    <!-- NEW: jump to OS File Explorer at vault folder -->
+                                                    <Button Content="&#x1F4C1;  Reveal Vault"
+                                                            Style="{StaticResource NeuralBtn}"
+                                                            Click="DashRevealVault_Click" Margin="0,0,10,10"
+                                                            ToolTip="Open vault folder in File Explorer"/>
+                                                    <!-- NEW: copy 0xBRAIN-... so user can share -->
+                                                    <Button Content="&#x1F4CB;  Copy Address"
+                                                            Style="{StaticResource NeuralBtn}"
+                                                            Click="DashCopyAddress_Click" Margin="0,0,10,10"
+                                                            ToolTip="Copy this brain's 0xBRAIN-... address to clipboard"/>
+                                                    <!-- NEW: shortcut to Settings view -->
+                                                    <Button Content="&#x2699;  Settings"
+                                                            Style="{StaticResource NeuralBtn}"
+                                                            Click="Nav_Click" Tag="Settings" Margin="0,0,10,10"
+                                                            ToolTip="Jump to Settings"/>
+                                                    <!-- Wrapper: navigate to Network view first so the user
+                                                         sees the connection state change there. -->
+                                                    <Button Content="&#x1F310;  Join Network"
+                                                            Style="{StaticResource NeuralBtnGhost}"
+                                                            Click="DashJoinNetwork_Click" Margin="0,0,10,10"
+                                                            ToolTip="Connect to the BrainX peer mesh"/>
+                                                    <Button Content="&#x1F4CA;  Export Stats"
+                                                            Style="{StaticResource NeuralBtnGhost}"
+                                                            Click="ExportStats_Click" Margin="0,0,10,10"
+                                                            ToolTip="Save brain_stats.json + open in File Explorer"/>
+                                                </WrapPanel>
+                                            </StackPanel>
+
+                                            <!-- ▼ SYSTEM HEALTH compact chip (moved from Pro Insights) ▼
+                                                 Six mono one-liners stacked vertically — VAULT, DB, INDEX,
+                                                 AI, MESH, VER — with the same x:Names the previous card
+                                                 used so PopulateDashHealth needs zero changes. -->
+                                            <Border Grid.Column="1" VerticalAlignment="Center"
+                                                    Background="#10FFFFFF"
+                                                    BorderBrush="#22FFFFFF" BorderThickness="1"
+                                                    CornerRadius="10" Padding="12,8" Margin="14,0,0,0"
+                                                    MinWidth="170">
+                                                <StackPanel>
+                                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                                                        <Ellipse x:Name="DashHealthDot" Width="7" Height="7"
+                                                                 Fill="{StaticResource NeuralMint}"
+                                                                 VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                                        <TextBlock Text="SYSTEM HEALTH"
+                                                                   FontSize="9" FontWeight="Bold"
+                                                                   Foreground="{StaticResource NeuralText3}"
+                                                                   VerticalAlignment="Center"/>
+                                                    </StackPanel>
+                                                    <Grid>
+                                                        <Grid.RowDefinitions>
+                                                            <RowDefinition Height="Auto"/>
+                                                            <RowDefinition Height="Auto"/>
+                                                            <RowDefinition Height="Auto"/>
+                                                            <RowDefinition Height="Auto"/>
+                                                            <RowDefinition Height="Auto"/>
+                                                            <RowDefinition Height="Auto"/>
+                                                        </Grid.RowDefinitions>
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                            <ColumnDefinition Width="*"/>
+                                                        </Grid.ColumnDefinitions>
+                                                        <TextBlock Grid.Row="0" Grid.Column="0" Text="VAULT"
+                                                                   FontSize="8.5" FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource NeuralText3}"
+                                                                   Margin="0,1,8,0"/>
+                                                        <TextBlock Grid.Row="0" Grid.Column="1" x:Name="DashHealthVaultText"
+                                                                   Text="—" FontSize="10" FontFamily="{StaticResource FontMono}"
+                                                                   Foreground="{StaticResource NeuralText1}"
+                                                                   TextTrimming="CharacterEllipsis" Margin="0,1,0,0"/>
+                                                        <TextBlock Grid.Row="1" Grid.Column="0" Text="DB"
+                                                                   FontSize="8.5" FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource NeuralText3}"
+                                                                   Margin="0,2,8,0"/>
+                                                        <TextBlock Grid.Row="1" Grid.Column="1" x:Name="DashHealthDbText"
+                                                                   Text="—" FontSize="10" FontFamily="{StaticResource FontMono}"
+                                                                   Foreground="{StaticResource NeuralText1}" Margin="0,2,0,0"/>
+                                                        <TextBlock Grid.Row="2" Grid.Column="0" Text="INDEX"
+                                                                   FontSize="8.5" FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource NeuralText3}"
+                                                                   Margin="0,2,8,0"/>
+                                                        <TextBlock Grid.Row="2" Grid.Column="1" x:Name="DashHealthIndexText"
+                                                                   Text="—" FontSize="10" FontFamily="{StaticResource FontMono}"
+                                                                   Foreground="{StaticResource NeuralText1}" Margin="0,2,0,0"/>
+                                                        <TextBlock Grid.Row="3" Grid.Column="0" Text="AI"
+                                                                   FontSize="8.5" FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource NeuralText3}"
+                                                                   Margin="0,2,8,0"/>
+                                                        <TextBlock Grid.Row="3" Grid.Column="1" x:Name="DashHealthAiText"
+                                                                   Text="—" FontSize="10" FontFamily="{StaticResource FontMono}"
+                                                                   Foreground="{StaticResource NeuralText1}" Margin="0,2,0,0"
+                                                                   TextTrimming="CharacterEllipsis"/>
+                                                        <TextBlock Grid.Row="4" Grid.Column="0" Text="MESH"
+                                                                   FontSize="8.5" FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource NeuralText3}"
+                                                                   Margin="0,2,8,0"/>
+                                                        <TextBlock Grid.Row="4" Grid.Column="1" x:Name="DashHealthMeshText"
+                                                                   Text="—" FontSize="10" FontFamily="{StaticResource FontMono}"
+                                                                   Foreground="{StaticResource NeuralText1}" Margin="0,2,0,0"/>
+                                                        <TextBlock Grid.Row="5" Grid.Column="0" Text="VER"
+                                                                   FontSize="8.5" FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource NeuralText3}"
+                                                                   Margin="0,2,8,0"/>
+                                                        <TextBlock Grid.Row="5" Grid.Column="1" x:Name="DashHealthVersionText"
+                                                                   Text="—" FontSize="10" FontFamily="{StaticResource FontMono}"
+                                                                   Foreground="{StaticResource NeuralText2}" Margin="0,2,0,0"/>
+                                                    </Grid>
+                                                </StackPanel>
+                                            </Border>
+                                        </Grid>
                                     </Border>
+                                    </StackPanel>
+                                    </ScrollViewer>
                                 <!-- end Dashboard inner 4-row Grid -->
                                 </Grid>
                         </Grid>
@@ -4437,7 +4806,7 @@
                                                 <TextBox x:Name="SshSetupCode1" IsReadOnly="True" BorderThickness="0" Background="Transparent"
                                                          FontFamily="{StaticResource MonoFont}" FontSize="12" TextWrapping="Wrap"
                                                          Foreground="{StaticResource TextPrimaryBrush}"
-                                                         Text="ssh-keygen -t ed25519 -f $HOME\.ssh\claude_xman4289_readonly_ed25519 -C &quot;claude-readonly-xman4289&quot; -N &quot;&quot;"/>
+                                                         Text="ssh-keygen -t ed25519 -f $HOME\.ssh\claude_myserver_readonly_ed25519 -C &quot;claude-readonly-myserver&quot; -N &quot;&quot;"/>
                                             </Border>
                                             <Button Content="&#x1F4CB; Copy" Style="{StaticResource NavButton}" Padding="12,6"
                                                     HorizontalAlignment="Right" Margin="0,8,0,0"
@@ -4462,7 +4831,7 @@
                                                 <TextBox x:Name="SshSetupCode2" IsReadOnly="True" BorderThickness="0" Background="Transparent"
                                                          FontFamily="{StaticResource MonoFont}" FontSize="12" TextWrapping="Wrap"
                                                          Foreground="{StaticResource TextPrimaryBrush}"
-                                                         Text="type $HOME\.ssh\claude_xman4289_readonly_ed25519.pub | ssh admin@123.253.62.251 &quot;mkdir -p ~/.ssh; chmod 700 ~/.ssh; tee -a ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys&quot;"/>
+                                                         Text="type $HOME\.ssh\claude_myserver_readonly_ed25519.pub | ssh admin@YOUR_SERVER_IP &quot;mkdir -p ~/.ssh; chmod 700 ~/.ssh; tee -a ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys&quot;"/>
                                             </Border>
                                             <Button Content="&#x1F4CB; Copy" Style="{StaticResource NavButton}" Padding="12,6"
                                                     HorizontalAlignment="Right" Margin="0,8,0,0"
@@ -4482,12 +4851,12 @@
                                             </StackPanel>
                                             <TextBlock TextWrapping="Wrap" FontSize="12" LineHeight="18" Margin="0,0,0,8"
                                                        Foreground="{StaticResource TextSecondaryBrush}"
-                                                       Text="SSH into the server and edit ~/.ssh/authorized_keys. Find the line you just appended (it ends with the comment claude-readonly-xman4289) and prepend the restrictions below. This is the second layer of defense — even if the brain's allow_patterns are bypassed, the server itself refuses unlisted commands."/>
+                                                       Text="SSH into the server and edit ~/.ssh/authorized_keys. Find the line you just appended (it ends with the comment claude-readonly-myserver) and prepend the restrictions below. This is the second layer of defense — even if the brain's allow_patterns are bypassed, the server itself refuses unlisted commands."/>
                                             <Border Background="#0D000000" Padding="12" CornerRadius="4">
                                                 <TextBox x:Name="SshSetupCode3" IsReadOnly="True" BorderThickness="0" Background="Transparent"
                                                          FontFamily="{StaticResource MonoFont}" FontSize="12" TextWrapping="Wrap"
                                                          Foreground="{StaticResource TextPrimaryBrush}"
-                                                         Text="command=&quot;/home/admin/bin/claude-readonly-shell&quot;,no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ssh-ed25519 AAAA...PASTE_PUBLIC_KEY... claude-readonly-xman4289"/>
+                                                         Text="command=&quot;/home/admin/bin/claude-readonly-shell&quot;,no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ssh-ed25519 AAAA...PASTE_PUBLIC_KEY... claude-readonly-myserver"/>
                                             </Border>
                                             <Button Content="&#x1F4CB; Copy" Style="{StaticResource NavButton}" Padding="12,6"
                                                     HorizontalAlignment="Right" Margin="0,8,0,0"
@@ -4537,7 +4906,7 @@
                                                 <TextBox x:Name="SshSetupCode5" IsReadOnly="True" BorderThickness="0" Background="Transparent"
                                                          FontFamily="{StaticResource MonoFont}" FontSize="12" TextWrapping="Wrap" AcceptsReturn="True"
                                                          Foreground="{StaticResource TextPrimaryBrush}"
-                                                         Text="{}{&#x0A;  &quot;id&quot;: &quot;xman4289-readonly&quot;,&#x0A;  &quot;description&quot;: &quot;DirectAdmin host — log tails, exim queue, WP option reads. command= pinned on server.&quot;,&#x0A;  &quot;host&quot;: &quot;123.253.62.251&quot;,&#x0A;  &quot;port&quot;: 22,&#x0A;  &quot;user&quot;: &quot;admin&quot;,&#x0A;  &quot;key_path&quot;: &quot;C:\\\\Users\\\\xman\\\\.ssh\\\\claude_xman4289_readonly_ed25519&quot;,&#x0A;  &quot;allow_patterns&quot;: [&#x0A;    &quot;^exim -bpc$&quot;,&#x0A;    &quot;^df -h$&quot;,&#x0A;    &quot;^free -m$&quot;,&#x0A;    &quot;^uptime$&quot;,&#x0A;    &quot;^tail -n \\\\d+ /var/log/[\\\\w./-]+$&quot;,&#x0A;    &quot;^wp option get [\\\\w_-]+ --path=/home/admin/domains/[\\\\w.-]+/public_html$&quot;&#x0A;  ],&#x0A;  &quot;deny_patterns&quot;: [&quot;;&quot;, &quot;&amp;&amp;&quot;, &quot;\\\\|&quot;, &quot;&gt;&quot;, &quot;&gt;&gt;&quot;, &quot;\\\\$\\\\(&quot;, &quot;`&quot;, &quot;\\\\\\\\&quot;],&#x0A;  &quot;max_runtime_sec&quot;: 30,&#x0A;  &quot;audit_to_brain&quot;: true&#x0A;}"/>
+                                                         Text="{}{&#x0A;  &quot;id&quot;: &quot;myserver-readonly&quot;,&#x0A;  &quot;description&quot;: &quot;DirectAdmin host — log tails, exim queue, WP option reads. command= pinned on server.&quot;,&#x0A;  &quot;host&quot;: &quot;YOUR_SERVER_IP&quot;,&#x0A;  &quot;port&quot;: 22,&#x0A;  &quot;user&quot;: &quot;admin&quot;,&#x0A;  &quot;key_path&quot;: &quot;C:\\\\Users\\\\YOU\\\\.ssh\\\\claude_myserver_readonly_ed25519&quot;,&#x0A;  &quot;allow_patterns&quot;: [&#x0A;    &quot;^exim -bpc$&quot;,&#x0A;    &quot;^df -h$&quot;,&#x0A;    &quot;^free -m$&quot;,&#x0A;    &quot;^uptime$&quot;,&#x0A;    &quot;^tail -n \\\\d+ /var/log/[\\\\w./-]+$&quot;,&#x0A;    &quot;^wp option get [\\\\w_-]+ --path=/home/admin/domains/[\\\\w.-]+/public_html$&quot;&#x0A;  ],&#x0A;  &quot;deny_patterns&quot;: [&quot;;&quot;, &quot;&amp;&amp;&quot;, &quot;\\\\|&quot;, &quot;&gt;&quot;, &quot;&gt;&gt;&quot;, &quot;\\\\$\\\\(&quot;, &quot;`&quot;, &quot;\\\\\\\\&quot;],&#x0A;  &quot;max_runtime_sec&quot;: 30,&#x0A;  &quot;audit_to_brain&quot;: true&#x0A;}"/>
                                             </Border>
                                             <Button Content="&#x1F4CB; Copy" Style="{StaticResource NavButton}" Padding="12,6"
                                                     HorizontalAlignment="Right" Margin="0,8,0,0"
@@ -4587,7 +4956,7 @@
                                                 <TextBox x:Name="SshSetupCode7" IsReadOnly="True" BorderThickness="0" Background="Transparent"
                                                          FontFamily="{StaticResource MonoFont}" FontSize="12" TextWrapping="Wrap" AcceptsReturn="True"
                                                          Foreground="{StaticResource TextPrimaryBrush}"
-                                                         Text="1) ดู SSH profile ที่มีให้หน่อย                  → ssh_profiles_list ต้องเจอ xman4289-readonly&#x0A;2) เช็คคิว mail ของเซิฟ xman4289                    → ssh_run exim -bpc ต้องคืนตัวเลข&#x0A;3) tail mainlog 50 บรรทัด                         → ssh_tail /var/log/exim/mainlog lines=50&#x0A;4) ลอง rm /tmp/test ดู                            → ssh_run rm ต้องได้ allowed:false reason=NotInAllowList&#x0A;5) เช็ค path: /var/log/x; rm -rf /                → ssh_tail ต้อง reject ที่ TailPathSafe"/>
+                                                         Text="1) ดู SSH profile ที่มีให้หน่อย                  → ssh_profiles_list ต้องเจอ myserver-readonly&#x0A;2) เช็คคิว mail ของเซิฟ myserver                    → ssh_run exim -bpc ต้องคืนตัวเลข&#x0A;3) tail mainlog 50 บรรทัด                         → ssh_tail /var/log/exim/mainlog lines=50&#x0A;4) ลอง rm /tmp/test ดู                            → ssh_run rm ต้องได้ allowed:false reason=NotInAllowList&#x0A;5) เช็ค path: /var/log/x; rm -rf /                → ssh_tail ต้อง reject ที่ TailPathSafe"/>
                                             </Border>
                                             <Button Content="&#x1F4CB; Copy" Style="{StaticResource NavButton}" Padding="12,6"
                                                     HorizontalAlignment="Right" Margin="0,8,0,0"
@@ -4602,7 +4971,7 @@
                                                        Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,8"/>
                                             <TextBlock TextWrapping="Wrap" FontSize="12" Margin="0,0,0,8"
                                                        Foreground="{StaticResource TextSecondaryBrush}"
-                                                       Text="Click 'Open audit log' at the top — you should see new lines with node_id starting 'ssh:xman4289-readonly' and op fields ssh_ok / ssh_denied / ssh_mitm matching what you exercised."/>
+                                                       Text="Click 'Open audit log' at the top — you should see new lines with node_id starting 'ssh:myserver-readonly' and op fields ssh_ok / ssh_denied / ssh_mitm matching what you exercised."/>
                                             <TextBlock TextWrapping="Wrap" FontSize="11" FontStyle="Italic"
                                                        Foreground="{StaticResource TextMutedBrush}"
                                                        Text="If a future connect ever returns host_key_mismatch=true, STOP. That means the server's host key changed — possible MITM, or someone reinstalled the box. Verify the new fingerprint manually before clearing the entry from ssh-known-hosts.txt."/>
@@ -4657,7 +5026,7 @@
                                         <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="20,12">
                                             <StackPanel>
                                                 <!-- Profile Id -->
-                                                <TextBlock Text="Profile id (kebab-case, e.g. xman4289-readonly)" FontSize="11" FontWeight="SemiBold"
+                                                <TextBlock Text="Profile id (kebab-case, e.g. myserver-readonly)" FontSize="11" FontWeight="SemiBold"
                                                            Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
                                                 <TextBox x:Name="SshDialogId" Padding="8,6" Margin="0,0,0,12"
                                                          FontFamily="{StaticResource MonoFont}" FontSize="12"
@@ -4962,7 +5331,7 @@
                                                            Foreground="{StaticResource NeuralText3}" Margin="0,0,0,4"
                                                            FontWeight="SemiBold"/>
                                                 <TextBox x:Name="SettingsServerUrl" Style="{StaticResource NeonTextBox}"
-                                                         Text="http://localhost:5142/brain-hub" Margin="0,0,0,12"/>
+                                                         Text="https://serverbrain.myserver.com/brain-hub" Margin="0,0,0,12"/>
                                                 <Button Content="Save Server URL" Style="{StaticResource NeuralBtnPrimary}"
                                                         Click="SaveServerUrl_Click" HorizontalAlignment="Left" Padding="16,8"/>
                                             </StackPanel>

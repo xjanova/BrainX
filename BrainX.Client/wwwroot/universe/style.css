@@ -963,6 +963,142 @@ body.wallpaper-mode {
     background: #000 !important;
 }
 
+/* ─── Wallpaper-active mode (dashboard preview) ──────────
+   Same chrome hiding as wallpaper-mode (no HUD, no settings, no info card,
+   no token chip) — but pointer-events stay enabled so the user can still
+   drag/zoom/orbit. Matches user spec: "ไม่มีตัวหนังสือบัง · ตั้งค่าไม่ได้ · เลื่อนได้ด้วยเม้า". */
+body.wallpaper-active #hud-top,
+body.wallpaper-active #legend,
+body.wallpaper-active #info-card,
+body.wallpaper-active #token-chip,
+body.wallpaper-active #settings-panel,
+body.wallpaper-active #settings-toggle,
+body.wallpaper-active #hud-bottom {
+    display: none !important;
+}
+body.wallpaper-active #universe-canvas {
+    /* opposite of wallpaper-mode — keep pointer-events ON so OrbitControls
+       receive mouse drag/wheel. grab cursor hints draggability. */
+    pointer-events: auto;
+    cursor: grab;
+}
+body.wallpaper-active #universe-canvas.dragging {
+    cursor: grabbing;
+}
+body.wallpaper-active {
+    background: #000 !important;
+}
+
+/* ─── Dashboard floating chips (Nodes/Words + Load) ─────────
+   Live INSIDE the WebView2's DOM (not WPF Border children) so
+   they're always part of the same DComp surface as the universe.
+   Only visible in dashboard mode (?mode=wallpaper-active).
+   pointer-events:none lets drag/zoom/orbit pass through. */
+body.wallpaper-active #dash-overlay-nodes,
+body.wallpaper-active #dash-overlay-load {
+    display: flex;
+}
+
+.dash-overlay {
+    position: fixed;
+    z-index: 50;
+    pointer-events: none;
+    border-radius: 12px;
+    background: linear-gradient(180deg,
+        rgba(42, 29, 79, 0.62) 0%,
+        rgba(21, 16, 44, 0.50) 50%,
+        rgba(6, 10, 16, 0.55) 100%);
+    border: 0.8px solid rgba(255, 255, 255, 0.22);
+    backdrop-filter: blur(14px) saturate(140%);
+    -webkit-backdrop-filter: blur(14px) saturate(140%);
+    box-shadow:
+        0 14px 32px rgba(0, 0, 0, 0.45),
+        inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    color: #f1ecff;
+    font-family: 'JetBrains Mono', 'Consolas', 'Segoe UI Mono', monospace;
+}
+
+/* Chip sizing is fluid: clamp() uses vw/vh of the WebView2 viewport
+   (= the universe Border size) so chips shrink in narrow dashboards
+   and grow in wide ones, but never go below readable or past noisy. */
+.dash-overlay-tl {
+    top: clamp(8px, 1.2vh, 16px);
+    left: clamp(8px, 1.2vw, 16px);
+    padding: clamp(5px, 0.7vh, 9px) clamp(9px, 1.1vw, 14px) clamp(5px, 0.7vh, 9px) clamp(8px, 1vw, 12px);
+    display: none; align-items: center;
+    gap: clamp(8px, 1vw, 14px);
+    border-radius: clamp(8px, 1vw, 11px);
+}
+.dash-overlay-bl {
+    bottom: clamp(8px, 1.2vh, 16px);
+    left: clamp(8px, 1.2vw, 16px);
+    padding: clamp(7px, 0.9vh, 11px) clamp(9px, 1.1vw, 14px) clamp(8px, 1vh, 12px) clamp(8px, 1vw, 12px);
+    width: clamp(132px, 18vw, 184px);
+    display: none; flex-direction: column;
+    border-radius: clamp(8px, 1vw, 11px);
+}
+
+.dash-chip-col       { display: flex; flex-direction: column; gap: 1px; }
+.dash-chip-label     { font-size: clamp(7px, 0.85vw, 8.5px); font-weight: 700; letter-spacing: 0.55px; color: #7d7796; }
+.dash-chip-value     { font-size: clamp(13px, 1.55vw, 17px); font-weight: 700; color: #f1ecff; line-height: 1.05; font-variant-numeric: tabular-nums; }
+.dash-chip-sep       { width: 1px; height: clamp(22px, 2.6vh, 28px); background: rgba(255, 255, 255, 0.14); }
+
+.dash-load-header {
+    display: flex; align-items: center; gap: 6px;
+    margin-bottom: clamp(4px, 0.6vh, 6px);
+}
+.dash-load-dot {
+    width: 5px; height: 5px; border-radius: 50%;
+    background: #4ae3a7;
+    box-shadow: 0 0 5px rgba(74, 227, 167, 0.7);
+    transition: background 0.4s ease, box-shadow 0.4s ease;
+    flex-shrink: 0;
+}
+.dash-load-dot.hot {
+    background: #ffc23c;
+    box-shadow: 0 0 7px rgba(255, 194, 60, 0.85);
+}
+.dash-load-title    { font-size: clamp(7.5px, 0.85vw, 8.5px); font-weight: 700; letter-spacing: 0.8px; color: #a9a3c2; }
+.dash-load-subtitle { margin-left: auto; font-size: clamp(7px, 0.8vw, 8px); font-weight: 600; letter-spacing: 0.6px; color: #7d7796; }
+
+.dash-metric-row { margin-bottom: clamp(3px, 0.5vh, 6px); }
+.dash-metric-row:last-child { margin-bottom: 0; }
+.dash-metric-head {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 2px;
+}
+.dash-metric-bar      { width: 3px; height: clamp(7px, 0.9vh, 9px); border-radius: 2px; }
+.dash-metric-bar-gpu  { background: #FF4F9E; }
+.dash-metric-bar-cpu  { background: #5BE9E9; }
+.dash-metric-label    { font-size: clamp(8px, 0.9vw, 9px); font-weight: 700; letter-spacing: 0.7px; color: #a9a3c2; }
+.dash-metric-value    { font-size: clamp(9.5px, 1.05vw, 11px); font-weight: 700; color: #f1ecff; font-variant-numeric: tabular-nums; }
+
+.dash-spark {
+    display: block;
+    width: 100%;
+    height: clamp(16px, 2.2vh, 22px);
+    overflow: visible;
+}
+.dash-spark-baseline { stroke: rgba(255, 255, 255, 0.13); stroke-width: 1; }
+.dash-spark-gridline { stroke: rgba(255, 255, 255, 0.10); stroke-width: 0.6; stroke-dasharray: 2 3; }
+.dash-spark-fill     { /* fill set inline via gradient ID */ }
+.dash-spark-stroke {
+    fill: none;
+    stroke-width: 1.4;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    filter: drop-shadow(0 0 3px rgba(255, 79, 158, 0.45));
+}
+.dash-metric-row[data-metric="cpu"] .dash-spark-stroke {
+    filter: drop-shadow(0 0 3px rgba(91, 233, 233, 0.45));
+}
+.dash-spark-halo {
+    filter: blur(3px);
+}
+
 /* ─── empty / error states ────────────────────────────── */
 .fade-in { animation: fade-in 0.45s ease-out both; }
 @keyframes fade-in {
