@@ -4,14 +4,29 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!-- The node has no .cshtml/.razor files (static dashboard), but the Web SDK
+         still validates RazorLangVersion; some SDK/package combos auto-set it to
+         "10.0" which the Razor compiler rejects (max 8.0, RZ3600). Pin to Latest. -->
+    <RazorLangVersion>Latest</RazorLangVersion>
     <Version>2.6.0</Version>
     <AssemblyVersion>2.6.0.0</AssemblyVersion>
     <FileVersion>2.6.0.0</FileVersion>
     <Product>BrainX Server</Product>
   </PropertyGroup>
 
+  <!-- CI stamps the node version to the GitHub release tag (BUILD_VERSION =
+       "2.0.<commitCount>") so SelfUpdateService's version-compare lines up with
+       the release it would pull. Local builds keep 2.6.0 and never self-update. -->
+  <PropertyGroup Condition="'$(BUILD_VERSION)' != ''">
+    <Version>$(BUILD_VERSION)</Version>
+    <InformationalVersion>$(BUILD_VERSION)+$(BUILD_COMMIT)</InformationalVersion>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.5" />
+    <!-- Lets the node run cleanly under the Windows Service Control Manager
+         (BrainXNode) — without it New-Service fails the SCM handshake (err 1053). -->
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.8" />
   </ItemGroup>
 
   <ItemGroup>

@@ -3,7 +3,21 @@ using BrainX.Server.Hubs;
 using BrainX.Core.Services;
 using BrainX.Core.Models;
 
-var builder = WebApplication.CreateBuilder(args);
+var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+{
+    Args = args,
+    // Anchor ContentRoot (→ wwwroot for the static Control Panel) to the EXE's
+    // folder. A Windows service's CWD is System32 and a by-hand run's CWD is the
+    // caller's dir — either way the default would 404 the dashboard. (UseWindowsService
+    // also sets this for the service case; explicit here covers console runs too.)
+    ContentRootPath = AppContext.BaseDirectory,
+});
+
+// Integrate with the Windows Service Control Manager when installed as the
+// BrainXNode service (does the SCM start/stop handshake → no err 1053). No-op
+// when launched as a plain console/standalone process, so the same binary
+// still works for dev + Docker.
+builder.Host.UseWindowsService();
 
 // Resolve node config from appsettings + environment (env wins). This is
 // what lets the same binary run two ways: bundled-with-client (EmbeddedMode,
@@ -32,6 +46,9 @@ builder.Services.AddCors(options =>
             policy.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader();
     });
 });
+
+// Opt-in node self-updater (BrainX__AutoUpdate=true). No-ops when disabled.
+builder.Services.AddHostedService<BrainX.Server.Services.SelfUpdateService>();
 
 var app = builder.Build();
 
@@ -983,6 +1000,14 @@ public static class NodeConfig
     /// <summary>MySQL connection string — required when StorageProvider=mysql.</summary>
     public static string? MySqlConnString { get; private set; }
 
+    /// <summary>Opt-in self-update: poll GitHub Releases and apply newer node builds.</summary>
+    public static bool AutoUpdate { get; private set; }
+    /// <summary>GitHub "owner/repo" the self-updater pulls releases from.</summary>
+    public static string UpdateRepo { get; private set; } = "xjanova/BrainX";
+    /// <summary>If set, the updater restarts THIS Windows service after swapping
+    /// files (sc stop/start). If empty, it relaunches the node exe directly.</summary>
+    public static string? UpdateServiceName { get; private set; }
+
     public static void Init(IConfiguration cfg)
     {
         var b = cfg.GetSection("BrainX");
@@ -997,6 +1022,9 @@ public static class NodeConfig
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         StorageProvider = (FirstNonEmpty(b["StorageProvider"]) ?? "sqlite").ToLowerInvariant();
         MySqlConnString = FirstNonEmpty(b["MySqlConnString"]);
+        AutoUpdate = ParseBool(b["AutoUpdate"], defaultValue: false);
+        UpdateRepo = FirstNonEmpty(b["UpdateRepo"]) ?? "xjanova/BrainX";
+        UpdateServiceName = FirstNonEmpty(b["UpdateServiceName"]);
     }
 
     static string? FirstNonEmpty(params string?[] vals)

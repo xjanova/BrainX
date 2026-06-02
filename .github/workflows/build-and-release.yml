@@ -80,6 +80,35 @@ jobs:
           cd publish/win-x64
           7z a "../../BrainX-${{ steps.ver.outputs.version }}-win-x64.zip" "."
 
+      - name: Velopack pack (client auto-update)
+        # Produces Releases/ — *-full.nupkg + BrainX-win-Setup.exe + RELEASES.
+        # The client's UpdateManager(GithubSource) reads these release assets to
+        # self-update. NOTE: only apps INSTALLED via the Setup.exe auto-update;
+        # the first switch-over is a one-time manual install.
+        shell: pwsh
+        run: |
+          dotnet tool install -g vpk --version 1.1.1
+          vpk pack `
+            --packId BrainX `
+            --packVersion ${{ steps.ver.outputs.version }} `
+            --packDir publish/win-x64 `
+            --mainExe BrainX.Client.exe `
+            --packTitle "BrainX" `
+            --outputDir Releases
+
+      - name: Publish + zip node (server self-update)
+        # brainx-node-win-x64.zip is exactly the asset SelfUpdateService looks
+        # for. BUILD_VERSION stamps the node so its version-compare matches the tag.
+        shell: pwsh
+        env:
+          BUILD_VERSION: ${{ steps.ver.outputs.version }}
+          BUILD_COMMIT:  ${{ steps.ver.outputs.sha }}
+        run: |
+          dotnet publish BrainX.Server/BrainX.Server.csproj `
+            -c Release -r win-x64 --self-contained true `
+            -p:PublishSingleFile=false -o publish/node-win-x64
+          Compress-Archive -Path publish/node-win-x64/* -DestinationPath brainx-node-win-x64.zip -Force
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -102,6 +131,9 @@ jobs:
             The shipped binary's About card and bottom bar will display
             `v${{ steps.ver.outputs.version }}+${{ steps.ver.outputs.sha }}`,
             matching this tag.
-          files: BrainX-${{ steps.ver.outputs.version }}-win-x64.zip
+          files: |
+            BrainX-${{ steps.ver.outputs.version }}-win-x64.zip
+            brainx-node-win-x64.zip
+            Releases/*
           generate_release_notes: true
           fail_on_unmatched_files: true

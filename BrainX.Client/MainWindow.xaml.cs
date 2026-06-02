@@ -2157,6 +2157,7 @@ public partial class MainWindow : Window
         // refreshes the bottom-bar label if a newer build is available.
         // Doesn't block startup — UX nicety only.
         _ = CheckLatestReleaseAsync();
+        _ = VelopackCheckAndStageAsync();   // real auto-update: download + stage in background
 
         Services.StartupProgress.Report("Initializing brain identity", 0.22, tag: "identity");
         InitializeIdentity();
@@ -5449,6 +5450,48 @@ public partial class MainWindow : Window
             // Offline, rate-limited, repo private, json shape changed —
             // any of these just leave the version label as-is.
         }
+    }
+
+    // ── Velopack auto-update (client) ──────────────────────────────────
+    // Velopack only operates from an INSTALLED build (delivered via its
+    // Setup.exe); a raw dev/unpacked build reports IsInstalled=false and this
+    // no-ops. On a newer release it downloads in the background, then the
+    // bottom-bar version chip becomes click-to-apply (swap + relaunch).
+    private Velopack.UpdateManager? _vpkMgr;
+    private Velopack.UpdateInfo? _vpkPending;
+
+    private async System.Threading.Tasks.Task VelopackCheckAndStageAsync()
+    {
+        try
+        {
+            var mgr = new Velopack.UpdateManager(
+                new Velopack.Sources.GithubSource($"https://github.com/{GitHubRepo}", null, false));
+            if (!mgr.IsInstalled) return;                  // dev/unpacked — nothing to do
+            var info = await mgr.CheckForUpdatesAsync().ConfigureAwait(false);
+            if (info == null) return;                      // already on the latest release
+            await mgr.DownloadUpdatesAsync(info).ConfigureAwait(false);
+            _vpkMgr = mgr;
+            _vpkPending = info;
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (VersionText == null) return;
+                VersionText.Text = $"v{GetLocalVersion().compareKey} ⤓ update ready";
+                VersionText.ToolTip = $"Update v{info.TargetFullRelease.Version} downloaded — click to restart & apply";
+                VersionText.Cursor = System.Windows.Input.Cursors.Hand;
+            });
+        }
+        catch (Exception ex) { Debug.WriteLine($"Velopack check: {ex.Message}"); }
+    }
+
+    private void VersionText_Click(object sender, MouseButtonEventArgs e)
+    {
+        if (_vpkMgr == null || _vpkPending == null) return;   // no staged update → ignore the click
+        try
+        {
+            StatusText.Text = "Applying update… BrainX will restart.";
+            _vpkMgr.ApplyUpdatesAndRestart(_vpkPending);
+        }
+        catch (Exception ex) { Debug.WriteLine($"Velopack apply: {ex.Message}"); }
     }
 
 

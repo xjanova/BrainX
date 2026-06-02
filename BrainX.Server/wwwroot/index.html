@@ -638,7 +638,7 @@ function viewSettings(){
       settingsField('Node Mode', S.info.embedded?'embedded (bundled with client)':'standalone node', false),
       h('div',null, h('div',{class:'eyebrow',style:{marginBottom:'7px'}},'Storage Backend · '+(S.info.storage&&S.info.storage!=='none'?S.info.storage+' active':(S.info.storageProvider||'sqlite'))),
         h('div',{style:{display:'flex',gap:'8px'}}, [['SQLite','sqlite'],['MySQL','mysql']].map(([label,key])=>{ const on=(S.info.storageProvider||'sqlite')===key; return h('button',{class:'btn sm '+(on?'solid':'ghost'),style:{flex:1,fontSize:'10px'},title:'เปลี่ยน backend ที่ BrainX Node Monitor แล้ว restart node'},label); })),
-        h('div',{class:'mono dim2',style:{fontSize:'10px',marginTop:'6px'}}, 'set via BrainX Node Monitor (env BrainX__StorageProvider) + restart · '+(S.info.storageNodes!=null?S.info.storageNodes+' nodes indexed':'')))))),
+        h('div',{class:'mono dim2',style:{fontSize:'10px',marginTop:'6px'}}, 'set via BrainX Node Monitor (env BrainX__StorageProvider) + restart · '+(S.info.storageNodes!=null?S.info.storageNodes+' nodes indexed':''))))),
     panel('AI Provider Keys','ai', null, [
       h('div',{class:'thai dim',style:{fontSize:'12px',marginBottom:'14px'}}, 'เก็บไว้ในเครื่องที่ ', h('span',{class:'mono',style:{color:'var(--accent)'}},'.obsidianx/ai-keys.json'),' — ไม่ถูกส่งออกนอกเครื่อง'),
       h('div',{style:{display:'grid',gap:'12px'}}, providers.map(([name,id])=>{ const set=!!k[id];

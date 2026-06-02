@@ -5994,9 +5994,10 @@
                              so it fits in the status row alongside the
                              other monospace chips. Full informational
                              version + commit sha + remote latest live in
-                             the tooltip. Display-only — no click. -->
+                             the tooltip. Click to apply a downloaded update. -->
                         <TextBlock Grid.Column="2" x:Name="VersionText" Text="v…" FontSize="10"
-                                   FontFamily="{StaticResource MonoFont}"
+                                   FontFamily="{StaticResource MonoFont}" Background="Transparent"
+                                   MouseLeftButtonUp="VersionText_Click"
                                    Foreground="{StaticResource TextMutedBrush}" VerticalAlignment="Center"/>
                     </Grid>
                 </Border>
