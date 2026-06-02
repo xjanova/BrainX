@@ -662,12 +662,24 @@ const LIVE_VIEWS = new Set(['overview','brains','ai','proxy','sharing','activity
 
 /* ============================ actions / data layer ============================ */
 function apiBase(){ return location.origin; }
+// node auth: a standalone node is private (RequireAuth) — every /api call needs
+// the bearer token (server file C:\\brainx\\bearer-token.txt), stored once in
+// localStorage. On a 401 we prompt for it.
+function nodeToken(){ return localStorage.getItem('brainx_node_token') || ''; }
+function authHeaders(base){ const t=nodeToken(); const o=Object.assign({}, base||{}); if(t) o['Authorization']='Bearer '+t; return o; }
+let _tokenPrompting=false;
+function requireToken(){
+  if(_tokenPrompting) return; _tokenPrompting=true;
+  const t=prompt('This node is private. Paste its bearer token\n(server file: C:\\brainx\\bearer-token.txt):','');
+  if(t&&t.trim()){ localStorage.setItem('brainx_node_token', t.trim()); location.reload(); }
+  // cancelled -> stay quiet; reload the page to try again
+}
 function toast(msg){
   const t=h('div',{style:{position:'fixed',bottom:'24px',left:'50%',transform:'translateX(-50%)',zIndex:10001,background:'rgba(10,22,40,.95)',border:'1px solid var(--accent)',color:'var(--accent)',padding:'10px 18px',borderRadius:'var(--r-sm)',fontFamily:'var(--font-ui)',fontSize:'11px',letterSpacing:'.1em',boxShadow:'var(--glow-accent)'}}, msg);
   document.body.appendChild(t); setTimeout(()=>{ t.style.transition='opacity .4s'; t.style.opacity='0'; setTimeout(()=>t.remove(),400); }, 1800);
 }
 function copyText(txt,btn){ navigator.clipboard&&navigator.clipboard.writeText(txt).catch(()=>{}); if(btn){ const old=btn.innerHTML; btn.innerHTML=''; btn.appendChild(icon('check',13)); setTimeout(()=>btn.innerHTML=old,1400); } }
-async function fetchJSON(path,opts){ const r=await fetch(apiBase()+path,opts); if(!r.ok) throw new Error(path+' '+r.status); return r.json(); }
+async function fetchJSON(path,opts){ opts=opts||{}; const r=await fetch(apiBase()+path, Object.assign({}, opts, {headers: authHeaders(opts.headers)})); if(r.status===401){ requireToken(); throw new Error(path+' 401'); } if(!r.ok) throw new Error(path+' '+r.status); return r.json(); }
 
 async function browseVault(peer){
   const q=prompt('ค้นหาใน brain ของ host (REST /api/brain/search):',''); if(q==null||!q.trim()) return;
@@ -686,7 +698,7 @@ async function startPull(name){
   if(S.pulls.some(p=>p.name===n)||S.models.some(m=>m.name===n)){ toast('already present'); return; }
   const pull={name:n,pct:0,status:'downloading'}; S.pulls.push(pull); pushActivity('ai','AI Hub: pulling "'+n+'"…'); render();
   try{
-    const resp=await fetch(apiBase()+'/api/ai/models/pull',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n})});
+    const resp=await fetch(apiBase()+'/api/ai/models/pull',{method:'POST',headers:authHeaders({'Content-Type':'application/json'}),body:JSON.stringify({name:n})});
     const reader=resp.body.getReader(); const dec=new TextDecoder(); let buf='';
     while(true){ const {done,value}=await reader.read(); if(done) break; buf+=dec.decode(value,{stream:true});
       let idx; while((idx=buf.indexOf('\n\n'))>=0){ const chunk=buf.slice(0,idx); buf=buf.slice(idx+2);
@@ -705,13 +717,13 @@ async function startPull(name){
 }
 async function delModel(name){
   if(!confirm('Delete model "'+name+'" from Ollama?')) return;
-  try{ await fetch(apiBase()+'/api/ai/models/'+encodeURIComponent(name),{method:'DELETE'}); pushActivity('leave','AI Hub: model "'+name+'" deleted'); loadModels(); }
+  try{ await fetch(apiBase()+'/api/ai/models/'+encodeURIComponent(name),{method:'DELETE',headers:authHeaders()}); pushActivity('leave','AI Hub: model "'+name+'" deleted'); loadModels(); }
   catch(e){ toast('delete failed: '+e.message); }
 }
 function addKey(id,name){ const v=prompt('Paste API key for '+name+':',''); if(v==null||!v.trim()) return; saveKeys({[id]:v.trim()}); }
 function clearKey(id){ if(!confirm('Clear this key?')) return; saveKeys({[id]:''}); }
 async function saveKeys(obj){
-  try{ await fetch(apiBase()+'/api/ai/keys',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(obj)}); toast('keys saved'); await loadKeyStatus(); render(); }
+  try{ await fetch(apiBase()+'/api/ai/keys',{method:'POST',headers:authHeaders({'Content-Type':'application/json'}),body:JSON.stringify(obj)}); toast('keys saved'); await loadKeyStatus(); render(); }
   catch(e){ toast('save failed (auth?): '+e.message); }
 }
 

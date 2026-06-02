@@ -96,7 +96,7 @@ if (!NodeConfig.EmbeddedMode && (!NodeConfig.RequireAuth || string.IsNullOrEmpty
 // are never gated here — the sensitive surface is the two writers below.
 app.Use(async (ctx, next) =>
 {
-    if (NodeConfig.RequireAuth && IsProtectedWrite(ctx.Request) && !BearerOk(ctx.Request))
+    if (NodeConfig.RequireAuth && IsProtected(ctx.Request) && !BearerOk(ctx.Request))
     {
         ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
         await ctx.Response.WriteAsJsonAsync(new { error = "unauthorized — bearer token required" });
@@ -933,12 +933,17 @@ app.MapPost("/api/ai/keys", async (HttpContext ctx) =>
 app.MapGet("/api/ai/stats/router", () => Results.Ok(RouterStats.Snapshot()));
 app.MapPost("/api/ai/stats/router/reset", () => { RouterStats.Reset(); return Results.Ok(); });
 
-// Which requests the bearer gate protects — the two endpoints that write to
-// disk. Everything else is read-only and harmless to leave open.
-static bool IsProtectedWrite(HttpRequest r) =>
-    HttpMethods.IsPost(r.Method) &&
-    (r.Path.StartsWithSegments("/api/ai/keys")
-     || r.Path.StartsWithSegments("/api/brain/auto-ingest"));
+// Default-deny gate: when RequireAuth is on, EVERY /api + /v1 request (reads
+// included — brain data, AI hub, stats, config) needs the bearer token. Only
+// liveness (/health, /api/health) stays open for monitoring; static dashboard
+// files and the SignalR /brain-hub aren't under /api so they pass (the hub has
+// its own challenge-response auth; the dashboard's own fetches carry the token).
+static bool IsProtected(HttpRequest r)
+{
+    var p = r.Path;
+    if (p.StartsWithSegments("/health") || p.StartsWithSegments("/api/health")) return false;
+    return p.StartsWithSegments("/api") || p.StartsWithSegments("/v1");
+}
 
 // Constant-time bearer-token check (avoids leaking the token via compare
 // timing). Returns false when no token is configured so a misconfigured
