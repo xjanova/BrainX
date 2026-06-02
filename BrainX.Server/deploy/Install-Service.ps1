@@ -14,7 +14,7 @@ param(
     [string]$AppDir   = "C:\brainx\app",
     [string]$VaultDir = "C:\brainx\vault",
     [int]   $Port     = 5142,
-    [string]$Domain   = ""      # e.g. serverbrain.example.com — restricts CORS when set
+    [string]$Domain   = ""      # e.g. serverbrain.example.com - restricts CORS when set
 )
 $ErrorActionPreference = "Continue"   # one soft error must not abort the whole install
 $svc  = "BrainXNode"
@@ -44,11 +44,11 @@ if (Test-SvcExists $svc) {
     Start-Sleep 2
     & sc.exe delete $svc *> $null
     if (-not (Wait-SvcGone $svc)) {
-        Write-Host "[warn] $svc still 'marked for deletion' — close services.msc / Event Viewer if open."
+        Write-Host "[warn] $svc still 'marked for deletion' - close services.msc / Event Viewer if open."
     }
 }
 
-# Bearer token — reuse an existing one across re-installs, else generate 24 bytes hex.
+# Bearer token - reuse an existing one across re-installs, else generate 24 bytes hex.
 $tokenFile = Join-Path $root "bearer-token.txt"
 if (Test-Path $tokenFile) { $token = (Get-Content $tokenFile -Raw).Trim() }
 else {
@@ -69,7 +69,7 @@ for ($i = 1; $i -le 5 -and -not $created; $i++) {
     }
 }
 if (-not $created) {
-    Write-Host "[FATAL] could not create $svc — likely lingering 'marked for deletion'. Reboot or close services.msc, then re-run."
+    Write-Host "[FATAL] could not create $svc - likely lingering 'marked for deletion'. Reboot or close services.msc, then re-run."
     try { Stop-Transcript } catch {}; exit 1
 }
 # Auto-restart on crash + a description (New-Service can't set these).
@@ -97,7 +97,7 @@ Start-Sleep 4
 $status = (Get-Service $svc -ErrorAction SilentlyContinue).Status
 Write-Host "Service status: $status"
 if ($status -ne 'Running') {
-    Write-Host "[warn] not Running — capturing the node's startup output for diagnosis:"
+    Write-Host "[warn] not Running - capturing the node's startup output for diagnosis:"
     $o = Join-Path $root "node-startup.txt"
     $env:ASPNETCORE_URLS = "http://127.0.0.1:$Port"; $env:BrainX__VaultPath = $VaultDir
     $p = Start-Process $exe -PassThru -RedirectStandardOutput $o -RedirectStandardError "$o.err" -WindowStyle Hidden
@@ -107,7 +107,7 @@ if ($status -ne 'Running') {
 
 try {
     $h = Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 8
-    Write-Host "[ok] node healthy — embedded=$($h.embedded) authRequired=$($h.authRequired)"
+    Write-Host "[ok] node healthy - embedded=$($h.embedded) authRequired=$($h.authRequired)"
 } catch { Write-Host "[warn] health probe failed: $($_.Exception.Message)" }
 
 Write-Host ""

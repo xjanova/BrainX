@@ -22,7 +22,7 @@ if (-not (Test-Path $cf)) {
     Invoke-WebRequest "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile $cf
 }
 
-Write-Host "`n>>> A browser will open — sign in and authorize the zone for $Domain`n"
+Write-Host "`n>>> A browser will open - sign in and authorize the zone for $Domain`n"
 & $cf tunnel login
 & $cf tunnel create $TunnelName
 & $cf tunnel route dns $TunnelName $Domain
@@ -42,4 +42,4 @@ ingress:
 Start-Service cloudflared -ErrorAction SilentlyContinue
 
 Write-Host "`n[done] Tunnel up. Verify:  Invoke-RestMethod https://$Domain/health"
-Write-Host "       (Cloudflare DNS now points serverbrain at the tunnel — no origin IP, no 526.)"
+Write-Host "       (Cloudflare DNS now points serverbrain at the tunnel - no origin IP, no 526.)"
