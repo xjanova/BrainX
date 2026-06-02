@@ -33,16 +33,14 @@ public partial class MainWindow : Window
     // Network
     private readonly NetworkClient _network = new();
 
-    // Mesh-hub-only model (see RemoteNodeConfig):
-    //  _hubUrl      — the brain NETWORK rendezvous (SignalR /brain-hub). Public
-    //                 bootnode by default; the client "joins the network" here.
-    //  _localAiBase — this client's OWN local node (REST + AI Hub). Stays local.
+    // Two independent endpoints (see RemoteNodeConfig):
+    //  _hubUrl      — the public mesh rendezvous (SignalR /brain-hub) for Join
+    //                 Brain (BitTorrent-style file sharing / discovery).
+    //  _localAiBase — this client's OWN brain + AI on localhost. Search is
+    //                 local-first; the server that answers here runs SEPARATELY
+    //                 (the client never launches or bundles it).
     private string _hubUrl = RemoteNodeConfig.DefaultHubUrl;
     private string _localAiBase = RemoteNodeConfig.DefaultLocalAiBase;
-
-    // Embedded = the LOCAL AI/brain node runs on this machine (client auto-launches
-    // it). This governs ONLY the local node — the mesh hub is always remote.
-    private bool _embeddedMode = true;
     private readonly List<ShareRequest> _incomingShares = [];
     private readonly List<string> _shareHistory = [];
 
@@ -7864,11 +7862,16 @@ public partial class MainWindow : Window
     // ═══════════════════════════════════════
     private async Task RefreshNetworkStats()
     {
-        if (!_network.IsConnected)
+        bool online = _network.IsConnected;
+        SetNetworkOnline(online);
+
+        if (!online)
         {
-            NetStatNodes.Text = "—";
-            NetStatWords.Text = "—";
-            NetStatShares.Text = "—";
+            NetBrainsText.Text = "0";
+            NetKnowledgeText.Text = "—";
+            NetWordsText.Text = "—";
+            BuildNetworkTopics(null);
+            DrawNetworkConstellation(0, false);
             return;
         }
 
@@ -7877,12 +7880,12 @@ public partial class MainWindow : Window
             var stats = await _network.GetNetworkStatsAsync();
             if (stats is Newtonsoft.Json.Linq.JObject obj)
             {
-                NetworkPeerCount.Text = obj["TotalPeers"]?.ToString() ?? "0";
-                NetStatNodes.Text = (obj["TotalKnowledge"]?.ToObject<int>() ?? 0).ToString("N0");
-                NetStatWords.Text = (obj["TotalWords"]?.ToObject<int>() ?? 0).ToString("N0");
-
-                var categories = obj["Categories"] as Newtonsoft.Json.Linq.JObject;
-                NetStatShares.Text = categories?.Count.ToString() ?? "0";
+                int peers = obj["TotalPeers"]?.ToObject<int>() ?? 0;
+                NetBrainsText.Text   = peers.ToString("N0");
+                NetKnowledgeText.Text = (obj["TotalKnowledge"]?.ToObject<int>() ?? 0).ToString("N0");
+                NetWordsText.Text    = FormatCompact(obj["TotalWords"]?.ToObject<long>() ?? 0);
+                BuildNetworkTopics(obj["Categories"] as Newtonsoft.Json.Linq.JObject);
+                DrawNetworkConstellation(peers, true);
             }
         }
         catch (Exception ex)
@@ -7891,6 +7894,152 @@ public partial class MainWindow : Window
             StatusText.Text = "Could not fetch network stats";
         }
     }
+
+    /// <summary>Reflect central-server reachability in the Join Brain HUD: status
+    /// dot + label, the verified shield (shown only when the hub is reached over
+    /// TLS — wss/https — so a fake plaintext redirect can never wear the badge),
+    /// the host label, and the core-star colour (violet live / grey dark).</summary>
+    private void SetNetworkOnline(bool online)
+    {
+        if (NetStatusText == null) return;   // Network view not built yet
+
+        NetStatusText.Text = online ? "ONLINE" : "OFFLINE";
+        NetStatusDot.Fill = new SolidColorBrush(online
+            ? Color.FromRgb(0x4A, 0xE3, 0xA7) : Color.FromRgb(0xFF, 0x6B, 0x6B));
+        NetHostText.Text = RemoteNodeConfig.HostLabel(_hubUrl);
+
+        bool tls = _hubUrl.StartsWith("https", StringComparison.OrdinalIgnoreCase)
+                || _hubUrl.StartsWith("wss",   StringComparison.OrdinalIgnoreCase);
+        NetVerifiedBadge.Visibility = (online && tls) ? Visibility.Visible : Visibility.Collapsed;
+
+        // Core-star gradient: violet when live, desaturated when dark.
+        if (NetworkCoreStopA   != null) NetworkCoreStopA.Color   = online ? Color.FromRgb(0xC9, 0xB5, 0xFF) : Color.FromRgb(0x55, 0x55, 0x77);
+        if (NetworkCoreStopB   != null) NetworkCoreStopB.Color   = online ? Color.FromRgb(0x6A, 0x48, 0xD6) : Color.FromRgb(0x2A, 0x2A, 0x3C);
+        if (NetworkCoreHaloStop != null) NetworkCoreHaloStop.Color = online ? Color.FromRgb(0x9D, 0x7B, 0xFF) : Color.FromRgb(0x55, 0x55, 0x77);
+
+        LeaveNetworkBtn.Visibility = online ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>Draw the mini-galaxy: peer stars on two rings around the central
+    /// server, each tethered by a faint live link. Redrawn on stats refresh /
+    /// peer-count change — no per-element animation, so it stays leak-free.</summary>
+    private void DrawNetworkConstellation(int peers, bool online)
+    {
+        var canvas = NetworkConstellationCanvas;
+        if (canvas == null) return;
+        canvas.Children.Clear();
+        canvas.UpdateLayout();
+        double w = canvas.ActualWidth, h = canvas.ActualHeight;
+        if (w <= 0) w = 300;
+        if (h <= 0) h = 206;
+        double cx = w / 2.0, cy = h / 2.0;
+
+        int shown = Math.Min(Math.Max(peers, 0), 14);
+        if (shown == 0) return;   // just the central star (XAML overlay)
+
+        var linkColor = online ? Color.FromArgb(0x55, 0x9D, 0x7B, 0xFF) : Color.FromArgb(0x1E, 0x9D, 0x7B, 0xFF);
+        var starColor = online ? Color.FromRgb(0x5B, 0xE9, 0xE9) : Color.FromRgb(0x55, 0x55, 0x77);
+        var starGlow  = Color.FromRgb(0x9D, 0x7B, 0xFF);
+        double ringA = Math.Min(w, h) * 0.30, ringB = Math.Min(w, h) * 0.46;
+
+        for (int i = 0; i < shown; i++)
+        {
+            double ang = (i * 2.0 * Math.PI / shown) + (i % 2 == 0 ? 0.0 : 0.36);
+            double r = (i % 2 == 0) ? ringA : ringB;
+            double px = cx + Math.Cos(ang) * r, py = cy + Math.Sin(ang) * r;
+
+            canvas.Children.Add(new System.Windows.Shapes.Line
+            {
+                X1 = cx, Y1 = cy, X2 = px, Y2 = py,
+                Stroke = new SolidColorBrush(linkColor), StrokeThickness = 1,
+            });
+
+            var dot = new System.Windows.Shapes.Ellipse
+            {
+                Width = 7, Height = 7,
+                Fill = new SolidColorBrush(starColor),
+                Effect = online ? new System.Windows.Media.Effects.DropShadowEffect
+                {
+                    Color = starGlow, BlurRadius = 8, ShadowDepth = 0, Opacity = 0.8,
+                } : null,
+            };
+            System.Windows.Controls.Canvas.SetLeft(dot, px - 3.5);
+            System.Windows.Controls.Canvas.SetTop(dot, py - 3.5);
+            canvas.Children.Add(dot);
+        }
+    }
+
+    /// <summary>Fill the "KNOWLEDGE JOINED" chip cloud from the hub's Categories
+    /// map (topic → count), biggest first, capped with a "+N more" overflow.</summary>
+    private void BuildNetworkTopics(Newtonsoft.Json.Linq.JObject? categories)
+    {
+        var panel = NetworkTopicsPanel;
+        if (panel == null) return;
+        panel.Children.Clear();
+
+        var items = categories?.Properties()
+            .Select(p => (name: p.Name, count: p.Value?.ToObject<int>() ?? 0))
+            .Where(t => !string.IsNullOrWhiteSpace(t.name))
+            .OrderByDescending(t => t.count)
+            .ToList() ?? new();
+
+        if (items.Count == 0)
+        {
+            panel.Children.Add(new TextBlock
+            {
+                Text = _network.IsConnected ? "No shared topics yet" : "Join the network to see shared topics",
+                FontSize = 12,
+                Foreground = (Brush)FindResource("NeuralText3"),
+            });
+            return;
+        }
+
+        var chipBg = (Brush)(TryFindResource("NeuralBgInset") ?? Brushes.Black);
+        var chipFg = (Brush)(TryFindResource("NeuralText2") ?? Brushes.White);
+        var cntFg  = new SolidColorBrush(Color.FromRgb(0x5B, 0xE9, 0xE9));
+        const int max = 12;
+
+        foreach (var (name, count) in items.Take(max))
+        {
+            // Topic names come from the remote hub — cap length so a hostile
+            // node can't bloat the UI with a giant string.
+            var label = name.Length > 24 ? name[..23] + "…" : name;
+            var sp = new StackPanel { Orientation = Orientation.Horizontal };
+            sp.Children.Add(new TextBlock
+            {
+                Text = label, FontSize = 12, FontWeight = FontWeights.Medium,
+                Foreground = chipFg, VerticalAlignment = VerticalAlignment.Center,
+            });
+            if (count > 0)
+                sp.Children.Add(new TextBlock
+                {
+                    Text = "  " + count.ToString("N0"), FontSize = 11, FontWeight = FontWeights.SemiBold,
+                    Foreground = cntFg, VerticalAlignment = VerticalAlignment.Center,
+                });
+            panel.Children.Add(new Border
+            {
+                Background = chipBg,
+                CornerRadius = new CornerRadius(11),
+                Padding = new Thickness(10, 4, 10, 4),
+                Margin = new Thickness(0, 0, 7, 7),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(0x22, 0x9D, 0x7B, 0xFF)),
+                BorderThickness = new Thickness(1),
+                Child = sp,
+            });
+        }
+        if (items.Count > max)
+            panel.Children.Add(new TextBlock
+            {
+                Text = $"+{items.Count - max} more", FontSize = 12,
+                VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(2, 0, 0, 7),
+                Foreground = (Brush)FindResource("NeuralText3"),
+            });
+    }
+
+    private static string FormatCompact(long n) =>
+        n >= 1_000_000 ? $"{n / 1_000_000.0:0.#}M"
+      : n >= 1_000     ? $"{n / 1_000.0:0.#}k"
+      : n.ToString("N0");
 
     private void CopyAddress_Click(object s, MouseButtonEventArgs e)
     {
@@ -8302,10 +8451,9 @@ public partial class MainWindow : Window
     {
         if (AiBackendCombo == null) return;
 
-        // Auto-launch the Server only in embedded mode. When pointing at a
-        // remote brainx-node we must NOT spawn a local one — just hit the
-        // remote AI base below. (Symmetric counterpart to MCP launching us.)
-        if (_embeddedMode) TryLaunchServerIfNotRunning(_vaultPath);
+        // The client NEVER launches the server — BrainX.Server runs as a
+        // separate process (anti-RE: its code must never ship with the client).
+        // We just hit the local AI base below; start the server separately.
 
         // Retry a few times — Kestrel takes 1-3 seconds to bind after
         // launch, so the first request often misses if we just spawned it.
@@ -8349,75 +8497,13 @@ public partial class MainWindow : Window
         }
 
         if (ClaudeViewStatus != null)
-            ClaudeViewStatus.Text = $"AI Hub unreachable after retries: {lastEx?.Message}. Start the server manually.";
+            ClaudeViewStatus.Text = $"Local server unreachable: {lastEx?.Message}. Start BrainX.Server (it runs separately).";
     }
 
-    /// <summary>
-    /// If `BrainX.Server` isn't running, walk up to the solution root,
-    /// pick the freshest build (Release vs Debug, by LastWriteTime — same
-    /// trick MCP uses to launch us), and spawn it minimized. The Server
-    /// is what serves /api/ai/backends, /api/brain/*, etc., so the AI
-    /// model dropdowns and several other Client features are blank
-    /// without it.
-    /// </summary>
-    private static void TryLaunchServerIfNotRunning(string vaultPath)
-    {
-        try
-        {
-            if (Process.GetProcessesByName("BrainX.Server").Length > 0) return;
-
-            var clientExe = Process.GetCurrentProcess().MainModule?.FileName;
-            if (string.IsNullOrEmpty(clientExe)) return;
-            var solnRoot = FindObsidianxSolutionRoot(Path.GetDirectoryName(clientExe) ?? "");
-            if (solnRoot == null) return;
-
-            string[] candidates =
-            [
-                Path.Combine(solnRoot, "BrainX.Server", "bin", "Release", "net10.0", "BrainX.Server.exe"),
-                Path.Combine(solnRoot, "BrainX.Server", "bin", "Debug",   "net10.0", "BrainX.Server.exe"),
-            ];
-
-            var pick = candidates
-                .Where(File.Exists)
-                .Select(p => (path: p, mtime: File.GetLastWriteTimeUtc(p)))
-                .OrderByDescending(t => t.mtime)
-                .Select(t => t.path)
-                .FirstOrDefault();
-            if (string.IsNullOrEmpty(pick)) return;
-
-            // Service-style spawn: no visible console. UseShellExecute=false
-            // + CreateNoWindow=true is the only combination that fully hides
-            // the Kestrel logs window. The user sees only the Client; Server
-            // status is surfaced via the status-bar indicator instead.
-            var psi = new ProcessStartInfo
-            {
-                FileName = pick,
-                WorkingDirectory = Path.GetDirectoryName(pick)!,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            };
-            // Hand the embedded server the vault path + mark it embedded, so it
-            // no longer relies on a hardcoded G:\Obsidian fallback and stays in
-            // wide-open localhost mode (no bearer auth for the local client).
-            if (!string.IsNullOrWhiteSpace(vaultPath))
-                psi.EnvironmentVariables["BrainX__VaultPath"] = vaultPath;
-            psi.EnvironmentVariables["BrainX__EmbeddedMode"] = "true";
-            var proc = Process.Start(psi);
-            // Drain stdout/err so the buffer never fills and blocks the
-            // Server process. We don't show this output; if you need it,
-            // hook a logger here.
-            if (proc != null)
-            {
-                proc.OutputDataReceived += (_, _) => { };
-                proc.ErrorDataReceived += (_, _) => { };
-                proc.BeginOutputReadLine();
-                proc.BeginErrorReadLine();
-            }
-        }
-        catch (Exception ex) { Debug.WriteLine($"Server launch failed: {ex.Message}"); }
-    }
+    // [removed] TryLaunchServerIfNotRunning — the client no longer launches OR
+    // bundles BrainX.Server. The brain/AI node is deployed remotely (anti-RE:
+    // the server is the product's "ไม้เด็ด" and must not ship with the client).
+    // Node URL resolution now lives in RemoteNodeConfig + LoadSettingsFromFile.
 
     private static string? FindObsidianxSolutionRoot(string startDir)
     {
@@ -9108,7 +9194,8 @@ public partial class MainWindow : Window
     private void OnPeerCountChanged(int count)
     {
         PeerCountText.Text = $"{count} peer{(count != 1 ? "s" : "")} connected";
-        NetworkPeerCount.Text = count.ToString();
+        if (NetBrainsText != null) NetBrainsText.Text = count.ToString("N0");
+        if (_network.IsConnected) DrawNetworkConstellation(count, true);
         PeersSubtitle.Text = $"{count} brain{(count != 1 ? "s" : "")} online";
         // Dashboard NETWORK card mirror.
         if (DashNetPeerCountText != null) DashNetPeerCountText.Text = count.ToString();
@@ -11059,7 +11146,6 @@ public partial class MainWindow : Window
             {
                 ["HubUrl"] = _hubUrl,
                 ["LocalAiBase"] = _localAiBase,
-                ["EmbeddedMode"] = _embeddedMode,
                 ["BrainName"] = _identity.DisplayName,
                 ["ScanPaths"] = _scanPaths,
                 ["ScanWholeMachine"] = _scanWholeMachine,
@@ -11093,17 +11179,16 @@ public partial class MainWindow : Window
             var json = File.ReadAllText(SettingsFilePath);
             var settings = Newtonsoft.Json.JsonConvert.DeserializeObject<Dictionary<string, object>>(json);
             if (settings == null) return;
-            // New keys (HubUrl + LocalAiBase). Back-compat: an older single
-            // "ServerUrl" was the local-or-merged endpoint — migrate it to the
-            // local AI base (the mesh hub now defaults to the public bootnode).
+            //  • HubUrl      — the public mesh rendezvous (Join Brain).
+            //  • LocalAiBase — this client's OWN brain/AI base on localhost. Stays
+            //    local; a legacy single "ServerUrl" migrates into it. The server
+            //    that answers here runs separately (never launched by the client).
             if (settings.TryGetValue("HubUrl", out var hu) && hu != null)
                 _hubUrl = hu.ToString() ?? _hubUrl;
             if (settings.TryGetValue("LocalAiBase", out var lab) && lab != null)
-                _localAiBase = lab.ToString() ?? _localAiBase;
+                _localAiBase = RemoteNodeConfig.RestBase(lab.ToString() ?? _localAiBase);
             else if (settings.TryGetValue("ServerUrl", out var legacy) && legacy != null)
                 _localAiBase = RemoteNodeConfig.RestBase(legacy.ToString() ?? _localAiBase);
-            if (settings.TryGetValue("EmbeddedMode", out var em) && em != null)
-                bool.TryParse(em.ToString(), out _embeddedMode);
             if (settings.TryGetValue("ScanWholeMachine", out var swm) && swm != null)
                 bool.TryParse(swm.ToString(), out _scanWholeMachine);
             if (settings.TryGetValue("ScanPatterns", out var sp) && sp != null)
@@ -11703,7 +11788,7 @@ public partial class MainWindow : Window
             ServerStatusDot.Fill = status == "Healthy"
                 ? (SolidColorBrush)FindResource("NeonGreenBrush")
                 : new SolidColorBrush(Color.FromRgb(0xCC, 0x88, 0x44));
-            ServerStatusText.Text = (_embeddedMode ? "Srv ✓ " : "Node ✓ ") + RemoteNodeConfig.HostLabel(AiServerBase);
+            ServerStatusText.Text = "Srv ✓ " + RemoteNodeConfig.HostLabel(AiServerBase);
         }
         catch (Exception ex)
         {
@@ -11726,14 +11811,8 @@ public partial class MainWindow : Window
 
     private void ServerStatusChip_Click(object sender, MouseButtonEventArgs e)
     {
-        // Prefer "open the dashboard in browser" — Server has its own
-        // cyberpunk web UI at root. If it's down, try to launch it.
-        if (_embeddedMode && Process.GetProcessesByName("BrainX.Server").Length == 0)
-        {
-            TryLaunchServerIfNotRunning(_vaultPath);
-            StatusText.Text = "Starting Server… (chip will go green when healthy)";
-            return;
-        }
+        // Open the remote node's web dashboard in the default browser. The
+        // client never launches a server — the node is deployed elsewhere.
         try
         {
             Process.Start(new ProcessStartInfo

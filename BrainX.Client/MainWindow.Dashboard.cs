@@ -881,33 +881,125 @@ public partial class MainWindow
                 : (Brush)(System.Windows.Application.Current.TryFindResource("NeuralRose") ?? Brushes.IndianRed);
         }
 
-        // Draw sparkline: 24 vertical bars across DashMcpSparkCanvas width.
+        // ── Draw the 24-hour histogram ────────────────────────────────
+        // Gradient bars (violet→cyan by intensity), rounded tops, a faint
+        // baseline + 50 % gridline, a glow on the busiest hour, and a cyan
+        // "now" accent (bar + crown dot) on the right-most current-hour bar.
+        // Matches the fluid look of the GPU/CPU load sparkline next door.
         DashMcpSparkCanvas.UpdateLayout();
         double w = DashMcpSparkCanvas.ActualWidth;
         double h = DashMcpSparkCanvas.ActualHeight;
         if (w <= 0) w = 220;
         if (h <= 0) h = 46;
         int max = Math.Max(1, bins24.Max());
+        int peakIdx = max > 0 ? Array.IndexOf(bins24, bins24.Max()) : -1;
         double slot = w / 24.0;
-        var barBrush = (Brush)(System.Windows.Application.Current.TryFindResource("NeuralViolet2")
-                              ?? Brushes.MediumPurple);
+        double barW = Math.Max(2.5, slot - 3.0);
+
+        var cViolet   = ResColor("NeuralViolet2", 0xb8, 0x9d, 0xff);
+        var cVioletLo = ResColor("NeuralViolet",  0x9d, 0x7b, 0xff);
+        var cCyan     = ResColor("NeuralCyan",    0x5b, 0xe9, 0xe9);
+        var cMint     = ResColor("NeuralMint",    0x4a, 0xe3, 0xa7);
+
+        // Baseline — faint full-width floor line.
+        DashMcpSparkCanvas.Children.Add(new System.Windows.Shapes.Line
+        {
+            X1 = 0, X2 = w, Y1 = h - 0.5, Y2 = h - 0.5,
+            Stroke = new SolidColorBrush(Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF)),
+            StrokeThickness = 1,
+        });
+        // 50 % gridline (dashed) — lets the eye read magnitude at a glance.
+        DashMcpSparkCanvas.Children.Add(new System.Windows.Shapes.Line
+        {
+            X1 = 0, X2 = w, Y1 = h / 2.0, Y2 = h / 2.0,
+            Stroke = new SolidColorBrush(Color.FromArgb(0x14, 0xFF, 0xFF, 0xFF)),
+            StrokeThickness = 0.6,
+            StrokeDashArray = new DoubleCollection { 2, 3 },
+            SnapsToDevicePixels = true,
+        });
+
         for (int i = 0; i < 24; i++)
         {
-            double bh = Math.Max(2.0, (bins24[i] / (double)max) * (h - 4));
-            var rect = new System.Windows.Shapes.Rectangle
+            bool isNow = (i == 23);                  // index 23 = current hour
+            int v = bins24[i];
+            double left = i * slot + (slot - barW) / 2.0;
+
+            if (v == 0)
             {
-                Width = Math.Max(2.0, slot - 2),
+                // Empty hour → a tiny dim stub on the floor so the 24-hour
+                // rhythm stays legible without ugly full-height gray bars.
+                var stub = new System.Windows.Shapes.Rectangle
+                {
+                    Width = barW, Height = 2, RadiusX = 1, RadiusY = 1,
+                    Fill = new SolidColorBrush(Color.FromArgb(
+                        isNow ? (byte)0x55 : (byte)0x24, cViolet.R, cViolet.G, cViolet.B)),
+                };
+                System.Windows.Controls.Canvas.SetLeft(stub, left);
+                System.Windows.Controls.Canvas.SetTop(stub, h - 3);
+                DashMcpSparkCanvas.Children.Add(stub);
+                continue;
+            }
+
+            double t  = v / (double)max;             // 0..1 intensity
+            double bh = Math.Max(3.0, t * (h - 5));
+            double topY = h - bh - 1;
+
+            // Top colour shifts violet→cyan with intensity; the "now" bar
+            // always leans cyan/mint so the current hour pops.
+            var top = isNow ? LerpColor(cCyan, cMint, 0.35) : LerpColor(cViolet, cCyan, t * 0.85);
+            top = BrightenColor(top, 1.12);
+
+            var bar = new System.Windows.Controls.Border
+            {
+                Width = barW,
                 Height = bh,
-                RadiusX = 1.5,
-                RadiusY = 1.5,
-                Fill = bins24[i] == 0
-                    ? (Brush)(System.Windows.Application.Current.TryFindResource("NeuralLine") ?? Brushes.Gray)
-                    : barBrush,
-                Opacity = bins24[i] == 0 ? 0.4 : 0.9,
+                CornerRadius = new System.Windows.CornerRadius(2.5, 2.5, 0, 0),
+                Background = new LinearGradientBrush
+                {
+                    StartPoint = new System.Windows.Point(0, 0),
+                    EndPoint   = new System.Windows.Point(0, 1),
+                    GradientStops = new GradientStopCollection
+                    {
+                        new GradientStop(Color.FromArgb(0xFF, top.R, top.G, top.B), 0.0),
+                        new GradientStop(Color.FromArgb(0xE6, cViolet.R, cViolet.G, cViolet.B), 0.55),
+                        new GradientStop(Color.FromArgb(0x38, cVioletLo.R, cVioletLo.G, cVioletLo.B), 1.0),
+                    },
+                },
             };
-            System.Windows.Controls.Canvas.SetLeft(rect, i * slot + 1);
-            System.Windows.Controls.Canvas.SetTop(rect, h - bh - 2);
-            DashMcpSparkCanvas.Children.Add(rect);
+
+            // Glow only the busiest hour and the current hour (≤2 bars) so
+            // the eye lands on what matters — cheap on the 8 s redraw.
+            if (i == peakIdx || isNow)
+            {
+                bar.Effect = new System.Windows.Media.Effects.DropShadowEffect
+                {
+                    Color = isNow ? cCyan : top,
+                    BlurRadius = isNow ? 9 : 7,
+                    ShadowDepth = 0,
+                    Opacity = isNow ? 0.75 : 0.55,
+                };
+            }
+
+            System.Windows.Controls.Canvas.SetLeft(bar, left);
+            System.Windows.Controls.Canvas.SetTop(bar, topY);
+            DashMcpSparkCanvas.Children.Add(bar);
+
+            // A glowing dot crowns the "now" bar → unmistakable live marker.
+            if (isNow)
+            {
+                var dot = new System.Windows.Shapes.Ellipse
+                {
+                    Width = 4, Height = 4,
+                    Fill = new SolidColorBrush(cCyan),
+                    Effect = new System.Windows.Media.Effects.DropShadowEffect
+                    {
+                        Color = cCyan, BlurRadius = 8, ShadowDepth = 0, Opacity = 0.95,
+                    },
+                };
+                System.Windows.Controls.Canvas.SetLeft(dot, left + (barW - 4) / 2.0);
+                System.Windows.Controls.Canvas.SetTop(dot, Math.Max(0, topY - 5));
+                DashMcpSparkCanvas.Children.Add(dot);
+            }
         }
     }
 
@@ -1344,6 +1436,24 @@ public partial class MainWindow
             clamp(c.R * factor),
             clamp(c.G * factor),
             clamp(c.B * factor));
+    }
+
+    // Resolve a theme SolidColorBrush to its Color, falling back to a
+    // hardcoded RGB if the resource is missing (keeps chart drawing robust
+    // when called before the theme dictionary is merged).
+    private static Color ResColor(string key, byte r, byte g, byte b)
+    {
+        if (System.Windows.Application.Current?.TryFindResource(key) is SolidColorBrush br)
+            return br.Color;
+        return Color.FromRgb(r, g, b);
+    }
+
+    // Linear interpolate between two opaque colours (t clamped 0..1).
+    private static Color LerpColor(Color a, Color b, double t)
+    {
+        t = System.Math.Clamp(t, 0, 1);
+        byte L(byte x, byte y) => (byte)(x + (y - x) * t);
+        return Color.FromArgb(255, L(a.R, b.R), L(a.G, b.G), L(a.B, b.B));
     }
 
     // ═════════════════════════════════════════════════════════════════

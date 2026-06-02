@@ -11,12 +11,13 @@ namespace BrainX.Client.Services;
 ///     and relay consent-gated shares. Defaults to the public node at
 ///     serverbrain.example.com. NetworkClient.ConnectAsync talks to THIS.
 ///
-///   • <see cref="DefaultLocalAiBase"/> — the LOCAL node base (REST + AI Hub) that
-///     serves this client's OWN brain + local LLM. Stays on localhost; the embedded
-///     server is auto-launched for it. AI Chat / brain APIs talk to THIS, never the hub.
+///   • <see cref="DefaultLocalAiBase"/> — this client's OWN brain + AI (REST + AI Hub).
+///     Stays LOCAL (localhost): knowledge search is local-first and private traffic
+///     never leaves the box. The BrainX.Server that answers here runs SEPARATELY —
+///     the client neither launches nor bundles it (anti-reverse-engineering).
 ///
-/// Keeping them separate means joining the public network never routes your private
-/// brain or AI traffic off-box — only peer discovery + explicit shares cross the wire.
+/// Keeping them separate means joining the public mesh never routes your private
+/// brain or AI off-box — only the BitTorrent-style file shares cross the wire.
 /// </summary>
 public static class RemoteNodeConfig
 {
@@ -26,7 +27,9 @@ public static class RemoteNodeConfig
     /// <summary>Default mesh-hub SignalR endpoint the client joins (the network).</summary>
     public const string DefaultHubUrl = PublicHubBase + "/brain-hub";
 
-    /// <summary>Default local node base for REST + AI Hub (this client's own brain).</summary>
+    /// <summary>Default LOCAL node base for REST + AI Hub (this client's own brain).
+    /// The BrainX.Server that answers here runs as a SEPARATE process — the client
+    /// never launches or bundles it.</summary>
     public const string DefaultLocalAiBase = "http://localhost:5142";
 
     /// <summary>REST / AI-Hub base for a given URL (strip any /brain-hub suffix + trailing slash).</summary>

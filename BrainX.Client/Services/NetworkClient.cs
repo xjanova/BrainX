@@ -34,7 +34,7 @@ public sealed class NetworkClientOptions
 public class NetworkClient : IAsyncDisposable
 {
     private HubConnection? _hub;
-    private string _serverUrl = "http://localhost:5142/brain-hub";
+    private string _serverUrl = RemoteNodeConfig.DefaultHubUrl;
     private BrainIdentity? _identity;
     private readonly NetworkClientOptions _options;
 
