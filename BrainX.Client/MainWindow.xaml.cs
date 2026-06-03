@@ -246,6 +246,14 @@ public partial class MainWindow : Window
         // the on-disk version is already current.
         ClaudeBrainRulesInstaller.EnsureInstalled(_vaultPath);
 
+        // Zero-touch Claude onboarding: auto-register the MCP server with Claude
+        // Desktop + the Claude Code CLI, install the auto-ingest hook, and
+        // self-heal a stale config — all idempotent, silent, and self-healing
+        // (see MainWindow.AutoOnboard.cs). Runs in the background so it never
+        // blocks first paint. The user never has to open Settings and click
+        // "Install" — it just works the moment the app opens.
+        _ = Task.Run(EnsureClaudeIntegrationAsync);
+
         // F11 toggles a true-fullscreen mode that *covers* the taskbar.
         // Standard WPF Maximize on a WindowStyle=None window only fills
         // the work area; this mode manually overrides bounds + Topmost.
@@ -5351,6 +5359,7 @@ public partial class MainWindow : Window
             }
 
             UpdateBottomBarVersion();
+            RefreshUpdatePanel();
         }
         catch { /* fall back silently to XAML default */ }
     }
@@ -11804,68 +11813,16 @@ public partial class MainWindow : Window
         {
             RefreshMcpStatusBar();
             RefreshAiBackendStatusBar();
-            RefreshServerStatusBar();
         };
         _mcpStatusTimer.Start();
         RefreshMcpStatusBar();
         RefreshAiBackendStatusBar();
-        RefreshServerStatusBar();
     }
 
-    /// <summary>
-    /// Poll the Server's /api/health every 3s and reflect on the status
-    /// bar chip. The Server runs hidden as a service-style process; this
-    /// chip is the only UI surface that says "yes, it's alive".
-    /// Falls back to "process exists" if the HTTP probe is slow — Kestrel
-    /// can take longer to respond to /api/health than the AI Hub does.
-    /// </summary>
-    private async void RefreshServerStatusBar()
-    {
-        if (ServerStatusDot == null) return;
-        try
-        {
-            using var http = BuildLocalHttpClient(5);
-            var json = await http.GetStringAsync(AiServerBase + "/api/health");
-            var root = Newtonsoft.Json.Linq.JObject.Parse(json);
-            var status = root["status"]?.ToString() ?? "?";
-            ServerStatusDot.Fill = status == "Healthy"
-                ? (SolidColorBrush)FindResource("NeonGreenBrush")
-                : new SolidColorBrush(Color.FromRgb(0xCC, 0x88, 0x44));
-            ServerStatusText.Text = "Srv ✓ " + RemoteNodeConfig.HostLabel(AiServerBase);
-        }
-        catch (Exception ex)
-        {
-            // Process-exists fallback — if the Server.exe is alive we still
-            // show green-ish, just with a warning label. Otherwise it's red.
-            var procAlive = Process.GetProcessesByName("BrainX.Server").Length > 0;
-            if (procAlive)
-            {
-                ServerStatusDot.Fill = new SolidColorBrush(Color.FromRgb(0xCC, 0x88, 0x44));
-                ServerStatusText.Text = "Srv ⚠ slow";
-            }
-            else
-            {
-                ServerStatusDot.Fill = new SolidColorBrush(Color.FromRgb(0x88, 0x44, 0x44));
-                ServerStatusText.Text = "Srv ✗ (click)";
-            }
-            Debug.WriteLine($"Server health probe failed: {ex.GetType().Name}: {ex.Message}");
-        }
-    }
-
-    private void ServerStatusChip_Click(object sender, MouseButtonEventArgs e)
-    {
-        // Open the remote node's web dashboard in the default browser. The
-        // client never launches a server — the node is deployed elsewhere.
-        try
-        {
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = AiServerBase,
-                UseShellExecute = true
-            });
-        }
-        catch (Exception ex) { Debug.WriteLine($"open server: {ex.Message}"); }
-    }
+    // [removed] RefreshServerStatusBar() + ServerStatusChip_Click — the bottom
+    // status bar no longer carries a "Srv" chip (client is thin / local-first,
+    // no embedded server). Node + mesh status live on the Join Brain page.
+    // The 3s status-watcher tick now updates only the MCP + AI-backend LEDs.
 
     /// <summary>Poll the AI Hub and reflect current backend + loaded
     /// model in the status bar every 3s together with the MCP LEDs.</summary>

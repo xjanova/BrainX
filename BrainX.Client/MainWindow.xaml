@@ -5297,6 +5297,52 @@
                                                   HorizontalScrollBarVisibility="Disabled"
                                                   Padding="8,0,4,8">
                                         <StackPanel>
+                                        <!-- Software update — VISIBLE auto-update surface (top of Settings so
+                                             it's the first thing seen). Driven by MainWindow.Updates.cs. -->
+                                        <Border x:Name="SettingsAnchorUpdates"
+                                                Style="{StaticResource NeuralCard}"
+                                                Padding="22" Margin="0,0,0,14">
+                                            <StackPanel>
+                                                <StackPanel Margin="0,0,0,16">
+                                                    <TextBlock Text="Software update" FontSize="16" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText}"/>
+                                                    <TextBlock Text="Keeps BrainX current. The installed build auto-updates at startup — you can also check manually here."
+                                                               FontSize="12.5" FontWeight="Medium"
+                                                               Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0" TextWrapping="Wrap"/>
+                                                </StackPanel>
+
+                                                <Grid Margin="0,0,0,6">
+                                                    <Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                    <TextBlock Grid.Column="0" Text="Current version" FontSize="12" Foreground="{StaticResource NeuralText3}"/>
+                                                    <TextBlock Grid.Column="1" x:Name="UpdCurrentVersion" Text="—" FontSize="12"
+                                                               FontFamily="{StaticResource MonoFont}" Foreground="{StaticResource NeuralText}"/>
+                                                </Grid>
+                                                <Grid Margin="0,0,0,6">
+                                                    <Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                    <TextBlock Grid.Column="0" Text="Latest release" FontSize="12" Foreground="{StaticResource NeuralText3}"/>
+                                                    <TextBlock Grid.Column="1" x:Name="UpdLatestVersion" Text="checking…" FontSize="12"
+                                                               FontFamily="{StaticResource MonoFont}" Foreground="{StaticResource NeuralText}"/>
+                                                </Grid>
+                                                <Grid Margin="0,0,0,12">
+                                                    <Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                    <TextBlock Grid.Column="0" Text="Auto-update" FontSize="12" Foreground="{StaticResource NeuralText3}"/>
+                                                    <TextBlock Grid.Column="1" x:Name="UpdInstallMode" Text="—" FontSize="12"
+                                                               Foreground="{StaticResource NeuralText}" TextWrapping="Wrap"/>
+                                                </Grid>
+
+                                                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                                    <Button x:Name="UpdCheckBtn" Content="Check for updates" Style="{StaticResource NeuralBtnPrimary}"
+                                                            Click="UpdCheckNow_Click" Padding="16,8" Margin="0,0,8,0"/>
+                                                    <Button x:Name="UpdApplyBtn" Content="Restart &amp; apply" Style="{StaticResource NeuralBtnGhost}"
+                                                            Click="UpdApply_Click" Padding="16,8" Margin="0,0,8,0" IsEnabled="False"/>
+                                                    <Button x:Name="UpdInstallerBtn" Content="Download installer" Style="{StaticResource NeuralBtnGhost}"
+                                                            Click="UpdDownloadInstaller_Click" Padding="16,8" Visibility="Collapsed"/>
+                                                </StackPanel>
+                                                <TextBlock x:Name="UpdStatusText" Text="" FontSize="11"
+                                                           Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap"/>
+                                            </StackPanel>
+                                        </Border>
+
                                         <!-- Brain Identity — violet-tinted Identity card per spec §11. -->
                                         <Border x:Name="SettingsAnchorIdentity"
                                                 Style="{StaticResource NeuralCard}"
@@ -5371,7 +5417,7 @@
                                                            Foreground="{StaticResource NeuralText3}" Margin="0,0,0,4"
                                                            FontWeight="SemiBold"/>
                                                 <TextBox x:Name="SettingsServerUrl" Style="{StaticResource NeonTextBox}"
-                                                         Text="https://serverbrain.myserver.com/brain-hub" Margin="0,0,0,12"/>
+                                                         Text="https://serverbrain.xman4289.com/brain-hub" Margin="0,0,0,12"/>
                                                 <Button Content="Save Server URL" Style="{StaticResource NeuralBtnPrimary}"
                                                         Click="SaveServerUrl_Click" HorizontalAlignment="Left" Padding="16,8"/>
                                             </StackPanel>
@@ -5769,11 +5815,18 @@
                                                                Foreground="{StaticResource NeuralText}"/>
                                                     <TextBlock FontSize="12.5" FontWeight="Medium"
                                                                Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0" TextWrapping="Wrap">
-                                                        One click registers into Claude Code CLI + Claude Desktop. Your brain
-                                                        shows up as 6 MCP tools (brain_search, brain_get_note, brain_expertise…).
+                                                        Set up automatically when BrainX starts — Claude Desktop + Claude Code CLI
+                                                        get your brain as MCP tools (brain_search, brain_get_note, brain_expertise…),
+                                                        and a stale config self-heals on the next launch. You normally never touch this.
                                                     </TextBlock>
                                                 </StackPanel>
 
+                                                <!-- Advanced / repair — auto-onboarding (MainWindow.AutoOnboard.cs) does all
+                                                     of this at startup, so it stays folded away by default. -->
+                                                <Expander Header="Advanced · set up / repair manually (you normally never need this)"
+                                                          IsExpanded="False" Foreground="{StaticResource TextSecondaryBrush}"
+                                                          Margin="0,4,0,4">
+                                                  <StackPanel Margin="0,8,0,0">
                                                 <TextBlock Text="Install command" FontSize="11"
                                                            Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
                                                 <TextBox x:Name="McpInstallCommand" Style="{StaticResource NeonTextBox}"
@@ -5819,6 +5872,8 @@
                                                                    TextWrapping="Wrap"/>
                                                     </StackPanel>
                                                 </Border>
+                                                  </StackPanel>
+                                                </Expander>
                                                 <TextBlock x:Name="McpStatusText" FontSize="11"
                                                            Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" Margin="0,0,0,12"/>
 
@@ -5977,17 +6032,8 @@
                             <TextBlock x:Name="AiBackendStatus" Text="AI off" FontSize="10"
                                        FontFamily="{StaticResource MonoFont}"
                                        Foreground="{StaticResource TextMutedBrush}" Margin="0,0,10,0"/>
-                            <Border x:Name="ServerStatusChip" Background="Transparent"
-                                    Cursor="Hand" Padding="0" MouseLeftButtonUp="ServerStatusChip_Click"
-                                    ToolTip="BrainX server (runs separately) — click to open its dashboard">
-                                <StackPanel Orientation="Horizontal">
-                                    <Ellipse x:Name="ServerStatusDot" Width="6" Height="6"
-                                             Fill="#555577" Margin="0,0,4,0"/>
-                                    <TextBlock x:Name="ServerStatusText" Text="Srv ?" FontSize="10"
-                                               FontFamily="{StaticResource MonoFont}"
-                                               Foreground="{StaticResource TextMutedBrush}"/>
-                                </StackPanel>
-                            </Border>
+                            <!-- [removed] ServerStatusChip ("Srv") — client is thin / local-first
+                                 (no embedded server). Node + mesh status live on the Join Brain page. -->
                         </StackPanel>
 
                         <!-- Right: version. Short SemVer only ("v2.0.40")
