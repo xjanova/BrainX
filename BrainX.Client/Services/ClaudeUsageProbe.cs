@@ -243,9 +243,15 @@ public sealed class ClaudeUsageProbe
             if (!snap.Authenticated)
             {
                 _consecutiveFailures++;
-                // After 3 failed scrapes, the page probably bounced to
-                // login — try refreshing cookies + reload once.
-                if (_consecutiveFailures == 3)
+                // Auto-recover from a browser re-login WITHOUT any user action:
+                // re-read the browser cookies (Chrome/Edge/Brave) + reload on the
+                // FIRST failure — so the moment the user signs back into claude.ai
+                // in their browser the card flips green on the next tick — and again
+                // every 3rd failure so a still-dead session keeps retrying. (The old
+                // code re-injected only ONCE, at exactly 3 failures, so a session
+                // that stayed expired never recovered on its own — the user had to
+                // click "Sign in" manually every time.)
+                if (_consecutiveFailures == 1 || _consecutiveFailures % 3 == 0)
                 {
                     await InjectEdgeCookiesAsync();
                     _core.Reload();

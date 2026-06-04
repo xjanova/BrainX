@@ -1595,7 +1595,7 @@ public partial class MainWindow
         {
             "green" => "Live · signed into claude.ai (click to re-open the usage page)",
             "red"   => "No data — neither claude.ai nor local transcripts available",
-            _       => "Click to sign into claude.ai · cookies stay private to BrainX",
+            _       => "Session expired — BrainX is auto-retrying your browser login. Click to sign in manually (cookies stay private to BrainX).",
         };
         // Hide the "Sign in →" link once authenticated; it's only useful
         // when the user actually needs to log in.
@@ -1604,6 +1604,15 @@ public partial class MainWindow
             DashClaudeSignInLink.Visibility = state == "green"
                 ? System.Windows.Visibility.Collapsed
                 : System.Windows.Visibility.Visible;
+        }
+        // Spell out WHY the card dimmed so the user isn't left guessing (and
+        // restore the normal subtitle once the session is live again). The
+        // probe auto-retries the browser cookies, so this usually self-heals.
+        if (DashClaudeSubtitleText != null)
+        {
+            DashClaudeSubtitleText.Text = state == "green"
+                ? "plan limits · live from claude.ai"
+                : "session expired";
         }
     }
 
