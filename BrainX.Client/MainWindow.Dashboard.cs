@@ -451,7 +451,7 @@ public partial class MainWindow
 
         try
         {
-            await DashUniverseWebView.EnsureCoreWebView2Async();
+            await DashUniverseWebView.EnsureCoreWebView2Async(await GetUniverseWebViewEnvAsync());
             var core = DashUniverseWebView.CoreWebView2;
 
             var wwwroot = System.IO.Path.Combine(System.AppContext.BaseDirectory, "wwwroot");

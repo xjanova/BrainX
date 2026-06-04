@@ -7558,6 +7558,29 @@ public partial class MainWindow : Window
     // https://universe.local. We post the file content via WebMessage
     // instead — IPC has no CORS and no practical size cap for our 6 MB.
     // ═══════════════════════════════════════
+    // Shared, STABLE WebView2 user-data folder for the Universe views. By
+    // default WebView2 stores its data (incl. localStorage) in
+    // <exe>.WebView2 NEXT TO the binary. Velopack moves the exe to a new
+    // app-<version> folder on every update, so that default folder — and the
+    // Universe's localStorage (graphics settings, wallpaper, camera) — is wiped
+    // each update, forcing the user to re-configure. Pinning the folder under
+    // LocalAppData makes those settings persist across updates. BOTH the full
+    // Universe view and the dashboard mini-universe MUST share this same folder
+    // (+ same universe.local origin) or their cross-view `storage` event sync
+    // breaks — see [[Dashboard universe inherits wallpaper appearance via storage event]].
+    private Task<CoreWebView2Environment>? _universeEnvTask;
+    private Task<CoreWebView2Environment> GetUniverseWebViewEnvAsync()
+        => _universeEnvTask ??= CreateUniverseWebViewEnvAsync();
+
+    private static async Task<CoreWebView2Environment> CreateUniverseWebViewEnvAsync()
+    {
+        var userData = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "BrainX", "WebView2", "Universe");
+        Directory.CreateDirectory(userData);
+        return await CoreWebView2Environment.CreateAsync(null, userData);
+    }
+
     private bool _universeInitialized;
 
     private async Task InitializeUniverseAsync()
@@ -7567,7 +7590,7 @@ public partial class MainWindow : Window
         try
         {
             SetUniverseLoadingStatus("Spinning up WebView2 runtime", "Cold-start takes 1-2s");
-            await UniverseWebView.EnsureCoreWebView2Async();
+            await UniverseWebView.EnsureCoreWebView2Async(await GetUniverseWebViewEnvAsync());
             var core = UniverseWebView.CoreWebView2;
 
             var wwwroot = Path.Combine(AppContext.BaseDirectory, "wwwroot");
