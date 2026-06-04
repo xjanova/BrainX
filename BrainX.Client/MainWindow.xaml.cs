@@ -2184,6 +2184,11 @@ public partial class MainWindow : Window
         Services.StartupProgress.Report("Checking Claude MCP connection", 0.62, tag: "mcp");
         CheckClaudeConnection();
 
+        // Auto-join the BrainX mesh so "connect to the central server" just
+        // works on open — no manual click. Background + self-healing (auto-
+        // reconnect). No-ops when no real node is configured. See AutoJoinMeshAsync.
+        _ = AutoJoinMeshAsync();
+
         // Load physics
         _dashPhysics.LoadFromGraph(_graph);
         _dashPhysics.Disturb(_graph.TotalNodes > 20 ? 0.05 : 0.3);
@@ -8133,6 +8138,51 @@ public partial class MainWindow : Window
             MessageBox.Show("Could not open Obsidian. Please open it manually.", "BrainX",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
         }
+    }
+
+    /// <summary>
+    /// Auto-join the BrainX mesh on startup so the connection "just works" on
+    /// open — no manual "Join Network" click. Background + error-swallowing;
+    /// NetworkClient.WithAutomaticReconnect handles drops afterwards. No-ops if
+    /// already connected, no identity, or the hub URL is still the redacted
+    /// placeholder (meaning no real node is configured in settings.json yet).
+    /// The verified working path (server + handshake + identity) is proven —
+    /// this just calls it automatically instead of waiting for a button.
+    /// </summary>
+    private async System.Threading.Tasks.Task AutoJoinMeshAsync()
+    {
+        try
+        {
+            if (_network.IsConnected || _identity == null) return;
+
+            var host = RemoteNodeConfig.HostLabel(_hubUrl);
+            if (string.IsNullOrEmpty(host) || host.Contains("example.com", StringComparison.OrdinalIgnoreCase))
+                return;   // no real node configured — don't dial the placeholder
+
+            await Dispatcher.InvokeAsync(() => { if (StatusText != null) StatusText.Text = $"Auto-joining BrainX mesh ({host})…"; });
+
+            var myInfo = new PeerInfo
+            {
+                BrainAddress = _identity.Address,
+                DisplayName = _identity.DisplayName,
+                PublicKey = _identity.PublicKey,
+                ExpertiseScores = _graph.ExpertiseMap.ToDictionary(kv => kv.Key, kv => kv.Value.Score),
+                TotalKnowledgeNodes = _graph.TotalNodes,
+                TotalWords = _graph.TotalWords,
+                JoinedAt = DateTime.UtcNow
+            };
+
+            var ok = await _network.ConnectAsync(_hubUrl, myInfo, _identity);
+
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (!ok) return;
+                if (JoinNetworkBtn != null) { JoinNetworkBtn.Content = "✅ Connected"; JoinNetworkBtn.IsEnabled = false; }
+                if (LeaveNetworkBtn != null) LeaveNetworkBtn.Visibility = Visibility.Visible;
+                _ = RefreshNetworkStats();
+            });
+        }
+        catch (Exception ex) { Debug.WriteLine($"AutoJoinMesh: {ex.Message}"); }
     }
 
     private async void JoinNetwork_Click(object s, RoutedEventArgs e)
