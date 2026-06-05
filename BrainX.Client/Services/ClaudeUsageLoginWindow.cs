@@ -6,12 +6,11 @@
 // the user closes the modal the hidden probe automatically picks
 // up the live session on its next 60-second tick.
 //
-// We watch CoreWebView2.SourceChanged + DocumentTitleChanged to
-// detect successful auth (URL leaves /login and the body no longer
-// shows a password field). When that happens we navigate the modal
-// to /settings/usage so the user can verify their numbers are
-// rendering, then leave a "Done — close this window" hint at the
-// top.
+// We watch CoreWebView2.SourceChanged to detect successful auth (the
+// URL leaves /login and /auth). When that happens we flush the session
+// cookies and CLOSE the window automatically — the hidden probe picks up
+// the live session on its next ReloadAsync (fired from the Closed event),
+// so the user never has to manually close this modal.
 //
 // Created in C# rather than XAML so MainWindow doesn't have to
 // reference yet another file; same reason ClaudeUsageProbe is a
@@ -31,7 +30,7 @@ public sealed class ClaudeUsageLoginWindow : Window
 {
     private readonly WebView2 _wv;
     private readonly TextBlock _statusText;
-    private bool _hasNavigatedToUsage;
+    private bool _autoClosing;
 
     public bool LoggedIn { get; private set; }
 
@@ -111,13 +110,16 @@ public sealed class ClaudeUsageLoginWindow : Window
                 return;
             }
             LoggedIn = true;
-            if (!_hasNavigatedToUsage)
+            if (!_autoClosing)
             {
-                _hasNavigatedToUsage = true;
-                _statusText.Text = "✓ Signed in. Verify your usage numbers below, then close this window — the dashboard will keep them in sync.";
-                // Small delay so the success state lands before we hop pages.
-                await Task.Delay(400);
-                _wv.CoreWebView2.Navigate("https://claude.ai/settings/usage");
+                _autoClosing = true;   // one-shot guard — fire the auto-close once
+                _statusText.Text = "✓ Signed in — closing…";
+                // Give WebView2 a moment to flush the freshly-set session cookies
+                // to the shared user-data folder (the hidden probe reads them via
+                // ReloadAsync, fired from this window's Closed event), then close
+                // automatically — the user asked not to leave the modal hanging open.
+                await Task.Delay(900);
+                try { Close(); } catch { /* already closing / disposed */ }
             }
         }
         catch (Exception ex)
