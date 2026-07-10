@@ -128,9 +128,13 @@ export function buildUniverse(brain) {
         });
     }
 
-    // 2) Place each galaxy on a Fibonacci sphere of radius 80.
-    //    Single-galaxy edge case: keep it centered.
-    const galaxyR = 80;
+    // 2) Place each galaxy on a Fibonacci sphere. The sphere radius scales
+    //    with the LARGEST disk so big galaxies (Programming can hit r≈60)
+    //    get real space between them instead of overlapping into one blob —
+    //    the eye should read distinct star systems, not a wireframe hairball.
+    //    (Camera fit + focusGalaxy derive from these centers, so they adapt.)
+    const maxDiskR = Math.max(...sortedCats.map(([, list]) => 12 + Math.sqrt(list.length) * 2.4));
+    const galaxyR = Math.max(80, maxDiskR * 2.1);
     const galaxies = sortedCats.map(([category, list], i) => {
         const pal = GALAXY_PALETTE[category] ?? { hex: hueFromCategory(category), label: prettifyCategory(category) };
         const expertise = expertiseByCat.get(category) ?? { score: 0, noteCount: list.length, totalWords: 0, growthRate: 0 };
@@ -238,14 +242,21 @@ export function buildUniverse(brain) {
 
     // 4) Wiki-link edges. Skip self-loops + edges to nodes we never indexed
     //    (orphan ids occur when an import is partial).
+    //
+    //    LinkedNodeIds is DIRECTIONAL (outgoing links only), so dedupe must
+    //    normalize the pair — the old `if (i < j)` shortcut silently dropped
+    //    every one-way link that happened to point from a higher node index
+    //    to a lower one (roughly half of all single-direction wiki-links).
     const edges = [];
+    const seenPairs = new Set();
     for (let i = 0; i < nodes.length; i++) {
         for (const tgtId of nodes[i].linkedIds) {
             const j = idIndex.get(tgtId);
             if (j == null || j === i) continue;
-            // dedupe: only emit (a,b) where a < b — otherwise we draw the
-            // same line twice and waste pixels (and bloom intensity).
-            if (i < j) edges.push({ a: i, b: j });
+            const key = i < j ? i * nodes.length + j : j * nodes.length + i;
+            if (seenPairs.has(key)) continue;
+            seenPairs.add(key);
+            edges.push(i < j ? { a: i, b: j } : { a: j, b: i });
         }
     }
 

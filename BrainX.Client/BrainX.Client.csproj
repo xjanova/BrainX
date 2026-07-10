@@ -46,6 +46,9 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
+    <!-- Explicit entry point (Program.Main) so Velopack lifecycle hooks run
+         before any WPF init — see Program.cs. -->
+    <StartupObject>BrainX.Client.Program</StartupObject>
     <TargetFramework>net10.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>

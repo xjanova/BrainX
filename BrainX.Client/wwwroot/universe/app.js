@@ -1220,7 +1220,7 @@ async function init() {
         });
     } catch (err) {
         console.error('[Universe] scene init failed', err);
-        setStatus(`three.js failed to load: ${err.message}. Check internet connectivity (CDN: unpkg.com).`, true);
+        setStatus(`three.js failed to load: ${err.message}. Vendored files missing under universe/vendor/ — reinstall BrainX.`, true);
         return;
     }
 

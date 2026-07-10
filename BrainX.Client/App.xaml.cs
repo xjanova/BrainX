@@ -48,12 +48,8 @@ public partial class App : Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
-        // Velopack MUST run first — it handles the install/update lifecycle
-        // hooks (and fast-exits the process for them). No-op for a normal
-        // launch and for raw dev builds (not packaged).
-        try { Velopack.VelopackApp.Build().Run(); }
-        catch (Exception ex) { Debug.WriteLine($"Velopack init: {ex.Message}"); }
-
+        // Velopack lifecycle hooks run in Program.Main — the true process
+        // entry point — per Velopack's "very beginning of Main()" guidance.
         base.OnStartup(e);
 
         // Try to claim the single-instance mutex. If we don't get it,

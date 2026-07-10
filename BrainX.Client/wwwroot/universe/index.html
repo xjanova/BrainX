@@ -6,15 +6,20 @@
     <title>BrainX Universe</title>
     <link rel="stylesheet" href="style.css" />
 
-    <!-- three.js + addons via importmap so app.js can use bare specifiers.
-         WebView2 has full network access; if offline this gracefully fails
-         and app.js shows the bridge-only fallback overlay. -->
+    <!-- three.js + addons + d3 are VENDORED under ./vendor/ (three@0.169.0,
+         d3-force@3) and served from disk via the WebView2 virtual host.
+         They used to come from unpkg/esm.sh CDNs, which made the very first
+         boot as slow as the network — and a dead universe when offline or
+         behind a firewall. Local files = instant, deterministic first paint. -->
     <script type="importmap">
     {
       "imports": {
-        "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
-        "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/",
-        "d3-force": "https://esm.sh/d3-force@3"
+        "three": "./vendor/three/three.module.js",
+        "three/addons/": "./vendor/three/jsm/",
+        "d3-force": "./vendor/d3-force/index.js",
+        "d3-quadtree": "./vendor/d3-quadtree/index.js",
+        "d3-dispatch": "./vendor/d3-dispatch/index.js",
+        "d3-timer": "./vendor/d3-timer/index.js"
       }
     }
     </script>

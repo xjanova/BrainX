@@ -5,6 +5,9 @@ out/
 publish-test/
 publish/
 build-smoke/
+# Local Velopack pack output (vpk pack --outputDir Releases)
+Releases/
+.buildcheck/
 
 # IDE
 .vs/

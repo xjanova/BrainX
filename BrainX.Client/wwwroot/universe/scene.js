@@ -11,7 +11,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { forceSimulation, forceManyBody, forceLink, forceCenter, forceCollide } from 'd3-force';
+import { forceSimulation, forceManyBody, forceLink, forceCenter, forceCollide, forceX, forceY } from 'd3-force';
 import { buildUniverse } from './layout.js';
 
 // ── shaders ────────────────────────────────────────────────────────────
@@ -130,32 +130,71 @@ const edgeFrag = /* glsl */`
     }
 `;
 
-// Background starfield: tiny dim points on a huge sphere, no animation.
+// Shared soft round-dot texture for plain PointsMaterial layers (dust +
+// starfield). Without a map, WebGL points rasterize as hard SQUARES — very
+// visible once sizeAttenuation makes dust grow near the camera.
+let _softDotTex = null;
+function softDotTexture() {
+    if (_softDotTex) return _softDotTex;
+    const SIZE = 64;
+    const c = document.createElement('canvas');
+    c.width = c.height = SIZE;
+    const ctx = c.getContext('2d');
+    const grad = ctx.createRadialGradient(SIZE / 2, SIZE / 2, 0, SIZE / 2, SIZE / 2, SIZE / 2);
+    grad.addColorStop(0.0, 'rgba(255,255,255,1)');
+    grad.addColorStop(0.4, 'rgba(255,255,255,0.55)');
+    grad.addColorStop(1.0, 'rgba(255,255,255,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, SIZE, SIZE);
+    _softDotTex = new THREE.CanvasTexture(c);
+    _softDotTex.colorSpace = THREE.SRGBColorSpace;
+    return _softDotTex;
+}
+
+// Background starfield: two layers on a huge sphere for depth — a dense dim
+// carpet plus a sparse layer of brighter stars with real astronomical color
+// scatter (cool blue-white / warm amber, like actual stellar classes).
 function buildStarfield() {
-    const COUNT = 2400;
-    const positions = new Float32Array(COUNT * 3);
-    for (let i = 0; i < COUNT; i++) {
-        // uniformly on a sphere of radius 1200
-        const u = Math.random(), v = Math.random();
-        const theta = 2 * Math.PI * u;
-        const phi = Math.acos(2 * v - 1);
-        const r = 1100 + Math.random() * 200;
-        positions[3 * i + 0] = r * Math.sin(phi) * Math.cos(theta);
-        positions[3 * i + 1] = r * Math.sin(phi) * Math.sin(theta);
-        positions[3 * i + 2] = r * Math.cos(phi);
+    const group = new THREE.Group();
+
+    function layer(count, size, opacity, warmRatio) {
+        const positions = new Float32Array(count * 3);
+        const colors = new Float32Array(count * 3);
+        const c = new THREE.Color();
+        for (let i = 0; i < count; i++) {
+            // uniformly on a sphere shell
+            const u = Math.random(), v = Math.random();
+            const theta = 2 * Math.PI * u;
+            const phi = Math.acos(2 * v - 1);
+            const r = 1100 + Math.random() * 200;
+            positions[3 * i + 0] = r * Math.sin(phi) * Math.cos(theta);
+            positions[3 * i + 1] = r * Math.sin(phi) * Math.sin(theta);
+            positions[3 * i + 2] = r * Math.cos(phi);
+            // Stellar tint: mostly cool blue-white, a fraction warm (K/M-class
+            // amber) so the sky reads as real stars, not a flat blue wash.
+            if (Math.random() < warmRatio) c.setHSL(0.07 + Math.random() * 0.05, 0.55, 0.72);
+            else                           c.setHSL(0.58 + Math.random() * 0.09, 0.35, 0.78);
+            colors[3 * i + 0] = c.r; colors[3 * i + 1] = c.g; colors[3 * i + 2] = c.b;
+        }
+        const geom = new THREE.BufferGeometry();
+        geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        const mat = new THREE.PointsMaterial({
+            map: softDotTexture(),
+            vertexColors: true,
+            size,
+            sizeAttenuation: false,
+            transparent: true,
+            opacity,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending
+        });
+        return new THREE.Points(geom, mat);
     }
-    const geom = new THREE.BufferGeometry();
-    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    const mat = new THREE.PointsMaterial({
-        color: 0xb8c0ff,
-        size: 0.7,
-        sizeAttenuation: false,
-        transparent: true,
-        opacity: 0.45,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending
-    });
-    return new THREE.Points(geom, mat);
+
+    group.add(layer(2200, 0.7, 0.40, 0.18));   // dim carpet
+    group.add(layer(340, 1.6, 0.65, 0.30));    // sparse bright accents
+    return group;
 }
 
 // Nebula haze: a translucent additive sprite per galaxy, gives each region
@@ -176,6 +215,7 @@ function buildNebulaSprites(galaxies) {
     tex.colorSpace = THREE.SRGBColorSpace;
 
     const group = new THREE.Group();
+    const coreCol = new THREE.Color();
     for (const g of galaxies) {
         const mat = new THREE.SpriteMaterial({
             map: tex,
@@ -191,8 +231,92 @@ function buildNebulaSprites(galaxies) {
         sprite.scale.set(s, s, s);
         sprite.userData.galaxy = g.category;
         group.add(sprite);
+
+        // Galactic bulge: a small, hot core at the disk center — real spiral
+        // galaxies read as "bright nucleus + arms", and bloom turns this into
+        // the anchor point the eye lands on. Color = galaxy hue pulled toward
+        // white so it looks like dense old stars, not a colored lamp.
+        coreCol.setHex(g.color).lerp(new THREE.Color(0xfff6e8), 0.55);
+        const coreMat = new THREE.SpriteMaterial({
+            map: tex,
+            color: coreCol.clone(),
+            transparent: true,
+            opacity: 0.60,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending
+        });
+        const core = new THREE.Sprite(coreMat);
+        core.position.set(g.center.x, g.center.y, g.center.z);
+        const cs = Math.max(6, g.radius * 0.9);
+        core.scale.set(cs, cs, cs);
+        core.userData.galaxy = g.category;
+        group.add(core);
     }
     return group;
+}
+
+// Unresolved-star dust: thousands of tiny points scattered along each
+// galaxy's two log-spiral arms (same math as layout.js) so a disk reads as
+// a STAR SYSTEM — millions of faint suns — instead of only N note-stars
+// floating in a void. One Points object for all galaxies; never pickable
+// (raycasts only test starsObj) and static (no per-frame CPU cost).
+function buildGalaxyDust(galaxies) {
+    let total = 0;
+    const counts = galaxies.map(g => {
+        const c = Math.min(900, Math.max(140, Math.round(g.count * 14)));
+        total += c;
+        return c;
+    });
+    if (!total) return null;
+
+    const positions = new Float32Array(total * 3);
+    const colors = new Float32Array(total * 3);
+    const col = new THREE.Color();
+    const white = new THREE.Color(0xffffff);
+    let w = 0;
+    for (let gi = 0; gi < galaxies.length; gi++) {
+        const g = galaxies[gi];
+        const n = counts[gi];
+        for (let k = 0; k < n; k++) {
+            // Same two-arm log-spiral as the note layout, tighter jitter so
+            // the dust TRACES the arms the anchored notes sit on.
+            const t = Math.pow(Math.random(), 0.65);            // bias toward core
+            const rim = g.radius * (0.06 + t * 1.02);
+            const arm = (k % 2) * Math.PI;
+            const swirl = Math.log(1 + rim) * 1.6;
+            const theta = arm + swirl + (Math.random() - 0.5) * 0.55;
+            const lx = rim * Math.cos(theta);
+            const ly = rim * Math.sin(theta);
+            const lz = (Math.random() + Math.random() + Math.random() - 1.5) * (g.radius / 9);
+
+            positions[w * 3 + 0] = g.center.x + g.basisU.x * lx + g.basisV.x * ly + g.normal.x * lz;
+            positions[w * 3 + 1] = g.center.y + g.basisU.y * lx + g.basisV.y * ly + g.normal.y * lz;
+            positions[w * 3 + 2] = g.center.z + g.basisU.z * lx + g.basisV.z * ly + g.normal.z * lz;
+
+            // Core dust glows warmer/brighter; rim dust cools to the galaxy hue.
+            col.setHex(g.color).lerp(white, Math.max(0, 0.55 - t * 0.6));
+            const dim = 0.35 + (1 - t) * 0.45;
+            colors[w * 3 + 0] = col.r * dim;
+            colors[w * 3 + 1] = col.g * dim;
+            colors[w * 3 + 2] = col.b * dim;
+            w++;
+        }
+    }
+
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    const mat = new THREE.PointsMaterial({
+        map: softDotTexture(),
+        vertexColors: true,
+        size: 1.1,
+        sizeAttenuation: true,
+        transparent: true,
+        opacity: 0.55,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending
+    });
+    return new THREE.Points(geom, mat);
 }
 
 function buildStars(nodes) {
@@ -277,9 +401,12 @@ function buildEdges(nodes, edges) {
         colors[6 * i + 3] = colB.r; colors[6 * i + 4] = colB.g; colors[6 * i + 5] = colB.b;
 
         // intra-galaxy edges are slightly brighter than cross-galaxy ones —
-        // the eye should pick up local clusters first.
+        // the eye should pick up local clusters first. Rebalanced when the
+        // edge-dedupe fix roughly DOUBLED the drawn edge count (2026-07-10):
+        // per-edge alpha drops so total scene luminosity stays where the
+        // original 0.18/0.07 tuning intended.
         const same = a.category === b.category;
-        const base = same ? 0.18 : 0.07;
+        const base = same ? 0.12 : 0.035;
         alphas[2 * i + 0] = base;
         alphas[2 * i + 1] = base;
         baseAlpha[i] = base;
@@ -408,6 +535,7 @@ export function createScene(canvas, callbacks = {}) {
     let starsObj = null;
     let edgesObj = null;
     let nebulaObj = null;
+    let dustObj = null;
     let hoverIndex = -1;
     let selectedIndex = -1;
     // Animation-loop control. _rafHandle = current requestAnimationFrame id
@@ -511,6 +639,15 @@ export function createScene(canvas, callbacks = {}) {
         nebulaObj = buildNebulaSprites(universe.galaxies);
         nebulaGroup.add(nebulaObj);
 
+        // Static spiral-arm dust — inside universeGroup (NOT nebulaGroup) so
+        // it rotates in lock-step with the note stars it traces. Hidden in
+        // 'black' background mode along with the other decorative layers.
+        dustObj = buildGalaxyDust(universe.galaxies);
+        if (dustObj) {
+            dustObj.visible = settings.background !== 'black';
+            universeGroup.add(dustObj);
+        }
+
         edgesObj = buildEdges(universe.nodes, universe.edges);
         if (edgesObj) {
             universeGroup.add(edgesObj);
@@ -564,7 +701,7 @@ export function createScene(canvas, callbacks = {}) {
     }
 
     function dispose() {
-        for (const obj of [starsObj, edgesObj, nebulaObj]) {
+        for (const obj of [starsObj, edgesObj, nebulaObj, dustObj]) {
             if (!obj) continue;
             // Each object is now a child of either universeGroup or nebulaGroup;
             // remove from whichever parent it actually has.
@@ -579,7 +716,7 @@ export function createScene(canvas, callbacks = {}) {
             obj.geometry?.dispose?.();
             obj.material?.dispose?.();
         }
-        starsObj = edgesObj = nebulaObj = null;
+        starsObj = edgesObj = nebulaObj = dustObj = null;
         edgeAlphaAttr = null;
         edgeBaseAlpha = null;
         edgeIntra = null;
@@ -632,6 +769,12 @@ export function createScene(canvas, callbacks = {}) {
                 return {
                     x: n.local.u,
                     y: n.local.v,
+                    // Anchor = the layout-time log-spiral position. A weak
+                    // spring back to it keeps the two spiral arms readable
+                    // after the force sim settles — without it, charge +
+                    // link forces smear the disk into a featureless blob.
+                    u0: n.local.u,
+                    v0: n.local.v,
                     nz: n.local.n,
                     radius: Math.max(1.4, n.size * 0.9)
                 };
@@ -662,6 +805,11 @@ export function createScene(canvas, callbacks = {}) {
                 .force('link', forceLink(links).distance(6).strength(0.35))
                 .force('center', forceCenter(0, 0).strength(0.05))
                 .force('collide', forceCollide().radius(d => d.radius).strength(0.7))
+                // Spiral-arm anchor: weak spring toward each node's original
+                // log-spiral slot. Strong enough that the arms survive the
+                // settle, weak enough that linked notes still cluster.
+                .force('anchorU', forceX(d => d.u0).strength(0.055))
+                .force('anchorV', forceY(d => d.v0).strength(0.055))
                 .alphaDecay(0.025)
                 .alphaMin(0.005)
                 .stop();   // we tick manually each frame
@@ -1829,6 +1977,7 @@ export function createScene(canvas, callbacks = {}) {
         renderer.setClearColor(isBlack ? 0x000000 : 0x02030a, 1);
         if (nebulaGroup) nebulaGroup.visible = !isBlack;
         if (starfieldObj) starfieldObj.visible = !isBlack;
+        if (dustObj) dustObj.visible = !isBlack;
         scene.fog.density = isBlack ? 0.0040 : 0.0025;
     }
 

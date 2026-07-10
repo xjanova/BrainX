@@ -2300,9 +2300,14 @@ public partial class MainWindow : Window
         //   - Cost is zero perceived — splash is already animating during
         //     these 1000ms; nothing is "waiting".
         Services.StartupProgress.Report("Initializing Universe galaxy", 0.92, tag: "universe");
+        // 250ms (was 1000ms): just enough to let Window_Loaded finish painting
+        // before WebView2 init grabs the dispatcher. The old 1000ms existed to
+        // showcase the loading overlay, but with three.js now vendored on disk
+        // (no CDN fetch) the whole init is fast — the user asked for a fast
+        // first boot over a long overlay cameo (2026-07-10).
         var universeStartTimer = new System.Windows.Threading.DispatcherTimer
         {
-            Interval = TimeSpan.FromMilliseconds(1000)
+            Interval = TimeSpan.FromMilliseconds(250)
         };
         universeStartTimer.Tick += (_, _) =>
         {
@@ -11738,10 +11743,23 @@ public partial class MainWindow : Window
         }
 
         using var proc = Process.Start(psi)!;
-        var stdout = await proc.StandardOutput.ReadToEndAsync();
-        var stderr = await proc.StandardError.ReadToEndAsync();
-        await proc.WaitForExitAsync();
-        return (proc.ExitCode, stdout, stderr);
+        // Read streams as tasks + bounded wait: `claude mcp list` spawns node
+        // and probes every registered server — if one wedges, this used to
+        // hang forever (background onboarding task leaked, manual buttons
+        // stuck on ⏳). 30s covers slow cold-start npm shims comfortably.
+        var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+        var stderrTask = proc.StandardError.ReadToEndAsync();
+        using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(30));
+        try
+        {
+            await proc.WaitForExitAsync(cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            try { proc.Kill(entireProcessTree: true); } catch { /* already exited */ }
+            throw new TimeoutException("claude CLI did not respond within 30s");
+        }
+        return (proc.ExitCode, await stdoutTask, await stderrTask);
     }
 
     private async void InstallMcp_Click(object s, RoutedEventArgs e)
@@ -12099,6 +12117,14 @@ public partial class MainWindow : Window
 
     private async void UninstallMcp_Click(object s, RoutedEventArgs e)
     {
+        // Destructive — Claude loses all brain access until reinstalled.
+        if (MessageBox.Show(this,
+                "Remove BrainX from Claude Code CLI and Claude Desktop?\n\n" +
+                "Claude will lose access to your brain until you reconnect " +
+                "(it reconnects automatically the next time BrainX starts).",
+                "Uninstall MCP", MessageBoxButton.YesNo, MessageBoxImage.Warning)
+            != MessageBoxResult.Yes) return;
+
         var sb = new System.Text.StringBuilder();
         try
         {
@@ -12221,6 +12247,13 @@ public partial class MainWindow : Window
 
     private void UninstallClaudeHook_Click(object s, RoutedEventArgs e)
     {
+        if (MessageBox.Show(this,
+                "Remove the auto-learn hook from ~/.claude/settings.json?\n\n" +
+                "Claude will stop feeding notes it reads/edits into the brain " +
+                "(BrainX re-installs the hook automatically on next start).",
+                "Remove hook", MessageBoxButton.YesNo, MessageBoxImage.Warning)
+            != MessageBoxResult.Yes) return;
+
         try
         {
             var path = ClaudeSettingsPath();
