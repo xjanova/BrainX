@@ -55,16 +55,30 @@ public partial class MainWindow
                 return;
             }
 
+            // Capture what's actually on this machine BEFORE registering —
+            // EnsureClaudeDesktopRegistered creates the %APPDATA%\Claude folder
+            // itself, so probing afterwards would always look "installed".
+            var desktopPresent = Directory.Exists(Path.GetDirectoryName(ClaudeDesktopConfigPath())!);
+            var cliPresent = FindClaudeCli() is not null;
+
             var desktopChanged = EnsureClaudeDesktopRegistered(exe);
             var cliChanged = await EnsureClaudeCliRegisteredAsync(exe);
             var hookChanged = EnsureAutoIngestHookInstalledSilent();
 
             // Friendly, non-technical confirmation. The status-bar chips
             // (RefreshMcpStatusBar, polled every 3s) flip to green on their own —
-            // the user just sees it "already works".
-            SetOnboardStatus(desktopChanged || cliChanged || hookChanged
-                ? "✅ Connected to Claude automatically — your brain is ready. Restart Claude Desktop once to activate."
-                : "✅ Claude is already connected — your brain is ready.");
+            // the user just sees it "already works". Never claim "connected"
+            // when no Claude app exists on this PC — the config we wrote only
+            // activates once one is installed.
+            if (!desktopPresent && !cliPresent)
+                SetOnboardStatus("⚠ Claude not found on this PC — install Claude Desktop (claude.ai/download) " +
+                                 "or Claude Code, then reopen BrainX. Connection is automatic; nothing to configure.");
+            else if (desktopChanged || cliChanged || hookChanged)
+                SetOnboardStatus(desktopPresent && desktopChanged
+                    ? "✅ Connected to Claude automatically — your brain is ready. Restart Claude Desktop once to activate."
+                    : "✅ Connected to Claude automatically — your brain is ready.");
+            else
+                SetOnboardStatus("✅ Claude is already connected — your brain is ready.");
         }
         catch
         {
@@ -196,16 +210,18 @@ public partial class MainWindow
 
     /// <summary>
     /// Idempotent install of the PostToolUse auto-ingest hook (the "100%
-    /// auto-learn" feature). Skips when our marker is already present. Identical
-    /// payload to InstallClaudeHook_Click — kept in sync intentionally.
+    /// auto-learn" feature). Skips when the CURRENT hook version is present;
+    /// an outdated marker (v1 read a CLAUDE_TOOL_INPUT env var Claude Code
+    /// never sets, so it never fired) is removed and replaced in place.
+    /// Same payload as InstallClaudeHook_Click via BuildAutoIngestHookCommand().
     /// </summary>
     private bool EnsureAutoIngestHookInstalledSilent()
     {
         try
         {
             var path = ClaudeSettingsPath();
-            if (File.Exists(path) && File.ReadAllText(path).Contains(BrainAutoIngestHookMarker))
-                return false;   // already installed
+            if (File.Exists(path) && File.ReadAllText(path).Contains(BrainAutoIngestHookVersionTag))
+                return false;   // current version already installed
 
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 
@@ -220,14 +236,13 @@ public partial class MainWindow
             var hooks = root["hooks"] as Newtonsoft.Json.Linq.JObject ?? new Newtonsoft.Json.Linq.JObject();
             var postToolUse = hooks["PostToolUse"] as Newtonsoft.Json.Linq.JArray ?? new Newtonsoft.Json.Linq.JArray();
 
-            var command =
-                "powershell -NoProfile -Command \"" +
-                "$j = $env:CLAUDE_TOOL_INPUT | ConvertFrom-Json; " +
-                "$p = $j.file_path; " +
-                "if ($p -and ($p -like '*.md')) { " +
-                $"  $body = @{{ path = $p }} | ConvertTo-Json; " +
-                $"  try {{ Invoke-RestMethod -Uri '{AiServerBase}/api/brain/auto-ingest' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 3 | Out-Null }} catch {{ }} " +
-                "}\" # " + BrainAutoIngestHookMarker;
+            // Drop any stale BrainX hook entries (old version / old URL) so the
+            // upgrade replaces rather than stacks duplicates.
+            for (int i = postToolUse.Count - 1; i >= 0; i--)
+            {
+                var cmd = postToolUse[i]["hooks"]?[0]?["command"]?.ToString() ?? "";
+                if (cmd.Contains(BrainAutoIngestHookMarker)) postToolUse.RemoveAt(i);
+            }
 
             postToolUse.Add(new Newtonsoft.Json.Linq.JObject
             {
@@ -237,7 +252,7 @@ public partial class MainWindow
                     new Newtonsoft.Json.Linq.JObject
                     {
                         ["type"] = "command",
-                        ["command"] = command,
+                        ["command"] = BuildAutoIngestHookCommand(),
                     },
                 },
             });

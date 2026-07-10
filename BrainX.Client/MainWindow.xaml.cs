@@ -239,6 +239,18 @@ public partial class MainWindow : Window
         _vaultPath = @"G:\Obsidian";
         if (Environment.GetCommandLineArgs().Length > 1)
             _vaultPath = Environment.GetCommandLineArgs()[1];
+        else if (!Directory.Exists(_vaultPath))
+        {
+            // Public install — G:\Obsidian is the dev machine's vault and won't
+            // exist here. Fall back to a per-user vault (same default as
+            // install.ps1) so first launch — and the MCP registration below —
+            // never points Claude at a path that doesn't exist.
+            _vaultPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                "BrainX-Vault");
+            try { Directory.CreateDirectory(_vaultPath); }
+            catch { /* IndexVault re-creates it later; never block startup */ }
+        }
         _identityPath = Path.Combine(_vaultPath, ".obsidianx", "identity.json");
 
         // First-run / version-bump install of brain-save policy into the
@@ -11527,12 +11539,17 @@ public partial class MainWindow : Window
 
     private string McpServerExePath()
     {
-        // Prefer the built artifact next to the solution
-        var root = FindSolutionRoot();
-        var candidate = Path.Combine(root, "BrainX.Mcp", "bin", "Release", "net9.0", "brainx-mcp.exe");
-        if (File.Exists(candidate)) return candidate;
-        candidate = Path.Combine(root, "BrainX.Mcp", "bin", "Debug", "net9.0", "brainx-mcp.exe");
-        return candidate;
+        // Single source of truth: the same resolver auto-onboarding uses
+        // (packaged mcp\ subfolder first, then dev Release/Debug, newest wins).
+        // The Settings card, install command, Test button, and status-bar
+        // version chip must all agree with what Claude actually spawns —
+        // before this they only looked at solution-relative dev paths, so a
+        // shipped install showed "MCP n/a" + a wrong path.
+        var best = ResolveBestMcpExe();
+        if (best is not null) return best;
+        // Nothing built anywhere — return the dev Release path purely so
+        // "expected at:" error messages point somewhere concrete.
+        return Path.Combine(FindSolutionRoot(), "BrainX.Mcp", "bin", "Release", "net9.0", "brainx-mcp.exe");
     }
 
     /// <summary>
@@ -11809,7 +11826,13 @@ public partial class MainWindow : Window
         if (File.Exists(cfgPath))
         {
             try { config = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(cfgPath)); }
-            catch { config = new Newtonsoft.Json.Linq.JObject(); }
+            catch
+            {
+                // Same rule as the auto-onboard path: never silently destroy a
+                // config that might hold the user's other mcpServers entries.
+                BackupCorruptFile(cfgPath);
+                config = new Newtonsoft.Json.Linq.JObject();
+            }
         }
         else config = new Newtonsoft.Json.Linq.JObject();
 
@@ -12115,6 +12138,27 @@ public partial class MainWindow : Window
 
     private const string BrainAutoIngestHookMarker = "obsidianx-auto-ingest";
 
+    // Bumped whenever the hook command changes shape, so installers can tell a
+    // current hook from a stale one and upgrade it in place. v2: read the tool
+    // payload from STDIN — v1 read $env:CLAUDE_TOOL_INPUT, which Claude Code
+    // never sets, so the v1 hook silently never fired.
+    private const string BrainAutoIngestHookVersionTag = BrainAutoIngestHookMarker + " v2";
+
+    /// <summary>
+    /// The PostToolUse hook command. Claude Code hands hooks their payload as
+    /// JSON on stdin ({ tool_name, tool_input: { file_path } … }); there is no
+    /// CLAUDE_TOOL_INPUT environment variable. The trailing comment doubles as
+    /// the install + version marker.
+    /// </summary>
+    private string BuildAutoIngestHookCommand() =>
+        "powershell -NoProfile -Command \"" +
+        "$j = [Console]::In.ReadToEnd() | ConvertFrom-Json; " +
+        "$p = $j.tool_input.file_path; " +
+        "if ($p -and ($p -like '*.md')) { " +
+        "$body = @{ path = $p } | ConvertTo-Json; " +
+        $"try {{ Invoke-RestMethod -Uri '{AiServerBase}/api/brain/auto-ingest' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 3 | Out-Null }} catch {{ }} " +
+        "}\" # " + BrainAutoIngestHookVersionTag;
+
     private void InstallClaudeHook_Click(object s, RoutedEventArgs e)
     {
         try
@@ -12126,7 +12170,13 @@ public partial class MainWindow : Window
             if (File.Exists(path))
             {
                 try { root = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(path)); }
-                catch { root = new Newtonsoft.Json.Linq.JObject(); }
+                catch
+                {
+                    // settings.json can hold the user's own hooks/permissions —
+                    // stash the unreadable original before rebuilding.
+                    BackupCorruptFile(path);
+                    root = new Newtonsoft.Json.Linq.JObject();
+                }
             }
             else root = new Newtonsoft.Json.Linq.JObject();
 
@@ -12142,17 +12192,8 @@ public partial class MainWindow : Window
             }
 
             // New hook entry — fires after Read/Edit/Write/MultiEdit and
-            // posts the file path back to our server. A small PowerShell
-            // snippet extracts the file_path from the tool input JSON
-            // (passed via $env:CLAUDE_TOOL_INPUT) and curls our endpoint.
-            var command =
-                "powershell -NoProfile -Command \"" +
-                "$j = $env:CLAUDE_TOOL_INPUT | ConvertFrom-Json; " +
-                "$p = $j.file_path; " +
-                "if ($p -and ($p -like '*.md')) { " +
-                $"  $body = @{{ path = $p }} | ConvertTo-Json; " +
-                $"  try {{ Invoke-RestMethod -Uri '{AiServerBase}/api/brain/auto-ingest' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 3 | Out-Null }} catch {{ }} " +
-                "}\" # " + BrainAutoIngestHookMarker;
+            // posts the file path back to our server.
+            var command = BuildAutoIngestHookCommand();
 
             postToolUse.Add(new Newtonsoft.Json.Linq.JObject
             {
@@ -12221,10 +12262,13 @@ public partial class MainWindow : Window
             var path = ClaudeSettingsPath();
             if (!File.Exists(path)) { ClaudeHookStatus.Text = $"❌ {path} does not exist yet"; return; }
             var text = File.ReadAllText(path);
-            var installed = text.Contains(BrainAutoIngestHookMarker);
-            ClaudeHookStatus.Text = installed
-                ? $"✅ Hook INSTALLED in {path}"
-                : $"❌ Hook NOT installed (settings.json has no '{BrainAutoIngestHookMarker}' marker)";
+            if (text.Contains(BrainAutoIngestHookVersionTag))
+                ClaudeHookStatus.Text = $"✅ Hook INSTALLED (current version) in {path}";
+            else if (text.Contains(BrainAutoIngestHookMarker))
+                ClaudeHookStatus.Text = "⚠ OUTDATED hook found (v1 read a CLAUDE_TOOL_INPUT env var that " +
+                    "Claude Code never sets, so it never fired). Click 'Install hook' to upgrade in place.";
+            else
+                ClaudeHookStatus.Text = $"❌ Hook NOT installed (settings.json has no '{BrainAutoIngestHookMarker}' marker)";
         }
         catch (Exception ex) { ClaudeHookStatus.Text = $"Check failed: {ex.Message}"; }
     }

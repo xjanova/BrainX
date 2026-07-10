@@ -74,6 +74,23 @@ jobs:
             -p:PublishSingleFile=false `
             -o publish/win-x64
 
+      - name: Publish MCP server into the client package
+        # The client's zero-touch Claude onboarding (MainWindow.AutoOnboard.cs)
+        # registers <install>\mcp\brainx-mcp.exe with Claude Desktop + the
+        # Claude Code CLI on startup. Without this step a shipped install has
+        # NO MCP binary at all and the whole Claude integration is dead on
+        # arrival. Self-contained so end users don't need a .NET 9 runtime.
+        env:
+          BUILD_VERSION: ${{ steps.ver.outputs.version }}
+          BUILD_COMMIT:  ${{ steps.ver.outputs.sha }}
+        run: |
+          dotnet publish BrainX.Mcp/BrainX.Mcp.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=false `
+            -o publish/win-x64/mcp
+
       - name: Zip artifact
         shell: bash
         run: |
