@@ -284,6 +284,27 @@ public partial class MainWindow : Window
         var handle = new System.Windows.Interop.WindowInteropHelper(this).Handle;
         var source = System.Windows.Interop.HwndSource.FromHwnd(handle);
         source?.AddHook(WindowProc);
+        CenterOnPrimaryScreen();
+    }
+
+    /// <summary>
+    /// Always open centered on the PRIMARY monitor (screen #1), every launch,
+    /// regardless of where the mouse or a previous window sat. The old
+    /// WindowStartupLocation="CenterScreen" centered on whichever monitor the
+    /// cursor happened to be on — the user wants screen #1 consistently
+    /// (2026-07-12). SystemParameters.WorkArea is the primary screen's work
+    /// area (taskbar excluded) already in device-independent units, the same
+    /// units as Window.Left/Top/Width/Height, so no DPI math is needed.
+    /// Skipped while maximized/fullscreen so we never fight those layouts.
+    /// </summary>
+    private void CenterOnPrimaryScreen()
+    {
+        if (WindowState != WindowState.Normal) return;
+        var wa = SystemParameters.WorkArea;   // primary screen, DIU, minus taskbar
+        // Clamp so a window taller/wider than screen #1 still lands with its
+        // top-left visible instead of drifting off the top/left edge.
+        Left = wa.Left + Math.Max(0, (wa.Width  - Width)  / 2);
+        Top  = wa.Top  + Math.Max(0, (wa.Height - Height) / 2);
     }
 
     private IntPtr WindowProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)

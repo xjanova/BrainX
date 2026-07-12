@@ -57,6 +57,10 @@ public sealed class ClaudeUsageProbe
     private bool _started;
     private bool _bootstrapped;
     private int _consecutiveFailures;
+    // True once we've pinned the live session's cookies to persistent for the
+    // current authenticated streak. Reset on any auth failure so the next
+    // successful login (or a server-rotated cookie) gets re-pinned.
+    private bool _sessionPinned;
 
     private const string UsageUrl = "https://claude.ai/settings/usage";
 
@@ -243,14 +247,16 @@ public sealed class ClaudeUsageProbe
             if (!snap.Authenticated)
             {
                 _consecutiveFailures++;
+                _sessionPinned = false;   // dead session → let the next success re-pin
                 // Auto-recover from a browser re-login WITHOUT any user action:
                 // re-read the browser cookies (Chrome/Edge/Brave) + reload on the
                 // FIRST failure — so the moment the user signs back into claude.ai
                 // in their browser the card flips green on the next tick — and again
-                // every 3rd failure so a still-dead session keeps retrying. (The old
-                // code re-injected only ONCE, at exactly 3 failures, so a session
-                // that stayed expired never recovered on its own — the user had to
-                // click "Sign in" manually every time.)
+                // every 3rd failure so a still-dead session keeps retrying. NOTE:
+                // this is the BONUS path — it only works when the browser is CLOSED
+                // (Chrome 127+ exclusively locks its cookie DB while running, so the
+                // read returns 0). The reliable path is BrainX's own pinned session
+                // (see PinSessionCookiesAsync + ClaudeUsageLoginWindow).
                 if (_consecutiveFailures == 1 || _consecutiveFailures % 3 == 0)
                 {
                     await InjectEdgeCookiesAsync();
@@ -260,6 +266,15 @@ public sealed class ClaudeUsageProbe
             else
             {
                 _consecutiveFailures = 0;
+                // Pin the live session to persistent so closing BrainX doesn't
+                // log the user out. Once per authenticated streak (flag reset on
+                // failure), so a server-rotated session-only cookie gets re-pinned
+                // the next time we confirm we're still signed in.
+                if (!_sessionPinned)
+                {
+                    _sessionPinned = true;
+                    await PinSessionCookiesAsync();
+                }
             }
 
             try { Updated?.Invoke(this, snap); }
@@ -275,6 +290,39 @@ public sealed class ClaudeUsageProbe
     {
         try { Updated?.Invoke(this, new UsageSnapshot { Authenticated = false }); }
         catch { }
+    }
+
+    /// <summary>
+    /// Promote the live claude.ai session's session-only cookies to persistent
+    /// (far-future expiry) so a normal close/reopen of BrainX keeps the user
+    /// signed in. Same rationale as ClaudeUsageLoginWindow.PromoteSessionCookies
+    /// — the auth cookie is often session-scoped and would otherwise vanish when
+    /// this WebView2's process ends. Runs against the probe's own CookieManager,
+    /// which shares the UserDataFolder, so the pin sticks across launches.
+    /// </summary>
+    private async Task PinSessionCookiesAsync()
+    {
+        try
+        {
+            if (_core == null) return;
+            var cm = _core.CookieManager;
+            var cookies = await cm.GetCookiesAsync("https://claude.ai");
+            int pinned = 0;
+            foreach (var c in cookies)
+            {
+                if (c.IsSession)
+                {
+                    c.Expires = DateTime.UtcNow.AddDays(400);
+                    cm.AddOrUpdateCookie(c);
+                    pinned++;
+                }
+            }
+            LogLine($"PinSessionCookies: pinned {pinned} session cookie(s) to persistent");
+        }
+        catch (Exception ex)
+        {
+            LogLine($"PinSessionCookiesAsync: {ex.Message}");
+        }
     }
 
     private static UsageSnapshot? ParseSnapshot(string json)

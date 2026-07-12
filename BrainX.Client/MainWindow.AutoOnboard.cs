@@ -103,9 +103,12 @@ public partial class MainWindow
     /// so two installs on one machine never fight over versions — and a genuine
     /// downgrade is still blocked later by IsMcpOutdated during self-heal.
     ///
-    /// Only a DEV checkout (running from bin\Debug, no packaged mcp\ beside it)
-    /// falls through to the newest-by-mtime pick across the solution's build
-    /// outputs — end-user machines never hit that branch.
+    /// A DEV checkout (running from bin\Debug, no packaged mcp\ beside it) does
+    /// NOT fall back to its own months-old build — it registers the INSTALLED
+    /// app's MCP (Velopack `current\mcp`, which auto-update keeps fresh) unless
+    /// a locally-rebuilt dev MCP is genuinely NEWER. This kills the "dev machine
+    /// keeps calling the old version" bug (2026-07-12): opening the dev client
+    /// to write code no longer points Claude at a stale dev binary.
     /// Returns null when no build exists anywhere.
     /// </summary>
     private string? ResolveBestMcpExe()
@@ -114,25 +117,35 @@ public partial class MainWindow
 
         // 1) Packaged beside the running client — version-matched, always wins.
         //    Subfolder layout (what the CI publish step produces) first, then
-        //    a flat layout as a fallback for hand-assembled packages.
+        //    a flat layout as a fallback for hand-assembled packages. The
+        //    installed build itself exits here (baseDir = current, so
+        //    current\mcp is "beside" it).
         var packagedSub  = Path.Combine(baseDir, "mcp", "brainx-mcp.exe");
         if (File.Exists(packagedSub))  return packagedSub;
         var packagedFlat = Path.Combine(baseDir, "brainx-mcp.exe");
         if (File.Exists(packagedFlat)) return packagedFlat;
 
-        // 2) Dev checkout only: no packaged MCP beside us, so pick the freshest
-        //    of the solution's build outputs by mtime (Release vs Debug order is
-        //    deliberately NOT hardcoded — see the LastWriteTime gotcha note).
+        // 2) DEV checkout (no packaged MCP beside us). Consider the INSTALLED
+        //    app's MCP alongside the solution's dev builds and pick the
+        //    HIGHEST VERSION. Installed (auto-updated) beats a stale dev binary,
+        //    but a dev who rebuilds the MCP to a newer commit still wins — so
+        //    debugging the MCP locally isn't blocked. Ties keep input order
+        //    (installed listed first) via LINQ's stable OrderBy, so an
+        //    equal-version dev build never displaces the installed one.
+        var installed = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "BrainX", "current", "mcp", "brainx-mcp.exe");
         var root = FindSolutionRoot();
-        var devCandidates = new[]
+        var candidates = new[]
         {
+            installed,
             Path.Combine(root, "BrainX.Mcp", "bin", "Release", "net9.0", "brainx-mcp.exe"),
             Path.Combine(root, "BrainX.Mcp", "bin", "Debug",   "net9.0", "brainx-mcp.exe"),
         };
-        return devCandidates
+        return candidates
             .Where(File.Exists)
-            .Select(p => (path: p, mtime: File.GetLastWriteTimeUtc(p)))
-            .OrderByDescending(t => t.mtime)
+            .Select(p => (path: p, ver: McpProductVersionOf(p) ?? new Version(0, 0)))
+            .OrderByDescending(t => t.ver)
             .Select(t => t.path)
             .FirstOrDefault();
     }

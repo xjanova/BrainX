@@ -113,18 +113,60 @@ public sealed class ClaudeUsageLoginWindow : Window
             if (!_autoClosing)
             {
                 _autoClosing = true;   // one-shot guard — fire the auto-close once
-                _statusText.Text = "✓ Signed in — closing…";
+                _statusText.Text = "✓ Signed in — saving session…";
                 // Give WebView2 a moment to flush the freshly-set session cookies
-                // to the shared user-data folder (the hidden probe reads them via
-                // ReloadAsync, fired from this window's Closed event), then close
-                // automatically — the user asked not to leave the modal hanging open.
+                // to the shared user-data folder, then PIN them so the login
+                // survives closing BrainX (see PromoteSessionCookiesAsync), and
+                // close automatically — the probe reads the live session via
+                // ReloadAsync fired from this window's Closed event.
                 await Task.Delay(900);
+                await PromoteSessionCookiesAsync();
                 try { Close(); } catch { /* already closing / disposed */ }
             }
         }
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"ClaudeUsageLoginWindow.OnSourceChanged: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Pin the freshly-established claude.ai session so it survives closing
+    /// BrainX — the whole point of "จำ session ไม่ต้อง login บ่อย".
+    ///
+    /// claude.ai's auth cookies are frequently SESSION-scoped (no Expires), so
+    /// WebView2 drops them the moment its process ends — which is exactly why
+    /// the user had to sign in on every launch. We re-save each session-only
+    /// cookie with a far-future expiry, promoting it to a PERSISTENT cookie
+    /// that WebView2 writes to disk in the (stable, update-surviving)
+    /// UserDataFolder. The server still governs real validity — if it revokes
+    /// the session we detect the login bounce and re-prompt — but a normal
+    /// close/reopen no longer logs the user out.
+    /// </summary>
+    private async Task PromoteSessionCookiesAsync()
+    {
+        try
+        {
+            var core = _wv.CoreWebView2;
+            if (core == null) return;
+            var cm = core.CookieManager;
+            var cookies = await cm.GetCookiesAsync("https://claude.ai");
+            int promoted = 0;
+            foreach (var c in cookies)
+            {
+                if (c.IsSession)
+                {
+                    c.Expires = DateTime.UtcNow.AddDays(400);
+                    cm.AddOrUpdateCookie(c);
+                    promoted++;
+                }
+            }
+            System.Diagnostics.Debug.WriteLine(
+                $"ClaudeUsageLoginWindow: pinned {promoted} session cookie(s) to persistent");
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"PromoteSessionCookiesAsync: {ex.Message}");
         }
     }
 }
