@@ -21,7 +21,33 @@ internal static partial class Program
 {
     private const string ProtocolVersion = "2025-06-18";
     private const string ServerName = "brainx-brain";
-    internal const string ServerVersion = "2.8.0";
+
+    // SINGLE SOURCE OF TRUTH for the version string. Derived from the
+    // assembly's InformationalVersion (stamped by csproj <Version>, i.e.
+    // "2.8.<git-commit-count>+<sha>"), stripped to its SemVer prefix.
+    // This is the SAME value the WPF status-bar chip reads off the DLL's
+    // ProductVersion, so serverInfo.version, brain_stats, --version, the
+    // BRAINX_MCP_VERSION self-heal, and the status bar can never disagree
+    // again. Bump the minor in BrainX.Mcp.csproj (both the static
+    // <Version> and the DeriveMcpVersion target) — never here.
+    internal static readonly string ServerVersion = ComputeServerVersion();
+
+    private static string ComputeServerVersion()
+    {
+        try
+        {
+            var asm = System.Reflection.Assembly.GetExecutingAssembly();
+            var v = asm.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+                       .OfType<System.Reflection.AssemblyInformationalVersionAttribute>()
+                       .FirstOrDefault()?.InformationalVersion;
+            if (string.IsNullOrEmpty(v)) v = asm.GetName().Version?.ToString(3);
+            if (string.IsNullOrEmpty(v)) return "2.8.0";
+            var plus = v.IndexOf('+'); if (plus >= 0) v = v[..plus];   // drop +<sha>
+            var dash = v.IndexOf('-'); if (dash >= 0) v = v[..dash];   // drop -<prerelease>
+            return v;
+        }
+        catch { return "2.8.0"; }
+    }
 
     /// <summary>
     /// Build a one-line version string including the bound assembly's
