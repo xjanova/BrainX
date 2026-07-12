@@ -21,7 +21,7 @@ internal static partial class Program
 {
     private const string ProtocolVersion = "2025-06-18";
     private const string ServerName = "brainx-brain";
-    internal const string ServerVersion = "2.7.0";
+    internal const string ServerVersion = "2.8.0";
 
     /// <summary>
     /// Build a one-line version string including the bound assembly's
@@ -79,6 +79,11 @@ internal static partial class Program
         {
             Console.OutputEncoding = new UTF8Encoding(false);
             return BakeBundlesCli(args.Skip(1).ToArray());
+        }
+        if (args.Length > 0 && args[0].Equals("embed", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.OutputEncoding = new UTF8Encoding(false);
+            return await EmbedCliAsync(args.Skip(1).ToArray()).ConfigureAwait(false);
         }
         if (args.Length > 0 && (args[0] == "--version" || args[0] == "-v" || args[0].Equals("version", StringComparison.OrdinalIgnoreCase)))
         {
@@ -260,7 +265,13 @@ internal static partial class Program
         ["tools"] = new JArray
         {
             Tool("brain_search",
-                "Full-text search across brain notes. Returns top matches with title, category, tags, and a short preview (200 chars by default — pass preview_chars to override or compact:true to drop preview entirely for cheap triage).",
+                "Full-text search across brain notes — matches titles, tags, AND full note bodies " +
+                "(not just previews). When a hit is deep in the body, the result carries a " +
+                "matchContext snippet showing the text around the match, so you usually don't need " +
+                "a follow-up brain_get_note just to see why it matched. Thai queries work without " +
+                "spaces (n-gram matching). Returns top matches with title, category, tags, and a " +
+                "short preview (200 chars by default — pass preview_chars to override or " +
+                "compact:true to drop preview entirely for cheap triage).",
                 new JObject
                 {
                     ["type"] = "object",
@@ -411,12 +422,13 @@ internal static partial class Program
                     ["required"] = new JArray { "id" }
                 }),
             Tool("brain_semantic_search",
-                "Embedding-based semantic search — finds notes whose meaning is close to the query, " +
-                "even when no keywords overlap. Falls back to keyword search if Ollama is unreachable. " +
-                "Use this when the user asks an open-ended question or you need topical neighbors " +
-                "rather than exact-match hits. Optional category/tag/scope filters narrow the search " +
-                "BEFORE the cosine pass — much faster than post-filtering when you already know the " +
-                "topic area. Same preview_chars/compact options as brain_search.",
+                "Hybrid semantic search — fuses embedding similarity (multilingual, handles Thai) with " +
+                "keyword ranking via reciprocal-rank fusion, so both paraphrases AND exact terms " +
+                "(ids, codenames) surface. mode field reports 'hybrid', 'semantic', or 'keyword-fallback' " +
+                "(Ollama unreachable). Use this when the user asks an open-ended question or you need " +
+                "topical neighbors rather than exact-match hits. Optional category/tag/scope filters " +
+                "narrow the search BEFORE the cosine pass — much faster than post-filtering when you " +
+                "already know the topic area. Same preview_chars/compact options as brain_search.",
                 new JObject
                 {
                     ["type"] = "object",
@@ -766,7 +778,7 @@ internal static partial class Program
             .Select(n => new
             {
                 Node = n,
-                Score = ScoreNode(n, ql)
+                Score = ScoreNode(n, ql, GetContentLower(export, n))
             })
             .Where(x => x.Score > 0)
             .OrderByDescending(x => x.Score)
@@ -776,7 +788,17 @@ internal static partial class Program
         // Log access for each hit so the 3D graph can pulse the matching nodes
         foreach (var m in matches) LogAccess(m.Node.Id, "search", query);
 
-        var resultsArr = new JArray(matches.Select(x => BuildSearchResult(x.Node, x.Score, previewChars, compact)));
+        var resultsArr = new JArray(matches.Select(x =>
+        {
+            var o = BuildSearchResult(x.Node, x.Score, previewChars, compact);
+            // Deep-content hits (v2.8.0): when the query matched past the
+            // preview, show the text AROUND the match — otherwise the
+            // caller sees a preview with no trace of why the note hit and
+            // burns a whole brain_get_note (5k-20k tokens) to find out.
+            var ctx = ExtractMatchContext(export, x.Node, ql);
+            if (ctx != null) o["matchContext"] = ctx;
+            return o;
+        }));
         StoreMemo("brain_search", args, query, resultsArr);
 
         // Phase D (v2.6.0): warm the note-memo for the top-3 hits so a
@@ -2073,22 +2095,62 @@ internal static partial class Program
         // (network, model not pulled, daemon not running) and fall
         // back to keyword search so the tool always answers.
         var queryVec = OllamaEmbed(query);
+        var ql = query.ToLowerInvariant();
         List<(NodeSummary node, double score)> ranked;
         string mode;
         if (queryVec != null)
         {
-            ranked = new List<(NodeSummary, double)>(filtered.Count);
+            var semantic = new List<(NodeSummary node, double score)>(filtered.Count);
             foreach (var n in filtered)
             {
                 var stored = LoadEmbedding(n.Id);
                 if (stored == null) continue;
-                ranked.Add((n, Cosine(queryVec, stored)));
+                semantic.Add((n, Cosine(queryVec, stored)));
             }
-            ranked = ranked
+            semantic.Sort((a, b) => b.score.CompareTo(a.score));
+
+            // Hybrid fusion (v2.8.0): cosine alone misses exact-term
+            // matches (ids, project codenames, mixed Thai/English
+            // queries); keyword alone misses paraphrases. Reciprocal-
+            // rank fusion combines both rankings without needing the
+            // two score scales to be comparable: each list contributes
+            // 1/(60+rank) per note, so a note near the top of EITHER
+            // list surfaces, and a note decent in BOTH beats one that
+            // is great in only one.
+            var keyword = filtered
+                .Select(n => (node: n, score: ScoreNode(n, ql, GetContentLower(export, n))))
+                .Where(x => x.score > 0)
                 .OrderByDescending(x => x.score)
-                .Take(limit)
                 .ToList();
-            mode = ranked.Count > 0 ? "semantic" : "keyword-fallback";
+
+            if (semantic.Count > 0 && keyword.Count > 0)
+            {
+                const double K = 60.0;
+                var fused = new Dictionary<string, (NodeSummary node, double score)>();
+                void Accumulate(List<(NodeSummary node, double score)> list)
+                {
+                    for (int i = 0; i < list.Count; i++)
+                    {
+                        var (n, _) = list[i];
+                        var add = 1.0 / (K + i + 1);
+                        fused[n.Id] = fused.TryGetValue(n.Id, out var cur)
+                            ? (n, cur.score + add)
+                            : (n, add);
+                    }
+                }
+                Accumulate(semantic);
+                Accumulate(keyword);
+                ranked = fused.Values
+                    .OrderByDescending(x => x.score)
+                    .Take(limit)
+                    .ToList();
+                mode = "hybrid";
+            }
+            else
+            {
+                ranked = semantic.Take(limit).ToList();
+                mode = ranked.Count > 0 ? "semantic" : "keyword-fallback";
+            }
         }
         else
         {
@@ -2096,16 +2158,15 @@ internal static partial class Program
             ranked = new();
         }
 
-        if (ranked.Count == 0)
+        if (ranked.Count == 0 && mode == "keyword-fallback")
         {
             // Either Ollama is offline or no embeddings exist yet.
             // Keyword fallback so callers always get useful output.
             // Same filter set applies — staying consistent with the
             // semantic path so callers see the same candidate universe
             // regardless of which scorer fired.
-            var ql = query.ToLowerInvariant();
             ranked = filtered
-                .Select(n => (n, ScoreNode(n, ql)))
+                .Select(n => (n, ScoreNode(n, ql, GetContentLower(export, n))))
                 .Where(x => x.Item2 > 0)
                 .OrderByDescending(x => x.Item2)
                 .Take(limit)
@@ -2113,7 +2174,13 @@ internal static partial class Program
         }
 
         foreach (var (n, _) in ranked) LogAccess(n.Id, "semantic_search", query);
-        var resultsArr = new JArray(ranked.Select(x => BuildSearchResult(x.node, Math.Round(x.score, 4), previewChars, compact)));
+        var resultsArr = new JArray(ranked.Select(x =>
+        {
+            var o = BuildSearchResult(x.node, Math.Round(x.score, 4), previewChars, compact);
+            var ctx = ExtractMatchContext(export, x.node, ql);
+            if (ctx != null) o["matchContext"] = ctx;
+            return o;
+        }));
         StoreMemo("brain_semantic_search", args, query, resultsArr);
 
         // Phase D (v2.6.0): prefetch top-3 for the inevitable get_note
@@ -3149,7 +3216,11 @@ internal static partial class Program
             };
             var body = new JObject
             {
-                ["model"] = "nomic-embed-text",
+                // Resolve through the embeddings manifest so the query
+                // vector always matches the model (and dimensions) the
+                // sidecars were built with — a mismatch makes cosine
+                // return 0 for every note. See EmbeddingService.ResolveModel.
+                ["model"] = EmbeddingService.ResolveModel(_vaultPath),
                 ["input"] = text
             }.ToString();
             var resp = http.PostAsync("http://localhost:11434/api/embed",
@@ -3185,16 +3256,26 @@ internal static partial class Program
     /// fully inspectable from the filesystem and a missing/corrupt
     /// embedding doesn't break the whole storage layer.
     /// </summary>
+    // Embedding cache (v2.8.0): a semantic query used to re-read every
+    // sidecar .bin from disk (600+ file reads per call). Vectors are
+    // ~3 KB each, so the whole vault fits in ~2 MB of RAM — cache them
+    // keyed by mtime and a warm query becomes a pure in-memory cosine
+    // sweep. A re-embedded note bumps its sidecar mtime and reloads.
+    private static readonly Dictionary<string, (long Mtime, float[] Vec)> _embCache = new();
+
     private static float[]? LoadEmbedding(string nodeId)
     {
         try
         {
             var path = Path.Combine(_vaultPath, ".obsidianx", "embeddings", nodeId + ".bin");
             if (!File.Exists(path)) return null;
+            var mtime = File.GetLastWriteTimeUtc(path).Ticks;
+            if (_embCache.TryGetValue(nodeId, out var hit) && hit.Mtime == mtime) return hit.Vec;
             var bytes = File.ReadAllBytes(path);
             if (bytes.Length % 4 != 0) return null;
             var floats = new float[bytes.Length / 4];
             Buffer.BlockCopy(bytes, 0, floats, 0, bytes.Length);
+            _embCache[nodeId] = (mtime, floats);
             return floats;
         }
         catch { return null; }
@@ -3390,18 +3471,19 @@ internal static partial class Program
 
     // ───────────── helpers ─────────────
 
-    private static double ScoreNode(NodeSummary n, string ql)
+    private static double ScoreNode(NodeSummary n, string ql, string? contentLower = null)
     {
         // Bonus when the full phrase appears verbatim
         double s = 0;
         if (n.Title.Contains(ql, StringComparison.OrdinalIgnoreCase)) s += 5;
         else if (n.Preview.Contains(ql, StringComparison.OrdinalIgnoreCase)) s += 2;
+        else if (contentLower != null && contentLower.Contains(ql, StringComparison.Ordinal)) s += 1.5;
 
         // Per-word scoring so multi-keyword queries hit notes matching any subset
         var words = ql.Split(new[] { ' ', '\t', '\n' }, StringSplitOptions.RemoveEmptyEntries)
-                      .Where(w => w.Length >= 2)
+                      .Where(w => w.Length >= 2 && !_stopWords.Contains(w))
                       .ToArray();
-        if (words.Length == 0) return s;
+        if (words.Length == 0) return ApplyGraphRecencyBoost(n, s);
 
         int matched = 0;
         foreach (var w in words)
@@ -3411,20 +3493,260 @@ internal static partial class Program
             if (n.Tags.Any(t => t.Contains(w, StringComparison.OrdinalIgnoreCase))) { s += 2; hit = true; }
             if (n.Preview.Contains(w, StringComparison.OrdinalIgnoreCase)) { s += 1; hit = true; }
             if (n.PrimaryCategory.Contains(w, StringComparison.OrdinalIgnoreCase)) { s += 1.5; hit = true; }
+            // Deep-content hit: worth less than a title/preview hit but
+            // rescues keywords buried past the 500-char preview.
+            if (!hit && contentLower != null
+                && contentLower.Contains(w, StringComparison.Ordinal)) { s += 0.5; hit = true; }
             if (hit) matched++;
         }
+
+        // Thai n-gram fallback (v2.8.0): Thai writes without spaces, so a
+        // natural-language Thai query arrives as ONE long "word" that
+        // never substring-matches anything ("ระบบค้นหาโน้ตทำงานอย่างไร"
+        // appears verbatim in no note even though ค้นหา/โน้ต do). Without
+        // a segmenter dictionary, overlapping 4-grams approximate word
+        // hits: if ≥ half the grams of a run occur in the note, the note
+        // is talking about those words. Only fires when the whole run
+        // missed — an exact match already scored above.
+        foreach (var (run, grams) in GetThaiGrams(ql))
+        {
+            if (n.Title.Contains(run, StringComparison.Ordinal)
+                || n.Preview.Contains(run, StringComparison.Ordinal)
+                || (contentLower != null && contentLower.Contains(run, StringComparison.Ordinal)))
+                continue;
+            if (contentLower == null || grams.Length == 0) continue;
+            int hits = 0;
+            foreach (var g in grams)
+                if (contentLower.Contains(g, StringComparison.Ordinal)) hits++;
+            var frac = (double)hits / grams.Length;
+            // 0.3, not 0.5: step-2 grams straddle word boundaries, so
+            // roughly half of a sentence's grams ("บบค้", "นหาโ") can
+            // never occur in any note. A note containing most of the
+            // query's real words lands around 0.3-0.45.
+            if (frac >= 0.3) { s += 3.0 * frac; matched++; }
+        }
+
         // Multi-word bonus: rewards notes that match >= 2 query words
         if (words.Length >= 2 && matched >= 2)
             s *= 1.0 + (0.25 * (matched - 1));
+        return ApplyGraphRecencyBoost(n, s);
+    }
+
+    // Memoized per query (ScoreNode runs once per node — don't re-derive
+    // the gram list 600×). Single-threaded stdio loop, so a one-slot
+    // cache is race-free.
+    private static (string Ql, (string Run, string[] Grams)[] Items) _thaiGramCache = ("", []);
+
+    private static (string Run, string[] Grams)[] GetThaiGrams(string ql)
+    {
+        if (_thaiGramCache.Ql == ql) return _thaiGramCache.Items;
+        var items = new List<(string, string[])>();
+        foreach (Match m in Regex.Matches(ql, "[฀-๿]{6,}"))
+        {
+            var run = m.Value;
+            var grams = new List<string>();
+            for (int i = 0; i + 4 <= run.Length && grams.Count < 12; i += 2)
+                grams.Add(run.Substring(i, 4));
+            if (grams.Count > 0) items.Add((run, grams.ToArray()));
+        }
+        _thaiGramCache = (ql, items.ToArray());
+        return _thaiGramCache.Items;
+    }
+
+    // English stopwords excluded from per-word scoring (v2.8.0). Matters
+    // for natural-language queries routed through the hybrid path —
+    // "how does p2p sync work" should score on "p2p"/"sync", not hand a
+    // point to every note containing "how". Kept deliberately small:
+    // brain_search queries are usually 2-4 curated keywords already.
+    private static readonly HashSet<string> _stopWords = new(StringComparer.Ordinal)
+    {
+        "the", "and", "for", "not", "but", "with", "that", "this", "these", "those",
+        "from", "into", "about", "when", "where", "what", "which", "who", "whom",
+        "how", "why", "does", "did", "was", "were", "are", "is", "be", "been",
+        "can", "could", "will", "would", "should", "has", "have", "had", "its", "it's",
+        "you", "your", "our", "their", "them", "they",
+    };
+
+    // Graph + recency signal: a well-linked note is usually the canonical
+    // write-up of its topic, and a recently touched note is usually what
+    // the user means. Both boosts are deliberately small (≤20% / ≤10%) —
+    // tie-breakers on top of the text score, never able to outrank a
+    // genuinely better keyword match.
+    private static double ApplyGraphRecencyBoost(NodeSummary n, double s)
+    {
+        if (s <= 0) return s;
+        var degree = n.BacklinkIds.Count + n.LinkedNodeIds.Count;
+        s *= 1.0 + Math.Min(degree, 10) * 0.02;
+        if (DateTime.UtcNow - n.ModifiedAt < TimeSpan.FromDays(14)) s *= 1.10;
         return s;
+    }
+
+    // Full-content cache (v2.8.0): brain-export.json only carries a
+    // ~500-char preview, so a keyword deeper in the body was invisible
+    // to brain_search. Cache each note's lowercased body keyed by file
+    // mtime — the whole vault (~1M words) is 10-20 MB, cheap for a
+    // long-lived process. First search after boot pays one bulk read;
+    // every search after that is a pure in-memory substring sweep.
+    private static readonly Dictionary<string, (long Mtime, string Content)> _contentCache = new();
+
+    private static string? GetContentLower(BrainExport export, NodeSummary n)
+    {
+        try
+        {
+            var path = Path.Combine(export.VaultPath, n.RelativePath);
+            if (!File.Exists(path)) return null;
+            var mtime = File.GetLastWriteTimeUtc(path).Ticks;
+            if (_contentCache.TryGetValue(n.Id, out var hit) && hit.Mtime == mtime) return hit.Content;
+            var content = File.ReadAllText(path).ToLowerInvariant();
+            _contentCache[n.Id] = (mtime, content);
+            return content;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// A grep -C style snippet around the first deep-content match —
+    /// only produced when the match sits BEYOND the exported preview
+    /// (the first ~500 chars), because inside that range the preview
+    /// already shows it. Positions are found on the lowercased cache,
+    /// then the same offsets are sliced from the original file so the
+    /// snippet keeps its original casing.
+    /// </summary>
+    private static string? ExtractMatchContext(BrainExport export, NodeSummary n, string ql)
+    {
+        var contentLower = GetContentLower(export, n);
+        if (contentLower == null) return null;
+
+        // Find the first query term that matches deep in the body.
+        int best = -1;
+        int idx = contentLower.IndexOf(ql, StringComparison.Ordinal);
+        if (idx >= 500) best = idx;
+        if (best < 0)
+        {
+            foreach (var w in ql.Split(new[] { ' ', '\t', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (w.Length < 2 || _stopWords.Contains(w)) continue;
+                idx = contentLower.IndexOf(w, StringComparison.Ordinal);
+                if (idx >= 500 && (best < 0 || idx < best)) best = idx;
+            }
+        }
+        if (best < 0)
+        {
+            foreach (var (_, grams) in GetThaiGrams(ql))
+                foreach (var g in grams)
+                {
+                    idx = contentLower.IndexOf(g, StringComparison.Ordinal);
+                    if (idx >= 500 && (best < 0 || idx < best)) best = idx;
+                }
+        }
+        if (best < 0) return null;
+
+        string original;
+        try
+        {
+            var path = Path.Combine(export.VaultPath, n.RelativePath);
+            original = File.ReadAllText(path);
+        }
+        catch { return null; }
+        // ToLowerInvariant is length-preserving for the characters in
+        // these vaults, but clamp defensively anyway.
+        var start = Math.Max(0, Math.Min(best, original.Length) - 80);
+        var end = Math.Min(original.Length, best + 160);
+        if (start >= end) return null;
+        var snip = original[start..end].Replace("\r", "").Replace('\n', ' ').Trim();
+        return "…" + snip + "…";
+    }
+
+    // Export cache (v2.8.0): brain-export.json is multi-MB and was
+    // re-parsed on EVERY tool call. Nothing in the MCP mutates the
+    // parsed object, so an mtime-keyed cache is safe — the client
+    // rewrites the file when the vault changes, which bumps mtime and
+    // invalidates us. On a parse error (e.g. the exporter is mid-write)
+    // we serve the last good copy instead of failing the tool call.
+    private static BrainExport? _exportCache;
+    private static long _exportCacheMtime;
+
+    /// <summary>
+    /// <c>brainx-mcp embed [--vault PATH] [--model NAME]</c> — (re)compute
+    /// embedding sidecars from the CLI, no WPF client needed. Reads the
+    /// node list from brain-export.json (so it needs no re-index pass)
+    /// and delegates to EmbeddingService, which handles the model
+    /// manifest and full re-embed on model change.
+    /// </summary>
+    private static async Task<int> EmbedCliAsync(string[] args)
+    {
+        for (int i = 0; i < args.Length - 1; i++)
+        {
+            if (args[i] == "--vault" && Directory.Exists(args[i + 1])) _vaultPath = args[i + 1];
+            if (args[i] == "--model")
+                Environment.SetEnvironmentVariable("BRAINX_EMBED_MODEL", args[i + 1]);
+        }
+
+        var export = LoadExport();
+        if (export == null)
+        {
+            Console.Error.WriteLine($"brain-export.json not found under {_vaultPath}\\.obsidianx — open BrainX and export first.");
+            return 1;
+        }
+
+        var nodes = export.Nodes.Select(n => new BrainX.Core.Models.KnowledgeNode
+        {
+            Id = n.Id,
+            Title = n.Title,
+            FilePath = Path.Combine(export.VaultPath, n.RelativePath),
+            ModifiedAt = n.ModifiedAt,
+        }).ToList();
+
+        var svc = new EmbeddingService();
+        var model = EmbeddingService.ResolveModel(_vaultPath);
+        Console.WriteLine($"brainx-mcp embed · v{ServerVersion}");
+        Console.WriteLine($"  vault: {_vaultPath}");
+        Console.WriteLine($"  model: {model}");
+        Console.WriteLine($"  notes: {nodes.Count}");
+
+        if (!await svc.OllamaReachableAsync().ConfigureAwait(false))
+        {
+            Console.Error.WriteLine($"Ollama unreachable at {svc.OllamaUrl} — start Ollama and pull the model first (ollama pull {model}).");
+            return 1;
+        }
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        int lastPct = -1;
+        var written = await svc.PrecomputeAsync(_vaultPath, nodes, (done, total) =>
+        {
+            var pct = done * 100 / total;
+            if (pct != lastPct && pct % 5 == 0)
+            {
+                lastPct = pct;
+                Console.WriteLine($"  {pct,3}% ({done}/{total}) · {sw.Elapsed:mm\\:ss}");
+            }
+        }).ConfigureAwait(false);
+        sw.Stop();
+
+        if (written == 0)
+            Console.WriteLine("  nothing to do (all sidecars fresh, or Ollama unreachable).");
+        else
+            Console.WriteLine($"[OK] wrote {written} embedding(s) in {sw.Elapsed:mm\\:ss} · model={svc.Model}");
+        return 0;
     }
 
     private static BrainExport? LoadExport()
     {
         var path = Path.Combine(_vaultPath, ".obsidianx", "brain-export.json");
         if (!File.Exists(path)) return null;
-        try { return JsonConvert.DeserializeObject<BrainExport>(File.ReadAllText(path)); }
-        catch { return null; }
+        try
+        {
+            var mtime = File.GetLastWriteTimeUtc(path).Ticks;
+            if (_exportCache != null && _exportCacheMtime == mtime) return _exportCache;
+            var parsed = JsonConvert.DeserializeObject<BrainExport>(File.ReadAllText(path));
+            if (parsed != null)
+            {
+                _exportCache = parsed;
+                _exportCacheMtime = mtime;
+            }
+            return parsed ?? _exportCache;
+        }
+        catch { return _exportCache; }
     }
 
     // ───────────── scope filter (path-prefix namespacing) ──────────────

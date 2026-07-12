@@ -96,6 +96,16 @@ If any link is missing, the next one to come up resurrects it. **The user never 
 - 🌐 **AI Hub** — single API surface over Ollama (local) + NVIDIA NIM (free tier, Llama 4 / GPT-OSS / DeepSeek / Qwen / Gemma) + OpenRouter + DeepSeek; backend + model picker + per-router stats
 - 🪞 **Claude redirect mode** — toggle Claude Desktop traffic to a local model with full visibility of in/out bytes and request count
 
+### Search stack (v2.8.0)
+- 🔎 **Hybrid retrieval** — `brain_semantic_search` fuses embedding cosine similarity with keyword ranking via **reciprocal-rank fusion** (the same trick production search engines use), so paraphrases AND exact terms (ids, codenames) both surface
+- 🌏 **Multilingual embeddings** — `bge-m3` via local Ollama; natural-language Thai queries find notes with zero keyword overlap, fully offline
+- 📖 **Full-content keyword search** — matches note *bodies*, not just previews; a term buried in paragraph 40 still hits
+- 🇹🇭 **Thai n-gram matching** — spaceless Thai queries ("ระบบค้นหาโน้ต…") match without a word segmenter via overlapping 4-grams
+- 🎯 **matchContext snippets** — deep hits ship a grep `-C`-style excerpt around the match, so Claude doesn't burn a 20k-token note read just to see *why* something matched
+- ⚡ **3-layer in-memory cache** — parsed export, embedding vectors, and note bodies are all mtime-invalidated RAM caches; a warm query is pure in-memory scan + SIMD cosine
+- 🧭 **Ranking signals** — well-linked (graph centrality) and recently-edited notes get small, capped boosts as tie-breakers
+- 🔁 **Embedding model manifest** — `embeddings/model.json` keeps query-time and precompute models in lockstep; swap models with `brainx-mcp embed --model <name>` and the whole vault re-embeds safely
+
 ## BrainX vs Obsidian
 
 | Feature | Obsidian | BrainX |
@@ -104,6 +114,8 @@ If any link is missing, the next one to come up resurrects it. **The user never 
 | `[[wiki-links]]` | Yes | Yes (Ctrl+Click + auto-update on rename) |
 | Backlinks | Yes | Yes (panel with surrounding context) |
 | Full-text search | Yes | Yes (highlighted matches) |
+| Semantic search | Plugin + API key | **Built-in, local & offline (bge-m3 + hybrid RRF)** |
+| Thai natural-language search | — | **n-gram matching + multilingual embeddings** |
 | Quick switcher | Ctrl+O | Ctrl+O |
 | Graph view | 2D, static | **3D physics + 2D fast renderer + toggle** |
 | Knowledge growth | — | **Time-series line chart over real dates** |
