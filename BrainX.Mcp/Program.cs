@@ -4117,38 +4117,51 @@ internal static partial class Program
             if (System.Diagnostics.Process.GetProcessesByName("BrainX.Client").Length > 0)
                 return;
 
-            // The MCP exe lives at
-            //   <solnRoot>/BrainX.Mcp/bin/<cfg>/net9.0/brainx-mcp.exe
-            // Client sits at
-            //   <solnRoot>/BrainX.Client/bin/<cfg>/net10.0-windows/BrainX.Client.exe
+            // Where does the client live? Order matters — the INSTALLED build
+            // must win so that Claude spawning this MCP never launches a stale
+            // dev binary (the user's "it remembers the dev build, not the one I
+            // installed" bug, 2026-07-12). Only a pure dev checkout with no
+            // install present falls through to bin\.
+            //   installed layout: current\BrainX.Client.exe  next to  current\mcp\brainx-mcp.exe
+            //   dev layout:       <soln>\BrainX.Client\bin\<cfg>\net10.0-windows\BrainX.Client.exe
             var mcpExe = System.Reflection.Assembly.GetExecutingAssembly().Location;
             if (string.IsNullOrEmpty(mcpExe)) mcpExe = Environment.GetCommandLineArgs()[0];
-            var solnRoot = FindSolutionRoot(Path.GetDirectoryName(mcpExe) ?? "");
-            if (solnRoot == null) { Log("client launch: solution root not found"); return; }
+            var mcpDir = Path.GetDirectoryName(mcpExe) ?? "";
 
-            // Candidate build outputs. We deliberately do NOT prefer Release
-            // over Debug — when the developer has been iterating on Debug,
-            // Release goes stale within hours and we'd auto-launch a
-            // weeks-old binary. Pick the freshest by LastWriteTime instead.
-            string[] candidates =
-            [
-                Path.Combine(solnRoot, "BrainX.Client", "bin", "Release", "net10.0-windows", "BrainX.Client.exe"),
-                Path.Combine(solnRoot, "BrainX.Client", "bin", "Debug",   "net10.0-windows", "BrainX.Client.exe")
-            ];
-
-            var existing = candidates
-                .Where(File.Exists)
-                .Select(p => (path: p, mtime: File.GetLastWriteTimeUtc(p)))
-                .OrderByDescending(t => t.mtime)
-                .ToList();
-
-            if (existing.Count == 0)
+            var ordered = new List<string>
             {
-                Log("client launch: exe not found under " + solnRoot);
-                return;
+                // 1) Client packaged one level up from this MCP (installed:
+                //    current\mcp\.. = current\BrainX.Client.exe). Version-matched
+                //    to the MCP Claude actually spawned.
+                Path.GetFullPath(Path.Combine(mcpDir, "..", "BrainX.Client.exe")),
+                // 2) The installed Velopack build explicitly — covers a dev MCP
+                //    that should STILL open the user's installed client, not its
+                //    own bin build.
+                Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "BrainX", "current", "BrainX.Client.exe"),
+            };
+            // 3) Dev checkout fallback (freshest of Release/Debug by mtime — we
+            //    deliberately don't prefer Release; an iterated Debug is newer).
+            var solnRoot = FindSolutionRoot(mcpDir);
+            if (solnRoot != null)
+            {
+                foreach (var dev in new[]
+                {
+                    Path.Combine(solnRoot, "BrainX.Client", "bin", "Release", "net10.0-windows", "BrainX.Client.exe"),
+                    Path.Combine(solnRoot, "BrainX.Client", "bin", "Debug",   "net10.0-windows", "BrainX.Client.exe"),
+                }
+                .Where(File.Exists)
+                .OrderByDescending(File.GetLastWriteTimeUtc))
+                    ordered.Add(dev);
             }
 
-            var pick = existing[0].path;
+            var pick = ordered.FirstOrDefault(File.Exists);
+            if (pick == null)
+            {
+                Log("client launch: no BrainX.Client.exe found (installed or dev)");
+                return;
+            }
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = pick,
@@ -4157,7 +4170,7 @@ internal static partial class Program
                 CreateNoWindow = false
             };
             System.Diagnostics.Process.Start(psi);
-            Log($"launched client (newest of {existing.Count}): {pick} @ {existing[0].mtime:O}");
+            Log($"launched client: {pick}");
         }
         catch (Exception ex) { Log($"client launch failed: {ex.Message}"); }
     }
