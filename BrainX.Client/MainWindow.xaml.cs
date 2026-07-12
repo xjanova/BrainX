@@ -2177,7 +2177,10 @@ public partial class MainWindow : Window
         // refreshes the bottom-bar label if a newer build is available.
         // Doesn't block startup — UX nicety only.
         _ = CheckLatestReleaseAsync();
-        _ = VelopackCheckAndStageAsync();   // real auto-update: download + stage in background
+        // Full auto-update on launch: find + download + apply + restart, itself,
+        // with no clicking (user spec). autoApply:true is safe here — the editor
+        // is always clean at startup. Mid-session re-checks pass false.
+        _ = VelopackCheckAndStageAsync(autoApply: true);
 
         Services.StartupProgress.Report("Initializing brain identity", 0.22, tag: "identity");
         InitializeIdentity();
@@ -5490,8 +5493,11 @@ public partial class MainWindow : Window
     // bottom-bar version chip becomes click-to-apply (swap + relaunch).
     private Velopack.UpdateManager? _vpkMgr;
     private Velopack.UpdateInfo? _vpkPending;
+    // Guards the auto-apply path so a background re-check can't fire a second
+    // restart while the first is already tearing the process down.
+    private bool _autoUpdateFiring;
 
-    private async System.Threading.Tasks.Task VelopackCheckAndStageAsync()
+    private async System.Threading.Tasks.Task VelopackCheckAndStageAsync(bool autoApply = false)
     {
         try
         {
@@ -5503,6 +5509,60 @@ public partial class MainWindow : Window
             await mgr.DownloadUpdatesAsync(info).ConfigureAwait(false);
             _vpkMgr = mgr;
             _vpkPending = info;
+
+            // ── Fully-automatic update (user spec 2026-07-12: "มันควรหาเอง
+            //    อัพเดท รีสตาร์ทเอง"). The old flow only STAGED the download and
+            //    waited for the user to click the version chip — which read as
+            //    "เจอ แต่ไม่อัพเดท". Now we apply + relaunch ourselves.
+            //
+            //    The ONE thing that must never be lost is an unsaved note, so we
+            //    self-apply only when the editor buffer is clean. On a normal
+            //    launch that's always true (the user hasn't typed yet), so the
+            //    app silently relaunches once onto the new build. If an update
+            //    lands mid-session while they're editing, we DON'T yank the app
+            //    away — we fall through to the click-to-apply chip instead.
+            var safeToAutoApply = autoApply && await Dispatcher.InvokeAsync(() =>
+                !_autoUpdateFiring && (_mdEditor == null || !_mdEditor.IsDirty));
+
+            if (safeToAutoApply)
+            {
+                _autoUpdateFiring = true;
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    StatusText.Text = $"Update v{info.TargetFullRelease.Version} downloaded — restarting BrainX to apply…";
+                    if (VersionText != null)
+                        VersionText.Text = $"updating → v{info.TargetFullRelease.Version}…";
+                });
+                // Let the status line paint so the restart doesn't look like the
+                // app just vanished, then re-check dirty in case they started
+                // typing during the download/paint window.
+                await System.Threading.Tasks.Task.Delay(1600).ConfigureAwait(false);
+                var stillSafe = await Dispatcher.InvokeAsync(() => _mdEditor == null || !_mdEditor.IsDirty);
+                if (stillSafe)
+                {
+                    try
+                    {
+                        // NOTE: Claude may be running brainx-mcp.exe out of
+                        // <current>\mcp — Velopack swaps whole versioned folders
+                        // and flips the `current` junction, so the live MCP's
+                        // open handles don't block the swap; the stale MCP dies
+                        // with its Claude session and the config already points
+                        // at the (stable) current\mcp path, so the next spawn is
+                        // the new build. No need to pre-kill it here.
+                        mgr.ApplyUpdatesAndRestart(info);
+                        return;
+                    }
+                    catch (Exception ex)
+                    {
+                        // Apply threw (locked files, permissions) — fall back to
+                        // the manual chip rather than leaving the user stuck.
+                        _autoUpdateFiring = false;
+                        Debug.WriteLine($"Velopack auto-apply failed, falling back to manual: {ex.Message}");
+                    }
+                }
+                else _autoUpdateFiring = false;   // user started editing — defer
+            }
+
             await Dispatcher.InvokeAsync(() =>
             {
                 if (VersionText == null) return;

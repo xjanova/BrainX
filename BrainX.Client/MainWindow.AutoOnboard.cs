@@ -88,24 +88,48 @@ public partial class MainWindow
     }
 
     /// <summary>
-    /// Pick the newest brainx-mcp.exe across the shipped + dev locations,
-    /// newest-by-mtime (NOT a hardcoded Release→Debug order). This is what keeps
-    /// us from ever registering a stale build with Claude — see the LastWriteTime
-    /// gotcha note. Returns null when no build exists anywhere.
+    /// Resolve the brainx-mcp.exe this client should register with Claude.
+    ///
+    /// RULE (2026-07-12): the MCP packaged BESIDE the running client wins
+    /// unconditionally. It shipped in the same package, so its version matches
+    /// this exe exactly — which is precisely what "เวอร์ชัน mcp ต้องตรงกับตัว
+    /// ล่าสุด" demands. This is what makes portable AND installed both correct
+    /// with zero guesswork:
+    ///   • installed (Velopack): baseDir = %LOCALAPPDATA%\BrainX\current →
+    ///       current\mcp\brainx-mcp.exe (a STABLE path auto-update swaps in place)
+    ///   • portable (unzipped anywhere): baseDir = &lt;portable&gt; →
+    ///       &lt;portable&gt;\mcp\brainx-mcp.exe
+    /// Whichever build the user actually launched registers ITS OWN matching MCP,
+    /// so two installs on one machine never fight over versions — and a genuine
+    /// downgrade is still blocked later by IsMcpOutdated during self-heal.
+    ///
+    /// Only a DEV checkout (running from bin\Debug, no packaged mcp\ beside it)
+    /// falls through to the newest-by-mtime pick across the solution's build
+    /// outputs — end-user machines never hit that branch.
+    /// Returns null when no build exists anywhere.
     /// </summary>
     private string? ResolveBestMcpExe()
     {
-        var root = FindSolutionRoot();
         var baseDir = AppContext.BaseDirectory;
-        var candidates = new[]
+
+        // 1) Packaged beside the running client — version-matched, always wins.
+        //    Subfolder layout (what the CI publish step produces) first, then
+        //    a flat layout as a fallback for hand-assembled packages.
+        var packagedSub  = Path.Combine(baseDir, "mcp", "brainx-mcp.exe");
+        if (File.Exists(packagedSub))  return packagedSub;
+        var packagedFlat = Path.Combine(baseDir, "brainx-mcp.exe");
+        if (File.Exists(packagedFlat)) return packagedFlat;
+
+        // 2) Dev checkout only: no packaged MCP beside us, so pick the freshest
+        //    of the solution's build outputs by mtime (Release vs Debug order is
+        //    deliberately NOT hardcoded — see the LastWriteTime gotcha note).
+        var root = FindSolutionRoot();
+        var devCandidates = new[]
         {
-            Path.Combine(baseDir, "mcp", "brainx-mcp.exe"),     // packaged release (subfolder)
-            Path.Combine(baseDir, "brainx-mcp.exe"),            // packaged release (flat)
             Path.Combine(root, "BrainX.Mcp", "bin", "Release", "net9.0", "brainx-mcp.exe"),
             Path.Combine(root, "BrainX.Mcp", "bin", "Debug",   "net9.0", "brainx-mcp.exe"),
         };
-
-        return candidates
+        return devCandidates
             .Where(File.Exists)
             .Select(p => (path: p, mtime: File.GetLastWriteTimeUtc(p)))
             .OrderByDescending(t => t.mtime)
