@@ -1574,8 +1574,18 @@ public partial class MainWindow
 
         Apply(DashClaudeSessionPct, DashClaudeSessionReset, DashClaudeSessionBar, snap.Session);
         Apply(DashClaudeWeeklyPct, DashClaudeWeeklyReset, DashClaudeWeeklyBar, snap.WeeklyAll);
-        Apply(DashClaudeSonnetPct, DashClaudeSonnetReset, DashClaudeSonnetBar, snap.SonnetOnly);
+        Apply(DashClaudeSonnetPct, DashClaudeSonnetReset, DashClaudeSonnetBar, snap.ModelRow);
         Apply(DashClaudeCreditsPct, DashClaudeCreditsReset, DashClaudeCreditsBar, snap.Credits);
+
+        // The per-model weekly row's label is dynamic (Sonnet → Fable → …).
+        // Show whatever claude.ai currently meters; hide the row entirely when
+        // there's no model-specific limit rather than showing a stale name.
+        if (DashClaudeModelLabel != null)
+        {
+            var label = snap.ModelRow?.Label;
+            DashClaudeModelLabel.Text = string.IsNullOrWhiteSpace(label)
+                ? "Model only" : $"{label} only";
+        }
     }
 
     private void SetClaudeDot(string state)

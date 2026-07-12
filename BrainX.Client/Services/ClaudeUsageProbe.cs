@@ -35,6 +35,9 @@ public sealed class ClaudeUsageProbe
     {
         public double Percent { get; set; } = -1;
         public string? ResetLabel { get; set; }
+        /// <summary>Row label as scraped (e.g. "Fable" for the model-specific
+        /// weekly row). Only the model row carries this; others leave it null.</summary>
+        public string? Label { get; set; }
     }
 
     public sealed class UsageSnapshot
@@ -43,7 +46,9 @@ public sealed class ClaudeUsageProbe
         public string? PlanLabel { get; set; }
         public UsageRow? Session { get; set; }
         public UsageRow? WeeklyAll { get; set; }
-        public UsageRow? SonnetOnly { get; set; }
+        // The per-model weekly row. Its label is dynamic (was "Sonnet only",
+        // now "Fable only") — read ModelRow.Label to show the real name.
+        public UsageRow? ModelRow { get; set; }
         public UsageRow? Credits { get; set; }
         public DateTime FetchedAt { get; set; } = DateTime.UtcNow;
     }
@@ -338,7 +343,7 @@ public sealed class ClaudeUsageProbe
                     ? p.GetString() : null,
                 Session = ReadRow(root, "session"),
                 WeeklyAll = ReadRow(root, "weeklyAll"),
-                SonnetOnly = ReadRow(root, "sonnet"),
+                ModelRow = ReadRow(root, "model"),
                 Credits = ReadRow(root, "credits"),
             };
             return snap;
@@ -359,6 +364,8 @@ public sealed class ClaudeUsageProbe
             row.Percent = pct.GetDouble();
         if (el.TryGetProperty("reset", out var rs) && rs.ValueKind == JsonValueKind.String)
             row.ResetLabel = rs.GetString();
+        if (el.TryGetProperty("label", out var lb) && lb.ValueKind == JsonValueKind.String)
+            row.Label = lb.GetString();
         return row;
     }
 
@@ -484,9 +491,31 @@ public sealed class ClaudeUsageProbe
       };
     }
 
+    // The weekly section lists "All models" PLUS one model-specific row whose
+    // label tracks whatever model Anthropic currently meters separately — it
+    // was "Sonnet only", now it's "Fable only" and will change again. So we
+    // don't hardcode the model name: find any "<name> only" label that isn't
+    // "All models" and return it WITH its label so the card shows the real
+    // model instead of a stale "Sonnet".
+    function findModelRow() {
+      var all = document.querySelectorAll('div,span,h1,h2,h3,h4,p,li');
+      for (var i = 0; i < all.length; i++) {
+        var t = (all[i].innerText || "").trim();
+        if (!t || t.length > 80) continue;
+        var m = t.match(/^([A-Za-z][A-Za-z0-9.\-]*(?:\s+[A-Za-z0-9.\-]+){0,2})\s+only$/i);
+        if (!m) continue;
+        if (/all\s+models/i.test(m[1])) continue;
+        var esc = m[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        var row = findRow(new RegExp('^' + esc + '$', 'i')) ||
+                  findRow(new RegExp(esc, 'i'));
+        if (row) return { label: m[1].trim(), pct: row.pct, reset: row.reset };
+      }
+      return null;
+    }
+
     var session = findRow(/current session/i);
     var weeklyAll = findRow(/all models/i);
-    var sonnet = findRow(/sonnet only/i);
+    var model = findModelRow();
     var credits = findCredits();
 
     return JSON.stringify({
@@ -494,7 +523,7 @@ public sealed class ClaudeUsageProbe
       plan: planLabel(),
       session: session,
       weeklyAll: weeklyAll,
-      sonnet: sonnet,
+      model: model,
       credits: credits
     });
   } catch (e) {

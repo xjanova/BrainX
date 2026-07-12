@@ -1709,7 +1709,8 @@
                                                             <RowDefinition Height="Auto"/>
                                                         </Grid.RowDefinitions>
                                                         <TextBlock Grid.Row="0" Grid.Column="0"
-                                                                   Text="Sonnet only"
+                                                                   x:Name="DashClaudeModelLabel"
+                                                                   Text="Model only"
                                                                    FontSize="10.5" FontWeight="SemiBold"
                                                                    Foreground="{StaticResource NeuralText1}"/>
                                                         <TextBlock Grid.Row="0" Grid.Column="1"
