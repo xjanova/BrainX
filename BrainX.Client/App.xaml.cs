@@ -136,6 +136,20 @@ public partial class App : Application
         var exe = Process.GetCurrentProcess().MainModule?.FileName;
         if (string.IsNullOrEmpty(exe) || !File.Exists(exe)) return;
 
+        // A DEV build (running from the solution's bin\Debug or bin\Release)
+        // must NOT touch the desktop shortcut. It used to repoint the user's
+        // icon at its own versioned exe via MainModule.FileName — so opening
+        // the dev client once left the desktop icon launching a stale
+        // bin\Debug build forever ("ไอคอนวิ่งไป 143" — the icon opened
+        // v2.0.143 no matter how many times the installed app updated,
+        // 2026-07-12). Only the INSTALLED build (which runs from
+        // %LOCALAPPDATA%\BrainX\current) owns the desktop icon; that path is
+        // stable across auto-updates, so its shortcut always launches the
+        // latest version.
+        if (exe.Contains(@"\bin\Debug\", StringComparison.OrdinalIgnoreCase) ||
+            exe.Contains(@"\bin\Release\", StringComparison.OrdinalIgnoreCase))
+            return;
+
         var desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
         var shortcutPath = Path.Combine(desktop, "BrainX.lnk");
 
