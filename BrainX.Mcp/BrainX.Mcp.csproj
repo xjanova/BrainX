@@ -27,4 +27,27 @@
     <ProjectReference Include="..\BrainX.Core\BrainX.Core.csproj" />
   </ItemGroup>
 
+  <!-- Stamp a MONOTONIC patch number (2.7.<git commit count>) so every build
+       carries a comparable ProductVersion. The client's self-heal uses this
+       to detect "Claude is registered against an OUTDATED brainx-mcp.exe"
+       and repoint automatically — with the old fixed 2.7.0 on every build,
+       no two exes were comparable and stale registrations lived forever.
+       Falls back to the static 2.7.0 above when git isn't available. -->
+  <Target Name="DeriveMcpVersion"
+          BeforeTargets="GetAssemblyVersion;CoreCompile">
+    <Exec Command="git rev-list --count HEAD"
+          ConsoleToMSBuild="true"
+          ContinueOnError="true"
+          IgnoreExitCode="true"
+          StandardOutputImportance="low"
+          StandardErrorImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="GitCommitCount" />
+    </Exec>
+    <PropertyGroup Condition="'$(GitCommitCount)' != ''">
+      <Version>2.7.$(GitCommitCount)</Version>
+      <FileVersion>2.7.$(GitCommitCount).0</FileVersion>
+    </PropertyGroup>
+    <Message Importance="high" Text="brainx-mcp version → $(Version)" />
+  </Target>
+
 </Project>

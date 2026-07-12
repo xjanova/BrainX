@@ -114,10 +114,48 @@ public partial class MainWindow
     }
 
     /// <summary>
+    /// ProductVersion of an MCP binary (from the .dll beside the launcher exe,
+    /// same source ReadMcpFileVersion uses), trimmed to its numeric SemVer
+    /// prefix. Null when the file is missing or carries no parseable version.
+    /// </summary>
+    private static Version? McpProductVersionOf(string exePath)
+    {
+        try
+        {
+            var dll = Path.ChangeExtension(exePath, ".dll");
+            var target = File.Exists(dll) ? dll : exePath;
+            if (!File.Exists(target)) return null;
+            var pv = System.Diagnostics.FileVersionInfo.GetVersionInfo(target).ProductVersion ?? "";
+            var cut = pv.IndexOfAny(['+', '-']);
+            if (cut >= 0) pv = pv[..cut];
+            return Version.TryParse(pv, out var v) ? v : null;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// True when the registered exe is a strictly OLDER build than the best
+    /// available one. This is what lets an updated install actually reach
+    /// Claude: without it, a registration pointing at any still-existing old
+    /// build (e.g. a dev bin\Release from weeks ago) counted as "healthy"
+    /// forever — the user-reported "Claude ยังเชื่อมต่อกับโปรเจคเก่า" bug
+    /// (2026-07-12). Both versions must parse; equal or unknown = NOT
+    /// outdated, so we still never churn a working config without cause.
+    /// </summary>
+    private static bool IsMcpOutdated(string registeredExe, string bestExe)
+    {
+        if (string.Equals(registeredExe, bestExe, StringComparison.OrdinalIgnoreCase)) return false;
+        var reg = McpProductVersionOf(registeredExe);
+        var best = McpProductVersionOf(bestExe);
+        return reg is not null && best is not null && best > reg;
+    }
+
+    /// <summary>
     /// Idempotent + self-healing Claude Desktop registration. Writes the config
-    /// only when the brainx-brain entry is missing, points at a stale exe, or
-    /// carries the wrong vault — so a normal re-launch is a no-op. Preserves any
-    /// other mcpServers the user has. Returns true when the file was changed.
+    /// only when the brainx-brain entry is missing, points at a stale exe,
+    /// carries the wrong vault, or is an OUTDATED build — so a normal re-launch
+    /// is a no-op. Preserves any other mcpServers the user has. Returns true
+    /// when the file was changed.
     /// </summary>
     private bool EnsureClaudeDesktopRegistered(string exe)
     {
@@ -151,14 +189,15 @@ public partial class MainWindow
         var curVault = existing?["env"]?["BRAINX_VAULT"]?.ToString();
 
         // Leave a WORKING config untouched — heal only when the entry is missing,
-        // its exe path no longer exists (stale / moved / deleted build), or the
-        // vault is wrong. Deliberately conservative: we do NOT repoint a daily
-        // Claude Desktop at a different build just because a newer one was
-        // compiled. ResolveBestMcpExe()'s newest-pick only decides which exe to
-        // write when we genuinely have to (fresh install or real self-heal).
+        // its exe path no longer exists (stale / moved / deleted build), the
+        // vault is wrong, or the registered build is VERSION-OUTDATED vs the
+        // best available exe. The version check (2026-07-12) is what finally
+        // lets app updates propagate to Claude: same-version rebuilds still
+        // never churn the config, but a genuinely newer release repoints it.
         var entryHealthy = existing is not null
             && !string.IsNullOrEmpty(curCmd) && File.Exists(curCmd!)
-            && string.Equals(curVault, _vaultPath, StringComparison.OrdinalIgnoreCase);
+            && string.Equals(curVault, _vaultPath, StringComparison.OrdinalIgnoreCase)
+            && !IsMcpOutdated(curCmd!, exe);
         if (entryHealthy) return false;
 
         // Update IN PLACE so we never clobber extra keys a user (or the MCP
@@ -181,9 +220,10 @@ public partial class MainWindow
 
     /// <summary>
     /// Register brainx-brain with the Claude Code CLI when it isn't already
-    /// listed. Deliberately gentle — we only add when missing rather than
-    /// remove/re-add every launch, so an in-progress `claude` session is never
-    /// disturbed. No-ops silently when the CLI isn't installed.
+    /// listed — or re-register when the listed entry points at a VERSION-
+    /// OUTDATED build. Deliberately gentle otherwise: no remove/re-add on a
+    /// normal launch, so an in-progress `claude` session is never disturbed.
+    /// No-ops silently when the CLI isn't installed.
     /// </summary>
     private async Task<bool> EnsureClaudeCliRegisteredAsync(string exe)
     {
@@ -193,7 +233,15 @@ public partial class MainWindow
         {
             var (_, listOut, _) = await RunClaudeCliAsync("mcp", "list");
             if (listOut.Contains("brainx-brain", StringComparison.OrdinalIgnoreCase))
-                return false;   // already registered
+            {
+                // Registered — but at which build? ~/.claude.json holds the
+                // user-scope command path; upgrade in place only when the
+                // registered build is strictly older than the best available.
+                var registered = ReadCliRegisteredCommand();
+                if (registered is null || !IsMcpOutdated(registered, exe))
+                    return false;   // current (or unknown) → leave alone
+                await RunClaudeCliAsync("mcp", "remove", "brainx-brain", "-s", "user");
+            }
 
             await RunClaudeCliAsync(
                 "mcp", "add", "brainx-brain",
@@ -206,6 +254,23 @@ public partial class MainWindow
         {
             return false;   // CLI flaked — fallback is the manual button
         }
+    }
+
+    /// <summary>
+    /// The command path of the user-scope brainx-brain entry in ~/.claude.json,
+    /// or null when absent/unreadable.
+    /// </summary>
+    private static string? ReadCliRegisteredCommand()
+    {
+        try
+        {
+            var path = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude.json");
+            if (!File.Exists(path)) return null;
+            var root = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(path));
+            return root["mcpServers"]?["brainx-brain"]?["command"]?.ToString();
+        }
+        catch { return null; }
     }
 
     /// <summary>

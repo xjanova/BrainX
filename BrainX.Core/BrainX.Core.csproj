@@ -13,10 +13,13 @@
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.11" />
     <!-- Pin the native SQLite bundle above the transitive 2.1.10 that
-         Microsoft.Data.Sqlite brings in — 2.1.10's e_sqlite3 carries a known
-         high-severity CVE (GHSA-2m69-gcr7-jv3q); 2.1.11 ships the patched
-         SQLite. Remove once Microsoft.Data.Sqlite bumps its own dependency. -->
-    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.11" />
+         Microsoft.Data.Sqlite brings in — e_sqlite3 ≤ 2.1.11 carries a known
+         high-severity CVE (GHSA-2m69-gcr7-jv3q; NU1903 confirmed 2.1.11 is
+         still in range and no 2.1.12 exists). 3.0.0 ships patched SQLite
+         3.50.x; verified compatible with Microsoft.Data.Sqlite 9.0.11 via
+         open/DDL/insert/FTS5-MATCH smoke test (2026-07-12). Remove once
+         Microsoft.Data.Sqlite bumps its own dependency. -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.0" />
     <PackageReference Include="MySqlConnector" Version="2.4.0" />
     <!-- Full YAML frontmatter parsing — replaces the regex tag-only
          extractor so users can put any structured data in the note
