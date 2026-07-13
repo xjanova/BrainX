@@ -1578,8 +1578,12 @@ public partial class MainWindow
         Apply(DashClaudeCreditsPct, DashClaudeCreditsReset, DashClaudeCreditsBar, snap.Credits);
 
         // The per-model weekly row's label is dynamic (Sonnet → Fable → …).
-        // Show whatever claude.ai currently meters; hide the row entirely when
-        // there's no model-specific limit rather than showing a stale name.
+        // Show whatever claude.ai currently meters. The scrape now surfaces
+        // the model NAME even when it can't read that row's % (findModelRow
+        // returns the label with a null pct), so a signed-in user sees
+        // "Fable only" instead of the generic "Model only". When there's no
+        // model-specific row at all (or not signed in) we keep the generic
+        // label rather than inventing a name from local transcripts.
         if (DashClaudeModelLabel != null)
         {
             var label = snap.ModelRow?.Label;

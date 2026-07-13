@@ -499,6 +499,7 @@ public sealed class ClaudeUsageProbe
     // model instead of a stale "Sonnet".
     function findModelRow() {
       var all = document.querySelectorAll('div,span,h1,h2,h3,h4,p,li');
+      var labelOnly = null;
       for (var i = 0; i < all.length; i++) {
         var t = (all[i].innerText || "").trim();
         if (!t || t.length > 80) continue;
@@ -509,8 +510,14 @@ public sealed class ClaudeUsageProbe
         var row = findRow(new RegExp('^' + esc + '$', 'i')) ||
                   findRow(new RegExp(esc, 'i'));
         if (row) return { label: m[1].trim(), pct: row.pct, reset: row.reset };
+        // Found the "<name> only" LABEL but couldn't attach a % to it
+        // (DOM shape varies). Remember the first one so we can still surface
+        // the model NAME — the card shows "Fable only" with a "—" figure
+        // instead of a useless generic "Model only". A real parsed row still
+        // wins over this if one turns up later in the scan.
+        if (labelOnly === null) labelOnly = m[1].trim();
       }
-      return null;
+      return labelOnly ? { label: labelOnly, pct: -1, reset: null } : null;
     }
 
     var session = findRow(/current session/i);

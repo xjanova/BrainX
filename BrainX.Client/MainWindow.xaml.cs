@@ -9025,6 +9025,19 @@ public partial class MainWindow : Window
                     // _graph.ExpertiseMap so values stay correct).
                     if (dashVisible || graphVisible) BuildExpertiseBars();
 
+                    // Re-push the fresh brain snapshot so the universe galaxy
+                    // legend's expertise %s track the dashboard bars. Without
+                    // this the universe kept the STALE snapshot from its
+                    // initial 'ready' push while the bars rebuild live from
+                    // _graph on every re-index — so the two drifted apart and
+                    // the dashboard (live) looked "more correct". The ingest
+                    // step above already rewrote brain-export.json, so these
+                    // read current data. Gated by visibility to avoid posting
+                    // the multi-MB payload to a universe the user isn't on.
+                    bool universeVisible = UniverseView?.Visibility == Visibility.Visible;
+                    if (dashVisible) PushBrainSnapshotToDashUniverse();
+                    if (universeVisible) PushBrainSnapshotToUniverse();
+
                     // The vault tree rebuild is the hot spot — clearing +
                     // rebuilding ~500 TreeViewItems takes 50-200ms which
                     // shows up as a frame skip on the brain graph. Skip it
