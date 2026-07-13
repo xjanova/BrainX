@@ -97,6 +97,16 @@ public class VaultWatcher : IDisposable
         var ext = Path.GetExtension(path);
         if (!ext.Equals(".md", StringComparison.OrdinalIgnoreCase)) return false;
 
+        // CLAUDE.md is auto-managed: BrainExporter splices a BRAIN:BEGIN/END
+        // section carrying a fresh "Updated:" timestamp on EVERY export. So
+        // reacting to our own rewrite of it created a perpetual loop —
+        // re-index → export → rewrite CLAUDE.md → watcher fires → re-index …
+        // cycling every ~15s (index time + 3s debounce), burning CPU/disk and,
+        // once the universe re-pushed per re-index, showing as constant
+        // stutter. It is self-generated churn, not a knowledge note — ignore it.
+        if (Path.GetFileName(path).Equals("CLAUDE.md", StringComparison.OrdinalIgnoreCase))
+            return false;
+
         // Ignore self-generated churn so the watcher doesn't pingpong
         var relative = Path.GetRelativePath(_vaultPath, path).Replace('\\', '/');
         foreach (var ignored in _ignoredFolders)
