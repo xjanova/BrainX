@@ -8035,6 +8035,37 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// Post a SMALL expertise-only update to both universe WebViews so their
+    /// legend %s track <see cref="BuildExpertiseBars"/> after a re-index —
+    /// WITHOUT the full brain re-push that triggers a scene.mount() geometry
+    /// rebuild (the source of the "universe stutters on every re-index" bug).
+    /// The JS 'expertise' handler merges these into the mounted galaxies and
+    /// re-renders only the legend rows. Payload is ~24 categories, a few KB.
+    /// </summary>
+    private void PostExpertiseUpdate()
+    {
+        if (_graph == null) return;
+        try
+        {
+            var payload = _graph.ExpertiseMap.Select(kv => new
+            {
+                Category = kv.Key.ToString(),
+                kv.Value.Score,
+                kv.Value.NoteCount,
+                kv.Value.TotalWords
+            });
+            var json = Newtonsoft.Json.JsonConvert.SerializeObject(
+                new { type = "expertise", payload });
+            UniverseWebView?.CoreWebView2?.PostWebMessageAsJson(json);
+            DashUniverseWebView?.CoreWebView2?.PostWebMessageAsJson(json);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"PostExpertiseUpdate: {ex.Message}");
+        }
+    }
+
     // ═══════════════════════════════════════
     // NETWORK STATS
     // ═══════════════════════════════════════
@@ -9025,18 +9056,16 @@ public partial class MainWindow : Window
                     // _graph.ExpertiseMap so values stay correct).
                     if (dashVisible || graphVisible) BuildExpertiseBars();
 
-                    // Re-push the fresh brain snapshot so the universe galaxy
-                    // legend's expertise %s track the dashboard bars. Without
-                    // this the universe kept the STALE snapshot from its
-                    // initial 'ready' push while the bars rebuild live from
-                    // _graph on every re-index — so the two drifted apart and
-                    // the dashboard (live) looked "more correct". The ingest
-                    // step above already rewrote brain-export.json, so these
-                    // read current data. Gated by visibility to avoid posting
-                    // the multi-MB payload to a universe the user isn't on.
+                    // Keep the universe legend's expertise %s in step with the
+                    // dashboard bars WITHOUT rebuilding the galaxy. An earlier
+                    // version re-pushed the whole 8 MB brain snapshot here,
+                    // which ran scene.mount() and made the universe visibly
+                    // stutter on every re-index. This posts a small
+                    // expertise-only message that just re-renders the legend
+                    // rows. New notes still reshape the galaxies on the next
+                    // reload/mount — only the figures update live.
                     bool universeVisible = UniverseView?.Visibility == Visibility.Visible;
-                    if (dashVisible) PushBrainSnapshotToDashUniverse();
-                    if (universeVisible) PushBrainSnapshotToUniverse();
+                    if (dashVisible || universeVisible) PostExpertiseUpdate();
 
                     // The vault tree rebuild is the hot spot — clearing +
                     // rebuilding ~500 TreeViewItems takes 50-200ms which

@@ -203,6 +203,34 @@ function renderLegend(galaxies) {
     }
 }
 
+// Merge fresh expertise scores into the already-mounted galaxies and
+// re-render just the legend rows. Cheap DOM work — never touches three.js.
+// No-op until a full mount has produced _lastGalaxies (the next mount
+// carries correct data anyway). Node COUNT changes still need a reload to
+// reshape the galaxies; this only keeps the score/word figures live.
+function updateExpertise(list) {
+    if (!Array.isArray(list) || !_lastGalaxies) return;
+    const byCat = new Map();
+    for (const e of list) {
+        const k = e.Category ?? e.category;
+        if (k) byCat.set(k, {
+            score: e.Score ?? e.score ?? 0,
+            totalWords: e.TotalWords ?? e.totalWords ?? 0
+        });
+    }
+    let changed = false;
+    for (const g of _lastGalaxies) {
+        const e = byCat.get(g.category);
+        if (!e) continue;
+        if (g.score !== e.score || g.totalWords !== e.totalWords) {
+            g.score = e.score;
+            g.totalWords = e.totalWords;
+            changed = true;
+        }
+    }
+    if (changed) renderLegend(_lastGalaxies);
+}
+
 function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => ({
         '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -594,6 +622,11 @@ function postToHost(msg) {
 
 let scene = null;
 let pendingBrain = null;
+// Last galaxy list handed to renderLegend(). Kept so a lightweight
+// 'expertise' message can refresh the legend %s in place WITHOUT a
+// scene.mount() geometry rebuild (that full rebuild on every re-index
+// was what made the universe stutter).
+let _lastGalaxies = null;
 
 function onHostMessage(evt) {
     const msg = evt.data;
@@ -650,6 +683,13 @@ function onHostMessage(evt) {
             // GPU + CPU samples for the bottom-left sparkline chip.
             // { gpu: 33, cpu: 37 } → push into 60-sample ring + redraw.
             handleDashLoad(msg);
+            break;
+        case 'expertise':
+            // Live expertise refresh after a re-index. Updates ONLY the
+            // legend %s/word counts — no scene.mount(), so the galaxy
+            // doesn't rebuild (that was the stutter). msg.payload is the
+            // small expertise array from _graph.ExpertiseMap.
+            updateExpertise(msg.payload);
             break;
         case 'finalizeWallpaper':
             // C# has just reparented us to WorkerW. Transition this page
@@ -1205,6 +1245,7 @@ async function init() {
                 showInfo(payload);
             },
             onGalaxies: galaxies => {
+                _lastGalaxies = galaxies;
                 renderLegend(galaxies);
             },
             onWalk: stats => {
