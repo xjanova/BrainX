@@ -47,6 +47,8 @@ internal static class CliInstall
         Console.WriteLine("  brainx-mcp install [options]         Install brain-first rules + print MCP registration");
         Console.WriteLine("  brainx-mcp register-claude [--vault] Re-register this binary with Claude Code (auto-includes");
         Console.WriteLine("                                          server name stays \"brainx-brain\"; BRAINX_MCP_VERSION env var is self-healed on every MCP boot)");
+        Console.WriteLine("  brainx-mcp register-codex [--vault]  Re-register this binary with the OpenAI Codex CLI");
+        Console.WriteLine("                                          (same stdio MCP binary — `codex mcp add`; verify with `codex mcp list`)");
         Console.WriteLine("  brainx-mcp bake-bundles [options]    Pre-bake ~500-token context bundles for top topics so");
         Console.WriteLine("                                          brain_bundle <topic> answers in ONE cheap MCP call");
         Console.WriteLine("  brainx-mcp --version | -v | version  Print version + binary path + build time");
@@ -125,6 +127,10 @@ internal static class CliInstall
         Console.WriteLine("  Or let this binary do it for you (removes any existing registration first):");
         Console.WriteLine();
         Console.WriteLine($"    brainx-mcp register-claude");
+        Console.WriteLine();
+        Console.WriteLine("  Using OpenAI Codex too? The SAME binary registers there (stdio MCP):");
+        Console.WriteLine();
+        Console.WriteLine($"    brainx-mcp register-codex     # → codex mcp add {McpServerName} ... ; verify: codex mcp list");
         Console.WriteLine();
         Console.WriteLine("  Or add this to your project's .mcp.json:");
         Console.WriteLine();
@@ -541,6 +547,177 @@ internal static class CliInstall
             }
         }
         return null;
+    }
+
+    // ── OpenAI Codex CLI registration ────────────────────────────────────
+
+    /// <summary>
+    /// `brainx-mcp register-codex` — register THIS binary with the OpenAI Codex
+    /// CLI. Codex consumes stdio MCP servers exactly like Claude Code, so the
+    /// same brainx-mcp binary works with no server-side change. We shell out to
+    /// `codex mcp add` (per the Codex MCP docs) rather than hand-editing
+    /// ~/.codex/config.toml — Codex owns that TOML and a DIY merge risks
+    /// corrupting the user's other servers (same reason we never touch
+    /// ~/.claude.json directly). See note "BrainX MCP → third-party agents
+    /// (Codex/Chrome/ChatGPT) — two-track exposure design".
+    /// </summary>
+    public static async Task<int> RegisterCodexAsync(string[] args)
+    {
+        string? vaultArg = null;
+        bool showHelp = false;
+        for (int i = 0; i < args.Length; i++)
+        {
+            switch (args[i])
+            {
+                case "--vault" when i + 1 < args.Length: vaultArg = args[++i]; break;
+                case "-h" or "--help" or "help": showHelp = true; break;
+            }
+        }
+        if (showHelp)
+        {
+            Console.WriteLine("Usage: brainx-mcp register-codex [--vault PATH]");
+            Console.WriteLine();
+            Console.WriteLine("Registers this binary with the OpenAI Codex CLI by running:");
+            Console.WriteLine($"  codex mcp remove {McpServerName}                              (if it exists)");
+            Console.WriteLine($"  codex mcp add {McpServerName} --env BRAINX_VAULT=<vault> -- <exe>");
+            Console.WriteLine();
+            Console.WriteLine("Codex speaks the same stdio MCP protocol as Claude, so the exact same");
+            Console.WriteLine("brainx-mcp binary works with no server changes. Verify with `codex mcp list`");
+            Console.WriteLine("or `/mcp` inside the Codex TUI, then restart Codex.");
+            return 0;
+        }
+
+        var vault = ResolveVault(vaultArg);
+        var exePath = ResolveSelfPath();
+        var pathQuality = ClassifyExePath(exePath);
+        Console.WriteLine($"brainx-mcp register-codex · v{Program.ServerVersion}");
+        Console.WriteLine($"  exe:   {exePath}");
+        Console.WriteLine($"  vault: {vault}");
+        Console.WriteLine();
+        if (pathQuality != ExePathQuality.Ok)
+        {
+            Console.WriteLine($"  ⚠  {DescribePathQuality(pathQuality)}");
+            Console.WriteLine("     Run this command from the published Release exe instead.");
+            return 2;
+        }
+        if (ResolveCodexLauncher() == null)
+        {
+            Console.WriteLine("  ✗ `codex` CLI not found in PATH or %APPDATA%\\npm.");
+            Console.WriteLine("     Install Codex first: https://developers.openai.com/codex/cli");
+            Console.WriteLine("     Then re-run: brainx-mcp register-codex");
+            return 3;
+        }
+
+        // Quietly remove any existing registration first — ignore the exit code
+        // because `codex mcp remove` fails when the name isn't registered, which
+        // is a fine no-op for fresh installs. Keeps the add idempotent.
+        Console.WriteLine($"[1/2] Codex CLI: removing any existing {McpServerName} registration...");
+        await RunCodexAsync("mcp", "remove", McpServerName).ConfigureAwait(false);
+        Console.WriteLine("[2/2] Codex CLI: adding fresh registration...");
+        var rc = await RunCodexAsync(
+            "mcp", "add", McpServerName,
+            "--env", $"BRAINX_VAULT={vault}",
+            "--", exePath
+        ).ConfigureAwait(false);
+        if (rc != 0)
+        {
+            Console.WriteLine($"  ✗ `codex mcp add` exited with code {rc}. Run it manually:");
+            Console.WriteLine($"    codex mcp add {McpServerName} --env BRAINX_VAULT=\"{vault}\" -- \"{exePath}\"");
+            return rc;
+        }
+        Console.WriteLine();
+        Console.WriteLine("✓ Done. Verify with: codex mcp list   (or `/mcp` inside the Codex TUI)");
+        Console.WriteLine("  RESTART Codex to pick up the new server.");
+        return 0;
+    }
+
+    /// <summary>
+    /// Find `codex` on the system. npm-installed CLIs land as `codex.cmd` in
+    /// %APPDATA%\npm (which `Process.Start` won't auto-resolve like a shell
+    /// does); a native install is `codex.exe` on PATH. Walk both, testing the
+    /// platform's known executable extensions.
+    /// </summary>
+    private static string? ResolveCodexLauncher()
+    {
+        var isWindows = System.Runtime.InteropServices.RuntimeInformation
+            .IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows);
+        string[] extensions = isWindows ? [".exe", ".cmd", ".bat", ""] : ["", ".sh"];
+
+        var dirs = new System.Collections.Generic.List<string>();
+        if (isWindows)
+        {
+            var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            if (!string.IsNullOrEmpty(appData)) dirs.Add(Path.Combine(appData, "npm"));
+        }
+        var path = Environment.GetEnvironmentVariable("PATH") ?? "";
+        var sep = isWindows ? ';' : ':';
+        dirs.AddRange(path.Split(sep, StringSplitOptions.RemoveEmptyEntries));
+
+        foreach (var dir in dirs)
+        {
+            foreach (var ext in extensions)
+            {
+                try
+                {
+                    var candidate = Path.Combine(dir.Trim(), "codex" + ext);
+                    if (File.Exists(candidate)) return candidate;
+                }
+                catch (ArgumentException) { /* skip invalid PATH entry */ }
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Run `codex <args...>` and forward stdout/stderr to the console. .cmd/.bat
+    /// npm shims must launch through cmd.exe (CreateProcess can't exec a batch
+    /// file directly); a native codex.exe runs directly. Args go through
+    /// ArgumentList so paths with spaces and `--env K=V` survive untouched.
+    /// </summary>
+    private static async Task<int> RunCodexAsync(params string[] args)
+    {
+        var launcher = ResolveCodexLauncher();
+        if (launcher == null)
+        {
+            Console.WriteLine("    [error] `codex` binary not found. Install Codex first: https://developers.openai.com/codex/cli");
+            return -2;
+        }
+
+        var isBatch = launcher.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase)
+                   || launcher.EndsWith(".bat", StringComparison.OrdinalIgnoreCase);
+        var psi = new System.Diagnostics.ProcessStartInfo(isBatch ? "cmd.exe" : launcher)
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        if (isBatch)
+        {
+            psi.ArgumentList.Add("/c");
+            psi.ArgumentList.Add(launcher);
+        }
+        foreach (var a in args) psi.ArgumentList.Add(a);
+
+        try
+        {
+            using var p = System.Diagnostics.Process.Start(psi)
+                          ?? throw new InvalidOperationException("failed to start codex");
+            var outTask = p.StandardOutput.ReadToEndAsync();
+            var errTask = p.StandardError.ReadToEndAsync();
+            await p.WaitForExitAsync().ConfigureAwait(false);
+            var stdout = await outTask.ConfigureAwait(false);
+            var stderr = await errTask.ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(stdout))
+                foreach (var line in stdout.Split('\n')) Console.WriteLine("    " + line.TrimEnd('\r'));
+            if (!string.IsNullOrWhiteSpace(stderr))
+                foreach (var line in stderr.Split('\n')) Console.WriteLine("    [err] " + line.TrimEnd('\r'));
+            return p.ExitCode;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"    [exception] {ex.Message}");
+            return -1;
+        }
     }
 
     private static string ResolveSelfPath()

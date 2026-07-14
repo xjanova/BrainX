@@ -1,6 +1,8 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace BrainX.Client;
@@ -60,25 +62,30 @@ public partial class MainWindow
             // itself, so probing afterwards would always look "installed".
             var desktopPresent = Directory.Exists(Path.GetDirectoryName(ClaudeDesktopConfigPath())!);
             var cliPresent = FindClaudeCli() is not null;
+            var codexPresent = FindCodexCli() is not null;
 
             var desktopChanged = EnsureClaudeDesktopRegistered(exe);
             var cliChanged = await EnsureClaudeCliRegisteredAsync(exe);
+            // Codex speaks the SAME stdio MCP protocol as Claude, so the exact
+            // same brainx-mcp.exe registers with zero server changes — see
+            // [[BrainX MCP → third-party agents (Codex/Chrome/ChatGPT) — two-track exposure design]].
+            var codexChanged = await EnsureCodexCliRegisteredAsync(exe);
             var hookChanged = EnsureAutoIngestHookInstalledSilent();
 
             // Friendly, non-technical confirmation. The status-bar chips
             // (RefreshMcpStatusBar, polled every 3s) flip to green on their own —
             // the user just sees it "already works". Never claim "connected"
-            // when no Claude app exists on this PC — the config we wrote only
-            // activates once one is installed.
-            if (!desktopPresent && !cliPresent)
-                SetOnboardStatus("⚠ Claude not found on this PC — install Claude Desktop (claude.ai/download) " +
-                                 "or Claude Code, then reopen BrainX. Connection is automatic; nothing to configure.");
-            else if (desktopChanged || cliChanged || hookChanged)
+            // when no agent app exists on this PC — the config we wrote only
+            // activates once one (Claude Desktop / Claude Code / Codex) is installed.
+            if (!desktopPresent && !cliPresent && !codexPresent)
+                SetOnboardStatus("⚠ No AI agent found on this PC — install Claude Desktop (claude.ai/download), " +
+                                 "Claude Code, or Codex, then reopen BrainX. Connection is automatic; nothing to configure.");
+            else if (desktopChanged || cliChanged || codexChanged || hookChanged)
                 SetOnboardStatus(desktopPresent && desktopChanged
-                    ? "✅ Connected to Claude automatically — your brain is ready. Restart Claude Desktop once to activate."
-                    : "✅ Connected to Claude automatically — your brain is ready.");
+                    ? "✅ Connected automatically — your brain is ready. Restart Claude Desktop once to activate."
+                    : "✅ Connected automatically — your brain is ready.");
             else
-                SetOnboardStatus("✅ Claude is already connected — your brain is ready.");
+                SetOnboardStatus("✅ Your brain is already connected — ready to use.");
         }
         catch
         {
@@ -291,6 +298,139 @@ public partial class MainWindow
         {
             return false;   // CLI flaked — fallback is the manual button
         }
+    }
+
+    // ── OpenAI Codex CLI ─────────────────────────────────────────────────
+    //
+    // Codex consumes stdio MCP servers exactly like Claude Code, so the same
+    // brainx-mcp.exe works with NO server-side change. We register by shelling
+    // out to `codex mcp add` (per the Codex MCP docs) rather than hand-editing
+    // ~/.codex/config.toml — Codex owns that TOML file and a DIY merge risks
+    // corrupting the user's other servers, the same reason we never touch
+    // ~/.claude.json directly. Every failure path here is a silent no-op whose
+    // fallback is the CLI command `brainx-mcp register-codex`.
+
+    /// <summary>
+    /// Register brainx-brain with the OpenAI Codex CLI when it isn't already
+    /// listed. Gentle + idempotent: adds ONLY when missing, so a normal
+    /// re-launch is a no-op and never disturbs a live Codex session. The exe we
+    /// register is ResolveBestMcpExe()'s STABLE installed path
+    /// (current\mcp\brainx-mcp.exe, which auto-update swaps in place), so
+    /// version bumps reach Codex automatically without re-registration.
+    /// No-ops silently when Codex isn't installed or its CLI flakes.
+    /// </summary>
+    private async Task<bool> EnsureCodexCliRegisteredAsync(string exe)
+    {
+        if (FindCodexCli() is null) return false;   // Codex not installed → nothing to do
+
+        try
+        {
+            // Only proceed to `add` when we can positively confirm it's absent.
+            // If `codex mcp list` errors (older/newer CLI surface), we skip
+            // rather than risk stacking a duplicate on every launch — the
+            // manual `register-codex` command remains the fallback.
+            var (listCode, listOut, _) = await RunCodexCliAsync("mcp", "list");
+            if (listCode != 0) return false;
+            if (listOut.Contains("brainx-brain", StringComparison.OrdinalIgnoreCase))
+                return false;   // already registered → leave the config untouched
+
+            // `codex mcp add <name> --env K=V -- <command>` (Codex MCP docs).
+            // Vault travels as BRAINX_VAULT env, matching the Claude
+            // registration — the MCP reads it, no positional arg needed.
+            var (addCode, _, _) = await RunCodexCliAsync(
+                "mcp", "add", "brainx-brain",
+                "--env", $"BRAINX_VAULT={_vaultPath}",
+                "--", exe);
+            return addCode == 0;
+        }
+        catch
+        {
+            return false;   // Codex CLI flaked — fallback is `brainx-mcp register-codex`
+        }
+    }
+
+    /// <summary>
+    /// Locate the `codex` launcher the same way we find `claude`: npm global
+    /// shims land in %APPDATA%\npm as codex.cmd; a native install lands as
+    /// codex.exe on PATH. Returns null when Codex isn't installed.
+    /// </summary>
+    private static string? FindCodexCli()
+    {
+        var pathVar = Environment.GetEnvironmentVariable("PATH") ?? "";
+        var roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        var dirs = new[] { Path.Combine(roaming, "npm") }
+            .Concat(pathVar.Split(';', StringSplitOptions.RemoveEmptyEntries));
+
+        foreach (var name in new[] { "codex.cmd", "codex.exe", "codex.bat", "codex" })
+        {
+            foreach (var d in dirs)
+            {
+                try
+                {
+                    var p = Path.Combine(d.Trim(), name);
+                    if (File.Exists(p)) return p;
+                }
+                catch (ArgumentException) { /* skip invalid PATH entry */ }
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Run `codex <args...>` with a bounded 30s wait. .cmd/.bat npm shims must
+    /// launch through cmd.exe (CreateProcess can't exec a batch file directly);
+    /// a native codex.exe runs directly. Mirrors RunClaudeCliAsync — the 30s
+    /// ceiling stops a wedged `codex mcp list` (it probes every server) from
+    /// leaking the background onboarding task.
+    /// </summary>
+    private static async Task<(int code, string stdout, string stderr)> RunCodexCliAsync(params string[] args)
+    {
+        var cli = FindCodexCli();
+        if (cli == null) throw new FileNotFoundException("codex CLI not found on PATH or in %APPDATA%\\npm");
+
+        ProcessStartInfo psi;
+        if (cli.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase)
+         || cli.EndsWith(".bat", StringComparison.OrdinalIgnoreCase))
+        {
+            psi = new ProcessStartInfo("cmd.exe")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            psi.ArgumentList.Add("/c");
+            psi.ArgumentList.Add(cli);
+            foreach (var a in args) psi.ArgumentList.Add(a);
+        }
+        else
+        {
+            psi = new ProcessStartInfo(cli)
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            foreach (var a in args) psi.ArgumentList.Add(a);
+        }
+
+        using var proc = Process.Start(psi)!;
+        var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+        var stderrTask = proc.StandardError.ReadToEndAsync();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        try
+        {
+            await proc.WaitForExitAsync(cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            try { proc.Kill(entireProcessTree: true); } catch { /* already gone */ }
+            return (-1, "", "codex CLI timed out");
+        }
+        var stdout = await stdoutTask;
+        var stderr = await stderrTask;
+        return (proc.ExitCode, stdout, stderr);
     }
 
     /// <summary>
