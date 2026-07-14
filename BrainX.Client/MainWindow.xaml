@@ -5850,6 +5850,30 @@
                                                 <Border BorderBrush="{StaticResource SurfaceLightBrush}" BorderThickness="0,1,0,0"
                                                         Margin="0,10,0,0" Padding="0,10,0,0">
                                                     <StackPanel>
+                                                        <TextBlock Text="CROSS-VENDOR — OpenAI Codex" FontSize="11" FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource NeonGreenBrush}" Margin="0,0,0,6"/>
+                                                        <TextBlock FontSize="10" Foreground="{StaticResource TextSecondaryBrush}"
+                                                                   TextWrapping="Wrap" Margin="0,0,0,8">
+                                                            Registers this same brainx-mcp server with the Codex CLI and installs the brain-first
+                                                            AGENTS.md rules. Codex then reads and writes the SAME vault as Claude — whatever Claude
+                                                            noted, Codex picks up, and vice versa. Runs automatically when BrainX starts; these
+                                                            buttons are the manual fallback. Restart Codex afterwards.
+                                                        </TextBlock>
+                                                        <StackPanel Orientation="Horizontal">
+                                                            <Button Content="Connect to Codex" Style="{StaticResource NeuralBtnPrimary}"
+                                                                    Click="ConnectCodex_Click" Padding="12,5" FontSize="10" Margin="0,0,6,0"/>
+                                                            <Button Content="Check status" Style="{StaticResource NeuralBtnGhost}"
+                                                                    Click="CheckCodex_Click" Padding="12,5" FontSize="10"/>
+                                                        </StackPanel>
+                                                        <TextBlock x:Name="CodexStatus" FontSize="10" Margin="0,6,0,0"
+                                                                   FontFamily="{StaticResource MonoFont}"
+                                                                   Foreground="{StaticResource TextMutedBrush}" TextWrapping="Wrap"/>
+                                                    </StackPanel>
+                                                </Border>
+
+                                                <Border BorderBrush="{StaticResource SurfaceLightBrush}" BorderThickness="0,1,0,0"
+                                                        Margin="0,10,0,0" Padding="0,10,0,0">
+                                                    <StackPanel>
                                                         <TextBlock Text="100% AUTO-LEARN — Claude Code hook" FontSize="11" FontWeight="SemiBold"
                                                                    Foreground="{StaticResource NeonGreenBrush}" Margin="0,0,0,6"/>
                                                         <TextBlock FontSize="10" Foreground="{StaticResource TextSecondaryBrush}"

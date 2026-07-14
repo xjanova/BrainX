@@ -625,10 +625,26 @@ internal static class CliInstall
             Console.WriteLine($"    codex mcp add {McpServerName} --env BRAINX_VAULT=\"{vault}\" -- \"{exePath}\"");
             return rc;
         }
+        // Tools alone don't make Codex brain-first — AGENTS.md is what carries
+        // the protocol (Codex has no equivalent of Claude's memory dir).
+        Console.WriteLine();
+        var rules = CodexAgentsRulesInstaller.EnsureInstalled(vault);
+        Console.WriteLine($"  brain-first rules (AGENTS.md): {rules} (v{CodexAgentsRulesInstaller.RuleVersion})");
+        Console.WriteLine($"    → global: {ResolveCodexHomeForDisplay()}\\AGENTS.md");
+        Console.WriteLine($"    → vault:  {Path.Combine(vault, "AGENTS.md")}");
+
         Console.WriteLine();
         Console.WriteLine("✓ Done. Verify with: codex mcp list   (or `/mcp` inside the Codex TUI)");
         Console.WriteLine("  RESTART Codex to pick up the new server.");
         return 0;
+    }
+
+    /// <summary>CODEX_HOME or ~/.codex — for display only.</summary>
+    private static string ResolveCodexHomeForDisplay()
+    {
+        var env = Environment.GetEnvironmentVariable("CODEX_HOME");
+        if (!string.IsNullOrWhiteSpace(env)) return env;
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
     }
 
     /// <summary>

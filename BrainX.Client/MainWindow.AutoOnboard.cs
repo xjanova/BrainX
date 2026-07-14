@@ -69,7 +69,20 @@ public partial class MainWindow
             // Codex speaks the SAME stdio MCP protocol as Claude, so the exact
             // same brainx-mcp.exe registers with zero server changes — see
             // [[BrainX MCP → third-party agents (Codex/Chrome/ChatGPT) — two-track exposure design]].
+            // Registration hands Codex the TOOLS; the AGENTS.md rules are what
+            // give it the brain-first INSTINCT (its counterpart to Claude's
+            // memory dir). Install the rules whenever Codex exists on the box,
+            // even if the MCP entry was already registered.
             var codexChanged = await EnsureCodexCliRegisteredAsync(exe);
+            if (codexPresent)
+            {
+                try
+                {
+                    codexChanged |= BrainX.Core.Services.CodexAgentsRulesInstaller
+                        .EnsureInstalled(_vaultPath) == BrainX.Core.Services.CodexAgentsRulesInstaller.InstallResult.Installed;
+                }
+                catch { /* rules are best-effort; never block onboarding */ }
+            }
             var hookChanged = EnsureAutoIngestHookInstalledSilent();
 
             // Friendly, non-technical confirmation. The status-bar chips
@@ -462,6 +475,105 @@ public partial class MainWindow
         var stdout = await stdoutTask;
         var stderr = await stderrTask;
         return (proc.ExitCode, stdout, stderr);
+    }
+
+    // ── Settings ▸ MCP ▸ Advanced — manual Codex controls ────────────────
+    //
+    // Auto-onboard already does this on every launch; these are the fallback
+    // for "it didn't take" (e.g. Codex was installed after BrainX last started)
+    // and the discoverable answer to "where do I connect Codex?" — which the
+    // owner asked precisely because the UI only ever mentioned Claude.
+
+    /// <summary>
+    /// Force-register brainx-brain with Codex (remove + add, unlike the gentle
+    /// auto-onboard path) and install the brain-first AGENTS.md rules.
+    /// </summary>
+    private async void ConnectCodex_Click(object sender, System.Windows.RoutedEventArgs e)
+    {
+        try
+        {
+            SetCodexStatus("⏳ connecting…");
+
+            if (FindCodexCli() is null)
+            {
+                SetCodexStatus("❌ Codex not found. Install it (developers.openai.com/codex/cli), then click again.");
+                return;
+            }
+
+            var exe = ResolveBestMcpExe();
+            if (exe is null)
+            {
+                SetCodexStatus("❌ MCP server not built — click “Build MCP Server” above first.");
+                return;
+            }
+
+            // Force path: remove then add, so a stale entry (old exe / wrong
+            // vault) is genuinely repointed rather than left alone.
+            await RunCodexCliAsync("mcp", "remove", "brainx-brain");
+            var (code, _, stderr) = await RunCodexCliAsync(
+                "mcp", "add", "brainx-brain",
+                "--env", $"BRAINX_VAULT={_vaultPath}",
+                "--", exe);
+
+            if (code != 0)
+            {
+                SetCodexStatus($"❌ `codex mcp add` failed: {stderr.Trim()}");
+                return;
+            }
+
+            var rules = BrainX.Core.Services.CodexAgentsRulesInstaller.EnsureInstalled(_vaultPath);
+            SetCodexStatus($"✅ Connected — brainx-brain registered · AGENTS.md rules: {rules}. Restart Codex to activate.");
+        }
+        catch (Exception ex)
+        {
+            SetCodexStatus($"❌ {ex.Message}");
+        }
+    }
+
+    /// <summary>Report whether Codex currently has brainx-brain registered.</summary>
+    private async void CheckCodex_Click(object sender, System.Windows.RoutedEventArgs e)
+    {
+        try
+        {
+            SetCodexStatus("⏳ checking…");
+
+            var cli = FindCodexCli();
+            if (cli is null)
+            {
+                SetCodexStatus("❌ Codex not installed on this PC.");
+                return;
+            }
+
+            var (code, listOut, stderr) = await RunCodexCliAsync("mcp", "list");
+            if (code != 0)
+            {
+                SetCodexStatus($"⚠ `codex mcp list` failed: {stderr.Trim()}");
+                return;
+            }
+
+            SetCodexStatus(listOut.Contains("brainx-brain", StringComparison.OrdinalIgnoreCase)
+                ? $"✅ brainx-brain is registered with Codex.\n   codex: {cli}"
+                : $"⚠ Codex found but brainx-brain is NOT registered — click “Connect to Codex”.\n   codex: {cli}");
+        }
+        catch (Exception ex)
+        {
+            SetCodexStatus($"❌ {ex.Message}");
+        }
+    }
+
+    private void SetCodexStatus(string text)
+    {
+        try
+        {
+            Dispatcher.Invoke(() =>
+            {
+                if (CodexStatus != null) CodexStatus.Text = text;
+            });
+        }
+        catch
+        {
+            // Window tearing down mid-write — ignore.
+        }
     }
 
     /// <summary>

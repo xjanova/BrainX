@@ -161,6 +161,19 @@ internal static partial class Program
         }
         catch (Exception ex) { Log($"brain rules install failed: {ex.Message}"); }
 
+        // Same policy, Codex-side. Registering the MCP hands Codex the brain's
+        // TOOLS; AGENTS.md is what gives it the brain-first INSTINCT (Codex has
+        // no equivalent of Claude's memory dir + SessionStart hook, so the rules
+        // must also tell it to fetch #session-handoff itself). Marker-spliced,
+        // so a hand-edited AGENTS.md keeps everything outside our block.
+        try
+        {
+            var result = CodexAgentsRulesInstaller.EnsureInstalled(_vaultPath);
+            if (result == CodexAgentsRulesInstaller.InstallResult.Installed)
+                Log($"codex AGENTS.md: {result} (v{CodexAgentsRulesInstaller.RuleVersion})");
+        }
+        catch (Exception ex) { Log($"codex AGENTS.md install failed: {ex.Message}"); }
+
         // Self-heal Claude Desktop's claude_desktop_config.json so its UI
         // sidebar shows the version we're actually running. Desktop doesn't
         // render serverInfo.version anywhere visible — owners verify the
@@ -214,7 +227,7 @@ internal static partial class Program
 
         return method switch
         {
-            "initialize"      => Initialize(id),
+            "initialize"      => Initialize(id, parameters),
             "initialized"     => "", // notification, no response
             "notifications/initialized" => "",
             "tools/list"      => ToolsList(id),
@@ -228,7 +241,65 @@ internal static partial class Program
 
     // ───────────── initialize ─────────────
 
-    private static string Initialize(JToken? id) => BuildResult(id, new JObject
+    /// <summary>
+    /// Which client is on the other end of this stdio pipe, as reported by the
+    /// MCP `initialize` handshake's `clientInfo.name` ("claude-code", "codex",
+    /// …). Null until the handshake lands.
+    ///
+    /// This exists so notes can be stamped with the agent that ACTUALLY wrote
+    /// them. `source:` used to be the hardcoded literal "claude-mcp", which was
+    /// harmless while Claude was the only client — but the moment Codex mounts
+    /// the same vault, every Codex-authored note would claim to be Claude's.
+    /// Cross-vendor provenance is the whole point of the shared brain: "Claude
+    /// decided X last week" has to be checkable, not folklore.
+    /// </summary>
+    private static string? _clientName;
+
+    /// <summary>
+    /// The `source:` frontmatter value for notes written in this session —
+    /// "claude-mcp", "codex-mcp", or "&lt;client&gt;-mcp" for anything else.
+    /// Falls back to "mcp" rather than "claude-mcp" when the client doesn't
+    /// identify itself: an honest unknown beats a confident lie.
+    /// </summary>
+    private static string SourceTag(string suffix = "")
+    {
+        var name = _clientName;
+        string bas;
+        if (string.IsNullOrWhiteSpace(name)) bas = "mcp";
+        else if (name.Contains("claude", StringComparison.OrdinalIgnoreCase)) bas = "claude-mcp";
+        else if (name.Contains("codex", StringComparison.OrdinalIgnoreCase)) bas = "codex-mcp";
+        else
+        {
+            // Unknown client — keep the reported name but make it frontmatter-safe.
+            var slug = new string(name.Trim().ToLowerInvariant()
+                .Select(c => char.IsLetterOrDigit(c) ? c : '-').ToArray())
+                .Trim('-');
+            bas = string.IsNullOrEmpty(slug) ? "mcp" : $"{slug}-mcp";
+        }
+        return bas + suffix;
+    }
+
+    private static string Initialize(JToken? id, JObject? parameters)
+    {
+        // Capture who we're talking to before answering. Best-effort: a client
+        // that omits clientInfo still gets a normal handshake, it just lands in
+        // the "mcp" bucket for provenance.
+        try
+        {
+            var name = parameters?["clientInfo"]?["name"]?.ToString();
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                _clientName = name;
+                Log($"client: {name} {parameters?["clientInfo"]?["version"]?.ToString() ?? ""}".TrimEnd()
+                    + $" → source={SourceTag()}");
+            }
+        }
+        catch { /* never fail the handshake over telemetry */ }
+
+        return InitializeResult(id);
+    }
+
+    private static string InitializeResult(JToken? id) => BuildResult(id, new JObject
     {
         ["protocolVersion"] = ProtocolVersion,
         ["serverInfo"] = new JObject { ["name"] = ServerName, ["version"] = ServerVersion },
@@ -1636,7 +1707,7 @@ internal static partial class Program
         var sb = new System.Text.StringBuilder();
         sb.AppendLine("---");
         sb.AppendLine($"created: {DateTime.UtcNow:O}");
-        sb.AppendLine($"source: claude-mcp");
+        sb.AppendLine($"source: {SourceTag()}");
         if (tags.Length > 0)
         {
             sb.AppendLine("tags:");
@@ -4288,7 +4359,7 @@ internal static partial class Program
                 {
                     sb.AppendLine("---");
                     sb.AppendLine($"date: {now:yyyy-MM-dd}");
-                    sb.AppendLine("source: claude-mcp-auto");
+                    sb.AppendLine($"source: {SourceTag("-auto")}");
                     sb.AppendLine("tags:");
                     sb.AppendLine("  - session");
                     sb.AppendLine("  - auto-log");
