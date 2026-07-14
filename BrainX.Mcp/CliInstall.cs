@@ -634,8 +634,8 @@ internal static class CliInstall
     /// <summary>
     /// Find `codex` on the system. npm-installed CLIs land as `codex.cmd` in
     /// %APPDATA%\npm (which `Process.Start` won't auto-resolve like a shell
-    /// does); a native install is `codex.exe` on PATH. Walk both, testing the
-    /// platform's known executable extensions.
+    /// does); a native install is `codex.exe` on PATH. Falls back to the Codex
+    /// DESKTOP app, which lives off-PATH — see ResolveCodexDesktopExe.
     /// </summary>
     private static string? ResolveCodexLauncher()
     {
@@ -665,7 +665,33 @@ internal static class CliInstall
                 catch (ArgumentException) { /* skip invalid PATH entry */ }
             }
         }
-        return null;
+        return ResolveCodexDesktopExe();
+    }
+
+    /// <summary>
+    /// The Codex DESKTOP app installs to %LOCALAPPDATA%\OpenAI\Codex\bin\&lt;hash&gt;\
+    /// codex.exe — a content-addressed folder that is NOT on PATH and NOT an npm
+    /// shim, so a PATH-only probe misses it and Codex silently never registers
+    /// (what actually happened on the owner's box, 2026-07-14). Updates leave
+    /// SEVERAL hash dirs side by side and some hold no codex.exe, so pick
+    /// NEWEST-BY-MTIME, not first-found — same rule as the note "MCP-spawned
+    /// sibling apps — never pick by hardcoded config order, pick by LastWriteTime".
+    /// </summary>
+    private static string? ResolveCodexDesktopExe()
+    {
+        try
+        {
+            var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (string.IsNullOrEmpty(local)) return null;
+            var binDir = Path.Combine(local, "OpenAI", "Codex", "bin");
+            if (!Directory.Exists(binDir)) return null;
+            return Directory.EnumerateDirectories(binDir)
+                .Select(d => Path.Combine(d, "codex.exe"))
+                .Where(File.Exists)
+                .OrderByDescending(File.GetLastWriteTimeUtc)
+                .FirstOrDefault();
+        }
+        catch { return null; }
     }
 
     /// <summary>

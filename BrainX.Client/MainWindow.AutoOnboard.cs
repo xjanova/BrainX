@@ -350,9 +350,12 @@ public partial class MainWindow
     }
 
     /// <summary>
-    /// Locate the `codex` launcher the same way we find `claude`: npm global
-    /// shims land in %APPDATA%\npm as codex.cmd; a native install lands as
-    /// codex.exe on PATH. Returns null when Codex isn't installed.
+    /// Locate the `codex` launcher. Three install shapes, in priority order:
+    ///   1. PATH / %APPDATA%\npm — npm global shim (codex.cmd) or a native exe
+    ///   2. The Codex DESKTOP app, which is NOT on PATH (see FindCodexDesktopExe)
+    /// All local Codex clients (desktop app, CLI, IDE extension) share one
+    /// ~/.codex/config.toml, so registering through whichever we find lands in
+    /// the same place. Returns null when Codex isn't installed at all.
     /// </summary>
     private static string? FindCodexCli()
     {
@@ -373,7 +376,35 @@ public partial class MainWindow
                 catch (ArgumentException) { /* skip invalid PATH entry */ }
             }
         }
-        return null;
+        return FindCodexDesktopExe();
+    }
+
+    /// <summary>
+    /// The Codex DESKTOP app installs to %LOCALAPPDATA%\OpenAI\Codex\bin\&lt;hash&gt;\
+    /// codex.exe — a content-addressed folder that is NOT on PATH and NOT an npm
+    /// shim, so a PATH-only probe misses it entirely and Codex silently never
+    /// gets registered (exactly what happened on the owner's box, 2026-07-14).
+    ///
+    /// Updates leave SEVERAL hash dirs side by side (and some hold no codex.exe
+    /// at all), so pick NEWEST-BY-MTIME rather than first-found — the same rule
+    /// as [[MCP-spawned sibling apps — never pick by hardcoded config order,
+    /// pick by LastWriteTime]]. Returns null when the desktop app isn't present.
+    /// </summary>
+    private static string? FindCodexDesktopExe()
+    {
+        try
+        {
+            var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (string.IsNullOrEmpty(local)) return null;
+            var binDir = Path.Combine(local, "OpenAI", "Codex", "bin");
+            if (!Directory.Exists(binDir)) return null;
+            return Directory.EnumerateDirectories(binDir)
+                .Select(d => Path.Combine(d, "codex.exe"))
+                .Where(File.Exists)
+                .OrderByDescending(File.GetLastWriteTimeUtc)
+                .FirstOrDefault();
+        }
+        catch { return null; }
     }
 
     /// <summary>
