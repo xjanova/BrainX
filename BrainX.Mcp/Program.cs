@@ -182,14 +182,27 @@ internal static partial class Program
         // ServerVersion (because the user upgraded the binary without
         // re-running register-claude), rewrite it here. Effect lands on
         // the NEXT Claude Desktop restart, not this session.
-        try { EnsureDesktopConfigVersion(); }
-        catch (Exception ex) { Log($"desktop config self-heal failed (non-fatal): {ex.Message}"); }
+        // HEADLESS (BRAINX_HEADLESS=1): we were spawned by the node to serve the
+        // remote /mcp endpoint, not by a desktop client. Both side effects below
+        // are desktop-only and actively wrong on a server: a Windows service or
+        // Docker container has no desktop to pop the WPF client onto, and
+        // rewriting the machine's Claude Desktop config because a stranger hit
+        // an HTTP endpoint would be plainly hostile. Tools still work fully —
+        // only the local-desktop courtesies are skipped.
+        var headless = Environment.GetEnvironmentVariable("BRAINX_HEADLESS") == "1";
+        if (headless) Log("headless mode — skipping desktop config self-heal + client launch");
 
-        // If BrainX client isn't running, bring it up. The MCP server
-        // is spawned by Claude Desktop / Claude Code on first connection,
-        // so this effectively "opens the brain visualiser automatically"
-        // whenever the user starts talking to Claude.
-        TryLaunchClientIfNotRunning();
+        if (!headless)
+        {
+            try { EnsureDesktopConfigVersion(); }
+            catch (Exception ex) { Log($"desktop config self-heal failed (non-fatal): {ex.Message}"); }
+
+            // If BrainX client isn't running, bring it up. The MCP server
+            // is spawned by Claude Desktop / Claude Code on first connection,
+            // so this effectively "opens the brain visualiser automatically"
+            // whenever the user starts talking to Claude.
+            TryLaunchClientIfNotRunning();
+        }
 
         var reader = Console.In;
         var writer = Console.Out;

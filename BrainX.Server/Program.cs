@@ -1,5 +1,6 @@
 using System.Text;
 using BrainX.Server.Hubs;
+using BrainX.Server.Mcp;
 using BrainX.Core.Services;
 using BrainX.Core.Models;
 
@@ -104,6 +105,49 @@ app.Use(async (ctx, next) =>
     }
     await next();
 });
+
+// ── Remote MCP endpoint (/mcp) ──
+// Opt-in (BrainX__McpEnabled=true). This is what makes the brain reachable from
+// clients that cannot spawn a local process — claude.ai / ChatGPT connectors and
+// `codex mcp add --url`. Everything dangerous is fenced in McpRemotePolicy;
+// read that file before changing anything here.
+McpSessionManager? mcpSessions = null;
+if (NodeConfig.McpEnabled)
+{
+    var mcpExe = ResolveMcpExe();
+    if (mcpExe == null)
+    {
+        Console.ForegroundColor = ConsoleColor.Red;
+        Console.WriteLine("  [WARN] BrainX__McpEnabled=true but brainx-mcp was not found — /mcp disabled.");
+        Console.WriteLine("         Set BrainX__McpExePath, or place brainx-mcp next to the node binary.");
+        Console.ResetColor();
+    }
+    else if (!NodeConfig.EmbeddedMode && string.IsNullOrEmpty(NodeConfig.McpWriteToken) && string.IsNullOrEmpty(NodeConfig.McpReadToken))
+    {
+        // Fail closed rather than publish the brain. A remote node with /mcp on
+        // and no token would be an open write endpoint on the public internet.
+        Console.ForegroundColor = ConsoleColor.Red;
+        Console.WriteLine("  [WARN] /mcp requested on a STANDALONE node with no token — refusing to enable.");
+        Console.WriteLine("         Set BrainX__McpWriteToken (and/or BrainX__McpReadToken) first.");
+        Console.ResetColor();
+    }
+    else
+    {
+        mcpSessions = new McpSessionManager(
+            mcpExe, NodeConfig.VaultPath,
+            NodeConfig.McpMaxSessions, TimeSpan.FromMinutes(NodeConfig.McpIdleMinutes));
+
+        app.MapBrainMcp(mcpSessions, ResolveMcpScope);
+
+        app.Lifetime.ApplicationStopping.Register(() => mcpSessions.DisposeAsync().AsTask().Wait(5000));
+
+        Console.WriteLine($"[mcp] remote endpoint ENABLED at /mcp · exe={mcpExe}");
+        Console.WriteLine($"[mcp]   scopes: write={(string.IsNullOrEmpty(NodeConfig.McpWriteToken) ? "-" : "set")}"
+                          + $" read={(string.IsNullOrEmpty(NodeConfig.McpReadToken) ? "-" : "set")}"
+                          + $" · max {NodeConfig.McpMaxSessions} sessions · idle {NodeConfig.McpIdleMinutes}m");
+        Console.WriteLine("[mcp]   ssh_run / ssh_tail / ssh_profiles_list / brain_import_path / brain_apply_audit_fix are PERMANENTLY blocked here.");
+    }
+}
 
 app.UseDefaultFiles();
 app.UseStaticFiles();
@@ -942,7 +986,72 @@ static bool IsProtected(HttpRequest r)
 {
     var p = r.Path;
     if (p.StartsWithSegments("/health") || p.StartsWithSegments("/api/health")) return false;
+    // /mcp deliberately does NOT ride this gate: it needs scope resolution
+    // (read vs read-write), and it must demand a token even when
+    // RequireAuth=false. ResolveMcpScope owns it and fails closed.
+    if (p.StartsWithSegments("/mcp")) return false;
     return p.StartsWithSegments("/api") || p.StartsWithSegments("/v1");
+}
+
+/// <summary>
+/// Decide what a /mcp caller may do. The security decision for the whole remote
+/// surface, so it fails closed at every step.
+///
+/// Unlike the /api gate this ignores RequireAuth: /mcp reaches brain WRITE
+/// tools, so a standalone node ALWAYS demands a token. Only an embedded node
+/// with no tokens configured is trusted, and only because that is a localhost
+/// process bundled with the client — the same trust boundary stdio already has.
+/// </summary>
+static McpScope ResolveMcpScope(HttpRequest r)
+{
+    var write = NodeConfig.McpWriteToken;
+    var read = NodeConfig.McpReadToken;
+
+    // Embedded + no tokens = localhost dev alongside the client. Anything else
+    // must present a credential.
+    if (NodeConfig.EmbeddedMode && string.IsNullOrEmpty(write) && string.IsNullOrEmpty(read))
+        return McpScope.ReadWrite;
+
+    var hdr = r.Headers.Authorization.ToString();
+    const string prefix = "Bearer ";
+    if (!hdr.StartsWith(prefix, StringComparison.Ordinal)) return McpScope.None;
+    var presented = hdr[prefix.Length..];
+    if (presented.Length == 0) return McpScope.None;
+
+    // Constant-time compares — a plain == leaks token length and prefix via
+    // timing, and this token is the only thing between the internet and the
+    // owner's brain. Check write first so a node that reuses one token for both
+    // resolves to the stronger scope.
+    if (!string.IsNullOrEmpty(write) && FixedTimeEquals(presented, write!)) return McpScope.ReadWrite;
+    if (!string.IsNullOrEmpty(read) && FixedTimeEquals(presented, read!)) return McpScope.Read;
+    return McpScope.None;
+}
+
+static bool FixedTimeEquals(string a, string b)
+    => System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+        System.Text.Encoding.UTF8.GetBytes(a), System.Text.Encoding.UTF8.GetBytes(b));
+
+/// <summary>
+/// Find the brainx-mcp binary this node should drive. Explicit config wins;
+/// otherwise probe next to the node (how the installer and Docker image ship
+/// it). Returns null when there is nothing to run, so /mcp stays off rather
+/// than half-working.
+/// </summary>
+static string? ResolveMcpExe()
+{
+    if (!string.IsNullOrWhiteSpace(NodeConfig.McpExePath))
+        return File.Exists(NodeConfig.McpExePath) ? NodeConfig.McpExePath : null;
+
+    var isWindows = OperatingSystem.IsWindows();
+    var name = isWindows ? "brainx-mcp.exe" : "brainx-mcp";
+    var baseDir = AppContext.BaseDirectory;
+    string[] probes =
+    [
+        Path.Combine(baseDir, "mcp", name),
+        Path.Combine(baseDir, name),
+        Path.Combine(baseDir, "..", "mcp", name),
+    ];
+    return probes.FirstOrDefault(File.Exists);
 }
 
 // Constant-time bearer-token check (avoids leaking the token via compare
@@ -1005,6 +1114,23 @@ public static class NodeConfig
     /// <summary>MySQL connection string — required when StorageProvider=mysql.</summary>
     public static string? MySqlConnString { get; private set; }
 
+    // ── Remote MCP endpoint (/mcp) ──
+    // Off by default: this is the one surface that hands brain WRITE tools to
+    // anything that can reach the port, so it must be a deliberate act, never
+    // something a node starts doing because it got upgraded.
+    /// <summary>Enable the remote MCP endpoint at /mcp (Streamable HTTP).</summary>
+    public static bool McpEnabled { get; private set; }
+    /// <summary>Path to brainx-mcp(.exe). Empty = probe next to the node binary.</summary>
+    public static string? McpExePath { get; private set; }
+    /// <summary>Token granting read+write over /mcp. Falls back to BearerToken.</summary>
+    public static string? McpWriteToken { get; private set; }
+    /// <summary>Token granting read-only over /mcp. Optional; hand this one out.</summary>
+    public static string? McpReadToken { get; private set; }
+    /// <summary>Max concurrent /mcp sessions — each is a real OS process.</summary>
+    public static int McpMaxSessions { get; private set; } = 8;
+    /// <summary>Idle minutes before a /mcp session's child is reaped.</summary>
+    public static int McpIdleMinutes { get; private set; } = 30;
+
     /// <summary>Opt-in self-update: poll GitHub Releases and apply newer node builds.</summary>
     public static bool AutoUpdate { get; private set; }
     /// <summary>GitHub "owner/repo" the self-updater pulls releases from.</summary>
@@ -1030,7 +1156,17 @@ public static class NodeConfig
         AutoUpdate = ParseBool(b["AutoUpdate"], defaultValue: false);
         UpdateRepo = FirstNonEmpty(b["UpdateRepo"]) ?? "xjanova/BrainX";
         UpdateServiceName = FirstNonEmpty(b["UpdateServiceName"]);
+
+        McpEnabled = ParseBool(b["McpEnabled"], defaultValue: false);
+        McpExePath = FirstNonEmpty(b["McpExePath"]);
+        McpWriteToken = FirstNonEmpty(b["McpWriteToken"], b["BearerToken"]);
+        McpReadToken = FirstNonEmpty(b["McpReadToken"]);
+        McpMaxSessions = ParseInt(b["McpMaxSessions"], 8);
+        McpIdleMinutes = ParseInt(b["McpIdleMinutes"], 30);
     }
+
+    static int ParseInt(string? s, int defaultValue)
+        => int.TryParse(s, out var v) && v > 0 ? v : defaultValue;
 
     static string? FirstNonEmpty(params string?[] vals)
         => vals.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
