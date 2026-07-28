@@ -70,6 +70,13 @@ public partial class MainWindow
 
     private void PopulateDashSidebar()
     {
+        // Layout wiring goes FIRST and in its own try: it used to sit near the
+        // end of the sequence below, so any populator that threw (they all
+        // share the one catch) skipped it — leaving DashCardsGrid with no row
+        // or column definitions and all five cards stacked in a single cell.
+        try { StartDashResponsiveLayout(); }
+        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"StartDashResponsiveLayout failed: {ex.Message}"); }
+
         try
         {
             PopulateDashActivity();

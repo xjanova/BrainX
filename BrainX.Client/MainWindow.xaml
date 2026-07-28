@@ -695,8 +695,28 @@
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>                      <!-- header -->
                                     <RowDefinition Height="Auto"/>                      <!-- (collapsed) -->
-                                    <RowDefinition Height="1.5*" MinHeight="320"/>      <!-- map row (universe + right col) -->
-                                    <RowDefinition Height="1*" MinHeight="200"/>        <!-- pro insights + quick actions (scrollable) -->
+                                    <!-- Map row keeps the lion's share but no longer starves the
+                                         lower strip: 1.5*→1.4* + MinHeight 320→300 buys the cards
+                                         row the ~40 px it needed to fit a maximized 1080p window
+                                         without a scrollbar (user: "เห็นทุกอย่างไม่ต้องสกรอเมื่อ
+                                         ขยายเต็มจอ"). Universe stays OUTSIDE any ScrollViewer —
+                                         HwndHost ignores scroll transforms and paints through the
+                                         titlebar, see the 2026-05-27 dashboard-scroll session. -->
+                                    <!-- These MinHeights are a budget, not a wish: their sum plus the
+                                         header and the pinned Quick Actions row has to stay under the
+                                         shortest window the user can drag to, or the Grid overflows
+                                         and clips its LAST row — which is Quick Actions, and that row
+                                         is outside the ScrollViewer so a clipped one is unreachable.
+                                         240 + 140 leaves Quick Actions room even at a 720 px window. -->
+                                    <RowDefinition x:Name="DashMapRow" Height="1.4*" MinHeight="240"/>  <!-- map row (universe + right col) -->
+                                    <RowDefinition x:Name="DashLowerRow" Height="1*" MinHeight="140"/>  <!-- card strip (the only scrollable zone) -->
+                                    <!-- Quick Actions is its OWN non-scrolling row. It used to sit
+                                         inside the ScrollViewer with the cards, which meant its
+                                         SYSTEM HEALTH chip was the first thing to fall off the
+                                         bottom whenever the strip overflowed by a few pixels.
+                                         Pinned here it is always fully visible, and the card strip
+                                         no longer has to share a height budget with it. -->
+                                    <RowDefinition Height="Auto"/>                                     <!-- quick actions (pinned) -->
                                 </Grid.RowDefinitions>
                                 <!-- View header — Row 0 -->
                                 <Grid Grid.Row="0" Margin="0,0,0,22">
@@ -756,10 +776,17 @@
                                          constraint without letting the universe paint over Row 3.
                                          MinWidth on the universe ColumnDefinition guarantees a
                                          420 px viewport even when the user narrows the window. -->
-                                    <Grid Grid.Row="2" Margin="0,0,0,16">
+                                    <!-- x:Name + a third (0-width) column so ApplyDashResponsiveLayout
+                                         can PROMOTE the AGENT BUS card up here on an ultra-wide
+                                         window. At 2560 px the universe is ~1090 px of mostly empty
+                                         space while the bottom strip is squeezed — moving the bus up
+                                         spends that width on something and gives the four remaining
+                                         cards room. The column stays 0-width at normal sizes. -->
+                                    <Grid x:Name="DashMapGrid" Grid.Row="2" Margin="0,0,0,16">
                                         <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="1.6*" MinWidth="420"/>
+                                            <ColumnDefinition x:Name="DashMapUniverseCol" Width="1.6*" MinWidth="420"/>
                                             <ColumnDefinition Width="*" MinWidth="280"/>
+                                            <ColumnDefinition x:Name="DashMapPromotedCol" Width="0"/>
                                         </Grid.ColumnDefinitions>
                                         <Border Grid.Column="0" Style="{StaticResource NeuralCard}"
                                                 Margin="0,0,8,0" Padding="0"
@@ -1359,13 +1386,24 @@
                                          set to Visible (not Auto) so users see right away that the section
                                          can be scrolled — addresses user's "ทำไงให้ผู้ใช้รู้ว่าสกรอร์
                                          ลงได้". -->
-                                    <ScrollViewer Grid.Row="3"
-                                                  VerticalScrollBarVisibility="Visible"
+                                    <ScrollViewer Grid.Row="3" x:Name="DashLowerScroll"
+                                                  VerticalScrollBarVisibility="Auto"
                                                   HorizontalScrollBarVisibility="Disabled"
                                                   CanContentScroll="False"
                                                   PanningMode="VerticalOnly"
                                                   Padding="0,0,4,0">
-                                    <StackPanel>
+                                    <!-- Scrollbar is Auto (was always-Visible): the strip now FITS
+                                         at desktop sizes, so a permanent scrollbar would be a lie.
+                                         ApplyDashResponsiveLayout (MainWindow.DashLayout.cs) sets
+                                         DashCardsGrid.MinHeight to the viewport height so the cards
+                                         STRETCH to fill when there's room, and only overflow
+                                         (→ scrollbar appears) on genuinely small windows.
+
+                                         Card strip: 5 cards re-flowed by width breakpoint (wide 5×1
+                                         · medium 3×2 with the bus spanning both rows · narrow 1×5
+                                         stacked). Row/column assignment lives in code because WPF
+                                         Grid can't re-flow declaratively. -->
+                                    <Grid x:Name="DashCardsGrid" Margin="0,0,0,4">
                                     <!-- ▼ AGENT BUS — live map of every agent on this brain ▼
                                          User (2026-07-28): "เพิ่มกราฟฟิคการ์ดหน้าแรก เพื่อแสดงสถานะ
                                          การเชื่อมต่อ ... เส้นทางการคุยเป็นกราฟฟิค รับส่งข้อมูล
@@ -1375,30 +1413,41 @@
                                          never kills a running animation. Data = files under
                                          .obsidianx/agent-bus/ (presence / inbox / read); see
                                          MainWindow.AgentBus.cs. -->
-                                    <Border Style="{StaticResource NeuralCard}"
-                                            Padding="16,14,16,14" Margin="0,0,0,16">
+                                    <Border x:Name="DashCardBus" Style="{StaticResource NeuralCard}"
+                                            Padding="16,14,16,14" Margin="4">
                                         <Grid>
                                             <Grid.RowDefinitions>
                                                 <RowDefinition Height="Auto"/>
-                                                <RowDefinition Height="215"/>
+                                                <!-- * (was a fixed 215) so the graph grows into a
+                                                     maximized window instead of leaving dead space;
+                                                     the canvas redraws itself on SizeChanged. -->
+                                                <RowDefinition Height="*" MinHeight="150"/>
                                                 <RowDefinition Height="Auto"/>
                                             </Grid.RowDefinitions>
+                                            <!-- 4 explicit columns, subtitle in the only * one: a
+                                                 horizontal StackPanel does not trim, so at narrow
+                                                 card widths the subtitle ran straight under the
+                                                 online counter ("Cod2 online"). -->
                                             <Grid Grid.Row="0">
                                                 <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="Auto"/>
                                                     <ColumnDefinition Width="*"/>
                                                     <ColumnDefinition Width="Auto"/>
+                                                    <ColumnDefinition Width="Auto"/>
                                                 </Grid.ColumnDefinitions>
-                                                <StackPanel Grid.Column="0" Orientation="Horizontal">
-                                                    <TextBlock Text="AGENT BUS" Style="{StaticResource TypeCardTitle}"
-                                                               VerticalAlignment="Center"/>
-                                                    <TextBlock Text=" · Claude ⇄ Codex ⇄ CluadeX ผ่านสมอง"
-                                                               FontSize="11" Foreground="{StaticResource NeuralText3}"
-                                                               VerticalAlignment="Center" Margin="6,0,0,0"/>
-                                                    <Ellipse x:Name="DashBusLiveDot" Width="7" Height="7"
-                                                             Fill="{StaticResource TextMutedBrush}"
-                                                             Margin="8,0,0,0" VerticalAlignment="Center"/>
-                                                </StackPanel>
-                                                <TextBlock Grid.Column="1" x:Name="DashBusOnlineCountText"
+                                                <TextBlock Grid.Column="0" Text="AGENT BUS"
+                                                           Style="{StaticResource TypeCardTitle}"
+                                                           VerticalAlignment="Center"/>
+                                                <TextBlock Grid.Column="1"
+                                                           Text=" · Claude ⇄ Codex ⇄ CluadeX ผ่านสมอง"
+                                                           FontSize="11" Foreground="{StaticResource NeuralText3}"
+                                                           VerticalAlignment="Center" Margin="6,0,6,0"
+                                                           TextTrimming="CharacterEllipsis"/>
+                                                <Ellipse Grid.Column="2" x:Name="DashBusLiveDot"
+                                                         Width="7" Height="7"
+                                                         Fill="{StaticResource TextMutedBrush}"
+                                                         Margin="0,0,8,0" VerticalAlignment="Center"/>
+                                                <TextBlock Grid.Column="3" x:Name="DashBusOnlineCountText"
                                                            Text="0 online" FontSize="11"
                                                            FontFamily="{StaticResource FontMono}"
                                                            Foreground="{StaticResource NeuralText3}"
@@ -1417,17 +1466,9 @@
                                         </Grid>
                                     </Border>
 
-                                    <Grid Margin="0,0,0,16">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="*"/>
-                                            <ColumnDefinition Width="*"/>
-                                            <ColumnDefinition Width="*"/>
-                                            <ColumnDefinition Width="*"/>
-                                        </Grid.ColumnDefinitions>
-
                                         <!-- ▼ CARD A — EXPERTISE PROFILE ▼ -->
-                                        <Border Grid.Column="0" Style="{StaticResource NeuralCard}"
-                                                Padding="16,14,16,14" Margin="0,0,7,0">
+                                        <Border x:Name="DashCardExpertise" Style="{StaticResource NeuralCard}"
+                                                Padding="16,14,16,14" Margin="4">
                                             <Grid>
                                                 <Grid.RowDefinitions>
                                                     <RowDefinition Height="Auto"/>
@@ -1498,8 +1539,8 @@
                                              DashNetDot. DashTopTagsPanel + DashTagsTotalText
                                              kept as 0-size dummies for legacy
                                              PopulateDashTopTags writes. -->
-                                        <Border Grid.Column="1" Style="{StaticResource NeuralCard}"
-                                                Padding="16,14,16,14" Margin="3,0,4,0">
+                                        <Border x:Name="DashCardNetwork" Style="{StaticResource NeuralCard}"
+                                                Padding="16,14,16,14" Margin="4">
                                             <Grid>
                                                 <Grid.RowDefinitions>
                                                     <RowDefinition Height="Auto"/>
@@ -1567,8 +1608,8 @@
                                         </Border>
 
                                         <!-- ▼ CARD C — MCP ACTIVITY 24 H ▼ -->
-                                        <Border Grid.Column="2" Style="{StaticResource NeuralCard}"
-                                                Padding="16,14,16,14" Margin="4,0,3,0">
+                                        <Border x:Name="DashCardMcp" Style="{StaticResource NeuralCard}"
+                                                Padding="16,14,16,14" Margin="4">
                                             <Grid>
                                                 <Grid.RowDefinitions>
                                                     <RowDefinition Height="Auto"/>
@@ -1630,8 +1671,8 @@
                                              dot turns amber and the bars stay at the last known
                                              reading while the local tally subtitle still updates
                                              in real time from ~/.claude/projects/**/*.jsonl. -->
-                                        <Border Grid.Column="3" Style="{StaticResource NeuralCard}"
-                                                Padding="16,14,16,14" Margin="7,0,0,0">
+                                        <Border x:Name="DashCardClaude" Style="{StaticResource NeuralCard}"
+                                                Padding="16,14,16,14" Margin="4">
                                             <Grid>
                                                 <Grid.RowDefinitions>
                                                     <RowDefinition Height="Auto"/>
@@ -1837,14 +1878,16 @@
                                             </Grid>
                                         </Border>
                                     </Grid>
-                                    <!-- end PRO INSIGHTS STRIP -->
+                                    </ScrollViewer>
+                                    <!-- end card strip -->
 
                                     <!-- Quick Actions — Row 4 (was Row 3 before the insights strip).
                                          NeuralCard wrapper + TypeCardTitle label + NeuralBtn / NeuralBtnPrimary
                                          buttons. Re-index Vault is the only action with a side effect on the
                                          entire knowledge graph, so it gets the primary violet treatment; the
                                          other three are secondary (ghost = no decoration, default = card-tinted). -->
-                                    <Border Style="{StaticResource NeuralCard}" Padding="22,18">
+                                    <Border x:Name="DashCardQuickActions" Grid.Row="4"
+                                            Style="{StaticResource NeuralCard}" Padding="20,11" Margin="4,8,4,4">
                                         <!-- 2-col layout: left = original Quick Actions header + WrapPanel;
                                              right = compact SYSTEM HEALTH chip (moved here from the
                                              Pro Insights strip so its slot could host CLAUDE USAGE).
@@ -1859,7 +1902,7 @@
                                             <StackPanel Grid.Column="0">
                                                 <TextBlock Text="QUICK ACTIONS"
                                                            Style="{StaticResource TypeCardTitle}"
-                                                           Margin="0,0,0,14"/>
+                                                           Margin="0,0,0,9"/>
                                                 <WrapPanel>
                                                     <!-- Primary action — only one violet button per card per
                                                          the t2.zip spec; everything else stays ghost/secondary. -->
@@ -1980,9 +2023,8 @@
                                             </Border>
                                         </Grid>
                                     </Border>
-                                    </StackPanel>
-                                    </ScrollViewer>
-                                <!-- end Dashboard inner 4-row Grid -->
+                                    <!-- end Quick Actions (pinned row 4) -->
+                                <!-- end Dashboard inner 5-row Grid -->
                                 </Grid>
                         </Grid>
 

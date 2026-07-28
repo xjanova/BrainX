@@ -222,7 +222,16 @@ public partial class MainWindow
 
         // Agents on an ellipse around the brain. Slot 0 points left so the
         // first two agents (claude, codex alphabetically) land left/right.
-        double rx = Math.Max(60, w * 0.36), ry = Math.Max(48, h * 0.34);
+        //
+        // ry is capped by the space a node's name + status caption need BELOW
+        // it, so the bottom-most node keeps its labels inside the canvas — on a
+        // short, wide card (stacked layout on a small window) a plain h*0.34
+        // pushed them past the edge and clipped "Local-agent-m…".
+        // rx is capped too: across a very wide card the nodes would otherwise
+        // fly to the far edges and the graph would read as unrelated dots.
+        const double labelBlock = 46;
+        double rx = Math.Max(70, Math.Min(w * 0.34, 210));
+        double ry = Math.Max(28, Math.Min(h * 0.32, h / 2 - labelBlock));
         for (int i = 0; i < agents.Count; i++)
         {
             var angle = Math.PI + (2 * Math.PI * i / agents.Count);
@@ -508,8 +517,14 @@ public partial class MainWindow
         "codex" => "Codex",
         "cluadex" => "CluadeX",
         "brain" => "BrainX",
-        _ => agent.Length <= 1 ? agent : char.ToUpperInvariant(agent[0]) + agent[1..]
+        // Unknown clients can report long slugs (e.g.
+        // "local-agent-mode-brainx-brain") that would run past the card's
+        // edge and collide with the neighbouring node's label.
+        _ => Ellipsize(agent.Length <= 1 ? agent : char.ToUpperInvariant(agent[0]) + agent[1..], 14)
     };
+
+    private static string Ellipsize(string s, int max) =>
+        s.Length <= max ? s : s[..(max - 1)] + "…";
 
     private Brush BusThemeBrush(string key, Color fallback) =>
         TryFindResource(key) as Brush ?? new SolidColorBrush(fallback);
