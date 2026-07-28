@@ -789,25 +789,22 @@
                                             <ColumnDefinition x:Name="DashMapPromotedCol" Width="0"/>
                                         </Grid.ColumnDefinitions>
                                         <Border Grid.Column="0" Style="{StaticResource NeuralCard}"
-                                                Margin="0,0,8,0" Padding="0"
-                                                MinHeight="320">
-                                        <!-- MinHeight here is REQUIRED again now that Row 2 is Auto
-                                             (was *). With Auto sizing the Row no longer reserves
-                                             space; the Border MUST self-size or the WebView2
-                                             collapses to 0. The earlier "overflow into Row 3"
-                                             bug from putting MinHeight here is no longer a risk
-                                             because the outer ScrollViewer wraps the inner Grid
-                                             — if total content > viewport it scrolls, doesn't
-                                             paint into adjacent rows. -->
-                                        <!-- MinHeight + MinWidth previously here caused the Border
-                                             to OVERFLOW into Row 3's cell space (user screenshot:
-                                             "กลายเป็นทับคนอื่นไป") because WPF Grid doesn't clip
-                                             children to cell bounds. Constraints moved to the
-                                             RowDefinition + ColumnDefinition above so the Grid
-                                             respects them at layout-pass time and never lets the
-                                             universe encroach on Row 3 (Pro Insights strip).
-                                             — Reinstated on 2026-05-27 with safer ScrollViewer
-                                             wrapper so the older overflow problem doesn't return. -->
+                                                Margin="0,0,8,0" Padding="0">
+                                        <!-- NO MinHeight here. A MinHeight on the Border is a demand
+                                             the Grid cannot refuse, and WPF Grid does not clip
+                                             children to cell bounds — so whenever the row was
+                                             shorter than it (small window → row sits at its 240 px
+                                             floor) the card overflowed downward and, being a
+                                             WebView2/HwndHost, painted straight over the AGENT BUS
+                                             card below (user screenshot 2026-07-28; same failure the
+                                             2026-05-27 comment recorded as "กลายเป็นทับคนอื่นไป").
+                                             It was reinstated back when Row 2 was Auto-sized and the
+                                             Border had to self-size; Row 2 is star/pixel-sized again,
+                                             so DashMapRow.MinHeight is the only constraint needed and
+                                             the universe now shrinks with its cell. The three.js
+                                             scene re-fits itself on resize (app.js handleResize →
+                                             scheduleAutoFit → scene.fitToScreen), so a smaller card
+                                             just means a zoomed-out galaxy, not a cropped one. -->
                                         <Grid>
                                             <Grid.RowDefinitions>
                                                 <RowDefinition Height="*"/>
@@ -1129,11 +1126,24 @@
                                              ballooned and pushed the Recently card below the fold
                                              — user: "activity feed มันดันจน การ์ด recently
                                              หายไปผู้ใช้ไม่รู้ถ้าไม่สกรอ". -->
-                                        <Grid Grid.Column="1" Margin="8,0,0,0" MinHeight="320">
+                                        <!-- MinHeight removed for the same reason as the universe
+                                             Border: it outranked the row and pushed this column's
+                                             cards past the cell into the strip below. -->
+                                        <Grid Grid.Column="1" Margin="8,0,0,0">
+                                            <!-- INVARIANT: KPI strip (Auto, measures ~96 px) + these two
+                                                 MinHeights must stay under DashMapRow's 240 px floor,
+                                                 or this column overflows its cell on a small window and
+                                                 paints over the card strip — WPF Grid does not clip
+                                                 children to cell bounds. 96+75+55 = 226 ✓.
+                                                 (Was 160/120 = 376 total, which is what produced the
+                                                 2026-07-28 overlap screenshot alongside the universe
+                                                 Border's own MinHeight.) Both cards scroll internally,
+                                                 so a squeeze costs rows-in-view, not content, and the
+                                                 3*/2* ratio still governs whenever there is room. -->
                                             <Grid.RowDefinitions>
                                                 <RowDefinition Height="Auto"/>
-                                                <RowDefinition Height="3*" MinHeight="160"/>
-                                                <RowDefinition Height="2*" MinHeight="120"/>
+                                                <RowDefinition Height="3*" MinHeight="75"/>
+                                                <RowDefinition Height="2*" MinHeight="55"/>
                                             </Grid.RowDefinitions>
                                             <!-- ── KPI mini-strip (Connections + Expertise) ──────────────
                                                  Moved here from the old Row 1 KPI band so the Universe
