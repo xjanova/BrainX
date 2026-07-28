@@ -7,9 +7,9 @@
     <Nullable>enable</Nullable>
     <AssemblyName>brainx-mcp</AssemblyName>
     <RootNamespace>BrainX.Mcp</RootNamespace>
-    <Version>2.8.0</Version>
-    <AssemblyVersion>2.8.0.0</AssemblyVersion>
-    <FileVersion>2.8.0.0</FileVersion>
+    <Version>2.9.0</Version>
+    <AssemblyVersion>2.9.0.0</AssemblyVersion>
+    <FileVersion>2.9.0.0</FileVersion>
     <Product>BrainX MCP Server</Product>
     <!-- v2.6.0+: cross-platform headless MCP. WPF Client stays Windows
          only (System.Windows.* deps), but the brain server is pure
@@ -47,8 +47,8 @@
       <Output TaskParameter="ConsoleOutput" PropertyName="GitCommitCount" />
     </Exec>
     <PropertyGroup Condition="'$(GitCommitCount)' != ''">
-      <Version>2.8.$(GitCommitCount)</Version>
-      <FileVersion>2.8.$(GitCommitCount).0</FileVersion>
+      <Version>2.9.$(GitCommitCount)</Version>
+      <FileVersion>2.9.$(GitCommitCount).0</FileVersion>
     </PropertyGroup>
     <Message Importance="high" Text="brainx-mcp version → $(Version)" />
   </Target>
