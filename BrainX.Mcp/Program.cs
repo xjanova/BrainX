@@ -233,7 +233,10 @@ internal static partial class Program
 
     private static string Handle(string line)
     {
-        var req = JObject.Parse(line);
+        // Windows shells (PowerShell 5.1 pipes, cmd redirects) can prepend a
+        // UTF-8 BOM to the first line — Json.NET rejects it as "unexpected
+        // character ﻿". Strip it so a BOM-ful client still handshakes.
+        var req = JObject.Parse(line.TrimStart('﻿'));
         var id = req["id"];
         var method = req["method"]?.ToString();
         var parameters = req["params"] as JObject;

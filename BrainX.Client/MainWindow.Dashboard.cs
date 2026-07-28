@@ -86,6 +86,9 @@ public partial class MainWindow
             // Hybrid Claude-usage card — local tally always-on,
             // claude.ai scraper layered on top when signed-in via Edge.
             StartDashClaudeUsage();
+            // AGENT BUS card — live map of agents on this brain + message
+            // flows relayed between them (MainWindow.AgentBus.cs).
+            StartAgentBusCard();
             // Mouse-wheel bubble: when an inner ScrollViewer (Activity Feed,
             // Recently Edited) hits its top/bottom, hand the wheel event off
             // to the outer DashOuterScroll. Without this the inner viewer

@@ -1366,6 +1366,57 @@
                                                   PanningMode="VerticalOnly"
                                                   Padding="0,0,4,0">
                                     <StackPanel>
+                                    <!-- ▼ AGENT BUS — live map of every agent on this brain ▼
+                                         User (2026-07-28): "เพิ่มกราฟฟิคการ์ดหน้าแรก เพื่อแสดงสถานะ
+                                         การเชื่อมต่อ ... เส้นทางการคุยเป็นกราฟฟิค รับส่งข้อมูล
+                                         ให้เห็นว่าอะไรคุยไปไหน มี cluadex ด้วย". Two stacked
+                                         canvases: the static layer is redrawn every poll tick,
+                                         the FX layer holds in-flight message dots so a redraw
+                                         never kills a running animation. Data = files under
+                                         .obsidianx/agent-bus/ (presence / inbox / read); see
+                                         MainWindow.AgentBus.cs. -->
+                                    <Border Style="{StaticResource NeuralCard}"
+                                            Padding="16,14,16,14" Margin="0,0,0,16">
+                                        <Grid>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto"/>
+                                                <RowDefinition Height="215"/>
+                                                <RowDefinition Height="Auto"/>
+                                            </Grid.RowDefinitions>
+                                            <Grid Grid.Row="0">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Grid.Column="0" Orientation="Horizontal">
+                                                    <TextBlock Text="AGENT BUS" Style="{StaticResource TypeCardTitle}"
+                                                               VerticalAlignment="Center"/>
+                                                    <TextBlock Text=" · Claude ⇄ Codex ⇄ CluadeX ผ่านสมอง"
+                                                               FontSize="11" Foreground="{StaticResource NeuralText3}"
+                                                               VerticalAlignment="Center" Margin="6,0,0,0"/>
+                                                    <Ellipse x:Name="DashBusLiveDot" Width="7" Height="7"
+                                                             Fill="{StaticResource TextMutedBrush}"
+                                                             Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                                </StackPanel>
+                                                <TextBlock Grid.Column="1" x:Name="DashBusOnlineCountText"
+                                                           Text="0 online" FontSize="11"
+                                                           FontFamily="{StaticResource FontMono}"
+                                                           Foreground="{StaticResource NeuralText3}"
+                                                           VerticalAlignment="Center"/>
+                                            </Grid>
+                                            <Grid Grid.Row="1" Margin="0,6,0,0">
+                                                <Canvas x:Name="DashAgentBusCanvas" ClipToBounds="True"
+                                                        Background="Transparent"/>
+                                                <Canvas x:Name="DashAgentBusFxCanvas" ClipToBounds="True"
+                                                        Background="Transparent" IsHitTestVisible="False"/>
+                                            </Grid>
+                                            <TextBlock Grid.Row="2" x:Name="DashBusTrafficText"
+                                                       Text="ยังไม่มีข้อความวันนี้ — agent คุยกันผ่าน agent_send / agent_inbox"
+                                                       FontSize="10.5" Foreground="{StaticResource NeuralText3}"
+                                                       TextTrimming="CharacterEllipsis" Margin="0,8,0,0"/>
+                                        </Grid>
+                                    </Border>
+
                                     <Grid Margin="0,0,0,16">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*"/>
