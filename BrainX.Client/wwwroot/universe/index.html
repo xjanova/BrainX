@@ -358,17 +358,10 @@
             <div class="hud-rows" id="hud-network-body"></div>
         </section>
 
+        <!-- Feed sits top-right, system below it: the stream is what the owner
+             watches, so it gets the corner the eye returns to; the health
+             block is a reference they consult, not a thing they monitor. -->
         <section class="hud-panel hud-tr">
-            <div class="hud-title"><span class="hud-dot" id="hud-health-dot"></span>System</div>
-            <div class="hud-rows" id="hud-system-body"></div>
-        </section>
-
-        <section class="hud-panel hud-ml">
-            <div class="hud-title"><span class="hud-dot"></span>Expertise</div>
-            <div class="hud-rows" id="hud-expertise-body"></div>
-        </section>
-
-        <section class="hud-panel hud-mr">
             <div class="hud-title"><span class="hud-dot"></span>Activity
                 <span class="hud-sub">live</span>
             </div>
@@ -378,6 +371,16 @@
                 <span class="hud-sub" id="hud-recent-count">—</span>
             </div>
             <div class="hud-feed" id="hud-recent-body"></div>
+        </section>
+
+        <section class="hud-panel hud-ml">
+            <div class="hud-title"><span class="hud-dot"></span>Expertise</div>
+            <div class="hud-rows" id="hud-expertise-body"></div>
+        </section>
+
+        <section class="hud-panel hud-mr">
+            <div class="hud-title"><span class="hud-dot" id="hud-health-dot"></span>System</div>
+            <div class="hud-rows" id="hud-system-body"></div>
         </section>
 
         <!-- Consumption: what the brain has been doing, and what it has spent
