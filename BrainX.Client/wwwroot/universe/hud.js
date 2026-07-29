@@ -335,6 +335,36 @@ async function initBus() {
         document.hidden ? bus?.stop() : bus?.start());
 }
 
+/** Let the wheel scroll a clipped readout instead of zooming the galaxy.
+ *
+ * The canvas listens for wheel events on the window, so without this a scroll
+ * over a panel both scrolls the panel AND flies the camera — which reads as
+ * the HUD fighting the user. Only swallow the event when the panel can
+ * actually move in that direction; at the ends the wheel belongs to the
+ * galaxy again, so the camera never feels stuck near a panel. */
+function wireWheelScroll() {
+    document.querySelectorAll('.hud-panel').forEach(panel => {
+        panel.addEventListener('wheel', (e) => {
+            const canScroll = panel.scrollHeight - panel.clientHeight > 1;
+            if (!canScroll) return;
+            const atTop = panel.scrollTop <= 0;
+            const atEnd = panel.scrollTop + panel.clientHeight >= panel.scrollHeight - 1;
+            if ((e.deltaY < 0 && atTop) || (e.deltaY > 0 && atEnd)) return;
+            e.stopPropagation();
+            e.preventDefault();
+            panel.scrollTop += e.deltaY;
+        }, { passive: false });
+    });
+}
+
+/** Mark panels whose content is clipped, so the fade only appears when there
+ *  is genuinely more to see — a permanent fade would be decoration that lies. */
+function markScrollable() {
+    document.querySelectorAll('.hud-panel').forEach(p => {
+        p.classList.toggle('is-scrollable', p.scrollHeight - p.clientHeight > 1);
+    });
+}
+
 function wireActions() {
     document.querySelectorAll('.hud-action').forEach(btn => {
         btn.addEventListener('click', () => post({ type: 'hudAction', action: btn.dataset.action }));
@@ -348,7 +378,13 @@ export function initHud() {
     document.body.classList.add('hud-active');
     renderBootSteps();
     wireActions();
+    wireWheelScroll();
     initBus();
+    // Content arrives in stages, so re-evaluate what is clipped as it lands
+    // and whenever the window changes shape.
+    const ro = new ResizeObserver(markScrollable);
+    document.querySelectorAll('.hud-panel').forEach(p => ro.observe(p));
+    addEventListener('resize', markScrollable);
 
     try { window.chrome?.webview?.addEventListener('message', onHudMessage); } catch { /* not hosted */ }
 

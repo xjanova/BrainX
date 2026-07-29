@@ -47,6 +47,12 @@ body.hud-active {
         "bl bc br";
     gap: var(--hud-gap);
     padding: var(--hud-gap);
+    /* Reserve the bottom strip. #hud-bottom (the drag/wheel/esc controls
+       reminder + size badge) is a fixed element outside this grid, and the
+       bottom-left panel was landing on top of it. Keeping the hint and moving
+       the grid up beats hiding it — a user who cannot remember how to fly the
+       camera is worse off than one who reads one extra line. */
+    padding-bottom: calc(var(--hud-gap) + 26px);
     box-sizing: border-box;
 }
 
@@ -76,6 +82,13 @@ body.hud-active #dash-overlay-load {
 .hud-bc { grid-area: bc; justify-self: center; align-self: end; }
 .hud-br { grid-area: br; justify-self: end;   align-self: end; }
 
+/* Clear the settings gear. #settings-toggle is a 36px fixed button pinned to
+   the bottom-right OUTSIDE this grid, so the bottom-right readout has to step
+   up over it — the grid's own bottom padding only clears the hint strip that
+   runs along the very bottom. Measured, not guessed: the gear's top sat 14px
+   inside where this panel ended. */
+.hud-panel.hud-br { margin-bottom: 34px; }
+
 /* ── Panel chrome ─────────────────────────────────────────────── */
 
 /* NO PANEL. The readouts sit directly on the galaxy — the frame was making it
@@ -91,9 +104,19 @@ body.hud-active #dash-overlay-load {
     padding: 0;
     max-width: min(30vw, 420px);
     max-height: calc(50vh - var(--hud-gap) * 2);
-    overflow: hidden;
+    /* Clipped content is REACHABLE, not lost: the wheel scrolls the panel
+       under the cursor. overscroll-behavior:contain stops the scroll chaining
+       out to the page once the panel hits its end, and hud.js swallows the
+       event so the galaxy does not zoom at the same time. */
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+    scrollbar-width: none;              /* Firefox */
     animation: hud-panel-in 420ms cubic-bezier(.2, .8, .3, 1) backwards;
 }
+/* No visible scrollbar — a track and thumb would put back exactly the chrome
+   the frameless look removed. The fade at the end of a feed is the affordance. */
+.hud-panel::-webkit-scrollbar { width: 0; height: 0; }
 
 /* Keep a middle panel INSIDE its row. A grid item may overflow its track, and
    .hud-panel's viewport-relative max-height knows nothing about how much room
@@ -282,11 +305,14 @@ body.hud-active #dash-overlay-load {
 
 .hud-feed {
     display: flex; flex-direction: column; gap: 4px;
-    overflow: hidden;
-    /* Fade the tail so a clipped last line reads as intentional rather than
-       broken — the panel is a window on a stream, not a list with an end. */
-    mask-image: linear-gradient(180deg, #000 72%, transparent 100%);
-    -webkit-mask-image: linear-gradient(180deg, #000 72%, transparent 100%);
+}
+
+/* Fade the tail ONLY when the panel actually has more content below — a
+   permanent fade is decoration that lies about there being more. hud.js sets
+   .is-scrollable from a real measurement. */
+.hud-panel.is-scrollable {
+    mask-image: linear-gradient(180deg, #000 88%, transparent 100%);
+    -webkit-mask-image: linear-gradient(180deg, #000 88%, transparent 100%);
 }
 .hud-feed-line {
     display: grid;
