@@ -38,11 +38,16 @@ public partial class MainWindow
     private bool _hudPageReady;
 
     /// <summary>
-    /// False until the vault has finished indexing. The page now loads WHILE
-    /// the brain is still being read, so pushing payloads on hudReady would
-    /// fill every readout with zeroes and lift the boot curtain on an empty
-    /// HUD — the app looking broken rather than looking busy. Until this
-    /// flips, the host only sends the boot screen a heartbeat label.
+    /// False until the vault has finished indexing.
+    ///
+    /// This gates ONLY the three readouts that are computed from the graph —
+    /// stats, expertise, recently-edited. It used to gate everything, which
+    /// made the boot screen look like eight sections queueing behind one
+    /// invisible thing and then finishing in a single burst. Most of the HUD
+    /// does not need the graph at all: the agent roster comes off disk, the
+    /// mesh off the network client, the feed and the MCP histogram off the
+    /// access log, the meters off the Claude services. Those load and tick
+    /// the moment they can, which is what a parallel loader should look like.
     /// </summary>
     private bool _hudBrainReady;
 
@@ -88,7 +93,12 @@ public partial class MainWindow
     {
         if (_hudBrainReady) return;
         _hudBrainReady = true;
-        if (_hudPageReady) PushAllHudPayloads();
+        if (!_hudPageReady) return;
+        // Tick the boot screen's "reading the vault" row before the readouts
+        // it was holding up arrive, so the row that took the time is seen to
+        // finish rather than vanishing under the others.
+        PostHud("hudBootBusy", new { label = "Vault indexed", done = true });
+        PushAllHudPayloads();
     }
 
     private void StartUniverseHud()
@@ -102,14 +112,13 @@ public partial class MainWindow
         _hudTimer.Tick += async (_, _) =>
         {
             if (!_hudPageReady || !HudOnScreen) return;
+            // Heartbeat while the vault is still being read. It puts the wait
+            // on the boot screen's board as its own row, and it keeps the
+            // page's "a section never arrived" deadline from firing and
+            // lifting the curtain on a half-filled HUD. Everything else on
+            // this tick still goes out — only the graph-derived readouts wait.
             if (!_hudBrainReady)
-            {
-                // Heartbeat while the vault is still being read: it keeps the
-                // boot screen's own "a section never arrived" deadline from
-                // firing and lifting the curtain on half a HUD.
-                PostHud("hudBootBusy", new { label = StatusText?.Text ?? "Reading the brain…" });
-                return;
-            }
+                PostHud("hudBootBusy", new { label = StatusText?.Text ?? "Reading the vault" });
             // The tick awaits a counter read; a machine where that read stalls
             // must not queue ticks behind it and then fire them all at once.
             if (_hudTicking) return;
@@ -152,13 +161,6 @@ public partial class MainWindow
     /// </summary>
     private async void PushAllHudPayloads()
     {
-        // Still reading the vault: keep the boot screen up and tell it what is
-        // taking the time, rather than publishing an empty brain.
-        if (!_hudBrainReady)
-        {
-            PostHud("hudBootBusy", new { label = StatusText?.Text ?? "Reading the brain…" });
-            return;
-        }
         try
         {
             _hudHealth = null;               // force a fresh health read
@@ -207,7 +209,11 @@ public partial class MainWindow
     /// </summary>
     private void PostHudStats()
     {
-        if (_graph == null) return;
+        // Graph-derived: hold rather than publish an empty vault. The galaxy's
+        // own `brain` payload (brain-export.json, last run's numbers) already
+        // filled this panel, so the reader is looking at real figures the
+        // whole time — these just replace them with fresher ones.
+        if (_graph == null || !_hudBrainReady) return;
 
         long auto = _graph.Edges.Count(e =>
             e.RelationType?.StartsWith("auto", StringComparison.OrdinalIgnoreCase) == true);
@@ -241,6 +247,7 @@ public partial class MainWindow
     /// </summary>
     private void PostHudExpertise()
     {
+        if (!_hudBrainReady) return;          // graph-derived — see PostHudStats
         if (_graph == null || _graph.TotalNodes == 0)
         {
             PostHud("hudExpertise", Array.Empty<object>());
@@ -348,6 +355,7 @@ public partial class MainWindow
 
     private void PostHudRecent()
     {
+        if (!_hudBrainReady) return;          // graph-derived — see PostHudStats
         if (_graph == null)
         {
             PostHud("hudRecent", new { items = Array.Empty<object>(), totalCount = 0 });

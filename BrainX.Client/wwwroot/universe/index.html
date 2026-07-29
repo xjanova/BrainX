@@ -434,10 +434,14 @@
             <div class="hud-boot-brand">BRAINX</div>
             <div class="hud-boot-tag">Neural knowledge engine</div>
             <div class="hud-boot-track"><div class="hud-boot-fill" id="hud-boot-fill"></div></div>
-            <!-- What the HOST is doing right now. The page loads while the
-                 vault is still being read, and "Indexing vault…" for fifteen
-                 seconds is the difference between a slow start and a hang. -->
-            <div class="hud-boot-busy" id="hud-boot-busy"></div>
+            <!-- Left: what the HOST is doing right now — the page loads while
+                 the vault is still being read, and "Indexing vault…" for
+                 fifteen seconds is the difference between a slow start and a
+                 hang. Right: the same number the bar is drawing, in words. -->
+            <div class="hud-boot-status">
+                <span class="hud-boot-busy" id="hud-boot-busy"></span>
+                <span class="hud-boot-count" id="hud-boot-count"></span>
+            </div>
             <div class="hud-boot-steps" id="hud-boot-steps"></div>
         </div>
     </div>

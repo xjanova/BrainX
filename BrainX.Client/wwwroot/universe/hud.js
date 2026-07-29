@@ -48,18 +48,57 @@ const BOOT_DEADLINE_MS = 9000;
 const state = { done: new Set(), started: performance.now(), finished: false };
 let bootDeadline = null;
 
+/* The host's own work, as a row in the same list.
+ *
+ * Reading the vault is ~15 of the ~18 seconds of a cold start, and it was the
+ * one part of the boot with no line of its own: six sections cannot even begin
+ * until it lands, so the bar sat at 2/8 for fifteen seconds and then jumped to
+ * 8/8. Counting it makes the bar describe the wait instead of hiding it.
+ * Added only when the host says it is busy — a fast start never sees it. */
+const hostStep = { id: 'host', label: 'Reading the vault', added: false };
+const totalSteps = () => STEPS.length + (hostStep.added ? 1 : 0);
+
 function armBootDeadline() {
     clearTimeout(bootDeadline);
     bootDeadline = setTimeout(() => {
         STEPS.forEach(s => { if (!state.done.has(s.id)) markStep(s.id, 'skip'); });
+        if (hostStep.added) markStep(hostStep.id, 'skip');
     }, BOOT_DEADLINE_MS);
 }
 
-/** Host heartbeat during a long read: keep the curtain, say why. */
-function noteHostBusy(label) {
+/** Host heartbeat during a long read: keep the curtain, say why, and put the
+ *  wait on the board. `done` arrives once when the host is finally ready. */
+function noteHostBusy(label, done) {
     if (state.finished) return;
     if (label) setText('hud-boot-busy', label);
+
+    if (!hostStep.added) {
+        hostStep.added = true;
+        if (label) hostStep.label = label.replace(/[.…]+$/, '');
+        const host = $('hud-boot-steps');
+        if (host) {
+            const row = document.createElement('div');
+            row.className = 'hud-boot-step pending';
+            row.dataset.step = hostStep.id;
+            row.innerHTML = `<span class="mark">·</span><span>${esc(hostStep.label)}</span><span class="ms"></span>`;
+            host.insertBefore(row, firstPendingRow(host));
+        }
+        updateBootProgress();
+    }
+
+    if (done) markStep(hostStep.id);
     armBootDeadline();
+}
+
+/** Where the pending block starts — i.e. just after the settled ones.
+ *  `ignore` is the row being moved: by the time markStep calls this it is
+ *  already marked done, so counting it would make it its own anchor and the
+ *  move would be a no-op. */
+function firstPendingRow(host, ignore) {
+    const settled = [...host.querySelectorAll('.hud-boot-step.ok, .hud-boot-step.skip')]
+        .filter(n => n !== ignore);
+    const last = settled[settled.length - 1];
+    return last ? last.nextSibling : host.firstChild;
 }
 
 /** The Agent Bus solar system. Loaded lazily so a HUD-less page (wallpaper,
@@ -82,15 +121,28 @@ function compact(n) {
 
 // ── Boot sequence ────────────────────────────────────────────────
 
+/** Every section starts at once, so every row starts in flight.
+ *
+ *  The old list lit ONE row at a time and moved the light down in order, which
+ *  described a queue. There is no queue: the host pushes these on a tiered
+ *  timer and they land in whatever order they finish — the agent roster is
+ *  usually first and the Claude meters last, no matter where they sit here. */
 function renderBootSteps() {
     const host = $('hud-boot-steps');
     if (!host) return;
     host.innerHTML = STEPS.map(s =>
-        `<div class="hud-boot-step" data-step="${s.id}">
+        `<div class="hud-boot-step pending" data-step="${s.id}">
             <span class="mark">·</span><span>${esc(s.label)}</span><span class="ms"></span>
         </div>`).join('');
-    const first = host.querySelector('.hud-boot-step');
-    if (first) first.classList.add('active');
+    updateBootProgress();
+}
+
+/** Bar and count come from the same number, so they can never disagree. */
+function updateBootProgress() {
+    const total = totalSteps();
+    const fill = $('hud-boot-fill');
+    if (fill) fill.style.width = Math.round((state.done.size / total) * 100) + '%';
+    setText('hud-boot-count', `${state.done.size}/${total}`);
 }
 
 function markStep(id, status = 'ok') {
@@ -101,26 +153,30 @@ function markStep(id, status = 'ok') {
     // are the second half of the sequence it shows. Harmless when unhosted.
     post({
         type: 'hudBootStep', id,
-        label: STEPS.find(s => s.id === id)?.label || id,
-        done: state.done.size, total: STEPS.length,
+        label: STEPS.find(s => s.id === id)?.label || (id === hostStep.id ? hostStep.label : id),
+        done: state.done.size, total: totalSteps(),
         skipped: status !== 'ok',
     });
 
-    const el = document.querySelector(`.hud-boot-step[data-step="${id}"]`);
-    if (el) {
-        el.classList.remove('active');
-        el.classList.add(status);
+    const host = $('hud-boot-steps');
+    const el = host?.querySelector(`.hud-boot-step[data-step="${id}"]`);
+    if (el && host) {
+        el.classList.remove('pending');
+        el.classList.add(status === 'ok' ? 'ok' : 'skip', 'just-landed');
         el.querySelector('.mark').textContent = status === 'ok' ? '✓' : '–';
         el.querySelector('.ms').textContent = Math.round(performance.now() - state.started) + 'ms';
+
+        // Finished sections rise into a block at the top, in the order they
+        // ACTUALLY finished; whatever is still working stays below. The list
+        // then reads as what it is — several things loading at once, settling
+        // as they land — instead of a queue that appears to stall on whichever
+        // row happens to be next in a fixed order.
+        host.insertBefore(el, firstPendingRow(host, el));
     }
-    // Light up the next unfinished step so the list reads as a sequence.
-    const next = STEPS.find(s => !state.done.has(s.id));
-    if (next) document.querySelector(`.hud-boot-step[data-step="${next.id}"]`)?.classList.add('active');
 
-    const fill = $('hud-boot-fill');
-    if (fill) fill.style.width = Math.round((state.done.size / STEPS.length) * 100) + '%';
+    updateBootProgress();
 
-    if (state.done.size >= STEPS.length) finishBoot();
+    if (state.done.size >= totalSteps()) finishBoot();
 }
 
 function finishBoot() {
@@ -427,7 +483,7 @@ function onHudMessage(evt) {
         // the "a section never arrived" deadline out — that deadline exists to
         // rescue a HUD whose host went quiet, not to overrule a host that is
         // telling us, right now, that it is still working.
-        case 'hudBootBusy':  noteHostBusy(m.payload?.label); break;
+        case 'hudBootBusy':  noteHostBusy(m.payload?.label, m.payload?.done); break;
         // The galaxy payload already flows for the renderer; piggyback on it so
         // the first two boot steps complete without waiting on the host's own
         // hudStats. brain-export.json is PascalCase (the C# model serialised

@@ -544,12 +544,22 @@ body.hud-active #settings-toggle {
     transition: width 420ms cubic-bezier(.2, .8, .3, 1);
 }
 
+.hud-boot-status {
+    display: flex; align-items: baseline; gap: 10px;
+    margin: 2px 0 10px;
+    min-height: 13px;                /* reserve the line so nothing jumps */
+}
 .hud-boot-busy {
     font-family: var(--hud-mono); font-size: 10.5px;
     color: rgba(140, 214, 255, 0.9);
-    margin: 2px 0 10px;
-    min-height: 13px;                /* reserve the line so nothing jumps */
+    flex: 1 1 auto;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hud-boot-count {
+    font-family: var(--hud-mono); font-size: 10.5px;
+    color: rgba(150, 146, 200, 0.85);
+    font-variant-numeric: tabular-nums;
+    flex: none;
 }
 .hud-boot-steps { display: flex; flex-direction: column; gap: 3px; }
 .hud-boot-step {
@@ -557,18 +567,39 @@ body.hud-active #settings-toggle {
     font-size: 10.5px;
     color: rgba(120, 116, 160, 0.75);
     transition: color 260ms;
+    /* Padding with a matching negative margin: the "just landed" highlight
+       needs a body to fill, and the rows must not shift to give it one. */
+    padding: 1px 5px; margin: 0 -5px; border-radius: 4px;
 }
 .hud-boot-step .mark { font-family: var(--hud-mono); font-size: 10px; }
 .hud-boot-step .ms {
     font-family: var(--hud-mono); font-size: 9.5px;
     color: rgba(110, 106, 150, 0.7); font-variant-numeric: tabular-nums;
 }
-.hud-boot-step.active { color: #cfcbe8; }
-.hud-boot-step.active .mark { color: #6cf0ff; }
+/* Everything not yet landed is IN FLIGHT — all of them, together. The pulse
+   is what says "working" without claiming an order the loader does not have. */
+.hud-boot-step.pending { color: #cfcbe8; }
+.hud-boot-step.pending .mark {
+    color: #6cf0ff;
+    animation: hud-boot-pulse 1.15s ease-in-out infinite;
+}
+@keyframes hud-boot-pulse {
+    0%, 100% { opacity: 0.28; }
+    50%      { opacity: 1; }
+}
+
 .hud-boot-step.ok { color: rgba(170, 166, 210, 0.95); }
 .hud-boot-step.ok .mark { color: #38d97a; }
 .hud-boot-step.skip { color: rgba(110, 106, 150, 0.6); }
 .hud-boot-step.skip .mark { color: rgba(255, 184, 108, 0.8); }
+
+/* A row that just moved up gets one beat of attention, so the reorder reads as
+   "this one finished" rather than the list mysteriously rearranging itself. */
+.hud-boot-step.just-landed { animation: hud-boot-landed 620ms ease-out; }
+@keyframes hud-boot-landed {
+    from { background: rgba(56, 217, 122, 0.16); transform: translateX(-3px); }
+    to   { background: transparent; transform: none; }
+}
 
 /* ── Responsive: drop by priority, never squash ───────────────── */
 
@@ -619,5 +650,6 @@ body.hud-active #settings-toggle {
    a HUD that pulses at someone who gets motion sick is not. */
 @media (prefers-reduced-motion: reduce) {
     .hud-panel, .hud-feed-line { animation: none; }
+    .hud-boot-step.pending .mark, .hud-boot-step.just-landed { animation: none; }
     .hud-bar > i, .hud-boot-fill { transition: none; }
 }
