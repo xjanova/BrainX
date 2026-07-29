@@ -255,7 +255,25 @@ public partial class MainWindow
             && !string.IsNullOrEmpty(curCmd) && File.Exists(curCmd!)
             && string.Equals(curVault, _vaultPath, StringComparison.OrdinalIgnoreCase)
             && !IsMcpOutdated(curCmd!, exe);
-        if (entryHealthy) return false;
+        if (entryHealthy)
+        {
+            // Healthy: the path is right and nothing needs repointing. But the
+            // BRAINX_MCP_VERSION LABEL can still lie, and this early return is
+            // exactly why it used to. Auto-update swaps the binary in place at
+            // a STABLE path, so "same path, newer build" never trips the checks
+            // above — leaving the only fixer the MCP server itself, which can
+            // only rewrite the config AFTER it starts, i.e. after Claude
+            // Desktop already read the old value to spawn it. The label was
+            // therefore permanently one restart behind (user: "ทำไมเวอร์ชั่น
+            // ไม่ปรับปรุงตามโปรแกรมอัตโนมัติ"). The client has no such
+            // ordering problem: it runs before Claude Desktop is opened.
+            //
+            // Returns false either way — a label correction is not a
+            // reconnection, and must not trigger the "restart Claude Desktop
+            // to activate" notice.
+            SyncDesktopVersionLabel(cfgPath, config, existing!, curCmd!);
+            return false;
+        }
 
         // Update IN PLACE so we never clobber extra keys a user (or the MCP
         // server) added — e.g. BRAINX_MCP_VERSION, custom args. Only `command`
@@ -267,12 +285,64 @@ public partial class MainWindow
         if (entry["args"] is null) entry["args"] = new Newtonsoft.Json.Linq.JArray();
         var env = entry["env"] as Newtonsoft.Json.Linq.JObject ?? new Newtonsoft.Json.Linq.JObject();
         env["BRAINX_VAULT"] = _vaultPath;
+        // Stamp the version we are pointing AT, so the label is right from the
+        // first launch rather than after the server has run once.
+        if (VersionLabelOf(exe) is string stamp) env["BRAINX_MCP_VERSION"] = stamp;
         entry["env"] = env;
         servers["brainx-brain"] = entry;
 
         Directory.CreateDirectory(cfgDir);
         File.WriteAllText(cfgPath, config.ToString(Newtonsoft.Json.Formatting.Indented));
         return true;
+    }
+
+    /// <summary>
+    /// Full SemVer label of an MCP binary — the same string the server reports
+    /// as <c>serverInfo.version</c>, so the config label and the server agree
+    /// exactly. <see cref="McpProductVersionOf"/> is deliberately not reused:
+    /// it parses to a <see cref="Version"/> for COMPARISON and would drop the
+    /// build metadata that makes the label useful.
+    /// </summary>
+    private static string? VersionLabelOf(string exePath)
+    {
+        try
+        {
+            var dll = Path.ChangeExtension(exePath, ".dll");
+            var target = File.Exists(dll) ? dll : exePath;
+            if (!File.Exists(target)) return null;
+            var pv = System.Diagnostics.FileVersionInfo.GetVersionInfo(target).ProductVersion;
+            if (string.IsNullOrWhiteSpace(pv)) return null;
+            var cut = pv.IndexOf('+');            // strip "+<sha>", keep any pre-release tag
+            return cut >= 0 ? pv[..cut] : pv;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Correct a stale BRAINX_MCP_VERSION on an otherwise-healthy entry, in
+    /// place. Writes only when the label actually disagrees with the binary,
+    /// so a steady-state launch never touches Claude Desktop's config.
+    /// </summary>
+    private static void SyncDesktopVersionLabel(
+        string cfgPath,
+        Newtonsoft.Json.Linq.JObject config,
+        Newtonsoft.Json.Linq.JObject entry,
+        string registeredExe)
+    {
+        try
+        {
+            if (VersionLabelOf(registeredExe) is not string actual) return;
+            var env = entry["env"] as Newtonsoft.Json.Linq.JObject;
+            if (env is null)
+            {
+                env = new Newtonsoft.Json.Linq.JObject();
+                entry["env"] = env;
+            }
+            if (string.Equals(env["BRAINX_MCP_VERSION"]?.ToString(), actual, StringComparison.Ordinal)) return;
+            env["BRAINX_MCP_VERSION"] = actual;
+            File.WriteAllText(cfgPath, config.ToString(Newtonsoft.Json.Formatting.Indented));
+        }
+        catch { /* a cosmetic label must never break onboarding */ }
     }
 
     /// <summary>
