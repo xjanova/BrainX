@@ -7,8 +7,11 @@ namespace BrainX.Core.Services;
 /// Self-improvement loop (Phase 1D inject-side).
 ///
 /// Given a user's coding spec, scan the brain for previously captured
-/// <c>#coding-lesson</c> notes that share keywords/concepts with the
-/// spec and return the top-K formatted as worker-ready prompt fragments.
+/// lessons that share keywords/concepts with the spec and return the top-K
+/// formatted as worker-ready prompt fragments. Every note is eligible;
+/// <c>#coding-lesson</c> (and bug/gotcha notes) merely rank higher — see
+/// <see cref="MinScoreUnboosted"/> for why that is not the same as letting
+/// anything through.
 /// The orchestrator passes them to <see cref="CluadeXClient.WriteCodeAsync"/>
 /// in the <c>lessons</c> parameter so the worker sees prior reviewer
 /// corrections without us manually feeding them in.
@@ -45,10 +48,19 @@ public sealed class LessonInjector
     /// prompt starts drowning the actual spec — keep it tight.</summary>
     public int MaxLessonsPerTask { get; init; } = 3;
 
-    /// <summary>Minimum keyword-overlap score for a lesson to be
-    /// considered relevant. Tuned empirically — below this the matches
-    /// are noise.</summary>
+    /// <summary>Minimum score for a lesson-shaped note (tagged or filed as a
+    /// lesson/bug) to be considered relevant. Tuned empirically — below this
+    /// the matches are noise.</summary>
     public double MinScore { get; init; } = 1.5;
+
+    /// <summary>
+    /// Bar for a note that carries no lesson signal. Deliberately much higher:
+    /// opening the pool to the whole brain is what makes every hard-won gotcha
+    /// reachable, but an ordinary note must EARN its slot by matching the spec
+    /// strongly (roughly: a title hit plus a tag hit) or the worker prompt
+    /// fills with vaguely-related session handoffs.
+    /// </summary>
+    public double MinScoreUnboosted { get; init; } = 6.0;
 
     /// <summary>
     /// Pull lessons matching the spec, formatted for direct injection
@@ -70,13 +82,6 @@ public sealed class LessonInjector
         catch { return []; }
         if (root?.Nodes == null || root.Nodes.Count == 0) return [];
 
-        // Keep only notes tagged as a coding lesson.
-        var lessons = root.Nodes
-            .Where(n => n.Tags != null &&
-                        n.Tags.Any(t => string.Equals(t, "coding-lesson", StringComparison.OrdinalIgnoreCase)))
-            .ToList();
-        if (lessons.Count == 0) return [];
-
         // Score by keyword + tag overlap with the spec.
         var terms = Tokenize(userSpec.ToLowerInvariant())
             .Where(t => t.Length >= 3)
@@ -84,22 +89,57 @@ public sealed class LessonInjector
             .ToList();
         if (terms.Count == 0) return [];
 
-        var scored = lessons
-            .Select(n => (Node: n, Score: ScoreNode(n, terms)))
-            .Where(x => x.Score >= MinScore)
-            .OrderByDescending(x => x.Score)
+        // EVERY note is a candidate — the #coding-lesson tag is a RANK BOOST,
+        // not a gate. It used to be a hard filter, which sounded right but in
+        // practice meant 4 notes out of 1,201 could ever reach the worker: a
+        // hard-won gotcha written up as a normal note (say the PowerShell BOM
+        // one) was invisible, and the owner's rule is that every lesson in the
+        // brain must be applied before work starts, in every connected program.
+        //
+        // Noise is held back by asking MORE of an unboosted note (see
+        // MinScoreUnboosted) rather than by refusing to look at it.
+        var scored = root.Nodes
+            .Select(n => (Node: n, Score: ScoreNode(n, terms), Boost: LessonBoost(n)))
+            .Where(x => x.Score + x.Boost >= (x.Boost > 0 ? MinScore : MinScoreUnboosted))
+            .OrderByDescending(x => x.Score + x.Boost)
             .Take(MaxLessonsPerTask)
             .ToList();
         if (scored.Count == 0) return [];
 
         // Format each lesson into a prompt-ready string.
         var result = new List<string>();
-        foreach (var (node, _) in scored)
+        foreach (var (node, _, _) in scored)
         {
             var formatted = FormatLessonForWorker(node);
             if (!string.IsNullOrWhiteSpace(formatted)) result.Add(formatted);
         }
         return result;
+    }
+
+    /// <summary>
+    /// How strongly this note claims to be a lesson. Tag first (explicit
+    /// authoring intent), then the folders where mistakes and fixes actually
+    /// get written — a bug write-up IS a lesson whether or not anyone
+    /// remembered to tag it.
+    /// </summary>
+    private static double LessonBoost(BrainNodeLite n)
+    {
+        var tags = n.Tags;
+        if (tags != null)
+        {
+            foreach (var t in tags)
+            {
+                if (string.Equals(t, "coding-lesson", StringComparison.OrdinalIgnoreCase)) return 5;
+                if (string.Equals(t, "gotcha", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(t, "bug-fix", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(t, "incident", StringComparison.OrdinalIgnoreCase)) return 4;
+            }
+        }
+        var path = (n.RelativePath ?? "").Replace('\\', '/');
+        if (path.StartsWith("Notes/Coding-Lessons/", StringComparison.OrdinalIgnoreCase)) return 5;
+        if (path.StartsWith("Notes/Bugs/", StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith("Debugging/", StringComparison.OrdinalIgnoreCase)) return 4;
+        return 0;
     }
 
     private static double ScoreNode(BrainNodeLite n, List<string> terms)
