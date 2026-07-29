@@ -40,6 +40,10 @@ const BOOT_DEADLINE_MS = 9000;
 
 const state = { done: new Set(), started: performance.now(), finished: false };
 
+/** The Agent Bus solar system. Loaded lazily so a HUD-less page (wallpaper,
+ *  dashboard embed) never pays for three.js twice. */
+let bus = null;
+
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const num = (n) => (typeof n === 'number' ? n : parseFloat(n) || 0).toLocaleString('en-US');
@@ -140,6 +144,11 @@ function renderActivity(list = []) {
 
 function renderAgents(d = {}) {
     const list = d.agents || [];
+    bus?.setAgents(list);
+    // Traffic the host reports since the last poll, replayed as motes falling
+    // into the star. Capped so a burst reads as busy rather than as confetti.
+    (d.traffic || []).slice(0, 4).forEach((t, i) =>
+        setTimeout(() => { bus?.fireTraffic(t.agent, t.inbound !== false); }, i * 160));
     setHTML('hud-agents-body', list.map(a =>
         `<div class="hud-row">
            <span class="hud-row-name">
@@ -207,6 +216,33 @@ function onHudMessage(evt) {
     }
 }
 
+/** Spin up the solar system, and keep it honest about cost: the loop stops
+ *  whenever the canvas is off-screen or the window is hidden, so a HUD left
+ *  open behind another view never burns frames. */
+async function initBus() {
+    const canvas = $('hud-bus-canvas');
+    if (!canvas) return;
+    try {
+        const { createAgentBus3D } = await import('./agentbus3d.js');
+        bus = createAgentBus3D(canvas);
+        // Demo mode only: a console handle for checking orbits/traffic without
+        // a screenshot. Never exposed in the shipped HUD.
+        if (HUD_DEMO) window.__hudBus = bus;
+    } catch (e) {
+        // A missing WebGL context must not take the rest of the HUD with it —
+        // the roster below the canvas still carries every fact.
+        console.warn('[hud] agent bus 3D unavailable:', e?.message || e);
+        canvas.style.display = 'none';
+        return;
+    }
+    new ResizeObserver(() => bus?.resize()).observe(canvas);
+    new IntersectionObserver(
+        ([e]) => (e.isIntersecting && !document.hidden ? bus?.start() : bus?.stop()),
+        { threshold: 0.01 }).observe(canvas);
+    document.addEventListener('visibilitychange', () =>
+        document.hidden ? bus?.stop() : bus?.start());
+}
+
 function wireActions() {
     document.querySelectorAll('.hud-action').forEach(btn => {
         btn.addEventListener('click', () => post({ type: 'hudAction', action: btn.dataset.action }));
@@ -220,6 +256,7 @@ export function initHud() {
     document.body.classList.add('hud-active');
     renderBootSteps();
     wireActions();
+    initBus();
 
     try { window.chrome?.webview?.addEventListener('message', onHudMessage); } catch { /* not hosted */ }
 
@@ -262,11 +299,17 @@ function runDemo() {
         { time: '21:59:03', tag: 'NOTE',  text: 'Semantic search was never running' },
     ]));
     step(2100, () => renderAgents({ agents: [
-        { name: 'Claude',  online: true,  color: '#e8825a', detail: 'brain_search' },
-        { name: 'Codex',   online: true,  color: '#19a385', detail: 'agent_peers' },
-        { name: 'CluadeX', online: true,  color: '#8b7cf6', detail: 'idle' },
-        { name: 'Local agent', online: false, color: '#8e9aa6' },
+        { name: 'claude',  online: true,  color: '#e8825a', detail: 'brain_search' },
+        { name: 'codex',   online: true,  color: '#19a385', detail: 'agent_peers' },
+        { name: 'cluadex', online: true,  color: '#8b7cf6', detail: 'idle' },
+        { name: 'local-agent', online: false, everSeen: true, color: '#8e9aa6' },
     ] }));
+    // Keep the system busy so the orbit + traffic animation can be judged.
+    setInterval(() => {
+        const who = ['claude', 'codex', 'cluadex'][Math.floor(Math.random() * 3)];
+        bus?.fireTraffic(who, true);
+        setTimeout(() => bus?.fireTraffic(who, false), 700);
+    }, 1800);
     step(2700, () => renderSystem({
         gpu: 48, cpu: 33, mcpCalls: 415, mesh: '1 peer', version: 'v2.0.166 · mcp 2.9.171',
     }));
