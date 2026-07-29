@@ -1,0 +1,328 @@
+/* BrainX Universe HUD — the dashboard, rebuilt as a heads-up display over the
+   galaxy instead of a page of cards next to it.
+
+   WHY IT LIVES IN THE DOM, NOT WPF
+   The WPF dashboard could not be made to survive a resize: every card needed
+   hand-computed MinHeights, and a WebView2 sibling would not tolerate being
+   laid out around (a WPF Border over the universe gets clobbered by the
+   WebView2 surface — see the note above #dash-overlay-nodes in index.html).
+   Inside the WebView the same panels are just CSS, so the browser does the
+   responsive work that WPF Grid could not: no pixel budgets, no scroll
+   plumbing, no MinHeight arithmetic.
+
+   LAYOUT MODEL
+   One fixed, full-viewport layer with pointer-events:none, so the galaxy
+   keeps the mouse everywhere the user is not actually touching a panel.
+   Panels anchor to the four corners and shrink/hide by priority as the
+   viewport narrows. Nothing overlaps the centre: that is where the brain is.
+
+   Everything is gated on body.hud-active so the wallpaper and dashboard-embed
+   modes of this same page are untouched. */
+
+body.hud-active {
+    /* Faint vignette so corner panels always have something to sit on, even
+       when the camera drifts the galaxy into a corner. */
+    --hud-gap: clamp(10px, 1.4vw, 22px);
+    --hud-panel-bg: rgba(8, 6, 24, 0.52);
+    --hud-panel-stroke: rgba(108, 240, 255, 0.16);
+    --hud-panel-glow: 0 0 24px -6px rgba(108, 240, 255, 0.28);
+    --hud-label: rgba(180, 176, 220, 0.62);
+    --hud-mono: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+}
+
+#hud-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    display: none;
+    pointer-events: none;
+    /* The grid is the whole point: corners are areas, so a panel can never
+       collide with another one regardless of how much content it has. */
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr) minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-areas:
+        "tl tc tr"
+        "ml .  mr"
+        "bl bc br";
+    gap: var(--hud-gap);
+    padding: var(--hud-gap);
+    box-sizing: border-box;
+}
+
+body:not(.hud-active) #hud-layer { display: none !important; }
+
+#hud-layer > * { pointer-events: auto; }
+
+.hud-tl { grid-area: tl; justify-self: start; align-self: start; }
+.hud-tc { grid-area: tc; justify-self: center; align-self: start; }
+.hud-tr { grid-area: tr; justify-self: end;   align-self: start; }
+.hud-ml { grid-area: ml; justify-self: start; align-self: center; }
+.hud-mr { grid-area: mr; justify-self: end;   align-self: center; }
+.hud-bl { grid-area: bl; justify-self: start; align-self: end; }
+.hud-bc { grid-area: bc; justify-self: center; align-self: end; }
+.hud-br { grid-area: br; justify-self: end;   align-self: end; }
+
+/* ── Panel chrome ─────────────────────────────────────────────── */
+
+.hud-panel {
+    position: relative;
+    background: var(--hud-panel-bg);
+    border: 1px solid var(--hud-panel-stroke);
+    border-radius: 12px;
+    box-shadow: var(--hud-panel-glow);
+    backdrop-filter: blur(14px) saturate(1.2);
+    -webkit-backdrop-filter: blur(14px) saturate(1.2);
+    padding: clamp(9px, 0.9vw, 14px) clamp(11px, 1.1vw, 17px);
+    max-width: min(30vw, 420px);
+    max-height: calc(50vh - var(--hud-gap) * 2);
+    overflow: hidden;
+    animation: hud-panel-in 420ms cubic-bezier(.2, .8, .3, 1) backwards;
+}
+
+@keyframes hud-panel-in {
+    from { opacity: 0; transform: translateY(6px) scale(0.985); }
+    to   { opacity: 1; transform: none; }
+}
+
+/* Corner brackets — the cheapest possible "targeting reticle" cue, drawn with
+   gradients so there is no extra markup per panel. */
+.hud-panel::before,
+.hud-panel::after {
+    content: "";
+    position: absolute;
+    width: 12px; height: 12px;
+    border: 1px solid rgba(108, 240, 255, 0.5);
+    pointer-events: none;
+}
+.hud-panel::before { top: -1px; left: -1px; border-right: 0; border-bottom: 0; border-radius: 12px 0 0 0; }
+.hud-panel::after  { bottom: -1px; right: -1px; border-left: 0; border-top: 0; border-radius: 0 0 12px 0; }
+
+.hud-title {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: clamp(8.5px, 0.62vw, 10px);
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--hud-label);
+    margin-bottom: 8px;
+    white-space: nowrap;
+}
+.hud-title .hud-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #38d97a;
+    box-shadow: 0 0 8px rgba(56, 217, 122, 0.9);
+    flex: none;
+}
+.hud-title .hud-dot.warn { background: #ffb86c; box-shadow: 0 0 8px rgba(255, 184, 108, 0.9); }
+.hud-title .hud-dot.off  { background: #5a5680; box-shadow: none; }
+.hud-title .hud-sub {
+    margin-left: auto;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    color: rgba(150, 146, 190, 0.75);
+    text-transform: none;
+}
+
+/* ── Stat blocks ──────────────────────────────────────────────── */
+
+.hud-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(64px, 1fr));
+    gap: clamp(8px, 0.8vw, 16px);
+}
+.hud-stat-label {
+    font-size: 8.5px; letter-spacing: 0.13em; text-transform: uppercase;
+    color: var(--hud-label);
+}
+.hud-stat-value {
+    font-family: var(--hud-mono);
+    font-size: clamp(15px, 1.45vw, 24px);
+    font-weight: 700;
+    line-height: 1.15;
+    color: #eae8ff;
+    text-shadow: 0 0 14px rgba(108, 240, 255, 0.35);
+    font-variant-numeric: tabular-nums;
+}
+.hud-stat-value.sm { font-size: clamp(12px, 1vw, 15px); }
+.hud-stat-foot { font-size: 9px; color: rgba(140, 136, 180, 0.8); margin-top: 1px; }
+
+/* ── Rows (expertise, agents, health) ─────────────────────────── */
+
+.hud-rows { display: flex; flex-direction: column; gap: 5px; }
+
+.hud-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: 8px;
+    font-size: clamp(10px, 0.78vw, 11.5px);
+}
+.hud-row-name {
+    display: flex; align-items: center; gap: 6px;
+    color: #cfcbe8;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hud-row-val {
+    font-family: var(--hud-mono);
+    color: rgba(200, 196, 236, 0.9);
+    font-variant-numeric: tabular-nums;
+    font-size: 0.95em;
+}
+.hud-bar {
+    grid-column: 1 / -1;
+    height: 2px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.07);
+    overflow: hidden;
+}
+.hud-bar > i {
+    display: block; height: 100%;
+    background: linear-gradient(90deg, #6cf0ff, #a68bff);
+    box-shadow: 0 0 10px rgba(108, 240, 255, 0.6);
+    transition: width 600ms cubic-bezier(.2, .8, .3, 1);
+}
+
+.hud-swatch { width: 7px; height: 7px; border-radius: 2px; flex: none; }
+
+/* ── Feed ─────────────────────────────────────────────────────── */
+
+.hud-feed {
+    display: flex; flex-direction: column; gap: 4px;
+    overflow: hidden;
+    /* Fade the tail so a clipped last line reads as intentional rather than
+       broken — the panel is a window on a stream, not a list with an end. */
+    mask-image: linear-gradient(180deg, #000 72%, transparent 100%);
+    -webkit-mask-image: linear-gradient(180deg, #000 72%, transparent 100%);
+}
+.hud-feed-line {
+    display: grid;
+    grid-template-columns: auto auto 1fr;
+    gap: 7px;
+    align-items: baseline;
+    font-size: clamp(9.5px, 0.72vw, 11px);
+    animation: hud-line-in 320ms ease backwards;
+}
+@keyframes hud-line-in { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: none; } }
+.hud-feed-time { font-family: var(--hud-mono); color: rgba(130, 126, 170, 0.85); font-size: 0.9em; }
+.hud-feed-tag {
+    font-size: 8px; letter-spacing: 0.08em; text-transform: uppercase;
+    padding: 1px 5px; border-radius: 4px;
+    background: rgba(166, 139, 255, 0.16);
+    color: #c9b8ff;
+    white-space: nowrap;
+}
+.hud-feed-text { color: rgba(206, 202, 236, 0.86); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── Quick actions ────────────────────────────────────────────── */
+
+.hud-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+.hud-action {
+    font: inherit;
+    font-size: clamp(9.5px, 0.72vw, 11px);
+    letter-spacing: 0.02em;
+    color: #d3cfef;
+    background: rgba(20, 16, 44, 0.6);
+    border: 1px solid rgba(108, 240, 255, 0.16);
+    border-radius: 8px;
+    padding: 6px 11px;
+    cursor: pointer;
+    transition: background 160ms, border-color 160ms, transform 160ms;
+    white-space: nowrap;
+}
+.hud-action:hover {
+    background: rgba(40, 32, 80, 0.75);
+    border-color: rgba(108, 240, 255, 0.45);
+    transform: translateY(-1px);
+}
+.hud-action:active { transform: none; }
+
+/* ── Boot sequence ────────────────────────────────────────────── */
+
+#hud-boot {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    display: grid;
+    place-items: center;
+    background: radial-gradient(ellipse at center, rgba(6, 4, 20, 0.82) 0%, rgba(0, 0, 0, 0.94) 70%);
+    backdrop-filter: blur(2px);
+    transition: opacity 520ms ease, visibility 520ms;
+}
+#hud-boot.done { opacity: 0; visibility: hidden; pointer-events: none; }
+
+.hud-boot-box { width: min(420px, 76vw); text-align: left; }
+
+.hud-boot-brand {
+    font-size: clamp(15px, 1.5vw, 21px);
+    font-weight: 700;
+    letter-spacing: 0.22em;
+    color: #eae8ff;
+    text-shadow: 0 0 22px rgba(108, 240, 255, 0.5);
+    margin-bottom: 3px;
+}
+.hud-boot-tag {
+    font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase;
+    color: var(--hud-label); margin-bottom: 16px;
+}
+
+.hud-boot-track {
+    height: 3px; border-radius: 3px;
+    background: rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+    margin-bottom: 13px;
+}
+.hud-boot-fill {
+    height: 100%; width: 0%;
+    background: linear-gradient(90deg, #6cf0ff, #a68bff 60%, #ff8fd0);
+    box-shadow: 0 0 16px rgba(108, 240, 255, 0.75);
+    transition: width 420ms cubic-bezier(.2, .8, .3, 1);
+}
+
+.hud-boot-steps { display: flex; flex-direction: column; gap: 3px; }
+.hud-boot-step {
+    display: grid; grid-template-columns: 14px 1fr auto; gap: 8px; align-items: baseline;
+    font-size: 10.5px;
+    color: rgba(120, 116, 160, 0.75);
+    transition: color 260ms;
+}
+.hud-boot-step .mark { font-family: var(--hud-mono); font-size: 10px; }
+.hud-boot-step .ms {
+    font-family: var(--hud-mono); font-size: 9.5px;
+    color: rgba(110, 106, 150, 0.7); font-variant-numeric: tabular-nums;
+}
+.hud-boot-step.active { color: #cfcbe8; }
+.hud-boot-step.active .mark { color: #6cf0ff; }
+.hud-boot-step.ok { color: rgba(170, 166, 210, 0.95); }
+.hud-boot-step.ok .mark { color: #38d97a; }
+.hud-boot-step.skip { color: rgba(110, 106, 150, 0.6); }
+.hud-boot-step.skip .mark { color: rgba(255, 184, 108, 0.8); }
+
+/* ── Responsive: drop by priority, never squash ───────────────── */
+
+/* Tight height — the middle panels are the first to go, the corners carry
+   the numbers that matter. */
+@media (max-height: 700px) {
+    .hud-ml, .hud-mr { display: none; }
+    .hud-panel { max-height: calc(46vh - var(--hud-gap) * 2); }
+}
+@media (max-width: 1180px) {
+    .hud-tc { display: none; }
+    .hud-panel { max-width: min(38vw, 340px); }
+}
+@media (max-width: 900px) {
+    .hud-ml, .hud-mr, .hud-br { display: none; }
+    #hud-layer { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-areas: "tl tr" "..  .." "bl bc"; }
+}
+@media (max-width: 620px) {
+    .hud-tr, .hud-bc { display: none; }
+}
+
+/* Respect the OS "reduce motion" setting — a HUD that pulses is a nice touch,
+   a HUD that pulses at someone who gets motion sick is not. */
+@media (prefers-reduced-motion: reduce) {
+    .hud-panel, .hud-feed-line { animation: none; }
+    .hud-bar > i, .hud-boot-fill { transition: none; }
+}

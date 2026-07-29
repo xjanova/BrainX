@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>BrainX Universe</title>
     <link rel="stylesheet" href="style.css" />
+    <!-- HUD skin. Inert unless the page is opened with ?hud=1, so wallpaper
+         and dashboard-embed modes of this same page are unaffected. -->
+    <link rel="stylesheet" href="hud.css" />
 
     <!-- three.js + addons + d3 are VENDORED under ./vendor/ (three@0.169.0,
          d3-force@3) and served from disk via the WebView2 virtual host.
@@ -333,6 +336,68 @@
         </div>
     </aside>
 
+    <!-- ══ HUD ══════════════════════════════════════════════════════════
+         The old WPF Dashboard, rebuilt as panels over the galaxy. Anchored to
+         the grid areas defined in hud.css; the centre is deliberately left
+         empty because that is where the brain sits. Hidden entirely unless
+         body.hud-active. -->
+    <div id="hud-layer" aria-hidden="false">
+
+        <section class="hud-panel hud-tl">
+            <div class="hud-title"><span class="hud-dot"></span>
+                <span id="hud-brand-name">BrainX</span>
+                <span class="hud-sub" id="hud-brand-addr">—</span>
+            </div>
+            <div class="hud-stats" id="hud-stats-body"></div>
+        </section>
+
+        <section class="hud-panel hud-tr">
+            <div class="hud-title"><span class="hud-dot"></span>System</div>
+            <div class="hud-rows" id="hud-system-body"></div>
+        </section>
+
+        <section class="hud-panel hud-ml">
+            <div class="hud-title"><span class="hud-dot"></span>Expertise</div>
+            <div class="hud-rows" id="hud-expertise-body"></div>
+        </section>
+
+        <section class="hud-panel hud-mr">
+            <div class="hud-title"><span class="hud-dot"></span>Activity
+                <span class="hud-sub">live</span>
+            </div>
+            <div class="hud-feed" id="hud-activity-body"></div>
+        </section>
+
+        <section class="hud-panel hud-bl">
+            <div class="hud-title"><span class="hud-dot"></span>Agent Bus
+                <span class="hud-sub" id="hud-agents-count">—</span>
+            </div>
+            <div class="hud-rows" id="hud-agents-body"></div>
+        </section>
+
+        <nav class="hud-panel hud-bc">
+            <div class="hud-actions">
+                <button class="hud-action" data-action="reindex" type="button">Re-index</button>
+                <button class="hud-action" data-action="obsidian" type="button">Obsidian</button>
+                <button class="hud-action" data-action="vault" type="button">Vault</button>
+                <button class="hud-action" data-action="address" type="button">Copy address</button>
+                <button class="hud-action" data-action="settings" type="button">Settings</button>
+            </div>
+        </nav>
+    </div>
+
+    <!-- Boot sequence: the bar fills as each section's data arrives, so a slow
+         section looks slow instead of the whole window looking frozen. -->
+    <div id="hud-boot">
+        <div class="hud-boot-box">
+            <div class="hud-boot-brand">BRAINX</div>
+            <div class="hud-boot-tag">Neural knowledge engine</div>
+            <div class="hud-boot-track"><div class="hud-boot-fill" id="hud-boot-fill"></div></div>
+            <div class="hud-boot-steps" id="hud-boot-steps"></div>
+        </div>
+    </div>
+
     <script type="module" src="app.js"></script>
+    <script type="module" src="hud.js"></script>
 </body>
 </html>
