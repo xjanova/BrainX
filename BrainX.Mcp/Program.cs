@@ -317,6 +317,11 @@ internal static partial class Program
         // online even if it never touches a bus tool itself.
         try { StartPresenceHeartbeat(); } catch { }
 
+        // Get the embedding model resident NOW, while the agent is still
+        // reading our instructions, so its first semantic query doesn't pay
+        // the cold load and fall back to keyword.
+        WarmEmbedModel();
+
         return InitializeResult(id);
     }
 
@@ -3417,11 +3422,21 @@ internal static partial class Program
             _embedCache.TryRemove(key, out _);
         }
 
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             using var http = new System.Net.Http.HttpClient
             {
-                Timeout = TimeSpan.FromSeconds(8)
+                // Was 8s, which is SHORTER than a cold model load and so
+                // guaranteed the thing it was meant to guard against.
+                // Measured on this vault: bge-m3 takes ~12.7 s on the first
+                // call (Ollama pulling 2.2 GB of weights into memory) and
+                // ~0.22 s once resident. The 8 s ceiling therefore cancelled
+                // EVERY cold call, returned null, and silently degraded
+                // semantic search to keyword — for ~8 s of nothing, when the
+                // keyword path alone answers in 0.17 s. WarmEmbedModel below
+                // means callers should never actually meet this ceiling.
+                Timeout = TimeSpan.FromSeconds(EmbedHttpTimeoutSeconds)
             };
             var body = new JObject
             {
@@ -3430,12 +3445,21 @@ internal static partial class Program
                 // sidecars were built with — a mismatch makes cosine
                 // return 0 for every note. See EmbeddingService.ResolveModel.
                 ["model"] = EmbeddingService.ResolveModel(_vaultPath),
-                ["input"] = text
+                ["input"] = text,
+                // Ollama evicts an idle model after ~5 min. Every eviction
+                // costs the next caller a full cold load, so a brain that is
+                // consulted a few times an hour paid the 12.7 s penalty on
+                // essentially every query. Hold it for the working session.
+                ["keep_alive"] = EmbedKeepAlive
             }.ToString();
             var resp = http.PostAsync("http://localhost:11434/api/embed",
                 new System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json"))
                 .GetAwaiter().GetResult();
-            if (!resp.IsSuccessStatusCode) return null;
+            if (!resp.IsSuccessStatusCode)
+            {
+                Log($"embed: HTTP {(int)resp.StatusCode} after {sw.ElapsedMilliseconds}ms → keyword fallback");
+                return null;
+            }
             var json = JObject.Parse(resp.Content.ReadAsStringAsync().GetAwaiter().GetResult());
             // Ollama returns "embeddings": [[float, float, ...]]
             var arr = (json["embeddings"] as JArray)?[0] as JArray;
@@ -3454,9 +3478,54 @@ internal static partial class Program
                 if (oldest != null) _embedCache.TryRemove(oldest, out _);
             }
             _embedCache[key] = (vec, DateTime.UtcNow);
+            if (sw.ElapsedMilliseconds > 2000)
+                Log($"embed: {sw.ElapsedMilliseconds}ms (cold model load — subsequent queries are ~200ms)");
             return vec;
         }
-        catch { return null; }
+        catch (Exception ex)
+        {
+            // This used to be a bare `catch { return null; }`. The caller
+            // reports mode='keyword-fallback' but nothing said WHY, so a
+            // permanently-degraded semantic search looked identical to a
+            // healthy one — it cost a live debugging session to notice.
+            Log($"embed FAILED after {sw.ElapsedMilliseconds}ms → keyword fallback · {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>How long to let a cold embedding-model load run before giving
+    /// up. Must exceed the model's load time or the fallback is guaranteed.</summary>
+    private const int EmbedHttpTimeoutSeconds = 30;
+
+    /// <summary>Ollama keep_alive for the embedding model. Long enough that a
+    /// normal working session never re-pays the cold load.</summary>
+    private const string EmbedKeepAlive = "30m";
+
+    /// <summary>
+    /// Fire one tiny embed in the background at startup so Ollama has the
+    /// model resident before the agent's first real query arrives.
+    ///
+    /// This is what actually makes semantic search usable: agents give recall
+    /// a short budget (CluadeX allows 6 s) and a cold load blows through it
+    /// no matter how generous OUR timeout is. Warming costs one request on a
+    /// background thread and turns the first real query from 12.7 s into
+    /// ~0.2 s. Entirely best-effort — no Ollama, no vault, no embeddings, or
+    /// any other failure just leaves the keyword path in charge.
+    /// </summary>
+    private static void WarmEmbedModel()
+    {
+        try
+        {
+            var dir = Path.Combine(_vaultPath, ".obsidianx", "embeddings");
+            if (!Directory.Exists(dir)) return;   // nothing precomputed → semantic search is moot
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var ok = OllamaEmbed("warm") != null;
+                Log($"embed warm-up: {(ok ? "ready" : "unavailable")} in {sw.ElapsedMilliseconds}ms");
+            });
+        }
+        catch { /* never let warming affect startup */ }
     }
 
     /// <summary>
