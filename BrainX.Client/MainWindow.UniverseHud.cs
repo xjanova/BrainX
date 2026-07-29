@@ -231,9 +231,13 @@ public partial class MainWindow
     }
 
     /// <summary>
-    /// Top categories by share of notes — the dashboard's Expertise Profile
+    /// EVERY category by share of notes — the dashboard's Expertise Profile
     /// card, same metric and same colours, so the bars don't change meaning
     /// when the reader's eye moves from one surface to the other.
+    ///
+    /// Not a top-six any more: the settings panel's Expertise toggle (which
+    /// revealed the page's full legend) is gone with the HUD on, so this panel
+    /// is the whole picture and has to carry it. It scrolls.
     /// </summary>
     private void PostHudExpertise()
     {
@@ -248,7 +252,6 @@ public partial class MainWindow
             .GroupBy(n => n.PrimaryCategory)
             .Select(g => new { Cat = g.Key, Count = g.Count() })
             .OrderByDescending(x => x.Count)
-            .Take(6)
             .Select(g => new
             {
                 name = g.Cat.ToString().Replace('_', ' '),

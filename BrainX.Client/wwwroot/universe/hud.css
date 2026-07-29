@@ -133,6 +133,13 @@ body.hud-active #settings-panel {
        never fix that — the HUD was on top, not behind. */
     z-index: 60;
 }
+/* The Expertise Show/Hide row toggles #legend, and the HUD hides #legend
+   unconditionally — so with the HUD on it is a control that does nothing, and
+   the readout it used to reveal is already sitting on the middle-left. The row
+   stays in the markup because wallpaper and dashboard-embed modes still have a
+   working legend to toggle. */
+body.hud-active #settings-panel .legend-row { display: none; }
+
 body.hud-active #settings-panel .panel-title { color: rgba(190, 236, 255, 0.9); }
 body.hud-active #settings-panel .setting-row label { color: rgba(214, 210, 240, 0.92); }
 body.hud-active #settings-panel .setting-val { color: #8ef3ff; }

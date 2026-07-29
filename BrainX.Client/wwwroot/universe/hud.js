@@ -162,8 +162,11 @@ function renderStats(d = {}) {
     markStep('stats');
 }
 
+/** Every category, not a top-six. The settings row that used to reveal the
+ *  full legend is gone, so this panel IS the complete picture — it scrolls
+ *  under the wheel and fades at the tail when there is more below. */
 function renderExpertise(list = []) {
-    setHTML('hud-expertise-body', list.slice(0, 6).map(e => {
+    setHTML('hud-expertise-body', list.map(e => {
         const pct = Math.max(0, Math.min(100, Number(e.percent) || 0));
         return `<div class="hud-row">
                   <span class="hud-row-name">
@@ -586,13 +589,26 @@ function runDemo() {
             { name: 'Usage credits', percent: 0 },
         ],
     }));
+    // All sixteen the live vault actually has, not a top-six: this panel is
+    // the complete expertise picture now and the demo has to exercise the
+    // scroll that makes that possible.
     step(900, () => renderExpertise([
-        { name: 'Programming',      percent: 35.6, color: '#6cf0ff' },
-        { name: 'AI / Machine Learning', percent: 18.1, color: '#a68bff' },
-        { name: 'Design / Art',     percent: 10.9, color: '#ff6ec7' },
-        { name: 'DataScience',      percent: 10.7, color: '#5ce1a0' },
-        { name: 'Blockchain / Web3', percent: 6.9, color: '#ffb86c' },
-        { name: 'Business / Finance', percent: 5.8, color: '#ffd86c' },
+        { name: 'Programming',      percent: 35.6, color: '#00f0ff' },
+        { name: 'AI MachineLearning', percent: 18.1, color: '#8b5cf6' },
+        { name: 'Design Art',       percent: 10.9, color: '#ff006e' },
+        { name: 'DataScience',      percent: 10.7, color: '#4ecdc4' },
+        { name: 'Blockchain Web3',  percent: 6.9, color: '#ffb800' },
+        { name: 'Business Finance', percent: 5.8, color: '#ffd86c' },
+        { name: 'Engineering',      percent: 4.2, color: '#00ff88' },
+        { name: 'Web Development',  percent: 3.1, color: '#6cf0ff' },
+        { name: 'Security Crypto',  percent: 1.6, color: '#ff6b6b' },
+        { name: 'Health Medicine',  percent: 1.2, color: '#a8e6cf' },
+        { name: 'DevOps Cloud',     percent: 0.9, color: '#4ecdc4' },
+        { name: 'Science',          percent: 0.7, color: '#00ff88' },
+        { name: 'GameDev',          percent: 0.4, color: '#ffb86c' },
+        { name: 'Mathematics',      percent: 0.2, color: '#a68bff' },
+        { name: 'Philosophy',       percent: 0.1, color: '#ff6ec7' },
+        { name: 'Other',            percent: 0.1, color: '#8e9aa6' },
     ]));
     // Ids matter: the feed only accepts events it has not seen, so demo data
     // without them would be silently ignored — exactly as it would be if the
