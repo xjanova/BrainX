@@ -96,7 +96,8 @@ internal static partial class Program
         lock (_busLock)
         {
             if (_presenceTimer != null) return;
-            try { WritePresence(); } catch { /* vault may not exist yet */ }
+            try { WritePresence(); SweepStaleTemps(BusPresenceDir); }
+            catch { /* vault may not exist yet */ }
             _presenceTimer = new Timer(_ => { try { WritePresence(); } catch { } },
                 null, TimeSpan.FromSeconds(HeartbeatSeconds), TimeSpan.FromSeconds(HeartbeatSeconds));
         }
@@ -178,6 +179,28 @@ internal static partial class Program
         var tmp = path + "." + Guid.NewGuid().ToString("N")[..8] + ".tmp";
         File.WriteAllText(tmp, payload.ToString(Formatting.Indented));
         File.Move(tmp, path, overwrite: true);
+    }
+
+    /// <summary>
+    /// Delete temp files a killed process left behind mid-write. They are
+    /// invisible to every reader here (all of which glob "*.json"), but this
+    /// runs inside the owner's vault, so leaving litter there is not
+    /// acceptable — one was observed after a test process was killed.
+    /// Age-gated so a temp file belonging to a write happening RIGHT NOW in
+    /// another process is never touched.
+    /// </summary>
+    private static void SweepStaleTemps(string dir)
+    {
+        try
+        {
+            var cutoff = DateTime.UtcNow.AddMinutes(-5);
+            foreach (var f in Directory.EnumerateFiles(dir, "*.tmp"))
+            {
+                try { if (File.GetLastWriteTimeUtc(f) < cutoff) File.Delete(f); }
+                catch { /* in use or already gone */ }
+            }
+        }
+        catch { }
     }
 
     // ───────────── agent_send ─────────────

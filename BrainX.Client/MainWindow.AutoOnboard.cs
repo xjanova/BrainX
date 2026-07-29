@@ -63,6 +63,7 @@ public partial class MainWindow
             var desktopPresent = Directory.Exists(Path.GetDirectoryName(ClaudeDesktopConfigPath())!);
             var cliPresent = FindClaudeCli() is not null;
             var codexPresent = FindCodexCli() is not null;
+            var cluadexPresent = Directory.Exists(Path.GetDirectoryName(CluadeXMcpConfigPath())!);
 
             var desktopChanged = EnsureClaudeDesktopRegistered(exe);
             var cliChanged = await EnsureClaudeCliRegisteredAsync(exe);
@@ -83,6 +84,13 @@ public partial class MainWindow
                 }
                 catch { /* rules are best-effort; never block onboarding */ }
             }
+            // CluadeX ships as BrainX's other half — the local-model coder. It
+            // must reach the same brain the cloud agents do, or the two halves
+            // of one product disagree about what has already been learned.
+            var cluadexChanged = false;
+            try { cluadexChanged = EnsureCluadeXRegistered(exe); }
+            catch { /* never block onboarding on a sibling app's config */ }
+
             var hookChanged = EnsureAutoIngestHookInstalledSilent();
 
             // Friendly, non-technical confirmation. The status-bar chips
@@ -90,10 +98,10 @@ public partial class MainWindow
             // the user just sees it "already works". Never claim "connected"
             // when no agent app exists on this PC — the config we wrote only
             // activates once one (Claude Desktop / Claude Code / Codex) is installed.
-            if (!desktopPresent && !cliPresent && !codexPresent)
+            if (!desktopPresent && !cliPresent && !codexPresent && !cluadexPresent)
                 SetOnboardStatus("⚠ No AI agent found on this PC — install Claude Desktop (claude.ai/download), " +
-                                 "Claude Code, or Codex, then reopen BrainX. Connection is automatic; nothing to configure.");
-            else if (desktopChanged || cliChanged || codexChanged || hookChanged)
+                                 "Claude Code, Codex, or CluadeX, then reopen BrainX. Connection is automatic; nothing to configure.");
+            else if (desktopChanged || cliChanged || codexChanged || cluadexChanged || hookChanged)
                 SetOnboardStatus(desktopPresent && desktopChanged
                     ? "✅ Connected automatically — your brain is ready. Restart Claude Desktop once to activate."
                     : "✅ Connected automatically — your brain is ready.");
@@ -205,6 +213,90 @@ public partial class MainWindow
         var reg = McpProductVersionOf(registeredExe);
         var best = McpProductVersionOf(bestExe);
         return reg is not null && best is not null && best > reg;
+    }
+
+    /// <summary>
+    /// CluadeX's own MCP client config. Same shape as Claude Desktop's
+    /// (<c>mcpServers</c> → command/args/env) plus an <c>enabled</c> flag, read
+    /// from <c>&lt;DataRoot&gt;/mcp_servers.json</c> where DataRoot is
+    /// %LOCALAPPDATA%\CluadeX for a normal install.
+    /// </summary>
+    private static string CluadeXMcpConfigPath() => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "CluadeX", "mcp_servers.json");
+
+    /// <summary>
+    /// Register the brain with CluadeX — BrainX's sibling local-model coding
+    /// app, shipped to be used WITH BrainX.
+    ///
+    /// This is not merely "one more client gets tools". CluadeX already has the
+    /// whole brain-first machinery built in: <c>MaybePrependBrainContextAsync</c>
+    /// semantic-searches the brain on every non-trivial message and prepends a
+    /// &lt;brainx_recall&gt; block, and its instinct feature writes lessons back
+    /// as notes. All of it is gated on <c>BrainSyncService.IsBrainAvailable</c>,
+    /// which simply looks for a RUNNING MCP server whose name contains "brain"
+    /// or "obsidianx". With an empty mcp_servers.json that check returns false
+    /// forever, so every one of those features was silently dormant — the local
+    /// model coded with no memory of past mistakes while Claude and Codex had
+    /// full recall. Registering here switches all of it on; the server key must
+    /// keep "brain" in the name for that lookup to match.
+    ///
+    /// Same discipline as the other registrars: lossless merge, and heal only
+    /// when the entry is missing, disabled, points at a vanished exe, carries
+    /// the wrong vault, or is an outdated build.
+    /// </summary>
+    private bool EnsureCluadeXRegistered(string exe)
+    {
+        var cfgPath = CluadeXMcpConfigPath();
+        var cfgDir = Path.GetDirectoryName(cfgPath)!;
+        // No data dir = CluadeX was never run on this machine. Creating one
+        // would fabricate an install that isn't there.
+        if (!Directory.Exists(cfgDir)) return false;
+
+        Newtonsoft.Json.Linq.JObject config;
+        if (File.Exists(cfgPath))
+        {
+            try { config = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(cfgPath)); }
+            catch { BackupCorruptFile(cfgPath); config = new Newtonsoft.Json.Linq.JObject(); }
+        }
+        else config = new Newtonsoft.Json.Linq.JObject();
+
+        var servers = config["mcpServers"] as Newtonsoft.Json.Linq.JObject;
+        if (servers is null)
+        {
+            servers = new Newtonsoft.Json.Linq.JObject();
+            config["mcpServers"] = servers;
+        }
+
+        var existing = servers["brainx-brain"] as Newtonsoft.Json.Linq.JObject;
+        var curCmd = existing?["command"]?.ToString();
+        var curVault = existing?["env"]?["BRAINX_VAULT"]?.ToString();
+        // enabled defaults to true in CluadeX's model, so only an explicit
+        // false counts as disabled — and a disabled entry never starts, which
+        // would leave IsBrainAvailable false just like a missing one.
+        var curEnabled = existing?["enabled"]?.ToObject<bool?>() ?? true;
+
+        var entryHealthy = existing is not null
+            && !string.IsNullOrEmpty(curCmd) && File.Exists(curCmd!)
+            && string.Equals(curVault, _vaultPath, StringComparison.OrdinalIgnoreCase)
+            && curEnabled
+            && !IsMcpOutdated(curCmd!, exe);
+        if (entryHealthy) return false;
+
+        var entry = existing is not null
+            ? (Newtonsoft.Json.Linq.JObject)existing.DeepClone()
+            : new Newtonsoft.Json.Linq.JObject();
+        entry["command"] = exe;
+        if (entry["args"] is null) entry["args"] = new Newtonsoft.Json.Linq.JArray();
+        var env = entry["env"] as Newtonsoft.Json.Linq.JObject ?? new Newtonsoft.Json.Linq.JObject();
+        env["BRAINX_VAULT"] = _vaultPath;
+        if (VersionLabelOf(exe) is string stamp) env["BRAINX_MCP_VERSION"] = stamp;
+        entry["env"] = env;
+        entry["enabled"] = true;
+        servers["brainx-brain"] = entry;
+
+        File.WriteAllText(cfgPath, config.ToString(Newtonsoft.Json.Formatting.Indented));
+        return true;
     }
 
     /// <summary>
