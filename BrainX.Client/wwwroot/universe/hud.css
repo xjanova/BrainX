@@ -92,6 +92,30 @@ body.hud-active #dash-overlay-load {
 body.hud-active #size { display: none; }
 body.hud-active #hud-bottom { right: calc(22px + 36px + 10px); }
 
+/* The note card opens on search and on clicking a star. Its default home is
+   bottom-LEFT, which is the agent bus's corner — the card landed straight on
+   top of the roster. It moves to the bottom-centre lane, which the action
+   buttons vacated when they went up top: horizontally centred, anchored low,
+   and narrow enough to stay inside the grid's centre column so it cannot
+   reach the panels on either side.
+   Scoped to .hud-active: the wallpaper and dashboard-embed modes have no HUD
+   to collide with, and their card stays where it was. */
+body.hud-active #info-card {
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%);
+    bottom: calc(var(--hud-gap) + 26px);
+    width: min(460px, 32vw);
+    max-height: 42vh;
+    /* Unlike the readouts, this one is READ closely and has buttons in it, so
+       it keeps a surface — and it has to out-rank the HUD layer (z-index 40)
+       or the readouts would print through it. */
+    background: rgba(6, 5, 18, 0.94);
+    border-color: rgba(108, 240, 255, 0.24);
+    box-shadow: 0 18px 48px -12px rgba(0, 0, 0, 0.9);
+    z-index: 55;
+}
+
 /* The settings panel is the one surface here the user OPERATES rather than
    reads, and it lands wherever the galaxy happens to be bright. Glass at 52%
    over a nebula left the labels and slider values guesswork. Controls get a
@@ -123,7 +147,9 @@ body.hud-active #settings-toggle {
 #hud-layer > * { pointer-events: auto; }
 
 .hud-tl { grid-area: tl; justify-self: start; align-self: start; }
-.hud-tc { grid-area: tc; justify-self: center; align-self: start; }
+/* Wider than the other panels: it carries the five action buttons now, and at
+   the shared 420px cap "Copy address" wrapped onto a second row on its own. */
+.hud-tc { grid-area: tc; justify-self: center; align-self: start; max-width: min(40vw, 500px); }
 .hud-tr { grid-area: tr; justify-self: end;   align-self: start; }
 .hud-ml { grid-area: ml; justify-self: start; align-self: center; }
 .hud-mr { grid-area: mr; justify-self: end;   align-self: center; }
@@ -545,15 +571,34 @@ body.hud-active #settings-toggle {
     .hud-panel { max-height: calc(44vh - var(--hud-gap) * 2); }
 }
 @media (max-width: 1000px) {
-    .hud-tc { display: none; }
+    /* The top-centre panel used to be Network alone and was dropped whole
+       here. It carries the ACTION BUTTONS now, which are not expendable — a
+       narrow window is exactly when a user reaches for Re-index or Settings.
+       So only the network readout goes; the buttons stay. */
+    .hud-tc .hud-title-sub,
+    .hud-tc #hud-network-body { display: none; }
     .hud-panel { max-width: min(40vw, 330px); }
+    .hud-tc { max-width: min(52vw, 420px); }
 }
 @media (max-width: 820px) {
     .hud-ml, .hud-mr, .hud-br { display: none; }
-    #hud-layer { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-areas: "tl tr" "..  .." "bl bc"; }
+    /* tc keeps a home in the two-column layout — an item whose grid-area no
+       longer exists gets auto-placed, and auto-placed is another word for
+       "wherever, possibly on top of something". */
+    #hud-layer {
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        grid-template-areas: "tl tr" "tc tc" "bl bl";
+    }
+    .hud-tc { align-self: center; }
 }
 @media (max-width: 620px) {
-    .hud-tr, .hud-bc { display: none; }
+    .hud-tr { display: none; }
+    /* Below this the card has no lane of its own left — put it back on the
+       left edge rather than centred over the agent bus. */
+    body.hud-active #info-card {
+        left: var(--hud-gap); right: var(--hud-gap);
+        transform: none; width: auto;
+    }
 }
 
 /* Respect the OS "reduce motion" setting — a HUD that pulses is a nice touch,

@@ -351,8 +351,19 @@
             <div class="hud-stats" id="hud-stats-body"></div>
         </section>
 
+        <!-- Actions ride at the TOP with the network readout. They used to sit
+             bottom-centre, which is the one zone the info card needs: that card
+             opens at the bottom and was landing on the agent bus in the corner.
+             Buttons are small and both belong to the same "chrome" band. -->
         <section class="hud-panel hud-tc">
-            <div class="hud-title"><span class="hud-dot" id="hud-net-dot"></span>Network
+            <div class="hud-actions">
+                <button class="hud-action" data-action="reindex" type="button">Re-index</button>
+                <button class="hud-action" data-action="obsidian" type="button">Obsidian</button>
+                <button class="hud-action" data-action="vault" type="button">Vault</button>
+                <button class="hud-action" data-action="address" type="button">Copy address</button>
+                <button class="hud-action" data-action="settings" type="button">Settings</button>
+            </div>
+            <div class="hud-title hud-title-sub"><span class="hud-dot" id="hud-net-dot"></span>Network
                 <span class="hud-sub" id="hud-net-state">—</span>
             </div>
             <div class="hud-rows" id="hud-network-body"></div>
@@ -409,15 +420,11 @@
             <div class="hud-rows" id="hud-agents-body"></div>
         </section>
 
-        <nav class="hud-panel hud-bc">
-            <div class="hud-actions">
-                <button class="hud-action" data-action="reindex" type="button">Re-index</button>
-                <button class="hud-action" data-action="obsidian" type="button">Obsidian</button>
-                <button class="hud-action" data-action="vault" type="button">Vault</button>
-                <button class="hud-action" data-action="address" type="button">Copy address</button>
-                <button class="hud-action" data-action="settings" type="button">Settings</button>
-            </div>
-        </nav>
+        <!-- bottom-centre is deliberately EMPTY. It is the landing zone for
+             #info-card (the note card that opens on search / star click), which
+             is positioned there by hud.css rather than being a child of this
+             layer — the layer is display:none in wallpaper and dashboard-embed
+             modes, and the card has to keep working in both. -->
     </div>
 
     <!-- Boot sequence: the bar fills as each section's data arrives, so a slow
