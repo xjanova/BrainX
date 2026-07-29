@@ -30,7 +30,9 @@ const STEPS = [
     { id: 'expertise', label: 'Mapping expertise' },
     { id: 'activity',  label: 'Attaching activity feed' },
     { id: 'agents',    label: 'Locating agents' },
+    { id: 'network',   label: 'Joining mesh' },
     { id: 'system',    label: 'Polling system' },
+    { id: 'usage',     label: 'Tallying usage' },
 ];
 
 /* A section that never arrives must not hold the boot screen hostage. After
@@ -109,6 +111,10 @@ function renderStats(d = {}) {
         ['Links', compact(d.links), `${num(d.wiki ?? 0)} wiki`],
         ['Galaxies', num(d.galaxies ?? 0), 'clusters'],
     ];
+    // The dashboard's two KPI tiles, folded in rather than given their own
+    // corner — they are the same class of fact as the four above.
+    if (d.connections != null) cells.push(['Connections', compact(d.connections), `${num(d.autoLinks ?? 0)} auto`]);
+    if (d.expertiseAreas != null) cells.push(['Expertise', `${d.expertiseAreas}/${d.expertiseTotal ?? 24}`, `${d.expertiseStrong ?? 0} above 80%`]);
     setHTML('hud-stats-body', cells.map(([l, v, f]) =>
         `<div><div class="hud-stat-label">${esc(l)}</div>
               <div class="hud-stat-value" title="${esc(f)}">${esc(v)}</div>
@@ -165,9 +171,15 @@ function renderSystem(d = {}) {
     const rows = [];
     if (d.gpu != null) rows.push(['GPU', `${Math.round(d.gpu)}%`, d.gpu]);
     if (d.cpu != null) rows.push(['CPU', `${Math.round(d.cpu)}%`, d.cpu]);
-    if (d.mcpCalls != null) rows.push(['MCP 24h', num(d.mcpCalls), null]);
-    if (d.mesh) rows.push(['Mesh', esc(d.mesh), null]);
-    if (d.version) rows.push(['Version', esc(d.version), null]);
+    // The old SYSTEM HEALTH card, verbatim — these are the lines the owner
+    // actually checks when something looks wrong.
+    if (d.vault) rows.push(['Vault', d.vault, null]);
+    if (d.db) rows.push(['DB', d.db, null]);
+    if (d.index) rows.push(['Index', d.index, null]);
+    if (d.ai) rows.push(['AI', d.ai, null]);
+    if (d.mesh) rows.push(['Mesh', d.mesh, null]);
+    if (d.version) rows.push(['Version', d.version, null]);
+    dotClass('hud-health-dot', d.healthy === false ? 'warn' : '');
 
     setHTML('hud-system-body', rows.map(([l, v, bar]) =>
         `<div class="hud-row">
@@ -176,6 +188,82 @@ function renderSystem(d = {}) {
            ${bar != null ? `<span class="hud-bar"><i style="width:${Math.max(0, Math.min(100, bar))}%"></i></span>` : ''}
          </div>`).join('') || emptyRow('no telemetry'));
     markStep('system');
+}
+
+function renderRecent(list = []) {
+    setHTML('hud-recent-body', list.slice(0, 5).map(n =>
+        `<div class="hud-feed-line">
+           <span class="hud-feed-time">${esc(n.when || '')}</span>
+           <span class="hud-feed-tag">${esc(n.category || 'NOTE')}</span>
+           <span class="hud-feed-text" title="${esc(n.title)}">${esc(n.title)}</span>
+         </div>`).join('') || emptyRow('nothing edited yet'));
+    setText('hud-recent-count', list.length ? `${num(list.totalCount ?? list.length)} notes` : '—');
+}
+
+function renderNetwork(d = {}) {
+    const rows = [
+        ['Status', d.connected ? 'Connected' : 'Offline'],
+        ['Peers', num(d.peers ?? 0)],
+    ];
+    if (d.address) rows.push(['Node', d.address]);
+    setHTML('hud-network-body', rows.map(([l, v]) =>
+        `<div class="hud-row"><span class="hud-row-name">${esc(l)}</span>
+           <span class="hud-row-val">${esc(v)}</span></div>`).join(''));
+    setText('hud-net-state', d.connected ? `${num(d.peers ?? 0)} peer${d.peers === 1 ? '' : 's'}` : 'offline');
+    dotClass('hud-net-dot', d.connected ? '' : 'off');
+    markStep('network');
+}
+
+function renderMcp(d = {}) {
+    const delta = Number(d.delta ?? 0);
+    setHTML('hud-mcp-body',
+        `<div class="hud-headline">
+           <span class="n">${num(d.calls ?? 0)}</span><span class="u">calls</span>
+           ${delta ? `<span class="d ${delta > 0 ? 'up' : 'down'}">${delta > 0 ? '+' : ''}${num(delta)} vs prev</span>` : ''}
+         </div>
+         ${sparkline(d.buckets || [])}
+         <div class="hud-row"><span class="hud-row-name">top tool</span>
+           <span class="hud-row-val">${esc(d.topTool || '—')}${d.topToolCount ? ` · ${num(d.topToolCount)}×` : ''}</span></div>`);
+    setText('hud-mcp-window', d.window || '24 h');
+}
+
+function renderClaude(d = {}) {
+    const rows = (d.meters || []).map(m => {
+        const pct = Math.max(0, Math.min(100, Number(m.percent) || 0));
+        return `<div class="hud-row">
+                  <span class="hud-row-name">${esc(m.name)}</span>
+                  <span class="hud-row-val">${m.percent == null ? '—' : pct + '% used'}</span>
+                  <span class="hud-bar"><i style="width:${pct}%"></i></span>
+                </div>`;
+    });
+    if (d.tally) rows.push(`<div class="hud-row"><span class="hud-row-name">local</span>
+        <span class="hud-row-val">${esc(d.tally)}</span></div>`);
+    setHTML('hud-claude-body', rows.join('') || emptyRow('sign in to track'));
+    setText('hud-claude-plan', d.plan || '—');
+    dotClass('hud-claude-dot', d.signedIn ? '' : 'warn');
+    markStep('usage');
+}
+
+/** Inline sparkline. SVG rather than canvas: a handful of points, and it
+ *  inherits the HUD's CSS glow for free. */
+function sparkline(vals) {
+    if (!vals.length) return '';
+    const w = 100, h = 30, max = Math.max(1, ...vals);
+    const pts = vals.map((v, i) =>
+        `${(i / Math.max(1, vals.length - 1)) * w},${h - (v / max) * (h - 2) - 1}`).join(' ');
+    return `<svg class="hud-spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">
+              <defs><linearGradient id="hud-spark-grad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0" stop-color="#6cf0ff" stop-opacity="0.6"/>
+                <stop offset="1" stop-color="#6cf0ff" stop-opacity="0"/>
+              </linearGradient></defs>
+              <polygon points="0,${h} ${pts} ${w},${h}"/>
+              <polyline points="${pts}"/>
+            </svg>`;
+}
+
+function dotClass(id, cls) {
+    const el = $(id);
+    if (el) el.className = 'hud-dot' + (cls ? ' ' + cls : '');
 }
 
 const emptyRow = (t) => `<div class="hud-row"><span class="hud-row-name" style="opacity:.55">${esc(t)}</span></div>`;
@@ -198,6 +286,10 @@ function onHudMessage(evt) {
         case 'hudActivity':  renderActivity(m.payload); break;
         case 'hudAgents':    renderAgents(m.payload); break;
         case 'hudSystem':    renderSystem(m.payload); break;
+        case 'hudRecent':    renderRecent(m.payload); break;
+        case 'hudNetwork':   renderNetwork(m.payload); break;
+        case 'hudMcp':       renderMcp(m.payload); break;
+        case 'hudClaude':    renderClaude(m.payload); break;
         // The galaxy payload already flows for the renderer; piggyback on it so
         // the first two boot steps complete without the host doing anything new.
         case 'brain':
@@ -280,7 +372,29 @@ function runDemo() {
     const step = (ms, fn) => setTimeout(fn, ms);
     step(300, () => renderStats({
         notes: 1204, words: 1523809, links: 8087, wiki: 969, galaxies: 24,
+        connections: 8087, autoLinks: 2704, expertiseAreas: 16, expertiseTotal: 24, expertiseStrong: 4,
         brainName: "xman's Brain", address: '0xBRAIN-e10c-6760-f9cc-707a',
+    }));
+    step(1100, () => renderNetwork({ connected: true, peers: 1, address: '0xBRAIN-e10c…' }));
+    step(1800, () => renderRecent([
+        { when: '2 min',  category: 'Programming', title: 'CluadeX froze for 11 minutes — event under a lock' },
+        { when: '18 min', category: 'Notes',       title: 'Semantic search was never running' },
+        { when: '1 h',    category: 'Notes',       title: 'Brain-first coverage audit — every connected agent' },
+        { when: '3 h',    category: 'Programming', title: 'BrainX Agent Bus v2.9 — Claude ⇄ Codex' },
+        { when: '5 h',    category: 'Design_Art',  title: 'Dashboard floating overlays — NETWORK card' },
+    ]));
+    step(3100, () => renderMcp({
+        calls: 415, delta: 27, window: '24 h', topTool: 'brain_search', topToolCount: 237,
+        buckets: [3, 8, 5, 12, 22, 14, 9, 31, 18, 7, 11, 26, 42, 19, 8, 5, 13, 29, 37, 21, 9, 6, 15, 24],
+    }));
+    step(3500, () => renderClaude({
+        plan: 'Max (5x)', signedIn: true, tally: '251.7M tokens · 5 h · 701 msg',
+        meters: [
+            { name: 'Current session', percent: 53 },
+            { name: 'Weekly · all models', percent: 82 },
+            { name: 'Model only', percent: null },
+            { name: 'Usage credits', percent: 0 },
+        ],
     }));
     step(900, () => renderExpertise([
         { name: 'Programming',      percent: 35.6, color: '#6cf0ff' },
@@ -311,7 +425,10 @@ function runDemo() {
         setTimeout(() => bus?.fireTraffic(who, false), 700);
     }, 1800);
     step(2700, () => renderSystem({
-        gpu: 48, cpu: 33, mcpCalls: 415, mesh: '1 peer', version: 'v2.0.166 · mcp 2.9.171',
+        gpu: 48, cpu: 33, healthy: true,
+        vault: 'G:\\Obsidian · 1.2 MB', db: 'SQLite · 1.5 GB',
+        index: '1,204 nodes · 8,087 links', ai: 'Ollama · bge-m3',
+        mesh: '1 peer · :5142', version: 'v2.0.166 · mcp 2.9.171',
     }));
 }
 

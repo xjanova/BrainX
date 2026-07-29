@@ -351,8 +351,15 @@
             <div class="hud-stats" id="hud-stats-body"></div>
         </section>
 
+        <section class="hud-panel hud-tc">
+            <div class="hud-title"><span class="hud-dot" id="hud-net-dot"></span>Network
+                <span class="hud-sub" id="hud-net-state">—</span>
+            </div>
+            <div class="hud-rows" id="hud-network-body"></div>
+        </section>
+
         <section class="hud-panel hud-tr">
-            <div class="hud-title"><span class="hud-dot"></span>System</div>
+            <div class="hud-title"><span class="hud-dot" id="hud-health-dot"></span>System</div>
             <div class="hud-rows" id="hud-system-body"></div>
         </section>
 
@@ -366,6 +373,25 @@
                 <span class="hud-sub">live</span>
             </div>
             <div class="hud-feed" id="hud-activity-body"></div>
+
+            <div class="hud-title hud-title-sub"><span class="hud-dot"></span>Recently edited
+                <span class="hud-sub" id="hud-recent-count">—</span>
+            </div>
+            <div class="hud-feed" id="hud-recent-body"></div>
+        </section>
+
+        <!-- Consumption: what the brain has been doing, and what it has spent
+             doing it. Bottom-right so the eye lands on it last. -->
+        <section class="hud-panel hud-br">
+            <div class="hud-title"><span class="hud-dot"></span>MCP
+                <span class="hud-sub" id="hud-mcp-window">24 h</span>
+            </div>
+            <div id="hud-mcp-body"></div>
+
+            <div class="hud-title hud-title-sub"><span class="hud-dot" id="hud-claude-dot"></span>Claude usage
+                <span class="hud-sub" id="hud-claude-plan">—</span>
+            </div>
+            <div class="hud-rows" id="hud-claude-body"></div>
         </section>
 
         <!-- Agent Bus: a solar system in a floating card. The brain is the
