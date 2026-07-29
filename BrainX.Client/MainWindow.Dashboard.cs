@@ -816,65 +816,19 @@ public partial class MainWindow
         if (DashMcpSparkCanvas == null) return;
         DashMcpSparkCanvas.Children.Clear();
 
-        var bins24 = new int[24];
-        int total = 0;
-        var toolCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        var path = System.IO.Path.Combine(_vaultPath, ".obsidianx", "access-log.ndjson");
-        var since = DateTime.UtcNow.AddHours(-24);
-
-        try
-        {
-            if (System.IO.File.Exists(path))
-            {
-                // Read the tail — capped at last ~3000 lines so we don't
-                // scan a multi-MB log on every tick.
-                var lines = SafeReadTailLines(path, 3000);
-                foreach (var line in lines)
-                {
-                    if (string.IsNullOrWhiteSpace(line)) continue;
-                    try
-                    {
-                        var obj = Newtonsoft.Json.Linq.JObject.Parse(line);
-                        var ts = obj["ts"]?.ToString();
-                        if (!DateTime.TryParse(ts, null,
-                            System.Globalization.DateTimeStyles.AssumeUniversal |
-                            System.Globalization.DateTimeStyles.AdjustToUniversal,
-                            out var dt)) continue;
-                        if (dt < since) continue;
-                        var hourAgo = (int)(DateTime.UtcNow - dt).TotalHours;
-                        if (hourAgo < 0 || hourAgo >= 24) continue;
-                        bins24[23 - hourAgo]++;
-                        total++;
-
-                        var op = obj["op"]?.ToString() ?? "";
-                        var tool = op.StartsWith("mcp.", StringComparison.OrdinalIgnoreCase)
-                            ? op.Substring(4)
-                            : op;
-                        if (!string.IsNullOrEmpty(tool))
-                        {
-                            if (!toolCounts.TryGetValue(tool, out int c)) c = 0;
-                            toolCounts[tool] = c + 1;
-                        }
-                    }
-                    catch { /* skip malformed lines */ }
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"PopulateDashMcpActivity read: {ex.Message}");
-        }
+        // The scan itself lives in MainWindow.UniverseHud.cs — the HUD shows
+        // these same numbers, and two copies of the parser would eventually
+        // disagree about what "calls in the last 24 h" means.
+        var (bins24, total, topTool, topToolCount) = ScanMcpActivityLog();
 
         if (DashMcpCalls24hText != null)
             DashMcpCalls24hText.Text = total.ToString("N0");
 
         if (DashMcpTopToolText != null)
         {
-            var topTool = toolCounts
-                .OrderByDescending(kv => kv.Value)
-                .Select(kv => $"{kv.Key} · {kv.Value:N0}×")
-                .FirstOrDefault();
-            DashMcpTopToolText.Text = string.IsNullOrEmpty(topTool) ? "—" : topTool;
+            DashMcpTopToolText.Text = string.IsNullOrEmpty(topTool)
+                ? "—"
+                : $"{topTool} · {topToolCount:N0}×";
         }
 
         if (DashMcpDeltaText != null)
@@ -1493,6 +1447,10 @@ public partial class MainWindow
             _claudeTally = new BrainX.Client.Services.ClaudeTranscriptTally();
             _claudeTally.Updated += (_, snap) =>
             {
+                // Capture before the dashboard's visibility gate: the Universe
+                // HUD shows this number too, and it is on screen exactly when
+                // the dashboard is not.
+                _hudTally = snap;
                 if (DashboardView?.Visibility != System.Windows.Visibility.Visible
                     && _dashClaudeFirstUpdate) return;
                 _dashClaudeFirstUpdate = true;
@@ -1514,6 +1472,7 @@ public partial class MainWindow
             _claudeProbe = new BrainX.Client.Services.ClaudeUsageProbe(this);
             _claudeProbe.Updated += (_, snap) =>
             {
+                _hudUsage = snap;
                 if (!Dispatcher.CheckAccess())
                     Dispatcher.BeginInvoke(new Action(() => ApplyClaudeProbeSnapshot(snap)));
                 else

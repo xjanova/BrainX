@@ -2337,10 +2337,11 @@ public partial class MainWindow : Window
         {
             universeStartTimer.Stop();
             _ = InitializeUniverseAsync();
-            // Dashboard map shows a SECOND Universe WebView2 in locked
-            // orbit mode — kick it off alongside the main one so by the
-            // time the user notices it, the galaxy is already rendering.
-            _ = InitializeDashUniverseAsync();
+            // The dashboard's own mini-galaxy is NOT started here any more.
+            // That page is retired and collapsed, so spinning up a second
+            // WebView2 + three.js scene at launch would burn a GPU context
+            // on something nobody can see. Nav_Click starts it if the user
+            // ever navigates back to the Dashboard.
         };
         universeStartTimer.Start();
         _ = LoadAiBackends();
@@ -7379,6 +7380,9 @@ public partial class MainWindow : Window
         if (tag == "Network") _ = RefreshNetworkStats();
         if (tag == "Vault") RefreshVaultTree();
         if (tag == "Universe") _ = InitializeUniverseAsync();
+        // Retired page — its embedded galaxy is built on demand now (see
+        // Window_Loaded), so a rollback still gets the full dashboard.
+        if (tag == "Dashboard") _ = InitializeDashUniverseAsync();
         if (tag == "Sharing") RefreshSharingScreen();
         if (tag == "Ssh") RefreshSshView();
     }
@@ -7710,7 +7714,11 @@ public partial class MainWindow : Window
             core.Settings.AreDefaultContextMenusEnabled = true;
 
             SetUniverseLoadingStatus("Loading three.js scene", "Galaxy bootstrap");
-            UniverseWebView.Source = new Uri("https://universe.local/universe/index.html");
+            // ?hud=1 turns on the heads-up dashboard (see MainWindow.UniverseHud.cs).
+            // ONLY this view passes it: the wallpaper and the dashboard's embedded
+            // mini-galaxy load the same page and must stay bare.
+            UniverseWebView.Source = new Uri("https://universe.local/universe/index.html?hud=1");
+            StartUniverseHud();
             _universeInitialized = true;
         }
         catch (Exception ex)
@@ -7846,6 +7854,26 @@ public partial class MainWindow : Window
                 if (payload != null && !string.IsNullOrEmpty(payload.noteId))
                     Dispatcher.BeginInvoke(new Action(
                         () => SaveNoteFromUniverse(payload.noteId, payload.content ?? "")));
+            }
+            else if (msg?.type == "hudReady")
+            {
+                // The HUD announces itself separately from the galaxy's `ready`
+                // because it is a separate consumer of the same page: it comes
+                // back after every reload, and its boot screen is waiting on all
+                // eight sections before it lifts.
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    _hudPageReady = true;
+                    PushAllHudPayloads();
+                }));
+            }
+            else if (msg?.type == "hudAction")
+            {
+                var json6 = e.WebMessageAsJson;
+                var action = Newtonsoft.Json.JsonConvert.DeserializeAnonymousType(
+                    json6, new { action = "" })?.action;
+                if (!string.IsNullOrEmpty(action))
+                    Dispatcher.BeginInvoke(new Action(() => HandleHudAction(action)));
             }
             else if (msg?.type == "importObsidianVault")
             {
@@ -9458,6 +9486,7 @@ public partial class MainWindow : Window
 
     private void OnPeerCountChanged(int count)
     {
+        _hudPeerCount = count;   // Universe HUD reads the number, not the label
         PeerCountText.Text = $"{count} peer{(count != 1 ? "s" : "")} connected";
         if (NetBrainsText != null) NetBrainsText.Text = count.ToString("N0");
         if (_network.IsConnected) DrawNetworkConstellation(count, true);

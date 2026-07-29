@@ -108,13 +108,21 @@ function renderStats(d = {}) {
     const cells = [
         ['Notes', compact(d.notes), `${num(d.notes)} indexed`],
         ['Words', compact(d.words), 'across the vault'],
-        ['Links', compact(d.links), `${num(d.wiki ?? 0)} wiki`],
+        // The dashboard called this CONNECTIONS in one card and Wiki-links in
+        // another, both showing the same total. One cell, and the split that
+        // the two labels were reaching for: what was written vs what was
+        // inferred by the auto-linker.
+        ['Links', compact(d.links), d.auto != null
+            ? `${num(d.wiki ?? 0)} wiki · ${num(d.auto)} auto`
+            : `${num(d.wiki ?? 0)} wiki`],
         ['Galaxies', num(d.galaxies ?? 0), 'clusters'],
     ];
-    // The dashboard's two KPI tiles, folded in rather than given their own
-    // corner — they are the same class of fact as the four above.
-    if (d.connections != null) cells.push(['Connections', compact(d.connections), `${num(d.autoLinks ?? 0)} auto`]);
-    if (d.expertiseAreas != null) cells.push(['Expertise', `${d.expertiseAreas}/${d.expertiseTotal ?? 24}`, `${d.expertiseStrong ?? 0} above 80%`]);
+    // The dashboard's mastery KPI, folded in rather than given its own corner
+    // — it is the same class of fact as the counts beside it.
+    if (d.expertiseAreas != null) {
+        cells.push(['Mastery', `${d.expertiseStrong ?? 0}/${d.expertiseAreas}`,
+            `areas above 80% of ${d.expertiseTotal ?? 24}`]);
+    }
     setHTML('hud-stats-body', cells.map(([l, v, f]) =>
         `<div><div class="hud-stat-label">${esc(l)}</div>
               <div class="hud-stat-value" title="${esc(f)}">${esc(v)}</div>
@@ -190,14 +198,19 @@ function renderSystem(d = {}) {
     markStep('system');
 }
 
-function renderRecent(list = []) {
+/** Accepts either a bare array or {items, totalCount}. The host sends the
+ *  latter because the panel's heading is the size of the WHOLE vault, which
+ *  five rows can't tell you. */
+function renderRecent(d = []) {
+    const list = Array.isArray(d) ? d : (d.items || []);
+    const total = Array.isArray(d) ? d.length : (d.totalCount ?? list.length);
     setHTML('hud-recent-body', list.slice(0, 5).map(n =>
         `<div class="hud-feed-line">
            <span class="hud-feed-time">${esc(n.when || '')}</span>
            <span class="hud-feed-tag">${esc(n.category || 'NOTE')}</span>
            <span class="hud-feed-text" title="${esc(n.title)}">${esc(n.title)}</span>
          </div>`).join('') || emptyRow('nothing edited yet'));
-    setText('hud-recent-count', list.length ? `${num(list.totalCount ?? list.length)} notes` : '—');
+    setText('hud-recent-count', list.length ? `${num(total)} notes` : '—');
 }
 
 function renderNetwork(d = {}) {
@@ -291,20 +304,26 @@ function onHudMessage(evt) {
         case 'hudMcp':       renderMcp(m.payload); break;
         case 'hudClaude':    renderClaude(m.payload); break;
         // The galaxy payload already flows for the renderer; piggyback on it so
-        // the first two boot steps complete without the host doing anything new.
-        case 'brain':
+        // the first two boot steps complete without waiting on the host's own
+        // hudStats. brain-export.json is PascalCase (the C# model serialised
+        // as-is) — read both casings rather than assuming, because guessing
+        // wrong here shows the user a confident, wrong "0 notes".
+        case 'brain': {
             markStep('galaxy');
-            if (m.payload?.nodes) {
+            const b = m.payload;
+            if (b && (b.TotalNotes != null || b.totalNotes != null || b.Nodes || b.nodes)) {
+                const pick = (...keys) => keys.map(k => b[k]).find(v => v != null);
                 renderStats({
-                    notes: m.payload.nodes.length,
-                    words: m.payload.totalWords,
-                    links: m.payload.edges?.length,
-                    galaxies: m.payload.galaxies?.length,
-                    brainName: m.payload.displayName,
-                    address: m.payload.brainAddress,
+                    notes: pick('TotalNotes', 'totalNotes') ?? (b.Nodes ?? b.nodes ?? []).length,
+                    words: pick('TotalWords', 'totalWords'),
+                    links: pick('TotalEdges', 'totalEdges'),
+                    galaxies: (pick('Expertise', 'expertise') ?? []).length,
+                    brainName: pick('DisplayName', 'displayName'),
+                    address: pick('BrainAddress', 'brainAddress'),
                 });
             }
             break;
+        }
     }
 }
 
@@ -407,8 +426,8 @@ export function initHud() {
 function runDemo() {
     const step = (ms, fn) => setTimeout(fn, ms);
     step(300, () => renderStats({
-        notes: 1204, words: 1523809, links: 8087, wiki: 969, galaxies: 24,
-        connections: 8087, autoLinks: 2704, expertiseAreas: 16, expertiseTotal: 24, expertiseStrong: 4,
+        notes: 1204, words: 1523809, links: 8087, wiki: 5383, auto: 2704, galaxies: 24,
+        expertiseAreas: 16, expertiseTotal: 25, expertiseStrong: 4,
         brainName: "xman's Brain", address: '0xBRAIN-e10c-6760-f9cc-707a',
     }));
     step(1100, () => renderNetwork({ connected: true, peers: 1, address: '0xBRAIN-e10c…' }));

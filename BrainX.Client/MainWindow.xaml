@@ -476,11 +476,15 @@
                                          ═══════════════════════════════════════════════════════════ -->
                                     <TextBlock Text="WORKSPACE" Style="{StaticResource TypeNavSectionLabel}"
                                                Margin="22,8,0,8"/>
-                                    <!-- Dashboard restored to the menu + default active view per
-                                         user "เพิ่ม หน้า dashboard". Each row now uses a 2-col
-                                         Grid (label | kbd chip) per t2.zip screenshot. The kbd
-                                         chip is a small NeuralBgInset pill on the right edge. -->
-                                    <Button x:Name="NavDashboard" Style="{StaticResource NavButtonActive}"
+                                    <!-- Dashboard is retired: every card it carried is now a HUD
+                                         readout over the galaxy (wwwroot/universe/hud.js +
+                                         MainWindow.UniverseHud.cs). The button and the view are
+                                         COLLAPSED rather than deleted so a rollback is one
+                                         attribute in each place, per the owner's ask to keep the
+                                         old page until the HUD has proven itself. Nav_Click and
+                                         the ⌘1 chip still work if it comes back. -->
+                                    <Button x:Name="NavDashboard" Style="{StaticResource NavButton}"
+                                            Visibility="Collapsed"
                                             Click="Nav_Click" Tag="Dashboard">
                                         <Grid>
                                             <Grid.ColumnDefinitions>
@@ -498,7 +502,9 @@
                                             </Border>
                                         </Grid>
                                     </Button>
-                                    <Button x:Name="NavUniverse" Style="{StaticResource NavButton}"
+                                    <!-- Universe is the app's front door now — it opens on the
+                                         galaxy with the HUD over it. -->
+                                    <Button x:Name="NavUniverse" Style="{StaticResource NavButtonActive}"
                                             Click="Nav_Click" Tag="Universe">
                                         <Grid>
                                             <Grid.ColumnDefinitions>
@@ -669,20 +675,27 @@
 
                     <!-- CONTENT AREA -->
                     <Grid Grid.Column="1">
-                        <!-- Dashboard — default startup (per user "เพิ่ม หน้า dashboard").
-                             KPI cards + Activity Feed + Recently Edited inside. -->
-                        <Grid x:Name="DashboardView" Visibility="Visible">
-                            <!-- Hidden WebView2 used by ClaudeUsageProbe to scrape
-                                 claude.ai/settings/usage. 1×1, transparent, hit-test
-                                 off — present in the visual tree so its HwndHost
-                                 stays alive, but invisible to the user. Cookies
-                                 from Edge are injected into its CookieManager on
-                                 startup so navigation auto-authenticates. -->
-                            <wv2:WebView2 x:Name="DashClaudeProbeWebView"
-                                          Width="1" Height="1"
-                                          IsHitTestVisible="False"
-                                          HorizontalAlignment="Left" VerticalAlignment="Top"
-                                          Panel.ZIndex="-1"/>
+                        <!-- Hidden WebView2 used by ClaudeUsageProbe to scrape
+                             claude.ai/settings/usage. 1×1, transparent, hit-test off —
+                             present in the visual tree so its HwndHost stays alive, but
+                             invisible to the user. Cookies from the user's Chromium
+                             browsers are injected into its CookieManager on startup so
+                             navigation auto-authenticates.
+                             It sits in the content root, NOT inside DashboardView: that
+                             view is collapsed at startup now, and WPF never lays out a
+                             collapsed subtree — an HwndHost in there may never build its
+                             window, which would leave the probe (and so the HUD's Claude
+                             meters) permanently dead. The probe is app-wide plumbing
+                             anyway, not a dashboard widget. -->
+                        <wv2:WebView2 x:Name="DashClaudeProbeWebView"
+                                      Width="1" Height="1"
+                                      IsHitTestVisible="False"
+                                      HorizontalAlignment="Left" VerticalAlignment="Top"
+                                      Panel.ZIndex="-1"/>
+                        <!-- Dashboard — retired in favour of the Universe HUD, kept in the
+                             tree (collapsed, reachable only if NavDashboard is un-collapsed)
+                             so the move can be rolled back without a revert. -->
+                        <Grid x:Name="DashboardView" Visibility="Collapsed">
                             <!-- Layout: NO outer ScrollViewer (DashOuterScroll removed 2026-05-27).
                                  WebView2 = HwndHost; a parent ScrollViewer's transform does NOT
                                  translate the Win32 child surface — universe stayed pinned to its
@@ -4657,15 +4670,15 @@
                         </Grid>
 
                         <!-- ═══ UNIVERSE VIEW (WebView2 + three.js + embedded 2D) ═══
-                             Available from sidebar; Dashboard is the default startup
-                             view again. WebView2 lives inside this content cell so the
-                             WPF chrome (sidebar/title/status) stays visible and
-                             interactive — the airspace rule keeps the WebView out of
-                             the chrome's area. InitializeUniverseAsync is triggered on
-                             first nav click to this view, not on app startup, so the
-                             WebView2 spin-up cost is paid only when the user asks for
-                             it. -->
-                        <Grid x:Name="UniverseView" Visibility="Collapsed">
+                             The startup view: the galaxy, with the whole dashboard on a
+                             HUD over it (?hud=1 → wwwroot/universe/hud.js). WebView2 lives
+                             inside this content cell so the WPF chrome (sidebar/title/
+                             status) stays visible and interactive — the airspace rule
+                             keeps the WebView out of the chrome's area.
+                             InitializeUniverseAsync already runs 250 ms after
+                             Window_Loaded, so the galaxy is building while the splash is
+                             still fading. -->
+                        <Grid x:Name="UniverseView" Visibility="Visible">
                             <!-- User: "เอาแถบบนออกทั้งแถบ" — Brain Graph view header
                                  (title + subtitle + 3D/2D + Filter + Re-layout) removed.
                                  The Universe galaxy is now full-bleed — no chrome eating

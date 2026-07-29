@@ -75,6 +75,7 @@ export function createAgentBus3D(canvas) {
     /** Rebuild the system. Agents keep their orbital phase across updates so a
      *  presence poll never makes the planets jump. */
     function setAgents(list) {
+        let rosterChanged = false;
         const seen = new Set();
         list.forEach((a, i) => {
             const name = a.name;
@@ -83,6 +84,7 @@ export function createAgentBus3D(canvas) {
             if (!p) {
                 p = buildPlanet(name, i, list.length);
                 planets.set(name, p);
+                rosterChanged = true;
             }
             applyPresence(p, a);
         });
@@ -92,14 +94,26 @@ export function createAgentBus3D(canvas) {
             scene.remove(p.pivot, p.ring);
             disposeDeep(p.pivot); disposeDeep(p.ring);
             planets.delete(name);
+            rosterChanged = true;
         }
-        layoutOrbits();
+        // Orbits depend on nothing but WHO is in the system, and the host
+        // re-sends presence every couple of seconds — laying out every time
+        // would throw away and rebuild a ring geometry per agent, forever, to
+        // arrive at identical numbers. Tracked as "did anyone join or leave"
+        // rather than a size comparison, because one agent replacing another
+        // leaves the count untouched and the newcomer un-placed.
+        if (rosterChanged) layoutOrbits();
     }
 
     /** One request/response round trip on an agent's orbit. */
     function fireTraffic(name, inbound = true) {
         const p = planets.get(name);
         if (!p) return;
+        // Motes are retired by the render loop, and the loop is stopped
+        // whenever this canvas is off-screen — so without a ceiling, traffic
+        // reported while the panel is scrolled out of view would queue up
+        // forever and then all burst at once. 60 is far past what is legible.
+        if (motes.length > 60) return;
         const color = inbound ? colorOf(name) : AGENT_COLORS.brain;
         const mote = new THREE.Mesh(moteGeo, new THREE.MeshBasicMaterial({
             color, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false,
