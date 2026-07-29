@@ -24,6 +24,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -44,6 +45,11 @@ public partial class MainWindow
     private bool _busFirstScan = true;
     private readonly HashSet<string> _busSeenInbox = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Point> _busNodePos = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Last call counter seen per agent — deltas become flow animations.</summary>
+    private readonly Dictionary<string, long> _busSeenCalls = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, TextBlock> _busCaptions = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Point> _busCaptionAnchor = new(StringComparer.OrdinalIgnoreCase);
+    private string _busStateSig = "";
 
     private string BusRootDir => IOPath.Combine(_vaultPath, ".obsidianx", "agent-bus");
 
@@ -80,6 +86,9 @@ public partial class MainWindow
         public double? AgeSeconds;
         public string ClientInfo = "";
         public int Pending;
+        /// <summary>Tool calls this agent has served since its MCP started.</summary>
+        public long Calls;
+        public string? LastTool;
     }
 
     private void RefreshAgentBusCard()
@@ -91,14 +100,48 @@ public partial class MainWindow
         try
         {
             var agents = ReadBusAgents();
+
+            // Static layer is redrawn ONLY when something it depicts actually
+            // changed. It used to be rebuilt on every 2 s tick, which cleared
+            // the canvas and killed the forever-running link animations a
+            // third of a second after they started — the card looked static
+            // no matter how much traffic was flowing.
+            var sig = BusStateSignature(agents);
+            if (sig != _busStateSig)
+            {
+                _busStateSig = sig;
+                DrawBusStaticLayer(agents);
+            }
+
+            // Flows are animated AFTER the layer exists, since they need node
+            // positions, and both sources are real traffic:
+            //   • call deltas  → request/response round-trips with the brain
+            //   • inbox files  → peer-to-peer mail between two agents
+            AnimateCallFlows(agents);
             AnimateNewBusTraffic(agents);
-            DrawBusStaticLayer(agents);
+            UpdateBusCaptions(agents);
             UpdateBusHeaderAndTraffic(agents);
         }
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"AgentBus card refresh failed: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Everything the static layer draws, as one string. Deliberately excludes
+    /// the call counter and last-seen age: those change constantly and would
+    /// defeat the whole point of gating the redraw.
+    /// </summary>
+    private string BusStateSignature(List<BusAgentState> agents)
+    {
+        var sb = new StringBuilder();
+        sb.Append((int)DashAgentBusCanvas.ActualWidth).Append('x')
+          .Append((int)DashAgentBusCanvas.ActualHeight).Append('|');
+        foreach (var a in agents)
+            sb.Append(a.Name).Append(a.Online ? '+' : '-')
+              .Append(a.EverSeen ? 'k' : 'n').Append(a.Pending).Append(';');
+        return sb.ToString();
     }
 
     // ───────────── data ─────────────
@@ -127,6 +170,8 @@ public partial class MainWindow
                     st.AgeSeconds = Math.Max(0, (DateTime.UtcNow - seen).TotalSeconds);
                     st.Online = st.AgeSeconds <= BusPresenceTtlSeconds;
                     st.ClientInfo = o["client"]?.ToString() ?? "";
+                    st.Calls = o["calls"]?.ToObject<long>() ?? 0;
+                    st.LastTool = o["lastTool"]?.ToString();
                 }
                 catch { /* half-written heartbeat — next tick catches up */ }
             }
@@ -165,6 +210,41 @@ public partial class MainWindow
     }
 
     // ───────────── animation triggers ─────────────
+
+    /// <summary>
+    /// Turn each agent's call-counter delta into visible round-trips on its
+    /// spoke: a bright dot agent → brain (the request), then a dimmer one
+    /// brain → agent (the answer). This is the card's only source of REAL
+    /// direction — mail flows are peer-to-peer and comparatively rare, so
+    /// without this the links never moved during ordinary brain work.
+    /// </summary>
+    private void AnimateCallFlows(List<BusAgentState> agents)
+    {
+        foreach (var a in agents)
+        {
+            if (!_busSeenCalls.TryGetValue(a.Name, out var prev))
+            {
+                // Seed silently: replaying a session's whole history as an
+                // animation storm on app start is noise, not signal.
+                _busSeenCalls[a.Name] = a.Calls;
+                continue;
+            }
+            _busSeenCalls[a.Name] = a.Calls;
+
+            // A restarted MCP resets its counter — treat any decrease as a
+            // fresh baseline rather than a negative delta.
+            var delta = a.Calls - prev;
+            if (delta <= 0) continue;
+            if (_busFirstScan) continue;
+
+            // Cap the burst: a busy agent can serve dozens of calls between
+            // polls and the point is to show that traffic is flowing, not to
+            // render every packet.
+            var shots = (int)Math.Min(delta, 3);
+            for (int i = 0; i < shots; i++)
+                AnimateBusRoundTrip(a.Name, i * 140);
+        }
+    }
 
     private void AnimateNewBusTraffic(List<BusAgentState> agents)
     {
@@ -218,6 +298,8 @@ public partial class MainWindow
 
         var center = new Point(w / 2, h / 2);
         _busNodePos.Clear();
+        _busCaptions.Clear();
+        _busCaptionAnchor.Clear();
         _busNodePos["brain"] = center;
 
         // Agents on an ellipse around the brain. Slot 0 points left so the
@@ -244,14 +326,39 @@ public partial class MainWindow
         foreach (var a in agents)
         {
             var p = _busNodePos[a.Name];
+            var color = BusAgentColor(a.Name);
+
             var line = new Line
             {
                 X1 = center.X, Y1 = center.Y, X2 = p.X, Y2 = p.Y,
-                Stroke = new SolidColorBrush(BusAgentColor(a.Name)) { Opacity = a.Online ? 0.55 : 0.18 },
+                Stroke = new SolidColorBrush(color) { Opacity = a.Online ? 0.34 : 0.18 },
                 StrokeThickness = a.Online ? 1.6 : 1.0
             };
             if (!a.EverSeen) line.StrokeDashArray = new DoubleCollection { 3, 4 };
             canvas.Children.Add(line);
+
+            // Live link: dashes marching along an online agent's spoke, so a
+            // connected agent reads as connected even while it is idle. This
+            // is an "alive" indicator, NOT a direction claim — the link is
+            // bidirectional, and direction is carried by the flow dots.
+            if (a.Online)
+            {
+                var flow = new Line
+                {
+                    X1 = p.X, Y1 = p.Y, X2 = center.X, Y2 = center.Y,
+                    Stroke = new SolidColorBrush(color) { Opacity = 0.85 },
+                    StrokeThickness = 1.7,
+                    StrokeDashCap = PenLineCap.Round,
+                    StrokeDashArray = new DoubleCollection { 0.6, 4.2 }
+                };
+                canvas.Children.Add(flow);
+                // Period == the dash array's sum, so the loop is seamless.
+                var march = new DoubleAnimation(4.8, 0, TimeSpan.FromSeconds(1.9))
+                {
+                    RepeatBehavior = RepeatBehavior.Forever
+                };
+                flow.BeginAnimation(Shape.StrokeDashOffsetProperty, march);
+            }
         }
 
         DrawBusBrainNode(canvas, center, agents.Any(a => a.Online));
@@ -268,6 +375,15 @@ public partial class MainWindow
         };
         Canvas.SetLeft(glow, center.X - 23); Canvas.SetTop(glow, center.Y - 23);
         canvas.Children.Add(glow);
+
+        // The brain breathes while anything is connected — the one cue that
+        // says "this hub is live" when no traffic happens to be in flight.
+        if (anyOnline)
+            glow.BeginAnimation(OpacityProperty, new DoubleAnimation(0.18, 0.42, TimeSpan.FromSeconds(1.6))
+            {
+                AutoReverse = true,
+                RepeatBehavior = RepeatBehavior.Forever
+            });
 
         var core = new Ellipse
         {
@@ -368,15 +484,43 @@ public partial class MainWindow
             FontSize = 9,
             Foreground = BusThemeBrush("NeuralText3", Color.FromRgb(0x7E, 0x88, 0x94))
         };
+        PositionBusCaption(caption, p);
+        canvas.Children.Add(caption);
+        // Kept so the caption can be refreshed in place. It changes on every
+        // tool call, and folding that into the redraw signature would rebuild
+        // the whole canvas constantly — killing the link animations again.
+        _busCaptions[a.Name] = caption;
+        _busCaptionAnchor[a.Name] = p;
+    }
+
+    private static void PositionBusCaption(TextBlock caption, Point p)
+    {
         caption.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
         Canvas.SetLeft(caption, p.X - caption.DesiredSize.Width / 2);
         Canvas.SetTop(caption, p.Y + 29);
-        canvas.Children.Add(caption);
+    }
+
+    /// <summary>Refresh the per-agent captions without touching the canvas.</summary>
+    private void UpdateBusCaptions(List<BusAgentState> agents)
+    {
+        foreach (var a in agents)
+        {
+            if (!_busCaptions.TryGetValue(a.Name, out var tb)) continue;
+            var text = BusAgentCaption(a);
+            if (tb.Text == text) continue;
+            tb.Text = text;
+            if (_busCaptionAnchor.TryGetValue(a.Name, out var p)) PositionBusCaption(tb, p);
+        }
     }
 
     private static string BusAgentCaption(BusAgentState a)
     {
         if (!a.EverSeen) return "ยังไม่เคยเชื่อมต่อ";
+        // Presence is rewritten on every tool call, so a very fresh timestamp
+        // means the agent is working right now — name what it just did rather
+        // than the generic "online".
+        if (a.Online && a.AgeSeconds is double fresh && fresh < 25 && !string.IsNullOrEmpty(a.LastTool))
+            return Ellipsize(a.LastTool!, 18);
         if (a.Online) return "online";
         if (a.AgeSeconds is not double s) return "offline";
         if (s < 3600) return $"{Math.Max(1, Math.Round(s / 60))} นาทีก่อน";
@@ -441,22 +585,14 @@ public partial class MainWindow
             !_busNodePos.TryGetValue(to, out var pTo) ||
             !_busNodePos.TryGetValue("brain", out var pBrain)) return;
 
-        var dot = new Ellipse
-        {
-            Width = 7, Height = 7,
-            Fill = new SolidColorBrush(BusAgentColor(from)),
-            Effect = new DropShadowEffect
-            {
-                Color = BusAgentColor(from), BlurRadius = 8, ShadowDepth = 0, Opacity = 0.9
-            }
-        };
-        Canvas.SetLeft(dot, pFrom.X - 3.5); Canvas.SetTop(dot, pFrom.Y - 3.5);
+        var dot = NewBusFlowDot(BusAgentColor(from), 7, 1.0);
+        PlaceBusDot(dot, pFrom, 7);
         DashAgentBusFxCanvas.Children.Add(dot);
 
-        var leg1 = BusLegAnimation(dot, pFrom, pBrain, 650);
+        var leg1 = BusLegAnimation(dot, pFrom, pBrain, 650, 7);
         leg1.Completed += (_, _) =>
         {
-            var leg2 = BusLegAnimation(dot, pBrain, pTo, 650);
+            var leg2 = BusLegAnimation(dot, pBrain, pTo, 650, 7);
             leg2.Completed += (_, _) =>
             {
                 var fade = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(250));
@@ -468,12 +604,72 @@ public partial class MainWindow
         leg1.Begin();
     }
 
-    private static Storyboard BusLegAnimation(Ellipse dot, Point a, Point b, int ms)
+    /// <summary>
+    /// One request/response round-trip on an agent's spoke: a bright dot in
+    /// the agent's colour travelling agent → brain, then a smaller blue one
+    /// coming back brain → agent. Colour carries the direction — outbound is
+    /// the caller's identity, inbound is the brain's — so the two legs stay
+    /// distinguishable even when several overlap.
+    /// </summary>
+    /// <param name="delayMs">Stagger for bursts, so N calls read as N pulses
+    /// rather than one thick blob.</param>
+    private void AnimateBusRoundTrip(string agent, int delayMs)
+    {
+        if (!_busNodePos.TryGetValue(agent, out var pAgent) ||
+            !_busNodePos.TryGetValue("brain", out var pBrain)) return;
+
+        var color = BusAgentColor(agent);
+        var req = NewBusFlowDot(color, 7, 0);        // starts invisible; fades in on cue
+        PlaceBusDot(req, pAgent, 7);
+        DashAgentBusFxCanvas.Children.Add(req);
+
+        var begin = TimeSpan.FromMilliseconds(delayMs);
+        var outbound = BusLegAnimation(req, pAgent, pBrain, 480, 7);
+        outbound.BeginTime = begin;
+        req.BeginAnimation(OpacityProperty,
+            new DoubleAnimation(0, 0.95, TimeSpan.FromMilliseconds(110)) { BeginTime = begin });
+
+        outbound.Completed += (_, _) =>
+        {
+            DashAgentBusFxCanvas.Children.Remove(req);
+            PulseBusNode("brain");                   // the brain acknowledges
+
+            var res = NewBusFlowDot(BusColorBrain, 5, 0.8);
+            PlaceBusDot(res, pBrain, 5);
+            DashAgentBusFxCanvas.Children.Add(res);
+
+            var inbound = BusLegAnimation(res, pBrain, pAgent, 480, 5);
+            inbound.Completed += (_, _) =>
+            {
+                var fade = new DoubleAnimation(0.8, 0, TimeSpan.FromMilliseconds(180));
+                fade.Completed += (_, _) => DashAgentBusFxCanvas.Children.Remove(res);
+                res.BeginAnimation(OpacityProperty, fade);
+            };
+            inbound.Begin();
+        };
+        outbound.Begin();
+    }
+
+    private static Ellipse NewBusFlowDot(Color color, double size, double opacity) => new()
+    {
+        Width = size, Height = size, Opacity = opacity,
+        Fill = new SolidColorBrush(color),
+        Effect = new DropShadowEffect { Color = color, BlurRadius = 9, ShadowDepth = 0, Opacity = 0.9 }
+    };
+
+    private static void PlaceBusDot(Ellipse dot, Point p, double size)
+    {
+        Canvas.SetLeft(dot, p.X - size / 2);
+        Canvas.SetTop(dot, p.Y - size / 2);
+    }
+
+    private static Storyboard BusLegAnimation(Ellipse dot, Point a, Point b, int ms, double size)
     {
         var sb = new Storyboard();
         var ease = new SineEase { EasingMode = EasingMode.EaseInOut };
-        var ax = new DoubleAnimation(a.X - 3.5, b.X - 3.5, TimeSpan.FromMilliseconds(ms)) { EasingFunction = ease };
-        var ay = new DoubleAnimation(a.Y - 3.5, b.Y - 3.5, TimeSpan.FromMilliseconds(ms)) { EasingFunction = ease };
+        var r = size / 2;
+        var ax = new DoubleAnimation(a.X - r, b.X - r, TimeSpan.FromMilliseconds(ms)) { EasingFunction = ease };
+        var ay = new DoubleAnimation(a.Y - r, b.Y - r, TimeSpan.FromMilliseconds(ms)) { EasingFunction = ease };
         Storyboard.SetTarget(ax, dot); Storyboard.SetTargetProperty(ax, new PropertyPath("(Canvas.Left)"));
         Storyboard.SetTarget(ay, dot); Storyboard.SetTargetProperty(ay, new PropertyPath("(Canvas.Top)"));
         sb.Children.Add(ax); sb.Children.Add(ay);
@@ -509,7 +705,8 @@ public partial class MainWindow
     // ───────────── helpers ─────────────
 
     private static Color BusAgentColor(string agent) =>
-        BusAgentColors.TryGetValue(agent, out var c) ? c : BusColorUnknown;
+        agent.Equals("brain", StringComparison.OrdinalIgnoreCase) ? BusColorBrain
+        : BusAgentColors.TryGetValue(agent, out var c) ? c : BusColorUnknown;
 
     private static string BusDisplayName(string agent) => agent.ToLowerInvariant() switch
     {

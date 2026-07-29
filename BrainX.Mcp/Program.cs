@@ -912,6 +912,10 @@ internal static partial class Program
             // the daily session log. The brain auto-records what happens.
             AutoLogSession(name ?? "unknown", SummarizeArgs(name, args));
 
+            // Bus telemetry: advance this agent's call counter so the
+            // dashboard can animate the round-trip it just served.
+            NoteBusActivity(name);
+
             var content = new JArray { new JObject
             {
                 ["type"] = "text",

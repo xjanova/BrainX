@@ -40,6 +40,16 @@ internal static partial class Program
     private static readonly object _busLock = new();
     private static Timer? _presenceTimer;
 
+    /// <summary>
+    /// Monotonic count of tool calls this session has served, republished in
+    /// the presence file on every call. The dashboard's AGENT BUS card diffs
+    /// it between polls to animate REAL request/response flow — without it the
+    /// card can only show mail, and the access log is no help because it
+    /// stamps a hardcoded client:"mcp" with no agent identity.
+    /// </summary>
+    private static long _busCallCount;
+    private static string? _busLastTool;
+
     private static string BusRoot => Path.Combine(_vaultPath, ".obsidianx", "agent-bus");
     private static string BusInboxDir(string agent) => Path.Combine(BusRoot, "inbox", agent);
     private static string BusReadDir(string agent) => Path.Combine(BusRoot, "read", agent);
@@ -96,14 +106,40 @@ internal static partial class Program
     {
         Directory.CreateDirectory(BusPresenceDir);
         var me = BusIdentity();
-        AtomicWriteJson(Path.Combine(BusPresenceDir, me + ".json"), new JObject
+        var o = new JObject
         {
             ["agent"] = me,
             ["client"] = _clientName ?? "unknown",
             ["pid"] = Environment.ProcessId,
             ["lastSeenUtc"] = DateTime.UtcNow.ToString("o"),
-            ["version"] = ServerVersion
-        });
+            ["version"] = ServerVersion,
+            ["calls"] = Interlocked.Read(ref _busCallCount)
+        };
+        if (!string.IsNullOrEmpty(_busLastTool)) o["lastTool"] = _busLastTool;
+        AtomicWriteJson(Path.Combine(BusPresenceDir, me + ".json"), o);
+    }
+
+    /// <summary>
+    /// Republish presence immediately after serving a tool call, with the call
+    /// counter advanced. Two effects on the dashboard: the agent reads as
+    /// active the instant it does anything (rather than up to 30 s later on
+    /// the heartbeat), and the counter delta tells the card exactly how many
+    /// request/response round-trips to animate on that agent's spoke.
+    ///
+    /// Best-effort and silent: a UI signal must never be able to fail a tool
+    /// call. No-ops before the handshake starts the heartbeat, which keeps CLI
+    /// subcommands (register-claude, bake-bundles, embed) out of the bus.
+    /// </summary>
+    private static void NoteBusActivity(string? tool)
+    {
+        if (_presenceTimer == null) return;
+        try
+        {
+            Interlocked.Increment(ref _busCallCount);
+            _busLastTool = tool;
+            WritePresence();
+        }
+        catch { }
     }
 
     /// <summary>Seconds since the agent's last heartbeat, or null if never seen.</summary>
