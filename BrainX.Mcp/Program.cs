@@ -3446,11 +3446,25 @@ internal static partial class Program
                 // return 0 for every note. See EmbeddingService.ResolveModel.
                 ["model"] = EmbeddingService.ResolveModel(_vaultPath),
                 ["input"] = text,
-                // Ollama evicts an idle model after ~5 min. Every eviction
-                // costs the next caller a full cold load, so a brain that is
-                // consulted a few times an hour paid the 12.7 s penalty on
-                // essentially every query. Hold it for the working session.
-                ["keep_alive"] = EmbedKeepAlive
+                // Ollama evicts an idle model after ~5 min, and every eviction
+                // costs the next caller a full cold load. Hold it a while —
+                // but see EmbedKeepAlive: not so long that it squats on a GPU
+                // the user's coding model needs.
+                ["keep_alive"] = EmbedKeepAlive,
+                // Embeddings run on the CPU. Measured on this box (GTX 1070 Ti,
+                // bge-m3): GPU cold 12.7 s / warm 220 ms and 1.21 GB of VRAM
+                // pinned, versus CPU cold 2.1 s / warm 175 ms and ZERO VRAM.
+                // The CPU is faster on both counts because the win from GPU
+                // matmul never repays shipping 1.2 GB across the bus for a
+                // handful of short queries.
+                //
+                // The VRAM is the real point. This machine runs a 7B coder on
+                // the same card; pinning the embedder beside it contributed to
+                // a hard power-limit reset on 2026-07-29, ~2 min after a local
+                // model loaded on top of a 30 min keep_alive. An embedder must
+                // never compete with the model doing the actual work.
+                // Override with BRAINX_EMBED_GPU=1 on a box with a spare card.
+                ["options"] = new JObject { ["num_gpu"] = EmbedGpuLayers }
             }.ToString();
             var resp = http.PostAsync("http://localhost:11434/api/embed",
                 new System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json"))
@@ -3497,9 +3511,22 @@ internal static partial class Program
     /// up. Must exceed the model's load time or the fallback is guaranteed.</summary>
     private const int EmbedHttpTimeoutSeconds = 30;
 
-    /// <summary>Ollama keep_alive for the embedding model. Long enough that a
-    /// normal working session never re-pays the cold load.</summary>
-    private const string EmbedKeepAlive = "30m";
+    /// <summary>
+    /// Ollama keep_alive for the embedding model. 10m, not the 30m first
+    /// shipped: on CPU a cold load is only ~2 s, so a long pin buys little,
+    /// and holding a model resident for half an hour is exactly the kind of
+    /// background resource squat that bit this machine.
+    /// </summary>
+    private static string EmbedKeepAlive =>
+        Environment.GetEnvironmentVariable("BRAINX_EMBED_KEEP_ALIVE") is string s && s.Length > 0 ? s : "10m";
+
+    /// <summary>
+    /// GPU layers for the embedding model. 0 = CPU, which is both faster in
+    /// wall-clock here AND leaves the GPU entirely to the user's coding model.
+    /// Set BRAINX_EMBED_GPU=1 to let Ollama place it as it sees fit.
+    /// </summary>
+    private static int EmbedGpuLayers =>
+        Environment.GetEnvironmentVariable("BRAINX_EMBED_GPU") == "1" ? 99 : 0;
 
     /// <summary>
     /// Fire one tiny embed in the background at startup so Ollama has the
