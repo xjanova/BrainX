@@ -37,10 +37,30 @@ const STEPS = [
 
 /* A section that never arrives must not hold the boot screen hostage. After
  * this long we mark the stragglers "skipped" and show the HUD anyway — a HUD
- * missing one panel beats a black screen with a stuck progress bar. */
+ * missing one panel beats a black screen with a stuck progress bar.
+ *
+ * The clock RESTARTS whenever the host says it is still working (hudBootBusy),
+ * because the host now loads the page BEFORE it finishes reading the vault:
+ * on a big brain that read is longer than this deadline, and expiring mid-read
+ * would lift the curtain on a HUD full of zeroes. */
 const BOOT_DEADLINE_MS = 9000;
 
 const state = { done: new Set(), started: performance.now(), finished: false };
+let bootDeadline = null;
+
+function armBootDeadline() {
+    clearTimeout(bootDeadline);
+    bootDeadline = setTimeout(() => {
+        STEPS.forEach(s => { if (!state.done.has(s.id)) markStep(s.id, 'skip'); });
+    }, BOOT_DEADLINE_MS);
+}
+
+/** Host heartbeat during a long read: keep the curtain, say why. */
+function noteHostBusy(label) {
+    if (state.finished) return;
+    if (label) setText('hud-boot-busy', label);
+    armBootDeadline();
+}
 
 /** The Agent Bus solar system. Loaded lazily so a HUD-less page (wallpaper,
  *  dashboard embed) never pays for three.js twice. */
@@ -400,6 +420,11 @@ function onHudMessage(evt) {
         case 'hudNetwork':   renderNetwork(m.payload); break;
         case 'hudMcp':       renderMcp(m.payload); break;
         case 'hudClaude':    renderClaude(m.payload); break;
+        // The host is still reading the vault. Show what it is doing and push
+        // the "a section never arrived" deadline out — that deadline exists to
+        // rescue a HUD whose host went quiet, not to overrule a host that is
+        // telling us, right now, that it is still working.
+        case 'hudBootBusy':  noteHostBusy(m.payload?.label); break;
         // The galaxy payload already flows for the renderer; piggyback on it so
         // the first two boot steps complete without waiting on the host's own
         // hudStats. brain-export.json is PascalCase (the C# model serialised
@@ -522,10 +547,10 @@ export function initHud() {
     // moves immediately and the window never looks dead.
     setTimeout(() => markStep('galaxy'), 400);
 
-    // Safety net: never let a missing section strand the boot screen.
-    setTimeout(() => {
-        STEPS.forEach(s => { if (!state.done.has(s.id)) markStep(s.id, 'skip'); });
-    }, BOOT_DEADLINE_MS);
+    // Safety net: never let a missing section strand the boot screen. Rearmed
+    // by every hudBootBusy heartbeat, so a slow host extends it and a silent
+    // host does not.
+    armBootDeadline();
 
     post({ type: 'hudReady' });
     if (HUD_DEMO) runDemo();

@@ -537,6 +537,13 @@ body.hud-active #settings-toggle {
     transition: width 420ms cubic-bezier(.2, .8, .3, 1);
 }
 
+.hud-boot-busy {
+    font-family: var(--hud-mono); font-size: 10.5px;
+    color: rgba(140, 214, 255, 0.9);
+    margin: 2px 0 10px;
+    min-height: 13px;                /* reserve the line so nothing jumps */
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .hud-boot-steps { display: flex; flex-direction: column; gap: 3px; }
 .hud-boot-step {
     display: grid; grid-template-columns: 14px 1fr auto; gap: 8px; align-items: baseline;

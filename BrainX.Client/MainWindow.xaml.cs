@@ -2290,7 +2290,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void Window_Loaded(object sender, RoutedEventArgs e)
+    private async void Window_Loaded(object sender, RoutedEventArgs e)
     {
         Services.StartupProgress.Report("Loading theme & resources", 0.10, tag: "theme");
 
@@ -2315,8 +2315,19 @@ public partial class MainWindow : Window
         ApplyBgDim();
         PopulateThemeList();
 
+        // The Universe starts BEFORE the heavy work, not after it. Its boot
+        // screen is the app's loading screen now, and it renders in the
+        // WebView's own process — so it animates through the indexing below
+        // instead of appearing once the indexing is already finished.
+        Services.StartupProgress.Report("Initializing Universe galaxy", 0.30, tag: "universe");
+        SetSidebarAutoHide(true);
+        _ = InitializeUniverseAsync();
+
         Services.StartupProgress.Report("Indexing vault notes", 0.42, tag: "index");
-        IndexVault();
+        // AWAIT, not call: this is the ~15s that used to freeze the whole app
+        // and forced a separate splash window to exist. The dispatcher stays
+        // free through it.
+        await IndexVaultAsync();
         Services.StartupProgress.Report(
             $"Loaded {_graph.TotalNodes:N0} notes · {_graph.TotalEdges:N0} wiki-links",
             0.55, tag: "index");
@@ -2351,7 +2362,10 @@ public partial class MainWindow : Window
         // drag mode — which doesn't match the "AI watch" framing the user
         // wants. Done after the physics dispatches its first tick so node
         // positions are real.
-        Dispatcher.BeginInvoke(new Action(() =>
+        // Discarded on purpose (here and below): these are queued for later,
+        // not awaited. Window_Loaded is async now, so an un-discarded
+        // BeginInvoke reads as a forgotten await.
+        _ = Dispatcher.BeginInvoke(new Action(() =>
         {
             FitGraphCamera();
             _cameraMode = CameraMode.RealBrain;
@@ -2364,13 +2378,13 @@ public partial class MainWindow : Window
         // Cheap (single sequential file read), so a busy brain doesn't
         // accumulate stale numbers in the toolbar.
         StartTokenSavingsTimer();
-        Dispatcher.BeginInvoke(new Action(FitDashCamera),
+        _ = Dispatcher.BeginInvoke(new Action(FitDashCamera),
             System.Windows.Threading.DispatcherPriority.ContextIdle);
 
         // 2D-default fit: dashboard map starts in 2D mode now, so call the
         // 2D fit on its renderer once layout is settled. (FitDashCamera
         // above only adjusts the 3D camera distance.)
-        Dispatcher.BeginInvoke(new Action(() => DashGraph2D.FitToContent()),
+        _ = Dispatcher.BeginInvoke(new Action(() => DashGraph2D.FitToContent()),
             System.Windows.Threading.DispatcherPriority.ContextIdle);
 
         // Wire 2D renderers to the same physics state so toggling is instant.
@@ -2407,51 +2421,19 @@ public partial class MainWindow : Window
         StartAccessLogWatcher();
         StartMcpStatusWatcher();
 
-        // Universe is the default view now — kick off WebView2 init.
-        // CRITICAL: we delay this by a full second AFTER Window_Loaded
-        // ends so the user actually sees the Universe loading overlay
-        // sit on screen with its spinner before stages start ticking.
+        // The Universe was started at the TOP of this method, before the
+        // indexing — it is the loading screen, so it has to exist while the
+        // loading happens. It used to be kicked off here, 250ms after
+        // everything was already done, which is why its boot sequence only
+        // ever appeared once there was nothing left to wait for.
         //
-        // Why 1000ms specifically:
-        //   - Splash fade is 420ms (parallel thread); during that time
-        //     the splash covers MainWindow — the overlay underneath
-        //     isn't visible yet.
-        //   - On fast machines with WebView2 already cached, the entire
-        //     init flow (EnsureCoreWebView2Async → Source → JS ready
-        //     → snapshot push) can finish in <400ms. If we kick it off
-        //     at ContextIdle (immediately after Window_Loaded), all
-        //     three overlay stages flash by behind the splash and the
-        //     user sees "splash → instant full UI" with no Universe
-        //     loading visible at all.
-        //   - 1000ms gives splash time to fully fade (420ms) PLUS ~580ms
-        //     of clear overlay visibility before the first stage ticks.
-        //   - Cost is zero perceived — splash is already animating during
-        //     these 1000ms; nothing is "waiting".
-        // Universe is the startup view, so it starts with its menu tucked away
-        // — same state a Nav_Click to it would produce.
-        SetSidebarAutoHide(true);
-
-        Services.StartupProgress.Report("Initializing Universe galaxy", 0.92, tag: "universe");
-        // 250ms (was 1000ms): just enough to let Window_Loaded finish painting
-        // before WebView2 init grabs the dispatcher. The old 1000ms existed to
-        // showcase the loading overlay, but with three.js now vendored on disk
-        // (no CDN fetch) the whole init is fast — the user asked for a fast
-        // first boot over a long overlay cameo (2026-07-10).
-        var universeStartTimer = new System.Windows.Threading.DispatcherTimer
-        {
-            Interval = TimeSpan.FromMilliseconds(250)
-        };
-        universeStartTimer.Tick += (_, _) =>
-        {
-            universeStartTimer.Stop();
-            _ = InitializeUniverseAsync();
-            // The dashboard's own mini-galaxy is NOT started here any more.
-            // That page is retired and collapsed, so spinning up a second
-            // WebView2 + three.js scene at launch would burn a GPU context
-            // on something nobody can see. Nav_Click starts it if the user
-            // ever navigates back to the Dashboard.
-        };
-        universeStartTimer.Start();
+        // The dashboard's own mini-galaxy is still not started at launch: that
+        // page is retired and collapsed, and a second WebView2 + three.js scene
+        // would burn a GPU context on something nobody can see. Nav_Click
+        // starts it if the user ever navigates back to the Dashboard.
+        Services.StartupProgress.Report("Wiring the galaxy", 0.92, tag: "universe-wire");
+        // Everything the HUD reads is now real — release its boot curtain.
+        MarkHudBrainReady();
         _ = LoadAiBackends();
         _ = RefreshAiKeyStatus();
         InitRedirectToggle();
@@ -5747,16 +5729,63 @@ public partial class MainWindow : Window
     }
 
 
+    /// <summary>
+    /// Startup-only variant: the same work, with the expensive half on a
+    /// worker thread so the dispatcher keeps pumping.
+    ///
+    /// This is what killed the splash screen. Indexing 1,200 notes takes ~15s
+    /// and it used to run ON the UI thread, which froze everything the app
+    /// could draw — the only way to show progress was a window on its own
+    /// thread. With the walk off the dispatcher, BrainX can draw its own
+    /// loading screen, and the Universe's WebView (a separate process) is
+    /// free to render its boot sequence the whole time.
+    ///
+    /// Callers that are NOT startup (the Re-index button) keep using the
+    /// synchronous <see cref="IndexVault"/>: they run when the app is idle and
+    /// already responsive, and making them async would change when their
+    /// callers' following statements see the new graph.
+    /// </summary>
+    private async Task IndexVaultAsync()
+    {
+        StatusText.Text = "Indexing vault...";
+        PrepareIndexer();
+        // _graph starts life as an empty KnowledgeGraph, so anything that runs
+        // during this await (the render loop, a nav click) sees an empty brain
+        // rather than a null one.
+        _graph = await Task.Run(() => _indexer.IndexVault(_vaultPath));
+        await Task.Run(FinishIndexOnWorker);
+        ReportIndexResult();
+        StartEmbeddingPrecompute();
+    }
+
     private void IndexVault()
     {
         StatusText.Text = "Indexing vault...";
+        PrepareIndexer();
+        _graph = _indexer.IndexVault(_vaultPath);
+        FinishIndexOnWorker();
+        ReportIndexResult();
+        StartEmbeddingPrecompute();
+    }
+
+    /// <summary>Cheap setup that has to happen before the walk. Touches only
+    /// fields, so it is safe on either thread — but it is always called from
+    /// the UI thread, before the work is handed off.</summary>
+    private void PrepareIndexer()
+    {
         if (!Directory.Exists(_vaultPath)) Directory.CreateDirectory(_vaultPath);
         _indexer.AutoLinker ??= new AutoLinker();
         _indexer.AutoLinker.Options.Enabled = _autoLinkEnabled;
         _indexer.AutoLinker.Options.Threshold = _autoLinkThreshold;
         _categories ??= new CategoryRegistry(_vaultPath);
         _indexer.CustomCategories = _categories;
-        _graph = _indexer.IndexVault(_vaultPath);
+    }
+
+    /// <summary>Storage upsert + brain-export. No UI, so it can run on the
+    /// worker with the walk.</summary>
+    private void FinishIndexOnWorker()
+    {
+        _lastExportMsg = "";
 
         // Push into configured storage (SQLite by default — FTS5 search)
         try
@@ -5770,20 +5799,19 @@ public partial class MainWindow : Window
         // SAME node IDs we rendered. Skipping this caused the pulse
         // LEDs to miss their targets because IDs drifted across
         // re-index runs. Now stable IDs + fresh export → always sync.
-        string exportMsg;
         try
         {
             if (_identity == null)
-                exportMsg = " · export SKIPPED (identity not ready)";
+                _lastExportMsg = " · export SKIPPED (identity not ready)";
             else
             {
                 var r = _exporter.Export(_vaultPath, _identity, _graph);
-                exportMsg = $" · exported {r.NodeCount} nodes → brain-export.json";
+                _lastExportMsg = $" · exported {r.NodeCount} nodes → brain-export.json";
             }
         }
         catch (Exception ex)
         {
-            exportMsg = $" · EXPORT FAILED: {ex.Message}";
+            _lastExportMsg = $" · EXPORT FAILED: {ex.Message}";
             Debug.WriteLine($"Export after index failed: {ex}");
             // File-logged so the user can inspect after the fact
             try
@@ -5793,16 +5821,27 @@ public partial class MainWindow : Window
             }
             catch { }
         }
+    }
 
+    /// <summary>Carries the export outcome from the worker back to the status
+    /// line, which only the UI thread may touch.</summary>
+    private string _lastExportMsg = "";
+
+    private void ReportIndexResult()
+    {
         var wikiEdges = _graph.Edges.Count(e => e.RelationType == "wiki-link");
         var autoEdges = _graph.Edges.Count - wikiEdges;
-        StatusText.Text = $"Indexed {_graph.TotalNodes} nodes · {wikiEdges} wiki · {autoEdges} auto-links · storage: {_storage?.ProviderName ?? "File"}{exportMsg}";
+        StatusText.Text = $"Indexed {_graph.TotalNodes} nodes · {wikiEdges} wiki · {autoEdges} auto-links · storage: {_storage?.ProviderName ?? "File"}{_lastExportMsg}";
+    }
 
-        // Background-precompute embeddings for any new/changed notes so
-        // the MCP semantic-search tools have vectors to rank against.
-        // Fire-and-forget: doesn't block indexing, gracefully no-ops
-        // when Ollama or the model isn't available, and writes sidecar
-        // .bin files into .obsidianx/embeddings/.
+    /// <summary>
+    /// Background-precompute embeddings for any new/changed notes so the MCP
+    /// semantic-search tools have vectors to rank against. Fire-and-forget:
+    /// gracefully no-ops when Ollama or the model isn't available, and writes
+    /// sidecar .bin files into .obsidianx/embeddings/.
+    /// </summary>
+    private void StartEmbeddingPrecompute()
+    {
         _ = Task.Run(async () =>
         {
             try

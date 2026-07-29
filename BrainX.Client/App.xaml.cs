@@ -78,26 +78,22 @@ public partial class App : Application
             Debug.WriteLine($"Shortcut setup failed: {ex.Message}");
         }
 
-        // v2.6.1+ — splash before MainWindow.
-        // We removed StartupUri from App.xaml so we can sequence things:
-        //   1. Spin up the splash on its own STA thread (it paints + animates
-        //      immediately, independent of the main UI thread).
-        //   2. Defer MainWindow construction to ApplicationIdle so the splash
-        //      gets a chance to render fully before the heavy work begins.
-        //   3. MainWindow emits StartupProgress.Report at milestones; splash
-        //      ticks them live.
-        //   4. MainWindow's Loaded handler calls StartupProgress.Complete()
-        //      → splash fades + closes itself.
-        try
-        {
-            SplashWindow.LaunchOnDedicatedThread();
-            StartupProgress.Report("Booting BrainX...", 0.05, tag: "boot");
-        }
-        catch (Exception ex) { Debug.WriteLine($"Splash launch failed (non-fatal): {ex.Message}"); }
+        // NO SPLASH WINDOW. Loading happens inside BrainX itself.
+        //
+        // The splash existed for one reason: Window_Loaded blocked the UI
+        // thread for ~15s indexing the vault, so anything drawn by that thread
+        // was frozen and only a window on its OWN thread could animate. The
+        // indexing moved off the dispatcher (see MainWindow.Window_Loaded), so
+        // the main window can now paint its own progress — and the Universe's
+        // boot screen, which renders in the WebView's separate process, is
+        // immune to the UI thread regardless.
+        //
+        // StartupProgress still reports: SplashWindow is gone as a consumer,
+        // and the Universe boot screen took its place (MainWindow forwards the
+        // stages into it). The class stays because it is also the app's boot
+        // timeline for diagnostics.
+        StartupProgress.Report("Booting BrainX...", 0.05, tag: "boot");
 
-        // Defer MainWindow creation so the splash thread has a real chance
-        // to paint + run its entry animations before MainWindow's heavy
-        // constructor seizes the dispatcher.
         Dispatcher.InvokeAsync(() =>
         {
             var main = new MainWindow();

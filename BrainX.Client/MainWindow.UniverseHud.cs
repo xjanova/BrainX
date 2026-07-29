@@ -37,6 +37,15 @@ public partial class MainWindow
     /// exists isn't wasted (and so a Ctrl+R reload re-arms the whole HUD).</summary>
     private bool _hudPageReady;
 
+    /// <summary>
+    /// False until the vault has finished indexing. The page now loads WHILE
+    /// the brain is still being read, so pushing payloads on hudReady would
+    /// fill every readout with zeroes and lift the boot curtain on an empty
+    /// HUD — the app looking broken rather than looking busy. Until this
+    /// flips, the host only sends the boot screen a heartbeat label.
+    /// </summary>
+    private bool _hudBrainReady;
+
     /// <summary>Per-agent call counters from the last poll. Deltas become the
     /// motes falling into the HUD's star. Kept separate from the dashboard
     /// card's <c>_busSeenCalls</c> so the two surfaces never eat each other's
@@ -71,6 +80,17 @@ public partial class MainWindow
     // Timer
     // ═════════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// The vault is indexed and every readout has something true to say.
+    /// Called at the end of startup — this is what releases the boot curtain.
+    /// </summary>
+    private void MarkHudBrainReady()
+    {
+        if (_hudBrainReady) return;
+        _hudBrainReady = true;
+        if (_hudPageReady) PushAllHudPayloads();
+    }
+
     private void StartUniverseHud()
     {
         if (_hudTimer != null) return;
@@ -82,6 +102,14 @@ public partial class MainWindow
         _hudTimer.Tick += async (_, _) =>
         {
             if (!_hudPageReady || !HudOnScreen) return;
+            if (!_hudBrainReady)
+            {
+                // Heartbeat while the vault is still being read: it keeps the
+                // boot screen's own "a section never arrived" deadline from
+                // firing and lifting the curtain on half a HUD.
+                PostHud("hudBootBusy", new { label = StatusText?.Text ?? "Reading the brain…" });
+                return;
+            }
             // The tick awaits a counter read; a machine where that read stalls
             // must not queue ticks behind it and then fire them all at once.
             if (_hudTicking) return;
@@ -124,6 +152,13 @@ public partial class MainWindow
     /// </summary>
     private async void PushAllHudPayloads()
     {
+        // Still reading the vault: keep the boot screen up and tell it what is
+        // taking the time, rather than publishing an empty brain.
+        if (!_hudBrainReady)
+        {
+            PostHud("hudBootBusy", new { label = StatusText?.Text ?? "Reading the brain…" });
+            return;
+        }
         try
         {
             _hudHealth = null;               // force a fresh health read
