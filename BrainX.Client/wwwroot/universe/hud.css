@@ -40,7 +40,16 @@ body.hud-active {
        collide with another one regardless of how much content it has. */
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr) minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr) auto;
+    /* FRACTIONAL rows, not auto.
+       With `auto` the top and bottom rows sized to their content and the
+       middle row got whatever was left — which, once the activity feed grew a
+       scrollback, was almost nothing: the System panel rendered as the single
+       line "GPU 42%" and Expertise as one category. Content-sized tracks let
+       one readout starve another. Shares can't: a panel that wants more than
+       its track scrolls inside it, and every panel keeps a floor.
+       The bottom row is widest because the agent-bus canvas and the MCP +
+       Claude stack are the tallest things on the HUD. */
+    grid-template-rows: minmax(0, 0.85fr) minmax(0, 1.1fr) minmax(0, 1.15fr);
     grid-template-areas:
         "tl tc tr"
         "ml .  mr"
@@ -71,6 +80,46 @@ body.hud-active #dash-overlay-load {
     display: none !important;
 }
 
+/* The last collision on this page, and the one the audit kept reporting:
+   #hud-bottom is left:22px/right:22px with space-between, so its size badge is
+   pushed into the exact 36px corner the settings gear occupies — the gear was
+   sitting ON the text, cutting "1698 × 954" in half. Over the old bright page
+   nobody noticed; over the galaxy it reads as damage.
+   The badge is a canvas-dimensions readout that tells a user nothing, so the
+   HUD drops it, and the strip stops short of the gear so the two boxes no
+   longer intersect at all. The hint on the left — how to fly the camera —
+   stays, because that is the half worth keeping. */
+body.hud-active #size { display: none; }
+body.hud-active #hud-bottom { right: calc(22px + 36px + 10px); }
+
+/* The settings panel is the one surface here the user OPERATES rather than
+   reads, and it lands wherever the galaxy happens to be bright. Glass at 52%
+   over a nebula left the labels and slider values guesswork. Controls get a
+   real backing: near-opaque, a defined edge, and a shadow that separates it
+   from the stars behind. The readouts stay frameless — they are glanced at,
+   not aimed at. */
+body.hud-active #settings-panel {
+    background: rgba(6, 5, 18, 0.94);
+    border-color: rgba(108, 240, 255, 0.28);
+    box-shadow: 0 18px 48px -12px rgba(0, 0, 0, 0.9),
+                0 0 0 1px rgba(0, 0, 0, 0.45);
+    /* ABOVE the readouts. #hud-layer is z-index 40 and this panel was 11, so
+       the System and MCP figures painted straight through the settings panel
+       and every slider label had a number sitting on it. Opacity alone could
+       never fix that — the HUD was on top, not behind. */
+    z-index: 60;
+}
+body.hud-active #settings-panel .panel-title { color: rgba(190, 236, 255, 0.9); }
+body.hud-active #settings-panel .setting-row label { color: rgba(214, 210, 240, 0.92); }
+body.hud-active #settings-panel .setting-val { color: #8ef3ff; }
+/* The gear that opens it needs the same treatment for the same reason — it is
+   a target, and a translucent target over a bright star is invisible. */
+body.hud-active #settings-toggle {
+    background: rgba(6, 5, 18, 0.88);
+    border-color: rgba(108, 240, 255, 0.34);
+    z-index: 61;   /* the button that opens the panel must never end up under it */
+}
+
 #hud-layer > * { pointer-events: auto; }
 
 .hud-tl { grid-area: tl; justify-self: start; align-self: start; }
@@ -86,8 +135,20 @@ body.hud-active #dash-overlay-load {
    the bottom-right OUTSIDE this grid, so the bottom-right readout has to step
    up over it — the grid's own bottom padding only clears the hint strip that
    runs along the very bottom. Measured, not guessed: the gear's top sat 14px
-   inside where this panel ended. */
-.hud-panel.hud-br { margin-bottom: 34px; }
+   inside where this panel ended.
+   The max-height has to pay for that margin. max-height:100% caps the BOX,
+   not the box plus its margin, so a full-height panel plus 34px overflowed
+   its track upward (align-self:end) and sat 7px on top of the panel above.
+   The selector needs the id too: the general "#hud-layer > .hud-panel" rule
+   above sets max-height:100% and would out-specify a plain class pair.
+   14px, not the old 34: the grid's bottom padding already ends 6px above the
+   gear, so the step-up only has to cover that plus a hair. The other 20px was
+   coming straight out of this panel's usable height, and it is the panel with
+   the most to say. */
+#hud-layer > .hud-panel.hud-br {
+    margin-bottom: 14px;
+    max-height: calc(100% - 14px);
+}
 
 /* ── Panel chrome ─────────────────────────────────────────────── */
 
@@ -118,15 +179,15 @@ body.hud-active #dash-overlay-load {
    the frameless look removed. The fade at the end of a feed is the affordance. */
 .hud-panel::-webkit-scrollbar { width: 0; height: 0; }
 
-/* Keep a middle panel INSIDE its row. A grid item may overflow its track, and
+/* Keep EVERY panel inside its row. A grid item may overflow its track, and
    .hud-panel's viewport-relative max-height knows nothing about how much room
-   the auto-sized top and bottom rows actually left — at 860x620 that let the
-   activity readout spill 51 px into both neighbours. The row is minmax(0,1fr),
-   so this makes the panel shrink with the row instead of growing over it.
-   Two class selectors on purpose: .hud-panel's max-height is declared later in
-   this file, so an equal-specificity rule would lose to it. */
-.hud-panel.hud-ml,
-.hud-panel.hud-mr {
+   the tracks actually left — at 860x620 that let the activity readout spill
+   51 px into both neighbours. The tracks are fractional, so this makes each
+   panel shrink with its row and scroll rather than grow over the next one.
+   The id selector is deliberate: .hud-panel's own max-height is declared later
+   in this file, and an equal-specificity rule would lose to it on source
+   order. */
+#hud-layer > .hud-panel {
     min-height: 0;
     max-height: 100%;
 }
@@ -176,10 +237,14 @@ body.hud-active #dash-overlay-load {
 
 /* ── Sparkline ────────────────────────────────────────────────── */
 
-.hud-spark { display: block; width: 100%; height: 30px; margin: 5px 0 3px; overflow: visible; }
-.hud-spark polyline { fill: none; stroke: #6cf0ff; stroke-width: 1.4; vector-effect: non-scaling-stroke;
-    filter: drop-shadow(0 0 4px rgba(108, 240, 255, 0.7)); }
-.hud-spark polygon { fill: url(#hud-spark-grad); opacity: 0.42; }
+/* Colour comes from --spark, set per instance by hud.js, so GPU and CPU can
+   be told apart at a glance without three near-identical CSS blocks. The fill
+   is an inline gradient reference (unique id per sparkline) — a shared id
+   would make one graph's fill depend on another's defs. */
+.hud-spark { display: block; width: 100%; height: 30px; margin: 1px 0 3px; overflow: visible; }
+.hud-spark polyline { fill: none; stroke: var(--spark, #6cf0ff); stroke-width: 1.4;
+    vector-effect: non-scaling-stroke; filter: drop-shadow(0 0 4px var(--spark, #6cf0ff)); }
+.hud-spark polygon { opacity: 0.42; }
 
 .hud-headline {
     display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap;
@@ -281,6 +346,14 @@ body.hud-active #dash-overlay-load {
 
 .hud-panel-bus { min-width: min(28vw, 250px); }
 
+/* The render absorbs the squeeze, not the roster. As a flex column the canvas
+   is the only growable child, so on a short window it shrinks toward its
+   minimum and every agent's name and status stays whole — a graphic that got
+   slightly smaller beats a roster whose last two agents fell off the bottom. */
+#hud-layer > .hud-panel.hud-bl { display: flex; flex-direction: column; }
+#hud-bus-canvas { flex: 1 1 auto; min-height: 84px; }
+#hud-agents-body { flex: 0 0 auto; }
+
 #hud-bus-canvas {
     display: block;
     width: 100%;
@@ -307,10 +380,40 @@ body.hud-active #dash-overlay-load {
     display: flex; flex-direction: column; gap: 4px;
 }
 
-/* Fade the tail ONLY when the panel actually has more content below — a
-   permanent fade is decoration that lies about there being more. hud.js sets
+/* The activity feed is its OWN scroller, not just part of the panel's. It
+   holds an hour of history and "recently edited" sits directly below it —
+   letting it grow the panel would push that readout off the screen, and
+   capping it without a scroller would throw the history away. Older events
+   fade out at the bottom edge and are still there when you scroll to them. */
+/* Same principle as the agent bus: this panel carries the feed AND "recently
+   edited", and the feed is the only part of it that scrolls. So the feed takes
+   whatever height is left over and "recently edited" is never the thing that
+   falls off — it has no scrollbar to rescue it. A fixed cap on the feed did
+   the opposite: on a 900px window it held its 144px and pushed the five
+   recently-edited rows clean out of the panel. */
+#hud-layer > .hud-panel.hud-tr { display: flex; flex-direction: column; }
+#hud-recent-body { flex: 0 0 auto; }
+
+#hud-activity-body {
+    flex: 1 1 auto;
+    min-height: 54px;
+    max-height: clamp(80px, 16vh, 220px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: none;
+    /* hud.js corrects scrollTop itself when it prepends. Chromium ALSO does
+       this by default (CSS scroll anchoring), and the two corrections stack —
+       every new event shot the reader twice as far down the history as the
+       content had actually grown. One mechanism, explicitly ours. */
+    overflow-anchor: none;
+}
+#hud-activity-body::-webkit-scrollbar { width: 0; height: 0; }
+
+/* Fade the tail ONLY when there is actually more content below — a permanent
+   fade is decoration that lies about there being more. hud.js sets
    .is-scrollable from a real measurement. */
-.hud-panel.is-scrollable {
+.hud-panel.is-scrollable,
+.hud-feed.is-scrollable {
     mask-image: linear-gradient(180deg, #000 88%, transparent 100%);
     -webkit-mask-image: linear-gradient(180deg, #000 88%, transparent 100%);
 }
@@ -322,7 +425,11 @@ body.hud-active #dash-overlay-load {
     font-size: clamp(9.5px, 0.72vw, 11px);
     animation: hud-line-in 320ms ease backwards;
 }
-@keyframes hud-line-in { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: none; } }
+/* Fade only. These panels are frameless and flush to the viewport edge, so
+   they carry no horizontal padding — any sideways entrance slides the first
+   glyph under .hud-panel's overflow clip, which chopped the leading digit off
+   every timestamp for the length of the animation. */
+@keyframes hud-line-in { from { opacity: 0; } to { opacity: 1; } }
 .hud-feed-time { font-family: var(--hud-mono); color: rgba(130, 126, 170, 0.85); font-size: 0.9em; }
 .hud-feed-tag {
     font-size: 8px; letter-spacing: 0.08em; text-transform: uppercase;

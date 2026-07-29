@@ -346,10 +346,18 @@
                          (subtle 8% violet hairline, replaces the loud cyan glow gradient).
                          Width stays at 220 px for now; bumping to 240 per the spec is a
                          later commit alongside the brand-crest + nav-item migration. -->
+                    <!-- ClipToBounds + the two mouse handlers are the auto-hide on the
+                         Universe view: the column shrinks to a 6 px hairline and the
+                         menu inside it must be clipped rather than spilling over the
+                         galaxy. See SetSidebarAutoHide in MainWindow.xaml.cs. -->
                     <Border x:Name="SidebarBorder" Grid.Column="0"
                             Background="{StaticResource NeuralSidebarBg}"
                             BorderBrush="{StaticResource NeuralLine}"
-                            BorderThickness="0,0,1,0">
+                            BorderThickness="0,0,1,0"
+                            ClipToBounds="True"
+                            MouseEnter="Sidebar_MouseEnter"
+                            MouseLeave="Sidebar_MouseLeave"
+                            PreviewMouseLeftButtonDown="Sidebar_MouseDown">
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -670,6 +678,19 @@
                                     </StackPanel>
                                 </Grid>
                             </Border>
+
+                            <!-- Grip for the auto-hidden state. Everything else in this
+                                 Grid is clipped away at 14px, so without it the strip is
+                                 an unlabelled sliver and the menu reads as simply gone —
+                                 which is exactly how it was reported. Spans all rows so
+                                 it sits at the vertical middle of the strip. -->
+                            <TextBlock x:Name="SidebarPeekGrip" Grid.Row="0" Grid.RowSpan="3"
+                                       Text="&#x22EE;" FontSize="15"
+                                       Foreground="{StaticResource NeuralText3}"
+                                       HorizontalAlignment="Left" VerticalAlignment="Center"
+                                       Margin="2,0,0,0" IsHitTestVisible="False"
+                                       Visibility="Collapsed"
+                                       ToolTip="Menu — click or hover to open"/>
                         </Grid>
                     </Border>
 
@@ -4701,10 +4722,20 @@
                                  Backdrop is 88% opaque so the empty WebView's
                                  black void is masked but the WebView still
                                  receives the navigation paint underneath. -->
+                            <!-- The spinning ring is OFF by default now. It was the third
+                                 loading indicator in a row — splash, then this, then the
+                                 HUD's own boot screen — and the one that outlived the
+                                 others, leaving a ring turning over a galaxy that had
+                                 already finished loading. The splash covers the whole
+                                 boot (see StartUniverseBootWatchdog) and the HUD's boot
+                                 screen covers a reload, so nothing is left for this to
+                                 do. Kept in the tree: SetUniverseLoadingStatus still
+                                 writes to it, and it is one attribute away from
+                                 returning if the sequencing ever changes back. -->
                             <Border x:Name="UniverseLoadingOverlay"
                                     Background="#DD000308"
                                     Panel.ZIndex="50"
-                                    Visibility="Visible">
+                                    Visibility="Collapsed">
                                 <Border Background="#FF0E0C24"
                                         BorderBrush="#886CF0FF" BorderThickness="1"
                                         CornerRadius="10"

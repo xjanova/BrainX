@@ -77,6 +77,15 @@ function markStep(id, status = 'ok') {
     if (state.done.has(id)) return;
     state.done.add(id);
 
+    // Relay to the host: the WPF splash covers the whole boot now, and these
+    // are the second half of the sequence it shows. Harmless when unhosted.
+    post({
+        type: 'hudBootStep', id,
+        label: STEPS.find(s => s.id === id)?.label || id,
+        done: state.done.size, total: STEPS.length,
+        skipped: status !== 'ok',
+    });
+
     const el = document.querySelector(`.hud-boot-step[data-step="${id}"]`);
     if (el) {
         el.classList.remove('active');
@@ -97,6 +106,7 @@ function markStep(id, status = 'ok') {
 function finishBoot() {
     if (state.finished) return;
     state.finished = true;
+    post({ type: 'hudBootDone' });      // releases the splash covering all of this
     // Let the bar visibly reach 100% before the curtain lifts; snapping both at
     // once reads as a glitch rather than a completion.
     setTimeout(() => $('hud-boot')?.classList.add('done'), 260);
@@ -146,13 +156,56 @@ function renderExpertise(list = []) {
     markStep('expertise');
 }
 
+/** Highest activity id already on screen. The host stamps a monotonic id per
+ *  event, which is the only reliable identity here — the log genuinely
+ *  contains repeated lines with the same second AND the same text, so a
+ *  content hash would silently swallow real events. */
+let _feedSeen = 0;
+/** Lines kept in the DOM. Deep enough to scroll back through, bounded so a
+ *  HUD left open for a day does not accumulate a thousand nodes. */
+const FEED_KEEP = 60;
+
+const feedLine = (a) =>
+    `<div class="hud-feed-line">
+       <span class="hud-feed-time">${esc(a.time || '')}</span>
+       <span class="hud-feed-tag">${esc(a.tag || 'MCP')}</span>
+       <span class="hud-feed-text" title="${esc(a.text)}">${esc(a.text)}</span>
+     </div>`;
+
+/** The feed GROWS; it is not redrawn.
+ *
+ *  The host resends its newest N every couple of seconds, so rewriting the
+ *  list would replay every line's entrance animation on every poll and throw
+ *  away wherever the user had scrolled to. Only genuinely new events are
+ *  prepended, so only they animate — and if the user is reading history, the
+ *  scroll position is corrected by exactly the height that arrived above it,
+ *  which keeps the text they are looking at under their eyes. */
 function renderActivity(list = []) {
-    setHTML('hud-activity-body', list.slice(0, 8).map(a =>
-        `<div class="hud-feed-line">
-           <span class="hud-feed-time">${esc(a.time || '')}</span>
-           <span class="hud-feed-tag">${esc(a.tag || 'MCP')}</span>
-           <span class="hud-feed-text" title="${esc(a.text)}">${esc(a.text)}</span>
-         </div>`).join('') || emptyRow('waiting for activity'));
+    const host = $('hud-activity-body');
+    if (!host) { markStep('activity'); return; }
+
+    const fresh = list.filter(a => Number(a.id ?? 0) > _feedSeen);
+    if (!fresh.length) {
+        if (!host.childElementCount) host.innerHTML = emptyRow('waiting for activity');
+        markStep('activity');
+        return;
+    }
+    _feedSeen = Math.max(_feedSeen, ...list.map(a => Number(a.id ?? 0)));
+
+    // Drop the placeholder before the first real line lands on top of it.
+    if (host.querySelector('.hud-row')) host.innerHTML = '';
+
+    const anchored = host.scrollTop > 2;
+    const heightBefore = host.scrollHeight;
+
+    const frag = document.createRange().createContextualFragment(
+        fresh.map(feedLine).join(''));      // fresh is newest-first, so is the DOM
+    host.insertBefore(frag, host.firstChild);
+
+    while (host.childElementCount > FEED_KEEP) host.lastElementChild.remove();
+    if (anchored) host.scrollTop += host.scrollHeight - heightBefore;
+
+    markScrollable();
     markStep('activity');
 }
 
@@ -175,10 +228,29 @@ function renderAgents(d = {}) {
     markStep('agents');
 }
 
+/** Load history, so the panel can show the SHAPE of the last two minutes and
+ *  not just this instant — a 90 % spike that has already passed is the thing
+ *  worth seeing, and a bare percentage never shows it. The host samples every
+ *  2 s, so 60 points ≈ 2 minutes. */
+const LOAD_KEEP = 60;
+const _load = { gpu: [], cpu: [] };
+function pushLoad(series, v) {
+    if (v == null) return;
+    series.push(Math.max(0, Math.min(100, Number(v) || 0)));
+    if (series.length > LOAD_KEEP) series.shift();
+}
+
 function renderSystem(d = {}) {
+    pushLoad(_load.gpu, d.gpu);
+    pushLoad(_load.cpu, d.cpu);
+
     const rows = [];
-    if (d.gpu != null) rows.push(['GPU', `${Math.round(d.gpu)}%`, d.gpu]);
-    if (d.cpu != null) rows.push(['CPU', `${Math.round(d.cpu)}%`, d.cpu]);
+    // GPU and CPU carry a graph instead of a bar: same pixels, and the bar
+    // only ever said what the number beside it already said.
+    if (d.gpu != null) rows.push(['GPU', `${Math.round(d.gpu)}%`, null,
+        sparkline(_load.gpu, { id: 'spark-gpu', color: '#6cf0ff', max: 100, height: 16 })]);
+    if (d.cpu != null) rows.push(['CPU', `${Math.round(d.cpu)}%`, null,
+        sparkline(_load.cpu, { id: 'spark-cpu', color: '#a68bff', max: 100, height: 16 })]);
     // The old SYSTEM HEALTH card, verbatim — these are the lines the owner
     // actually checks when something looks wrong.
     if (d.vault) rows.push(['Vault', d.vault, null]);
@@ -189,12 +261,12 @@ function renderSystem(d = {}) {
     if (d.version) rows.push(['Version', d.version, null]);
     dotClass('hud-health-dot', d.healthy === false ? 'warn' : '');
 
-    setHTML('hud-system-body', rows.map(([l, v, bar]) =>
+    setHTML('hud-system-body', rows.map(([l, v, bar, graph]) =>
         `<div class="hud-row">
            <span class="hud-row-name">${esc(l)}</span>
            <span class="hud-row-val">${esc(v)}</span>
            ${bar != null ? `<span class="hud-bar"><i style="width:${Math.max(0, Math.min(100, bar))}%"></i></span>` : ''}
-         </div>`).join('') || emptyRow('no telemetry'));
+         </div>${graph || ''}`).join('') || emptyRow('no telemetry'));
     markStep('system');
 }
 
@@ -234,7 +306,7 @@ function renderMcp(d = {}) {
            <span class="n">${num(d.calls ?? 0)}</span><span class="u">calls</span>
            ${delta ? `<span class="d ${delta > 0 ? 'up' : 'down'}">${delta > 0 ? '+' : ''}${num(delta)} vs prev</span>` : ''}
          </div>
-         ${sparkline(d.buckets || [])}
+         ${sparkline(d.buckets || [], { id: 'spark-mcp', height: 24 })}
          <div class="hud-row"><span class="hud-row-name">top tool</span>
            <span class="hud-row-val">${esc(d.topTool || '—')}${d.topToolCount ? ` · ${num(d.topToolCount)}×` : ''}</span></div>`);
     setText('hud-mcp-window', d.window || '24 h');
@@ -258,18 +330,30 @@ function renderClaude(d = {}) {
 }
 
 /** Inline sparkline. SVG rather than canvas: a handful of points, and it
- *  inherits the HUD's CSS glow for free. */
-function sparkline(vals) {
+ *  inherits the HUD's CSS glow for free.
+ *
+ *  `max` is explicit for percentage series — auto-scaling a load graph makes
+ *  an idle 3 % CPU draw the same mountain as a pegged one, which is a chart
+ *  that lies. Counts (MCP calls) still auto-scale, because there is no
+ *  meaningful ceiling to draw them against. The gradient id is per-instance:
+ *  several sparklines share this page and duplicate ids make the fill of one
+ *  silently depend on another. */
+function sparkline(vals, opts = {}) {
     if (!vals.length) return '';
-    const w = 100, h = 30, max = Math.max(1, ...vals);
+    const color = opts.color || '#6cf0ff';
+    const gid = opts.id || 'hud-spark-grad';
+    const h = opts.height ?? 30;
+    const w = 100;
+    const max = opts.max ?? Math.max(1, ...vals);
     const pts = vals.map((v, i) =>
-        `${(i / Math.max(1, vals.length - 1)) * w},${h - (v / max) * (h - 2) - 1}`).join(' ');
-    return `<svg class="hud-spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">
-              <defs><linearGradient id="hud-spark-grad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0" stop-color="#6cf0ff" stop-opacity="0.6"/>
-                <stop offset="1" stop-color="#6cf0ff" stop-opacity="0"/>
+        `${(i / Math.max(1, vals.length - 1)) * w},${h - (Math.min(v, max) / max) * (h - 2) - 1}`).join(' ');
+    return `<svg class="hud-spark" style="--spark:${esc(color)};height:${h}px"
+                 viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">
+              <defs><linearGradient id="${esc(gid)}" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0" stop-color="${esc(color)}" stop-opacity="0.6"/>
+                <stop offset="1" stop-color="${esc(color)}" stop-opacity="0"/>
               </linearGradient></defs>
-              <polygon points="0,${h} ${pts} ${w},${h}"/>
+              <polygon fill="url(#${esc(gid)})" points="0,${h} ${pts} ${w},${h}"/>
               <polyline points="${pts}"/>
             </svg>`;
 }
@@ -281,7 +365,20 @@ function dotClass(id, cls) {
 
 const emptyRow = (t) => `<div class="hud-row"><span class="hud-row-name" style="opacity:.55">${esc(t)}</span></div>`;
 
-function setHTML(id, html) { const el = $(id); if (el) el.innerHTML = html; }
+/** Write only when the markup actually changed.
+ *
+ *  The host re-sends every panel on a timer, so an unguarded innerHTML would
+ *  rebuild identical DOM every couple of seconds — and rebuilt nodes replay
+ *  their entrance animation, which turned the activity feed into a permanent
+ *  twitch. It also throws away the meters' width transitions and any text the
+ *  user was mid-selection on. */
+const _lastHTML = new Map();
+function setHTML(id, html) {
+    const el = $(id);
+    if (!el || _lastHTML.get(id) === html) return;
+    _lastHTML.set(id, html);
+    el.innerHTML = html;
+}
 function setText(id, txt) { const el = $(id); if (el) el.textContent = txt; }
 
 // ── Host channel ─────────────────────────────────────────────────
@@ -364,14 +461,27 @@ async function initBus() {
 function wireWheelScroll() {
     document.querySelectorAll('.hud-panel').forEach(panel => {
         panel.addEventListener('wheel', (e) => {
-            const canScroll = panel.scrollHeight - panel.clientHeight > 1;
-            if (!canScroll) return;
-            const atTop = panel.scrollTop <= 0;
-            const atEnd = panel.scrollTop + panel.clientHeight >= panel.scrollHeight - 1;
+            // The nearest scrollable box UNDER THE CURSOR, not the panel:
+            // the activity feed is its own scroller inside .hud-tr so that
+            // "recently edited" below it stays on screen while the user reads
+            // back through history. Handling only the panel would scroll the
+            // wrong box — and preventDefault on the way past would stop the
+            // inner one scrolling natively too.
+            let box = e.target;
+            while (box && box !== panel.parentNode) {
+                if (box.scrollHeight - box.clientHeight > 1 &&
+                    getComputedStyle(box).overflowY !== 'visible') break;
+                box = box.parentElement;
+            }
+            if (!box || box === panel.parentNode) return;
+            const atTop = box.scrollTop <= 0;
+            const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 1;
+            // At either end the wheel belongs to the galaxy again, so the
+            // camera never feels stuck near a readout.
             if ((e.deltaY < 0 && atTop) || (e.deltaY > 0 && atEnd)) return;
             e.stopPropagation();
             e.preventDefault();
-            panel.scrollTop += e.deltaY;
+            box.scrollTop += e.deltaY;
         }, { passive: false });
     });
 }
@@ -379,7 +489,7 @@ function wireWheelScroll() {
 /** Mark panels whose content is clipped, so the fade only appears when there
  *  is genuinely more to see — a permanent fade would be decoration that lies. */
 function markScrollable() {
-    document.querySelectorAll('.hud-panel').forEach(p => {
+    document.querySelectorAll('.hud-panel, .hud-feed').forEach(p => {
         p.classList.toggle('is-scrollable', p.scrollHeight - p.clientHeight > 1);
     });
 }
@@ -459,14 +569,25 @@ function runDemo() {
         { name: 'Blockchain / Web3', percent: 6.9, color: '#ffb86c' },
         { name: 'Business / Finance', percent: 5.8, color: '#ffd86c' },
     ]));
+    // Ids matter: the feed only accepts events it has not seen, so demo data
+    // without them would be silently ignored — exactly as it would be if the
+    // host ever forgot to stamp them.
     step(1500, () => renderActivity([
-        { time: '21:57:24', tag: 'MCP',   text: 'ssh_ok "cd /home/admin/domains/netwix.online"' },
-        { time: '21:57:41', tag: 'MCP',   text: 'search "publish client Velopack release"' },
-        { time: '21:58:02', tag: 'NOTE',  text: 'BrainX Agent Bus v2.9 — Claude ⇄ Codex' },
-        { time: '21:58:19', tag: 'BUS',   text: 'claude → codex · review-authcontroller' },
-        { time: '21:58:44', tag: 'MCP',   text: 'brain_semantic_search "dashboard layout"' },
-        { time: '21:59:03', tag: 'NOTE',  text: 'Semantic search was never running' },
+        { id: 6, time: '21:59:03', tag: 'NOTE',  text: 'Semantic search was never running' },
+        { id: 5, time: '21:58:44', tag: 'MCP',   text: 'brain_semantic_search "dashboard layout"' },
+        { id: 4, time: '21:58:19', tag: 'BUS',   text: 'claude → codex · review-authcontroller' },
+        { id: 3, time: '21:58:02', tag: 'NOTE',  text: 'BrainX Agent Bus v2.9 — Claude ⇄ Codex' },
+        { id: 2, time: '21:57:41', tag: 'MCP',   text: 'search "publish client Velopack release"' },
+        { id: 1, time: '21:57:24', tag: 'MCP',   text: 'ssh_ok "cd /home/admin/domains/netwix.online"' },
     ]));
+    // A trickle of new events, so the prepend + scroll-anchor behaviour can be
+    // watched rather than reasoned about.
+    let demoId = 6;
+    setInterval(() => {
+        demoId++;
+        renderActivity([{ id: demoId, time: new Date().toTimeString().slice(0, 8), tag: 'MCP',
+                          text: `brain_search "live feed sample ${demoId}"` }]);
+    }, 2600);
     step(2100, () => renderAgents({ agents: [
         { name: 'claude',  online: true,  color: '#e8825a', detail: 'brain_search' },
         { name: 'codex',   online: true,  color: '#19a385', detail: 'agent_peers' },
@@ -479,12 +600,19 @@ function runDemo() {
         bus?.fireTraffic(who, true);
         setTimeout(() => bus?.fireTraffic(who, false), 700);
     }, 1800);
-    step(2700, () => renderSystem({
-        gpu: 48, cpu: 33, healthy: true,
+    const demoSystem = (gpu, cpu) => renderSystem({
+        gpu, cpu, healthy: true,
         vault: 'G:\\Obsidian · 1.2 MB', db: 'SQLite · 1.5 GB',
         index: '1,204 nodes · 8,087 links', ai: 'Ollama · bge-m3',
         mesh: '1 peer · :5142', version: 'v2.0.166 · mcp 2.9.171',
-    }));
+    });
+    step(2700, () => {
+        // Seed a plausible two minutes of history so the load graphs can be
+        // judged as graphs. A single sample only ever draws a flat line.
+        [12, 18, 44, 61, 38, 22, 27, 55, 78, 64, 41, 30, 26, 35, 52, 48]
+            .forEach((g, i) => demoSystem(g, 12 + (i * 7) % 46));
+        setInterval(() => demoSystem(20 + Math.random() * 70, 8 + Math.random() * 50), 2000);
+    });
 }
 
 if (HUD_ON) {

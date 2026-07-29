@@ -36,6 +36,14 @@ public partial class MainWindow
         public string KindLabel { get; init; } = "";     // "MCP" / "SAV" / "IND" / "AI" / "PEE" / "SHA"
         public Brush KindBrush { get; init; } = Brushes.Gray;
         public string Message { get; init; } = "";
+
+        /// <summary>
+        /// Monotonic arrival id — higher is newer. The Universe HUD grows its
+        /// feed instead of redrawing it, and needs to know which rows it has
+        /// never seen. Content can't answer that: the access log genuinely
+        /// repeats the same tool, the same text and the same second.
+        /// </summary>
+        public long Seq { get; set; }
     }
 
     public sealed class DashRecentNote
@@ -152,6 +160,7 @@ public partial class MainWindow
     // adds rows as new lines stream in via PollAccessLog.
     private System.Collections.ObjectModel.ObservableCollection<DashActivityRow>? _dashActivityRows;
     private const int DashActivityCap = 60;
+    private long _dashActivitySeq;
 
     private void PopulateDashActivity()
     {
@@ -168,13 +177,23 @@ public partial class MainWindow
             var path = System.IO.Path.Combine(_vaultPath, ".obsidianx", "access-log.ndjson");
             if (System.IO.File.Exists(path))
             {
-                // Read tail — last 30 lines is plenty for the visible feed.
-                var lines = SafeReadTailLines(path, 30);
+                // Read tail — enough that the HUD's feed has history to scroll
+                // back through on a cold start, not just the last handful.
+                var lines = SafeReadTailLines(path, DashActivityCap);
+                // The log is oldest-first and the live path prepends
+                // (Insert(0)), so seeding in file order built a list that ran
+                // OLDEST-first while every new event arrived on top — the feed
+                // read backwards until it had churned through a full cap.
+                lines.Reverse();
+                long seq = lines.Count;
                 foreach (var line in lines)
                 {
                     var row = TryBuildActivityRowFromAccessLog(line);
-                    if (row != null) _dashActivityRows.Add(row);
+                    if (row == null) { seq--; continue; }
+                    row.Seq = seq--;          // newest seeded row gets the highest id
+                    _dashActivityRows.Add(row);
                 }
+                _dashActivitySeq = lines.Count;
             }
         }
         catch (System.Exception ex)
@@ -212,6 +231,7 @@ public partial class MainWindow
         {
             var row = TryBuildActivityRowFromAccessLog(json);
             if (row == null) return;
+            row.Seq = System.Threading.Interlocked.Increment(ref _dashActivitySeq);
 
             // Dispatch in case the caller is on a worker thread.
             if (Dispatcher.CheckAccess())

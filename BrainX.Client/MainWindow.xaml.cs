@@ -2088,7 +2088,7 @@ public partial class MainWindow : Window
 
     // ── Sidebar collapse (hamburger toggle) ───────────────────────────
     private bool _sidebarCollapsed;
-    private GridLength _sidebarSavedWidth = new GridLength(220);
+    private GridLength _sidebarSavedWidth = new GridLength(SidebarFullWidth);
 
     private void SidebarToggle_Click(object s, RoutedEventArgs e)
     {
@@ -2102,10 +2102,114 @@ public partial class MainWindow : Window
         }
         else
         {
-            SidebarColumn.Width = _sidebarSavedWidth;
+            SidebarColumn.Width = new GridLength(_sidebarAutoHide ? SidebarPeekWidth : SidebarFullWidth);
             if (SidebarBorder != null) SidebarBorder.Visibility = Visibility.Visible;
             _sidebarCollapsed = false;
         }
+        UpdateSidebarGrip();
+    }
+
+    // ── Sidebar auto-hide (Universe view) ─────────────────────────────
+    // The Universe is a full-bleed picture with its own HUD; 220 px of menu
+    // beside it is 220 px of galaxy the user asked to see. On that view the
+    // sidebar shrinks to a hairline and comes back when the pointer rests on
+    // it.
+    //
+    // It shrinks rather than disappearing because it CANNOT overlay: the
+    // WebView2 is an HwndHost, so anything WPF draws over it loses the
+    // airspace fight. A few pixels of real column is the only reveal target
+    // that survives — which also means expanding genuinely resizes the
+    // WebView, so the hover is deliberately delayed. A menu that unfurls
+    // every time the mouse crosses the edge would make the galaxy reflow at
+    // random.
+    private const double SidebarFullWidth = 220;
+    // 14px, not 6: a 6px target is a target only in theory — it was there, it
+    // worked, and it could not be found. This is a strip you can actually put a
+    // pointer on, and it takes a click as well as a hover so nobody has to
+    // discover the hover at all.
+    private const double SidebarPeekWidth = 14;
+    private bool _sidebarAutoHide;
+    private bool _sidebarHoverExpanded;
+    private System.Windows.Threading.DispatcherTimer? _sidebarHoverTimer;
+
+    private void SetSidebarAutoHide(bool on)
+    {
+        if (SidebarColumn == null) return;
+        if (_sidebarAutoHide == on) return;
+        _sidebarAutoHide = on;
+        _sidebarHoverExpanded = false;
+        _sidebarHoverTimer?.Stop();
+        // The hamburger outranks this: a user who explicitly hid the menu
+        // should not have it reappear because they changed view.
+        if (_sidebarCollapsed) return;
+        SidebarColumn.Width = new GridLength(on ? SidebarPeekWidth : SidebarFullWidth);
+        UpdateSidebarGrip();
+    }
+
+    /// <summary>The grip is the strip's only label — show it exactly when the
+    /// menu is a strip.</summary>
+    private void UpdateSidebarGrip()
+    {
+        if (SidebarPeekGrip == null) return;
+        SidebarPeekGrip.Visibility =
+            (_sidebarAutoHide && !_sidebarCollapsed && !_sidebarHoverExpanded)
+                ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void Sidebar_MouseEnter(object s, MouseEventArgs e) => ScheduleSidebarHover(true, 120);
+
+    private void Sidebar_MouseLeave(object s, MouseEventArgs e) => ScheduleSidebarHover(false, 350);
+
+    /// <summary>
+    /// Click the strip to open the menu — the deterministic way in. Only fires
+    /// while it IS a strip: once expanded, clicks belong to the nav buttons.
+    /// </summary>
+    private void Sidebar_MouseDown(object s, MouseButtonEventArgs e)
+    {
+        if (!_sidebarAutoHide || _sidebarCollapsed || _sidebarHoverExpanded) return;
+        if (SidebarColumn == null) return;
+        _sidebarHoverTimer?.Stop();
+        _sidebarHoverExpanded = true;
+        SidebarColumn.Width = new GridLength(SidebarFullWidth);
+        UpdateSidebarGrip();
+    }
+
+    /// <summary>Expand/collapse after a beat, so a pointer merely crossing the
+    /// edge doesn't unfurl the menu (and a pointer overshooting the menu by a
+    /// few pixels doesn't snap it shut).</summary>
+    private void ScheduleSidebarHover(bool expand, int delayMs)
+    {
+        if (!_sidebarAutoHide || _sidebarCollapsed || SidebarColumn == null) return;
+        if (expand == _sidebarHoverExpanded) { _sidebarHoverTimer?.Stop(); return; }
+
+        // Input priority, NOT the DispatcherTimer default of Background: this
+        // window runs a CompositionTarget.Rendering loop every frame, and a
+        // background-priority callback behind that can wait a very long time
+        // for a slot. A 120ms interaction timer that fires "eventually" is a
+        // menu that does not open.
+        _sidebarHoverTimer ??= new System.Windows.Threading.DispatcherTimer(
+            System.Windows.Threading.DispatcherPriority.Input);
+        _sidebarHoverTimer.Stop();
+        _sidebarHoverTimer.Interval = TimeSpan.FromMilliseconds(delayMs);
+        // Re-point the handler each time — a DispatcherTimer keeps every
+        // handler ever added, so += would fire an ever-growing pile of stale
+        // closures, each fighting over the width.
+        _sidebarHoverTimer.Tick -= OnSidebarHoverTick;
+        _sidebarHoverTimer.Tick += OnSidebarHoverTick;
+        _sidebarHoverPending = expand;
+        _sidebarHoverTimer.Start();
+    }
+
+    private bool _sidebarHoverPending;
+
+    private void OnSidebarHoverTick(object? sender, EventArgs e)
+    {
+        _sidebarHoverTimer?.Stop();
+        if (!_sidebarAutoHide || _sidebarCollapsed || SidebarColumn == null) return;
+        _sidebarHoverExpanded = _sidebarHoverPending;
+        SidebarColumn.Width = new GridLength(
+            _sidebarHoverExpanded ? SidebarFullWidth : SidebarPeekWidth);
+        UpdateSidebarGrip();
     }
 
     // ── Show Case (chrome-less Universe) ──────────────────────────────
@@ -2323,6 +2427,10 @@ public partial class MainWindow : Window
         //     of clear overlay visibility before the first stage ticks.
         //   - Cost is zero perceived — splash is already animating during
         //     these 1000ms; nothing is "waiting".
+        // Universe is the startup view, so it starts with its menu tucked away
+        // — same state a Nav_Click to it would produce.
+        SetSidebarAutoHide(true);
+
         Services.StartupProgress.Report("Initializing Universe galaxy", 0.92, tag: "universe");
         // 250ms (was 1000ms): just enough to let Window_Loaded finish painting
         // before WebView2 init grabs the dispatcher. The old 1000ms existed to
@@ -2416,11 +2524,42 @@ public partial class MainWindow : Window
         // Start render loop
         CompositionTarget.Rendering += OnRenderFrame;
 
-        // All synchronous boot work is done. Universe galaxy still
-        // loading in the background (scheduled at ContextIdle) but
-        // the user can already see + interact with the app — dismiss
-        // the splash. The Universe will fade in behind it.
-        Services.StartupProgress.Complete();
+        // The splash does NOT lift here any more.
+        //
+        // Dropping it at the end of the synchronous boot is what produced two
+        // loading screens back to back: the splash, then the Universe's own
+        // boot curtain while the galaxy built and the readouts filled. One
+        // curtain now covers both — the HUD forwards its boot steps into this
+        // same progress feed (see OnUniverseMessage → hudBootStep) and the
+        // splash lifts when the LAST of them lands.
+        //
+        // It cannot be the other way round: the Universe's curtain is HTML
+        // inside a WebView that does not exist until this method returns, and
+        // this method blocks the UI thread while it runs. The splash is on its
+        // own thread, so it is the only thing that can cover the whole boot.
+        StartUniverseBootWatchdog();
+    }
+
+    /// <summary>
+    /// Safety net for the handover above: if the HUD never reports (WebView2
+    /// missing, a page error, graphics driver refusing a context), the splash
+    /// must not sit on the user's screen forever. A window they can use beats
+    /// a curtain that is technically still correct.
+    /// </summary>
+    private void StartUniverseBootWatchdog()
+    {
+        var watchdog = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(20)
+        };
+        watchdog.Tick += (_, _) =>
+        {
+            watchdog.Stop();
+            if (Services.StartupProgress.IsComplete) return;
+            Services.StartupProgress.Report("Universe still loading — showing the app anyway", 1.0, tag: "universe");
+            Services.StartupProgress.Complete();
+        };
+        watchdog.Start();
     }
 
     // ═══════════════════════════════════════
@@ -7370,6 +7509,10 @@ public partial class MainWindow : Window
         foreach (var nb in navButtons) nb.Style = (Style)FindResource("NavButton");
         btn.Style = (Style)FindResource("NavButtonActive");
 
+        // The Universe is the only full-bleed view, so it is the only one that
+        // gives its menu space back to the picture.
+        SetSidebarAutoHide(tag == "Universe");
+
         // Special rendering for specific views
         if (tag == "Growth") RenderGrowthChart();
         if (tag == "Tokens") RenderTokenEconomyChart();
@@ -7699,6 +7842,10 @@ public partial class MainWindow : Window
             if (!Directory.Exists(wwwroot))
             {
                 SetUniverseLoadingStatus("Universe assets missing", "Rebuild the project");
+                // Lift the splash FIRST: it is topmost and now waits on the
+                // HUD's boot report, which is never coming. A modal dialog
+                // behind a curtain is indistinguishable from a hang.
+                Services.StartupProgress.Complete();
                 MessageBox.Show(
                     $"Universe assets folder missing:\n{wwwroot}\n\n" +
                     "Rebuild the project so wwwroot is copied to bin/.",
@@ -7724,6 +7871,7 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             SetUniverseLoadingStatus("WebView2 init failed", "Install WebView2 Runtime");
+            Services.StartupProgress.Complete();   // see the note above — never dialog under the splash
             MessageBox.Show(
                 $"WebView2 init failed: {ex.Message}\n\n" +
                 "If the WebView2 Runtime is missing, install it from:\n" +
@@ -7866,6 +8014,30 @@ public partial class MainWindow : Window
                     _hudPageReady = true;
                     PushAllHudPayloads();
                 }));
+            }
+            else if (msg?.type == "hudBootStep")
+            {
+                // The HUD's boot checklist, relayed into the splash's list so
+                // the user reads ONE sequence from "Booting BrainX" through
+                // "Tallying usage" instead of watching two loaders in a row.
+                var json7 = e.WebMessageAsJson;
+                var step = Newtonsoft.Json.JsonConvert.DeserializeAnonymousType(
+                    json7, new { label = "", id = "", done = 0, total = 1, skipped = false });
+                if (step != null && !string.IsNullOrEmpty(step.label))
+                {
+                    var frac = step.total > 0 ? step.done / (double)step.total : 1.0;
+                    Dispatcher.BeginInvoke(new Action(() =>
+                        Services.StartupProgress.Report(
+                            step.skipped ? $"{step.label} — skipped" : step.label,
+                            // The WPF phase owns the bar up to 0.92; the
+                            // universe phase spends what is left.
+                            0.92 + 0.08 * frac,
+                            tag: "hud-" + step.id)));
+                }
+            }
+            else if (msg?.type == "hudBootDone")
+            {
+                Dispatcher.BeginInvoke(new Action(Services.StartupProgress.Complete));
             }
             else if (msg?.type == "hudAction")
             {

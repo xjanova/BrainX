@@ -232,9 +232,11 @@ public partial class MainWindow
     /// </summary>
     private void PostHudActivity()
     {
+        // The whole ring, not the visible handful: the HUD keeps its own
+        // scrollback, and a payload trimmed to what fits on screen would make
+        // "scroll up to see what happened" impossible.
         var rows = (_dashActivityRows ?? Enumerable.Empty<DashActivityRow>() as IEnumerable<DashActivityRow>)
-            .Take(8)
-            .Select(r => new { time = r.Time, tag = r.KindLabel, text = r.Message })
+            .Select(r => new { id = r.Seq, time = r.Time, tag = r.KindLabel, text = r.Message })
             .ToList();
         PostHud("hudActivity", rows);
     }
