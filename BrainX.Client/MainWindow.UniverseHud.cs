@@ -141,6 +141,9 @@ public partial class MainWindow
                     PostHudExpertise();
                     PostHudMcp();
                     PostHudClaude();
+                    // Self-throttled to ~45s; this is just the heartbeat that
+                    // gets it asked at all.
+                    CheckMcpFreshness();
                 }
             }
             catch (Exception ex)
@@ -649,6 +652,9 @@ public partial class MainWindow
                     // Reuse the nav handler so the sidebar's active pill moves
                     // with the view, exactly as if the user had clicked it.
                     if (NavSettings != null) Nav_Click(NavSettings, new RoutedEventArgs());
+                    break;
+                case "restartClaude":
+                    RestartStaleMcpClients();
                     break;
                 default:
                     System.Diagnostics.Debug.WriteLine($"HUD action ignored: {action}");

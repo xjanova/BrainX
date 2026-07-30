@@ -474,6 +474,71 @@ body.hud-active #settings-toggle {
 }
 .hud-feed-text { color: rgba(206, 202, 236, 0.86); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* ── Notice bar ───────────────────────────────────────────────── */
+
+/* Amber, not red: nothing is broken, something is out of date. It sits under
+   the title bar across the full width because it is the one message here the
+   user is meant to act on, and a readout-sized hint in a corner would be read
+   as another readout. */
+body.hud-active #hud-notice {
+    position: fixed;
+    top: var(--hud-gap);
+    /* Centred by auto margins, NOT by translateX(-50%): the entrance animation
+       sets `transform` too, and the last one wins — a translate-centred bar
+       jumps half its own width sideways for the length of the animation. */
+    left: 0; right: 0;
+    margin-inline: auto;
+    width: fit-content;
+    z-index: 58;                      /* over the readouts, under the settings panel */
+    display: flex; align-items: baseline; gap: 10px;
+    max-width: min(920px, calc(100vw - var(--hud-gap) * 2));
+    padding: 8px 12px;
+    border-radius: 10px;
+    background: rgba(24, 16, 6, 0.94);
+    border: 1px solid rgba(255, 184, 108, 0.42);
+    box-shadow: 0 14px 40px -12px rgba(0, 0, 0, 0.9);
+    font-size: 11.5px;
+    animation: hud-notice-in 420ms cubic-bezier(.2, .8, .3, 1) backwards;
+}
+@keyframes hud-notice-in {
+    from { opacity: 0; transform: translateY(-8px); }
+    to   { opacity: 1; transform: none; }
+}
+body:not(.hud-active) #hud-notice { display: none !important; }
+#hud-notice[hidden] { display: none !important; }
+
+/* Make room instead of covering. hud.js measures the bar and sets the
+   variable, so a message that wraps to two lines still clears the panels. */
+body.hud-active.has-notice #hud-layer {
+    padding-top: calc(var(--hud-gap) * 2 + var(--hud-notice-h, 52px));
+}
+
+.hud-notice-dot {
+    width: 7px; height: 7px; border-radius: 50%; flex: none;
+    background: #ffb86c; box-shadow: 0 0 10px #ffb86c;
+    align-self: center;
+}
+.hud-notice-text { color: #ffd7a8; font-weight: 600; }
+.hud-notice-detail {
+    color: rgba(214, 198, 178, 0.72);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    flex: 1 1 auto; min-width: 0;
+}
+.hud-notice-btn, .hud-notice-close {
+    font: inherit; flex: none; cursor: pointer;
+    border-radius: 7px;
+    border: 1px solid rgba(255, 184, 108, 0.5);
+    background: rgba(255, 184, 108, 0.16);
+    color: #ffd7a8;
+    padding: 3px 10px;
+    transition: background 160ms, border-color 160ms;
+}
+.hud-notice-close { padding: 3px 7px; color: rgba(255, 215, 168, 0.7); }
+.hud-notice-btn:hover, .hud-notice-close:hover {
+    background: rgba(255, 184, 108, 0.3);
+    border-color: rgba(255, 184, 108, 0.8);
+}
+
 /* ── Quick actions ────────────────────────────────────────────── */
 
 .hud-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }

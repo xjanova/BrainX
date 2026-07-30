@@ -437,6 +437,57 @@ function sparkline(vals, opts = {}) {
             </svg>`;
 }
 
+/** The one thing on this HUD allowed to interrupt.
+ *
+ *  An empty payload clears it — the host sends that as soon as the condition
+ *  is gone, so a notice can never outlive the problem it describes. Dismissing
+ *  hides it until the host raises a DIFFERENT one: the user saying "not now"
+ *  should not mean "never tell me again" for a fact that is still true, but it
+ *  also should not re-open every poll. */
+let _noticeDismissed = '';
+function renderNotice(d = {}) {
+    const bar = $('hud-notice');
+    if (!bar) return;
+    const text = d.text || '';
+    if (!text) { hideNotice(); _noticeDismissed = ''; return; }
+    if (_noticeDismissed === text) { hideNotice(); return; }
+
+    setText('hud-notice-text', text);
+    setText('hud-notice-detail', d.detail || '');
+    const btn = $('hud-notice-btn');
+    if (btn) {
+        btn.hidden = !d.action;
+        btn.textContent = d.actionLabel || 'Fix';
+        btn.dataset.action = d.action || '';
+    }
+    bar.hidden = false;
+    // The readouts move DOWN for it rather than being covered by it. A bar
+    // that hides the identity block and the action buttons — including the
+    // ones it is telling you to use — is worse than the problem it reports.
+    // Measured, because the text can wrap on a narrow window.
+    document.body.classList.add('has-notice');
+    document.documentElement.style.setProperty('--hud-notice-h', bar.offsetHeight + 'px');
+    markScrollable();
+}
+
+function hideNotice() {
+    const bar = $('hud-notice');
+    if (bar) bar.hidden = true;
+    document.body.classList.remove('has-notice');
+    markScrollable();
+}
+
+function wireNotice() {
+    $('hud-notice-btn')?.addEventListener('click', (e) => {
+        const action = e.currentTarget.dataset.action;
+        if (action) post({ type: 'hudAction', action });
+    });
+    $('hud-notice-close')?.addEventListener('click', () => {
+        _noticeDismissed = $('hud-notice-text')?.textContent || '';
+        hideNotice();
+    });
+}
+
 function dotClass(id, cls) {
     const el = $(id);
     if (el) el.className = 'hud-dot' + (cls ? ' ' + cls : '');
@@ -484,6 +535,7 @@ function onHudMessage(evt) {
         // rescue a HUD whose host went quiet, not to overrule a host that is
         // telling us, right now, that it is still working.
         case 'hudBootBusy':  noteHostBusy(m.payload?.label, m.payload?.done); break;
+        case 'hudNotice':    renderNotice(m.payload); break;
         // The galaxy payload already flows for the renderer; piggyback on it so
         // the first two boot steps complete without waiting on the host's own
         // hudStats. brain-export.json is PascalCase (the C# model serialised
@@ -591,6 +643,7 @@ export function initHud() {
     document.body.classList.add('hud-active');
     renderBootSteps();
     wireActions();
+    wireNotice();
     wireWheelScroll();
     initBus();
     // Content arrives in stages, so re-evaluate what is clipped as it lands

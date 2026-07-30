@@ -2434,6 +2434,10 @@ public partial class MainWindow : Window
         Services.StartupProgress.Report("Wiring the galaxy", 0.92, tag: "universe-wire");
         // Everything the HUD reads is now real — release its boot curtain.
         MarkHudBrainReady();
+        // An update that landed while Claude was open leaves Claude talking to
+        // the previous MCP. Check right after startup, when it matters most:
+        // this run is very often the first one after Velopack applied.
+        CheckMcpFreshness(force: true);
         _ = LoadAiBackends();
         _ = RefreshAiKeyStatus();
         InitRedirectToggle();
@@ -12368,12 +12372,11 @@ public partial class MainWindow : Window
         // session will spawn. Beats Claude Desktop's UI label which
         // caches config-file values at startup and never refreshes
         // until the whole Desktop app is restarted.
-        if (McpVersionText != null)
-        {
-            var (label, tooltip) = ReadMcpFileVersion();
-            McpVersionText.Text = label;
-            McpVersionText.ToolTip = tooltip;
-        }
+        // ...unless a Claude session is still holding the PREVIOUS build. Then
+        // this chip's job changes: the number on disk is no longer the number
+        // answering Claude's calls, and saying it would be a confident lie.
+        if (_staleMcp.Count > 0) ApplyMcpFreshnessToUi();
+        else RefreshMcpVersionChip();
 
         // Recent activity — seconds since last access-log event
         var sinceLast = _lastMcpActivity == DateTime.MinValue

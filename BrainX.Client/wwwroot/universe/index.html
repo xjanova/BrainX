@@ -341,6 +341,19 @@
          the grid areas defined in hud.css; the centre is deliberately left
          empty because that is where the brain sits. Hidden entirely unless
          body.hud-active. -->
+    <!-- Notice bar: for the one class of fact the readouts cannot carry —
+         something is WRONG and the user has to act. Empty and hidden the rest
+         of the time; the HUD's whole point is that nothing shouts unless it
+         has earned it. Outside #hud-layer so it spans the full width and
+         cannot be squeezed by a grid track. -->
+    <div id="hud-notice" hidden>
+        <span class="hud-notice-dot"></span>
+        <span class="hud-notice-text" id="hud-notice-text"></span>
+        <span class="hud-notice-detail" id="hud-notice-detail"></span>
+        <button class="hud-notice-btn" id="hud-notice-btn" type="button" hidden></button>
+        <button class="hud-notice-close" id="hud-notice-close" type="button" aria-label="Dismiss">&#x2715;</button>
+    </div>
+
     <div id="hud-layer" aria-hidden="false">
 
         <section class="hud-panel hud-tl">
