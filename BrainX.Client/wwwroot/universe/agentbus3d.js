@@ -39,10 +39,35 @@ export function createAgentBus3D(canvas) {
 
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(38, 1, 0.1, 100);
-    // Low, tilted vantage — orbits read as ellipses instead of concentric
-    // circles, which is what makes it look like a system and not a dartboard.
-    camera.position.set(0, 3.4, 7.4);
-    camera.lookAt(0, 0, 0);
+
+    /* Camera as spherical coordinates around the star, driven by the mouse.
+     *
+     * Hand-rolled rather than OrbitControls: three.js is vendored here, and
+     * pulling in the addon means patching its bare `from 'three'` import (the
+     * ATMOS 3D build hit exactly that). This needs two gestures, and two
+     * gestures is thirty lines.
+     *
+     * The default is the old fixed framing — low and tilted, so the orbits
+     * read as ellipses instead of concentric circles, which is what makes it
+     * look like a system and not a dartboard. */
+    const view = {
+        theta: 0,                 // around the vertical axis
+        phi: 0.43,                // above the orbital plane, radians
+        dist: 8.15,               // matches the original (0, 3.4, 7.4)
+        target: new THREE.Vector3(0, 0, 0),
+    };
+    const DIST_MIN = 2.2, DIST_MAX = 16;
+    const PHI_MIN = 0.06, PHI_MAX = 1.45;      // never quite top-down or edge-on
+
+    function applyCamera() {
+        const r = view.dist, cp = Math.cos(view.phi), sp = Math.sin(view.phi);
+        camera.position.set(
+            view.target.x + r * cp * Math.sin(view.theta),
+            view.target.y + r * sp,
+            view.target.z + r * cp * Math.cos(view.theta));
+        camera.lookAt(view.target);
+    }
+    applyCamera();
 
     scene.add(new THREE.AmbientLight(0xffffff, 0.55));
     const starLight = new THREE.PointLight(0x9ecfff, 26, 40);
@@ -67,8 +92,65 @@ export function createAgentBus3D(canvas) {
     const planets = new Map();   // name → { pivot, mesh, ring, orbitR, speed, phase, online, everSeen }
     const motes = [];            // in-flight traffic
     const moteGeo = new THREE.SphereGeometry(0.075, 8, 8);
+    /** Points in a comet tail. Long enough to read as motion, short enough
+     *  that a burst of traffic is still a burst and not a cobweb. */
+    const TRAIL_LEN = 14;
+
+    /* Name tags. They start appearing when the camera is closer than FAR and
+     * are fully solid by NEAR — a fade rather than a switch, so zooming feels
+     * like approaching something rather than tripping a sensor. */
+    const LABEL_FAR = 6.4, LABEL_NEAR = 4.2;
+    const LABEL_W = 1.35, LABEL_H = 0.34;
 
     let raf = 0, running = false, lastT = 0;
+
+    // ── Mouse: drag to orbit, wheel to zoom ─────────────────────
+    //
+    // Every handler swallows its event. This canvas sits INSIDE the galaxy's
+    // page, and the galaxy listens for drag and wheel too — without this, one
+    // gesture would turn the solar system and fly the main camera at the same
+    // time, and the panel's own scroller would join in on the wheel.
+    let dragging = false, lastX = 0, lastY = 0, userMoved = false;
+
+    canvas.addEventListener('pointerdown', (e) => {
+        dragging = true; userMoved = true;
+        lastX = e.clientX; lastY = e.clientY;
+        canvas.setPointerCapture?.(e.pointerId);
+        e.stopPropagation(); e.preventDefault();
+    });
+    canvas.addEventListener('pointermove', (e) => {
+        if (!dragging) return;
+        // Scale by canvas size so the same drag turns the same amount whether
+        // the panel is 200px or 400px wide.
+        const w = canvas.clientWidth || 240;
+        view.theta -= ((e.clientX - lastX) / w) * Math.PI * 2;
+        view.phi = clamp(view.phi + ((e.clientY - lastY) / w) * Math.PI * 1.4, PHI_MIN, PHI_MAX);
+        lastX = e.clientX; lastY = e.clientY;
+        applyCamera();
+        e.stopPropagation(); e.preventDefault();
+    });
+    const endDrag = (e) => {
+        if (!dragging) return;
+        dragging = false;
+        canvas.releasePointerCapture?.(e.pointerId);
+        e.stopPropagation();
+    };
+    canvas.addEventListener('pointerup', endDrag);
+    canvas.addEventListener('pointercancel', endDrag);
+    canvas.addEventListener('wheel', (e) => {
+        userMoved = true;
+        view.dist = clamp(view.dist * (e.deltaY > 0 ? 1.12 : 0.89), DIST_MIN, DIST_MAX);
+        applyCamera();
+        e.stopPropagation(); e.preventDefault();
+    }, { passive: false });
+    // Double-click puts it back — a view you can lose is a view you need a way
+    // out of, and "drag until it looks right again" is not one.
+    canvas.addEventListener('dblclick', (e) => {
+        view.theta = 0; view.phi = 0.43; view.dist = 8.15;
+        userMoved = false;
+        applyCamera();
+        e.stopPropagation(); e.preventDefault();
+    });
 
     // ── Public API ──────────────────────────────────────────────
 
@@ -119,7 +201,26 @@ export function createAgentBus3D(canvas) {
             color, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false,
         }));
         scene.add(mote);
-        motes.push({ mesh: mote, planet: p, t: 0, dur: inbound ? 0.62 : 0.58, inbound });
+
+        // The tail. A message that leaves a streak reads as something
+        // TRAVELLING; a bare dot reads as something blinking. It is a line
+        // through the last N positions, coloured from the mote's own colour at
+        // the head down to black at the tip — additive blending means black is
+        // invisible, so the fade needs no per-vertex alpha.
+        const trailGeo = new THREE.BufferGeometry();
+        trailGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(TRAIL_LEN * 3), 3));
+        trailGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(TRAIL_LEN * 3), 3));
+        const trail = new THREE.Line(trailGeo, new THREE.LineBasicMaterial({
+            vertexColors: true, blending: THREE.AdditiveBlending,
+            transparent: true, depthWrite: false,
+        }));
+        trail.frustumCulled = false;      // the points are written every frame
+        scene.add(trail);
+
+        motes.push({
+            mesh: mote, trail, planet: p, t: 0, dur: inbound ? 0.62 : 0.58, inbound,
+            head: new THREE.Color(color), history: [],
+        });
     }
 
     function resize() {
@@ -136,7 +237,7 @@ export function createAgentBus3D(canvas) {
     function dispose() {
         stop();
         planets.forEach(p => { disposeDeep(p.pivot); disposeDeep(p.ring); });
-        motes.forEach(m => disposeDeep(m.mesh));
+        motes.forEach(m => { disposeDeep(m.mesh); disposeDeep(m.trail); });
         disposeDeep(scene);
         renderer.dispose();
     }
@@ -158,8 +259,22 @@ export function createAgentBus3D(canvas) {
         ring.rotation.x = Math.PI / 2;
         scene.add(ring);
 
+        // Name tag. A sprite rather than an HTML overlay: it rides the pivot,
+        // so it needs no per-frame projection maths, and it is clipped by the
+        // canvas for free. Hidden until the camera is close enough for the
+        // text to be worth reading — at the default framing five of these
+        // would be five smudges over the orbits.
+        const label = new THREE.Sprite(new THREE.SpriteMaterial({
+            map: labelTexture(name, color),
+            transparent: true, depthWrite: false, depthTest: false, opacity: 0,
+        }));
+        label.scale.set(LABEL_W, LABEL_H, 1);
+        label.position.y = 0.42;
+        label.visible = false;
+        pivot.add(label);
+
         return {
-            pivot, mesh, ring, orbitR: 1, online: false, everSeen: false,
+            pivot, mesh, ring, label, orbitR: 1, online: false, everSeen: false,
             // Inner orbits move faster, like a real system — and it keeps two
             // planets from sitting locked next to each other forever.
             speed: 0.34 - index * 0.045,
@@ -177,6 +292,32 @@ export function createAgentBus3D(canvas) {
         p.mesh.visible = p.everSeen;              // never connected → bare orbit
         p.ring.material.opacity = p.online ? 0.34 : (p.everSeen ? 0.16 : 0.07);
         p.mesh.scale.setScalar(p.online ? 1 : 0.78);
+    }
+
+    /**
+     * Push the head position into the tail and rewrite the line.
+     *
+     * The history is padded to full length from the first frame, so a mote
+     * that has only just been fired draws a tail collapsed at its own position
+     * rather than a stray segment reaching back to the origin.
+     */
+    function updateTrail(m, fade) {
+        m.history.unshift(m.mesh.position.clone());
+        while (m.history.length > TRAIL_LEN) m.history.pop();
+
+        const pos = m.trail.geometry.attributes.position;
+        const col = m.trail.geometry.attributes.color;
+        for (let i = 0; i < TRAIL_LEN; i++) {
+            const p = m.history[Math.min(i, m.history.length - 1)];
+            pos.setXYZ(i, p.x, p.y, p.z);
+            // Head keeps the mote's colour; the tip decays to black, which is
+            // nothing at all under additive blending.
+            const t = 1 - i / (TRAIL_LEN - 1);
+            const a = t * t * fade;
+            col.setXYZ(i, m.head.r * a, m.head.g * a, m.head.b * a);
+        }
+        pos.needsUpdate = true;
+        col.needsUpdate = true;
     }
 
     function layoutOrbits() {
@@ -200,15 +341,31 @@ export function createAgentBus3D(canvas) {
         star.scale.setScalar(pulse);
         corona.scale.setScalar(3.1 * pulse);
 
+        // Name tags fade in as the camera closes. Computed once, not per
+        // planet — they all share the same distance from the star.
+        const labelAlpha = clamp((LABEL_FAR - view.dist) / (LABEL_FAR - LABEL_NEAR), 0, 1);
+
         for (const p of planets.values()) {
             p.phase += p.speed * dt * (p.online ? 1 : 0.35);
             p.pivot.position.set(Math.cos(p.phase) * p.orbitR, 0, Math.sin(p.phase) * p.orbitR);
+            if (p.label) {
+                // An agent that has never connected is a bare orbit; naming it
+                // would be labelling an absence.
+                const a = p.everSeen ? labelAlpha : 0;
+                p.label.visible = a > 0.01;
+                p.label.material.opacity = a;
+            }
         }
 
         for (let i = motes.length - 1; i >= 0; i--) {
             const m = motes[i];
             m.t += dt / m.dur;
-            if (m.t >= 1) { scene.remove(m.mesh); disposeDeep(m.mesh); motes.splice(i, 1); continue; }
+            if (m.t >= 1) {
+                scene.remove(m.mesh, m.trail);
+                disposeDeep(m.mesh); disposeDeep(m.trail);
+                motes.splice(i, 1);
+                continue;
+            }
             const from = m.inbound ? m.planet.pivot.position : new THREE.Vector3(0, 0, 0);
             const to   = m.inbound ? new THREE.Vector3(0, 0, 0) : m.planet.pivot.position;
             // Arc the path slightly above the orbital plane so an inbound and
@@ -216,7 +373,9 @@ export function createAgentBus3D(canvas) {
             const k = m.t;
             m.mesh.position.lerpVectors(from, to, k);
             m.mesh.position.y += Math.sin(k * Math.PI) * (m.inbound ? 0.42 : -0.34);
-            m.mesh.material.opacity = k < 0.15 ? k / 0.15 : (k > 0.85 ? (1 - k) / 0.15 : 1);
+            const fade = k < 0.15 ? k / 0.15 : (k > 0.85 ? (1 - k) / 0.15 : 1);
+            m.mesh.material.opacity = fade;
+            updateTrail(m, fade);
         }
 
         renderer.render(scene, camera);
@@ -233,6 +392,10 @@ export function createAgentBus3D(canvas) {
     function debugState() {
         return {
             running,
+            view: { theta: +view.theta.toFixed(3), phi: +view.phi.toFixed(3),
+                    dist: +view.dist.toFixed(2), userMoved },
+            labelsVisible: [...planets.values()].filter(p => p.label?.visible).length,
+            trails: motes.filter(m => m.trail).length,
             planets: [...planets.entries()].map(([name, p]) => ({
                 name, online: p.online, r: +p.orbitR.toFixed(2),
                 x: +p.pivot.position.x.toFixed(3), z: +p.pivot.position.z.toFixed(3),
@@ -273,12 +436,47 @@ function radialTexture() {
     return tex;
 }
 
+/** A name drawn onto a canvas, for the planet's sprite label. Generated for
+ *  the same reason as the corona: the HUD ships no binary assets. */
+function labelTexture(name, color) {
+    const w = 256, h = 64;
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+    ctx.font = '600 30px "JetBrains Mono", "Cascadia Mono", Consolas, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    // Dark halo first: these sit over orbits and a bright star, and unlike the
+    // HUD's text they get no panel behind them.
+    ctx.lineWidth = 6;
+    ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+    ctx.strokeText(displayName(name), w / 2, h / 2);
+    ctx.fillStyle = '#' + color.toString(16).padStart(6, '0');
+    ctx.fillText(displayName(name), w / 2, h / 2);
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+}
+
+/** Long client slugs ("local-agent-mode-brainx-brain") would render as a
+ *  smear at this size; the roster underneath carries the full name. */
+function displayName(name) {
+    const s = String(name);
+    const pretty = s.charAt(0).toUpperCase() + s.slice(1);
+    return pretty.length <= 14 ? pretty : pretty.slice(0, 13) + '…';
+}
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
 function disposeDeep(obj) {
     obj.traverse?.((o) => {
         o.geometry?.dispose?.();
         if (Array.isArray(o.material)) o.material.forEach(m => m.dispose?.());
-        else o.material?.dispose?.();
+        // A sprite's canvas texture is not freed by disposing the material.
+        o.material?.map?.dispose?.();
+        if (!Array.isArray(o.material)) o.material?.dispose?.();
     });
     obj.geometry?.dispose?.();
+    obj.material?.map?.dispose?.();
     obj.material?.dispose?.();
 }

@@ -390,6 +390,10 @@ body.hud-active #settings-toggle {
 #hud-bus-canvas {
     display: block;
     width: 100%;
+    /* It is draggable now, so it has to look draggable. touch-action:none
+       keeps a pen or touch drag from being stolen by the page's own panning. */
+    cursor: grab;
+    touch-action: none;
     /* Wider than tall: orbits are viewed at a shallow tilt, so vertical pixels
        past this ratio are empty space above and below the orbital plane. */
     aspect-ratio: 16 / 9;
@@ -400,6 +404,8 @@ body.hud-active #settings-toggle {
        into it — which is the whole point of dropping the panels. */
     background: none;
 }
+
+#hud-bus-canvas:active { cursor: grabbing; }
 
 /* On a short viewport the roster carries the information and the render is
    the first thing to go — it is the decoration, the names are the data. */
