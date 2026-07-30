@@ -406,36 +406,111 @@ public partial class MainWindow
                     MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
         }
 
+        var relaunch = new List<string>();
         foreach (var p in restartable)
+        {
+            string? exe = null;
+            try { exe = p.MainModule?.FileName; } catch { /* exits mid-read */ }
+            if (CloseClientCompletely(p) && !string.IsNullOrEmpty(exe)) relaunch.Add(exe!);
+            p.Dispose();
+        }
+
+        // Any stale server still breathing is now an orphan: its client is
+        // gone, so nothing is going to read from it or shut it down. Left
+        // alive it keeps its lock on the old binary and keeps showing up in
+        // the next freshness check.
+        KillOrphanedStaleServers();
+
+        foreach (var exe in relaunch.Distinct(StringComparer.OrdinalIgnoreCase))
         {
             try
             {
-                var exe = p.MainModule?.FileName;
-                // Ask, don't kill: a graceful close lets the client save its
-                // session. If it declines, we leave it alone and say so.
-                p.CloseMainWindow();
-                if (!p.WaitForExit(8000))
-                {
-                    StatusText.Text = $"{PrettyClient(p.ProcessName)} (pid {p.Id}) did not close — restart it yourself";
-                    continue;
-                }
-                if (!string.IsNullOrEmpty(exe) && File.Exists(exe))
-                    Process.Start(new ProcessStartInfo(exe) { UseShellExecute = true });
+                if (File.Exists(exe)) Process.Start(new ProcessStartInfo(exe) { UseShellExecute = true });
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"RestartStaleMcpClients({p.Id}): {ex.Message}");
-                StatusText.Text = $"Could not restart pid {p.Id}: {ex.Message}";
+                Debug.WriteLine($"relaunch {exe}: {ex.Message}");
+                StatusText.Text = $"Could not relaunch {Path.GetFileName(exe)}: {ex.Message}";
             }
-            finally { p.Dispose(); }
         }
 
-        // The new client spawns a new MCP; re-check once it has had a moment.
+        // The new client spawns a new MCP; re-check once it has had a moment,
+        // and SAY so if anything is somehow still on the old build — a restart
+        // that quietly half-worked is the one failure mode worth naming.
         var settle = new System.Windows.Threading.DispatcherTimer(
             System.Windows.Threading.DispatcherPriority.Background)
-        { Interval = TimeSpan.FromSeconds(6) };
-        settle.Tick += (_, _) => { settle.Stop(); CheckMcpFreshness(force: true); };
+        { Interval = TimeSpan.FromSeconds(8) };
+        settle.Tick += (_, _) =>
+        {
+            settle.Stop();
+            CheckMcpFreshness(force: true);
+            if (StatusText != null)
+                StatusText.Text = _staleMcp.Count == 0
+                    ? "MCP up to date — every client is on the current build"
+                    : $"{_staleMcp.Count} MCP server(s) still on the old build — restart those clients yourself";
+        };
         settle.Start();
+    }
+
+    /// <summary>
+    /// Close a client AND everything it spawned, escalating until it is
+    /// actually gone.
+    ///
+    /// Asking politely is the right first move — the client gets to save its
+    /// session — but it cannot be the only move. An app that ignores WM_CLOSE,
+    /// or that hides to the tray instead of exiting, would leave the whole
+    /// feature doing nothing at all: the old server keeps running, the client
+    /// keeps talking to it, and the update never lands. So: ask, then insist.
+    /// Kill takes the process TREE, because the client's windowless helpers
+    /// are what actually own the MCP servers.
+    /// </summary>
+    private bool CloseClientCompletely(Process p)
+    {
+        var name = PrettyClient(p.ProcessName);
+        try
+        {
+            if (p.MainWindowHandle != IntPtr.Zero) p.CloseMainWindow();
+            if (p.WaitForExit(6000)) return true;
+
+            if (StatusText != null) StatusText.Text = $"{name} did not close on request — closing it and its helpers";
+            p.Kill(entireProcessTree: true);
+            if (p.WaitForExit(5000)) return true;
+
+            if (StatusText != null) StatusText.Text = $"{name} (pid {p.Id}) would not close — restart it yourself";
+            return false;
+        }
+        catch (Exception ex)
+        {
+            // Already gone between the check and the call is a success, not a
+            // failure — that is exactly the state we were asking for.
+            if (p.HasExited) return true;
+            Debug.WriteLine($"CloseClientCompletely({p.Id}): {ex.Message}");
+            if (StatusText != null) StatusText.Text = $"Could not close {name}: {ex.Message}";
+            return false;
+        }
+    }
+
+    /// <summary>Stale servers whose client has exited — nothing owns them now.</summary>
+    private void KillOrphanedStaleServers()
+    {
+        foreach (var s in _staleMcp)
+        {
+            try
+            {
+                using var proc = Process.GetProcessById(s.Pid);
+                if (proc.HasExited) continue;
+                // Only if the parent really is gone. A server whose client is
+                // still running is that client's business, not ours.
+                if (s.ParentPid > 0)
+                {
+                    try { using var parent = Process.GetProcessById(s.ParentPid); if (!parent.HasExited) continue; }
+                    catch { /* parent gone — fall through and clean up */ }
+                }
+                proc.Kill();
+                proc.WaitForExit(3000);
+            }
+            catch { /* already gone, or not ours to touch */ }
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════
