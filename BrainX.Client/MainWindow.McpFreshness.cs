@@ -137,6 +137,18 @@ public partial class MainWindow
     // Surfacing
     // ═════════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// The chip's normal colour, captured before we ever paint it amber.
+    ///
+    /// NOT ClearValue: the XAML sets Foreground as a LOCAL value
+    /// ({StaticResource TextMutedBrush}), so clearing it does not restore that
+    /// — it drops to the inherited default, which is black on a dark status
+    /// bar. Holding the brush INSTANCE also keeps the chip following theme
+    /// changes, because ApplyUiTheme recolours the existing brushes in place
+    /// rather than swapping the dictionary entries.
+    /// </summary>
+    private System.Windows.Media.Brush? _mcpChipBrush;
+
     /// <summary>The plain "MCP v2.9.183" chip — what the NEXT session spawns.</summary>
     private void RefreshMcpVersionChip()
     {
@@ -144,7 +156,7 @@ public partial class MainWindow
         var (label, tooltip) = ReadMcpFileVersion();
         McpVersionText.Text = label;
         McpVersionText.ToolTip = tooltip;
-        McpVersionText.ClearValue(System.Windows.Controls.TextBlock.ForegroundProperty);
+        if (_mcpChipBrush != null) McpVersionText.Foreground = _mcpChipBrush;
     }
 
     private void ApplyMcpFreshnessToUi()
@@ -168,6 +180,9 @@ public partial class MainWindow
 
         if (McpVersionText != null)
         {
+            // Remember what it looked like before the first override, so the
+            // way back is a restore rather than a guess.
+            _mcpChipBrush ??= McpVersionText.Foreground;
             McpVersionText.Text = "MCP ↻ restart Claude";
             McpVersionText.Foreground = (System.Windows.Media.Brush)(
                 TryFindResource("NeuralAmber") ?? System.Windows.Media.Brushes.Orange);
