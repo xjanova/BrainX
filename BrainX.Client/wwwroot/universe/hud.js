@@ -460,6 +460,15 @@ function renderNotice(d = {}) {
         btn.textContent = d.actionLabel || 'Fix';
         btn.dataset.action = d.action || '';
     }
+    // Second action, for the notices that are counting down to something:
+    // the thing is going to happen, and "Cancel" has to be as reachable as
+    // "do it now".
+    const alt = $('hud-notice-alt');
+    if (alt) {
+        alt.hidden = !d.alt;
+        alt.textContent = d.altLabel || 'Cancel';
+        alt.dataset.action = d.alt || '';
+    }
     bar.hidden = false;
     // The readouts move DOWN for it rather than being covered by it. A bar
     // that hides the identity block and the action buttons — including the
@@ -478,10 +487,10 @@ function hideNotice() {
 }
 
 function wireNotice() {
-    $('hud-notice-btn')?.addEventListener('click', (e) => {
+    ['hud-notice-btn', 'hud-notice-alt'].forEach(id => $(id)?.addEventListener('click', (e) => {
         const action = e.currentTarget.dataset.action;
         if (action) post({ type: 'hudAction', action });
-    });
+    }));
     $('hud-notice-close')?.addEventListener('click', () => {
         _noticeDismissed = $('hud-notice-text')?.textContent || '';
         hideNotice();

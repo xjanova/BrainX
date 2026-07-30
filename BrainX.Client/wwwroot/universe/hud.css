@@ -534,6 +534,13 @@ body.hud-active.has-notice #hud-layer {
     transition: background 160ms, border-color 160ms;
 }
 .hud-notice-close { padding: 3px 7px; color: rgba(255, 215, 168, 0.7); }
+/* Cancel reads as the quieter of the two, but stays a real button — a
+   countdown you can only stop by finding a small × is not a choice. */
+.hud-notice-alt {
+    background: transparent;
+    border-color: rgba(255, 184, 108, 0.32);
+    color: rgba(255, 215, 168, 0.82);
+}
 .hud-notice-btn:hover, .hud-notice-close:hover {
     background: rgba(255, 184, 108, 0.3);
     border-color: rgba(255, 184, 108, 0.8);

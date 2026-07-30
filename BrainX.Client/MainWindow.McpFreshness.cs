@@ -16,9 +16,18 @@
 // longer exists on disk. That covers both update paths — Velopack (new file,
 // fresh timestamp) and deploy-mcp.ps1 (same file, overwritten).
 //
-// It NOTIFIES and offers a button. It does not restart Claude on its own:
-// closing Claude discards whatever conversation is open in it, and no update
-// is worth doing that to someone without asking.
+// It restarts the affected clients AUTOMATICALLY (owner, 2026-07-30: "ทำ auto
+// restart เลยเมื่อ brainx update ให้รีสตาร์ท cluade ide และอื่นๆด้วยเพื่อให้ตรงกัน"), which
+// matches how the rest of this app treats Claude integration — registration
+// and config healing are already zero-touch on every open.
+//
+// Two things temper it, and neither is a veto:
+//   • A visible countdown with Cancel. It still fires on its own; the window
+//     exists so someone mid-sentence in Claude can stop it. Once per run —
+//     a client that comes back still stale must not start a restart loop.
+//   • Terminal-hosted sessions are named but not touched. Killing a terminal
+//     takes the user's shell and everything else running in it, which is a
+//     different and much larger thing than closing an app.
 
 using System;
 using System.Collections.Generic;
@@ -42,6 +51,17 @@ public partial class MainWindow
     /// <summary>How often to walk the process list. Cheap, but not free, and
     /// nothing here changes between one HUD tick and the next.</summary>
     private static readonly TimeSpan McpFreshnessInterval = TimeSpan.FromSeconds(45);
+
+    /// <summary>Grace period before the automatic restart. Long enough to read
+    /// the bar and hit Cancel, short enough that it is still "automatic".</summary>
+    private const int AutoRestartSeconds = 12;
+
+    private System.Windows.Threading.DispatcherTimer? _autoRestartTimer;
+    private int _autoRestartLeft;
+    /// <summary>Once per app run. If a restarted client comes back and is
+    /// somehow still stale, the answer is to tell the user — not to close
+    /// their editor again, and again.</summary>
+    private bool _autoRestartSpent;
 
     // ═════════════════════════════════════════════════════════════════
     // Detection
@@ -131,13 +151,16 @@ public partial class MainWindow
     {
         if (_staleMcp.Count == 0)
         {
+            StopAutoRestartCountdown();
             RefreshMcpVersionChip();              // back to the plain label
             PostHud("hudNotice", new { });        // clears the banner
             return;
         }
 
+        // "an MCP client" when the parent is gone or unreadable. Saying
+        // "Claude" there would be a guess wearing the clothes of a fact.
         var clients = _staleMcp
-            .Select(s => string.IsNullOrEmpty(s.ParentName) ? "Claude" : PrettyClient(s.ParentName))
+            .Select(s => string.IsNullOrEmpty(s.ParentName) ? "an MCP client" : PrettyClient(s.ParentName))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
         var who = string.Join(" · ", clients);
@@ -156,6 +179,36 @@ public partial class MainWindow
                 "\n\nRestart Claude to pick up the new tools.";
         }
 
+        // Arm the automatic restart the first time we see this, but only if
+        // there is actually something we can restart. If every stale server
+        // belongs to a terminal session, an automatic anything would be a
+        // countdown to nothing.
+        var canRestart = RestartableClients();
+        var any = canRestart.Count > 0;
+        foreach (var p in canRestart) p.Dispose();
+
+        if (!_autoRestartSpent && _autoRestartTimer == null && any)
+            StartAutoRestartCountdown();
+        else
+            PostStaleNotice(onDisk, who, null);
+    }
+
+    /// <summary>The stale-MCP bar. `secondsLeft` turns it into a countdown.</summary>
+    private void PostStaleNotice(string onDisk, string who, int? secondsLeft)
+    {
+        if (secondsLeft is int s)
+        {
+            PostHud("hudNotice", new
+            {
+                text = $"MCP updated to {onDisk} — restarting {who} in {s}s",
+                detail = "A stdio MCP server is spawned once per session, so the new tools arrive on restart.",
+                action = "restartClaude",
+                actionLabel = "Restart now",
+                alt = "cancelRestart",
+                altLabel = "Cancel",
+            });
+            return;
+        }
         PostHud("hudNotice", new
         {
             text = $"MCP updated to {onDisk} — {who} is still on the previous build",
@@ -163,6 +216,56 @@ public partial class MainWindow
             action = "restartClaude",
             actionLabel = "Restart Claude",
         });
+    }
+
+    private void StartAutoRestartCountdown()
+    {
+        _autoRestartLeft = AutoRestartSeconds;
+        TickAutoRestartNotice();
+        _autoRestartTimer = new System.Windows.Threading.DispatcherTimer(
+            System.Windows.Threading.DispatcherPriority.Input)   // never Background: see the sidebar timer
+        { Interval = TimeSpan.FromSeconds(1) };
+        _autoRestartTimer.Tick += (_, _) =>
+        {
+            _autoRestartLeft--;
+            if (_autoRestartLeft > 0) { TickAutoRestartNotice(); return; }
+            StopAutoRestartCountdown();
+            _autoRestartSpent = true;
+            RestartStaleMcpClients(auto: true);
+        };
+        _autoRestartTimer.Start();
+    }
+
+    private void TickAutoRestartNotice()
+    {
+        // Dispose: this runs once a second and every Process here is a live
+        // OS handle. A twelve-second countdown should not leak two dozen.
+        var clients = RestartableClients();
+        var who = string.Join(" · ", clients
+            .Select(p => PrettyClient(p.ProcessName))
+            .Distinct(StringComparer.OrdinalIgnoreCase));
+        foreach (var p in clients) p.Dispose();
+        if (string.IsNullOrEmpty(who)) who = "Claude";
+        PostStaleNotice(ReadMcpFileVersion().label.Replace("MCP ", ""), who, _autoRestartLeft);
+        if (StatusText != null)
+            StatusText.Text = $"MCP updated — restarting {who} in {_autoRestartLeft}s (Cancel on the notice bar)";
+    }
+
+    private void StopAutoRestartCountdown()
+    {
+        _autoRestartTimer?.Stop();
+        _autoRestartTimer = null;
+    }
+
+    /// <summary>User pressed Cancel. Their call stands for the rest of the
+    /// run — the bar stays, with the manual button, so the fact does not
+    /// disappear along with the countdown.</summary>
+    private void CancelAutoRestart()
+    {
+        StopAutoRestartCountdown();
+        _autoRestartSpent = true;
+        if (StatusText != null) StatusText.Text = "Automatic restart cancelled — restart Claude when convenient";
+        ApplyMcpFreshnessToUi();
     }
 
     private static string PrettyClient(string processName) => processName.ToLowerInvariant() switch
@@ -186,51 +289,77 @@ public partial class MainWindow
     /// NOT touched — killing a terminal takes the user's shell and anything
     /// else running in it, which is not ours to spend.
     /// </summary>
-    private void RestartStaleMcpClients()
+    /// <summary>
+    /// Clients we are willing to close and relaunch: GUI apps, by name.
+    ///
+    /// An allowlist, not a heuristic. "Has a main window" would sweep in a
+    /// terminal, an editor hosting one, or anything else that happens to be an
+    /// MCP's parent — and being wrong here closes something the user did not
+    /// agree to lose.
+    /// </summary>
+    private static readonly string[] RestartableClientNames = { "claude", "cluadex" };
+
+    private List<Process> RestartableClients()
+    {
+        var list = new List<Process>();
+        foreach (var s in _staleMcp)
+        {
+            if (s.ParentPid <= 0) continue;
+            if (!RestartableClientNames.Contains(s.ParentName, StringComparer.OrdinalIgnoreCase)) continue;
+            if (list.Any(p => p.Id == s.ParentPid)) continue;
+            try { list.Add(Process.GetProcessById(s.ParentPid)); } catch { /* already gone */ }
+        }
+        return list;
+    }
+
+    private List<string> ManualRestartClients() => _staleMcp
+        .Where(s => s.ParentPid <= 0 ||
+                    !RestartableClientNames.Contains(s.ParentName, StringComparer.OrdinalIgnoreCase))
+        .Select(s => s.ParentPid <= 0
+            ? $"pid {s.Pid} (parent unknown)"
+            : $"{PrettyClient(s.ParentName)} (pid {s.ParentPid})")
+        .Distinct()
+        .ToList();
+
+    private void RestartStaleMcpClients(bool auto = false)
     {
         CheckMcpFreshness(force: true);
         if (_staleMcp.Count == 0)
         {
-            MessageBox.Show(this, "Every running MCP server is already the current build.",
-                "Nothing to restart", MessageBoxButton.OK, MessageBoxImage.Information);
+            if (!auto)
+                MessageBox.Show(this, "Every running MCP server is already the current build.",
+                    "Nothing to restart", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
 
-        var restartable = new List<Process>();
-        var manual = new List<string>();
-        foreach (var s in _staleMcp)
-        {
-            if (s.ParentPid <= 0) { manual.Add($"pid {s.Pid} (parent unknown)"); continue; }
-            // Only GUI clients we can close and relaunch cleanly.
-            if (!s.ParentName.Equals("claude", StringComparison.OrdinalIgnoreCase) &&
-                !s.ParentName.Equals("cluadex", StringComparison.OrdinalIgnoreCase))
-            {
-                manual.Add($"{PrettyClient(s.ParentName)} (pid {s.ParentPid})");
-                continue;
-            }
-            try
-            {
-                var parent = Process.GetProcessById(s.ParentPid);
-                if (restartable.All(p => p.Id != parent.Id)) restartable.Add(parent);
-            }
-            catch { manual.Add($"pid {s.ParentPid} (already gone)"); }
-        }
+        var restartable = RestartableClients();
+        var manual = ManualRestartClients();
 
-        var msg = restartable.Count > 0
-            ? "Close and reopen:\n" + string.Join("\n",
-                  restartable.Select(p => $"  • {PrettyClient(p.ProcessName)} (pid {p.Id})")) +
-              "\n\nAnything open in them will be closed."
-            : "No client here can be restarted automatically.";
-        if (manual.Count > 0)
-            msg += "\n\nRestart these yourself:\n" + string.Join("\n", manual.Select(m => "  • " + m));
         if (restartable.Count == 0)
         {
-            MessageBox.Show(this, msg, "Restart for the new MCP", MessageBoxButton.OK, MessageBoxImage.Information);
+            var none = "No client here can be restarted automatically." +
+                       (manual.Count > 0
+                           ? "\n\nRestart these yourself:\n" + string.Join("\n", manual.Select(m => "  • " + m))
+                           : "");
+            if (auto) { if (StatusText != null) StatusText.Text = none.Replace("\n", " "); }
+            else MessageBox.Show(this, none, "Restart for the new MCP",
+                     MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
 
-        if (MessageBox.Show(this, msg, "Restart for the new MCP",
-                MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
+        // Manual invocation still asks. Automatic does not — the countdown WAS
+        // the asking, and a dialog nobody is looking at would just be a
+        // restart that never happens.
+        if (!auto)
+        {
+            var msg = "Close and reopen:\n" + string.Join("\n",
+                          restartable.Select(p => $"  • {PrettyClient(p.ProcessName)} (pid {p.Id})")) +
+                      "\n\nAnything open in them will be closed.";
+            if (manual.Count > 0)
+                msg += "\n\nRestart these yourself:\n" + string.Join("\n", manual.Select(m => "  • " + m));
+            if (MessageBox.Show(this, msg, "Restart for the new MCP",
+                    MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
+        }
 
         foreach (var p in restartable)
         {

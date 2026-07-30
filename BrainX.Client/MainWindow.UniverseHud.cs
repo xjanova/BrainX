@@ -654,7 +654,11 @@ public partial class MainWindow
                     if (NavSettings != null) Nav_Click(NavSettings, new RoutedEventArgs());
                     break;
                 case "restartClaude":
+                    StopAutoRestartCountdown();       // "now" means now
                     RestartStaleMcpClients();
+                    break;
+                case "cancelRestart":
+                    CancelAutoRestart();
                     break;
                 default:
                     System.Diagnostics.Debug.WriteLine($"HUD action ignored: {action}");
