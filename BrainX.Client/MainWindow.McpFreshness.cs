@@ -299,27 +299,72 @@ public partial class MainWindow
     /// </summary>
     private static readonly string[] RestartableClientNames = { "claude", "cluadex" };
 
+    /// <summary>
+    /// The client processes to close, one per app — not one per MCP.
+    ///
+    /// Claude spawns its MCP servers from WINDOWLESS helper processes: of three
+    /// servers here, one's parent owned the window and two were children of
+    /// helpers that were themselves children of that window. Closing a helper
+    /// is not possible (CloseMainWindow needs a window) and not necessary
+    /// (closing the app takes its helpers with it). So walk up the chain while
+    /// the names still belong to the same client and keep the highest one that
+    /// actually owns a window; three servers then map to one restart instead of
+    /// one restart and two eight-second waits that fail.
+    /// </summary>
     private List<Process> RestartableClients()
     {
-        var list = new List<Process>();
+        var parents = ParentMap();
+        var byPid = new Dictionary<int, Process>();
+
         foreach (var s in _staleMcp)
         {
-            if (s.ParentPid <= 0) continue;
-            if (!RestartableClientNames.Contains(s.ParentName, StringComparer.OrdinalIgnoreCase)) continue;
-            if (list.Any(p => p.Id == s.ParentPid)) continue;
-            try { list.Add(Process.GetProcessById(s.ParentPid)); } catch { /* already gone */ }
+            var owner = WindowOwningClient(s.ParentPid, parents);
+            if (owner == null) continue;
+            if (!byPid.TryAdd(owner.Id, owner)) owner.Dispose();
         }
-        return list;
+        return byPid.Values.ToList();
     }
 
-    private List<string> ManualRestartClients() => _staleMcp
-        .Where(s => s.ParentPid <= 0 ||
-                    !RestartableClientNames.Contains(s.ParentName, StringComparer.OrdinalIgnoreCase))
-        .Select(s => s.ParentPid <= 0
-            ? $"pid {s.Pid} (parent unknown)"
-            : $"{PrettyClient(s.ParentName)} (pid {s.ParentPid})")
-        .Distinct()
-        .ToList();
+    private static Process? WindowOwningClient(int pid, Dictionary<int, int> parents)
+    {
+        Process? best = null;
+        for (var depth = 0; depth < 6 && pid > 0; depth++)
+        {
+            Process cur;
+            try { cur = Process.GetProcessById(pid); } catch { break; }
+
+            // Stop the moment the chain leaves this client: climbing past it
+            // would eventually reach explorer.exe, and nothing good is at the
+            // top of that walk.
+            if (!RestartableClientNames.Contains(cur.ProcessName, StringComparer.OrdinalIgnoreCase))
+            {
+                cur.Dispose();
+                break;
+            }
+            if (cur.MainWindowHandle != IntPtr.Zero) { best?.Dispose(); best = cur; }
+            else cur.Dispose();
+
+            if (!parents.TryGetValue(pid, out pid)) break;
+        }
+        return best;
+    }
+
+    /// <summary>Stale servers with no window-owning client we may close —
+    /// terminal sessions, and anything whose parent is already gone.</summary>
+    private List<string> ManualRestartClients()
+    {
+        var parents = ParentMap();
+        var list = new List<string>();
+        foreach (var s in _staleMcp)
+        {
+            var owner = WindowOwningClient(s.ParentPid, parents);
+            if (owner != null) { owner.Dispose(); continue; }
+            list.Add(s.ParentPid <= 0 || string.IsNullOrEmpty(s.ParentName)
+                ? $"pid {s.Pid} (parent unknown)"
+                : $"{PrettyClient(s.ParentName)} (pid {s.ParentPid})");
+        }
+        return list.Distinct().ToList();
+    }
 
     private void RestartStaleMcpClients(bool auto = false)
     {
