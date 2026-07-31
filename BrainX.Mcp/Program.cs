@@ -3310,6 +3310,9 @@ internal static partial class Program
         var brokenWikiLinks = new List<(NodeSummary node, List<string> targets)>();
         int structuralChecked = 0;
         var titleSet = new HashSet<string>(export.Nodes.Select(n => n.Title), StringComparer.OrdinalIgnoreCase);
+        // Ids are legitimate link targets (KnowledgeIndexer resolves them), so
+        // a `[[b5934f5023a9]]` citation is not a broken link.
+        foreach (var n in export.Nodes) titleSet.Add(n.Id);
         foreach (var n in export.Nodes.OrderByDescending(n => n.ModifiedAt).Take(structuralSampleSize))
         {
             structuralChecked++;
@@ -3327,12 +3330,18 @@ internal static partial class Program
                 foreach (Match m in matches)
                 {
                     var raw = m.Groups[1].Value;
-                    var target = raw.Split('|')[0].Split('#')[0].Trim();
+                    var full = raw.Split('|')[0].Trim();
+                    var target = full.Split('#')[0].Trim();
                     if (string.IsNullOrEmpty(target)) continue;
                     if (target.Length < 2) continue;
                     // Allow path-style targets — only flag pure title links that don't resolve.
                     if (target.Contains('/') || target.Contains('\\')) continue;
-                    if (!titleSet.Contains(target)) broken.Add(target);
+                    // Titles here legitimately contain '#' ("Session 2026-05-14 #4 — …"),
+                    // so the anchor split alone would report every link to one of
+                    // them as broken. Match KnowledgeIndexer: fall back to the
+                    // whole string before calling it dead.
+                    if (titleSet.Contains(target) || titleSet.Contains(full)) continue;
+                    broken.Add(target);
                 }
                 if (broken.Count > 0) brokenWikiLinks.Add((n, broken.Distinct().Take(5).ToList()));
             }
@@ -3371,6 +3380,30 @@ internal static partial class Program
             if ((now - n.ModifiedAt).TotalDays > staleDays)
                 staleNotes.Add(n);
         }
+
+        // ── 3a. What a broken link actually MEANS.
+        //
+        // A single "N broken links" number was useless here: measured on this
+        // vault, most of them are not damage at all. Three different things
+        // hide inside that count, and only one is worth anyone's time:
+        //   • memory refs  — `[[rule_paid_bills_always_resume]]` points at a
+        //     Claude memory file in another store. Working as intended.
+        //   • source files — `[[BrainHub.cs]]` names code, not a note. It will
+        //     never resolve and should not.
+        //   • missing notes — a real title that several notes reach for and
+        //     nobody has written. THIS is the useful output: the brain saying
+        //     what it wants next, ranked by how many notes asked.
+        var memoryRefs = 0;
+        var sourceFileRefs = 0;
+        var wanted = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (_, targets) in brokenWikiLinks)
+            foreach (var t in targets)
+            {
+                if (Regex.IsMatch(t, @"^(rule|feedback|reference|incident|feature|user|project)_")) { memoryRefs++; continue; }
+                if (Regex.IsMatch(t, @"\.(cs|ts|js|json|xaml|md|ps1|py|php|css|html)$", RegexOptions.IgnoreCase)) { sourceFileRefs++; continue; }
+                wanted[t] = wanted.GetValueOrDefault(t) + 1;
+            }
+        var wantedRanked = wanted.OrderByDescending(k => k.Value).ThenBy(k => k.Key).ToList();
 
         // ── 3b. Fact verification — the one check that compares a note to the
         // WORLD rather than to other notes. Everything above can only tell you
@@ -3469,9 +3502,16 @@ internal static partial class Program
         if (untagged.Count > totalNotes * 0.10)
             actions.Add(MakeAction("medium", "untagged", $"{untagged.Count} note(s) with <2 tags",
                 "brain_apply_audit_fix kind=untagged model=gemma3:4b dryRun=true"));
-        if (brokenWikiLinks.Count > 0)
-            actions.Add(MakeAction("medium", "broken-wiki-links", $"{brokenWikiLinks.Count} note(s) link to titles that don't exist",
-                "(manual review — list under structural.brokenWikiLinks)"));
+        // Only the notes-that-should-exist are worth an action. Memory refs and
+        // source-file names are permanent by design, and listing them as work
+        // just trains everyone to ignore the whole category.
+        var topWanted = wantedRanked.Where(w => w.Value >= 2).Take(5).ToList();
+        if (topWanted.Count > 0)
+            actions.Add(MakeAction("medium", "notes-worth-writing",
+                $"{topWanted.Count}+ title(s) that 2 or more notes link to and nobody has written: "
+                + string.Join(", ", topWanted.Select(w => $"\"{w.Key}\" ({w.Value})"))
+                + $" — scanned the {structuralChecked} most recent notes, not the whole vault",
+                "brain_create_note for the ones worth having; see structural.linkTargets.wantedNotes"));
         if (nearDupes.Count > 0)
             actions.Add(MakeAction("low", "near-duplicates", $"{nearDupes.Count} pair(s) with cosine > {dupeThreshold} (consider merging)",
                 "(manual review — list under graphHealth.nearDupes)"));
@@ -3598,6 +3638,20 @@ internal static partial class Program
                 {
                     ["missingFrontmatter"] = missingFrontmatter.Count,
                     ["brokenWikiLinks"] = brokenWikiLinks.Count
+                },
+                ["linkTargets"] = new JObject
+                {
+                    ["memoryRefs"] = memoryRefs,
+                    ["sourceFileRefs"] = sourceFileRefs,
+                    ["wantedNotesDistinct"] = wantedRanked.Count,
+                    ["wantedNotes"] = new JArray(wantedRanked.Take(perCategoryLimit).Select(w => new JObject
+                    {
+                        ["title"] = w.Key,
+                        ["referencedBy"] = w.Value
+                    })),
+                    ["hint"] = "memoryRefs and sourceFileRefs are expected — a Claude memory file "
+                             + "and a source filename are not notes and never resolve. wantedNotes is "
+                             + "the actionable part: titles the vault keeps reaching for."
                 },
                 ["missingFrontmatter"] = AuditList(missingFrontmatter, perCategoryLimit),
                 ["brokenWikiLinks"] = new JArray(brokenWikiLinks.Take(perCategoryLimit).Select(b => new JObject

@@ -54,6 +54,12 @@ public partial class KnowledgeIndexer
             var node = IndexFile(file, vaultPath);
             graph.Nodes.Add(node);
             nodeMap[node.Title.ToLowerInvariant()] = node;
+            // Agents cite each other by id — `[[b5934f5023a9]] (description)` is
+            // the convention in this vault's "related:" lines, because an id is
+            // stable and a title is not. Those links resolved to nothing until
+            // now. Keyed alongside titles rather than as a fallback: a 12-hex
+            // note TITLE would be the collision, and there is no such thing.
+            if (!string.IsNullOrEmpty(node.Id)) nodeMap[node.Id.ToLowerInvariant()] = node;
             var rel = Path.GetRelativePath(vaultPath, file).Replace('\\', '/');
             nodeByPath[rel] = node;
             // Filename-only key for "file": "Note.md" without folder
@@ -89,11 +95,35 @@ public partial class KnowledgeIndexer
                     ? link.Groups["alias"].Value.Trim()
                     : null;
 
+                // A `#` in a link is normally a heading anchor, so the regex
+                // stops the target there. But this vault names notes
+                // "Session 2026-05-14 #4 — ..." and "INCIDENT ... (#2022#551)",
+                // and for those the anchor split cuts the TITLE in half: the
+                // target resolves to nothing, no edge is built, and the link
+                // dies silently in both BrainX and Obsidian. Nobody notices,
+                // because a wiki-link that resolves to nothing still renders.
+                //
+                // So: if the split form does not resolve, put the pieces back
+                // and try the whole string as a title. Only reached on failure,
+                // so a genuine `Note#Heading` link is unaffected.
+                var lookupKey = NormalizeLinkTarget(rawTarget);
+                if (!nodeMap.TryGetValue(lookupKey, out var targetNode)
+                    && (heading != null || block != null))
+                {
+                    var whole = rawTarget
+                              + (heading != null ? "#" + heading : "")
+                              + (block != null ? "^" + block : "");
+                    if (nodeMap.TryGetValue(NormalizeLinkTarget(whole), out targetNode))
+                    {
+                        // The `#` was part of the name, not an anchor into it.
+                        heading = null;
+                        block = null;
+                    }
+                }
                 // Embed assets that don't resolve to a markdown note —
                 // record on the source's Embeds list and skip edge
                 // creation. Examples: ![[diagram.png]], ![[clip.mp4]].
-                var lookupKey = NormalizeLinkTarget(rawTarget);
-                if (!nodeMap.TryGetValue(lookupKey, out var targetNode))
+                if (targetNode == null)
                 {
                     if (isEmbed) node.Embeds.Add(rawTarget);
                     continue;
