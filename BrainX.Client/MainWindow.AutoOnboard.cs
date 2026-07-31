@@ -738,6 +738,92 @@ public partial class MainWindow
         }
     }
 
+    // ───────────── outbound bridges (Unity / Unreal) ─────────────
+    //
+    // The brain hubs OUT to other MCP servers; the config that describes them
+    // lives in the vault, so the client's whole job here is to put it in front
+    // of the owner. Registering the Codex integration taught us the lesson:
+    // a capability with no visible surface is a capability the owner can't find.
+
+    /// <summary>
+    /// Open <c>&lt;vault&gt;/.obsidianx/mcp-bridges.json</c> in whatever the
+    /// owner uses for JSON, seeding it first if no agent has run yet.
+    /// </summary>
+    private void OpenBridgeConfig_Click(object sender, System.Windows.RoutedEventArgs e)
+    {
+        try
+        {
+            // Load() seeds the disabled unity + unreal entries when the file is
+            // absent, so this button always has something to open.
+            BrainX.Core.Services.McpBridgeConfig.Load(_vaultPath, _ => { });
+            var path = BrainX.Core.Services.McpBridgeConfig.PathFor(_vaultPath);
+
+            if (!File.Exists(path))
+            {
+                SetBridgeStatus($"❌ could not create {path} — is the vault writable?");
+                return;
+            }
+
+            Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+            SetBridgeStatus($"opened {path}\n   set \"enabled\": true, point \"args\" at your checkout, then restart the agent.");
+        }
+        catch (Exception ex)
+        {
+            SetBridgeStatus($"❌ {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Report each configured bridge and what the last agent session made of
+    /// it. Reads files only — never spawns an engine server, which would take
+    /// seconds and pop a Python window from a UI click.
+    /// </summary>
+    private void CheckBridges_Click(object sender, System.Windows.RoutedEventArgs e)
+    {
+        try
+        {
+            var defs = BrainX.Core.Services.McpBridgeConfig.Load(_vaultPath, _ => { });
+            if (defs.Count == 0)
+            {
+                SetBridgeStatus("⚠ no bridges configured — click “Open bridge config”.");
+                return;
+            }
+
+            var cache = BrainX.Core.Services.McpBridgeConfig.ReadCache(_vaultPath);
+            var lines = defs.Select(d =>
+            {
+                if (!d.Enabled) return $"○ {d.Id} — disabled";
+                if (!cache.TryGetValue(d.Id, out var c))
+                    return $"◐ {d.Id} — enabled, not probed yet (restart the agent once)";
+                if (c.Tools > 0)
+                    return $"✅ {d.Id} — {c.Tools} tool(s) as {d.Id}__*"
+                         + (c.FetchedUtc is { } at ? $", seen {at.ToLocalTime():g}" : "");
+                return $"❌ {d.Id} — {c.Error ?? "no tools found"}";
+            });
+
+            SetBridgeStatus(string.Join("\n", lines));
+        }
+        catch (Exception ex)
+        {
+            SetBridgeStatus($"❌ {ex.Message}");
+        }
+    }
+
+    private void SetBridgeStatus(string text)
+    {
+        try
+        {
+            Dispatcher.Invoke(() =>
+            {
+                if (BridgeStatus != null) BridgeStatus.Text = text;
+            });
+        }
+        catch
+        {
+            // Window tearing down mid-write — ignore.
+        }
+    }
+
     /// <summary>
     /// The command path of the user-scope brainx-brain entry in ~/.claude.json,
     /// or null when absent/unreadable.

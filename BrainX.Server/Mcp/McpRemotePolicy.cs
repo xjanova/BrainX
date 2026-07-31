@@ -40,6 +40,13 @@ public enum McpScope
 ///     Remotely that is arbitrary local file disclosure (C:\Users\...\.ssh\id_rsa
 ///     → into the brain → read back via brain_get_note).
 ///   • brain_apply_audit_fix — bulk-mutates the vault; too blunt to expose.
+///   • bridge_status — describes the owner's OUTBOUND bridges: local paths, the
+///     commands they spawn, which engine editors are up. Default-deny already
+///     refused it; naming it makes the refusal intended rather than merely
+///     unclassified. The bridged tools themselves (unity__*, unreal__*) can't
+///     be listed here — they're discovered at runtime — and don't need to be:
+///     the hub switches off entirely under BRAINX_HEADLESS, which every
+///     node-spawned child runs with, so a remote session's MCP never has them.
 /// </summary>
 public static class McpRemotePolicy
 {
@@ -56,6 +63,7 @@ public static class McpRemotePolicy
         "ssh_profiles_list",
         "brain_import_path",
         "brain_apply_audit_fix",
+        "bridge_status",
     };
 
     /// <summary>Read-only tools — available to any valid token.</summary>

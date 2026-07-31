@@ -6021,6 +6021,32 @@
                                                 <Border BorderBrush="{StaticResource SurfaceLightBrush}" BorderThickness="0,1,0,0"
                                                         Margin="0,10,0,0" Padding="0,10,0,0">
                                                     <StackPanel>
+                                                        <TextBlock Text="GAME ENGINES — Unity / Unreal bridge" FontSize="11" FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource NeonGreenBrush}" Margin="0,0,0,6"/>
+                                                        <TextBlock FontSize="10" Foreground="{StaticResource TextSecondaryBrush}"
+                                                                   TextWrapping="Wrap" Margin="0,0,0,8">
+                                                            The brain can also connect OUTWARD to other MCP servers and hand their tools to
+                                                            every agent already mounted on it. Point a bridge at unity-mcp or unreal-mcp and
+                                                            Claude, Codex and CluadeX all gain unity__* / unreal__* tools at once — no
+                                                            per-client setup — with every editor action recorded in the brain's journal.
+                                                            Edit the config, set enabled:true, then restart the agent. Bridges are local-only:
+                                                            the remote /mcp endpoint can never reach them.
+                                                        </TextBlock>
+                                                        <StackPanel Orientation="Horizontal">
+                                                            <Button Content="Open bridge config" Style="{StaticResource NeuralBtnPrimary}"
+                                                                    Click="OpenBridgeConfig_Click" Padding="12,5" FontSize="10" Margin="0,0,6,0"/>
+                                                            <Button Content="Check status" Style="{StaticResource NeuralBtnGhost}"
+                                                                    Click="CheckBridges_Click" Padding="12,5" FontSize="10"/>
+                                                        </StackPanel>
+                                                        <TextBlock x:Name="BridgeStatus" FontSize="10" Margin="0,6,0,0"
+                                                                   FontFamily="{StaticResource MonoFont}"
+                                                                   Foreground="{StaticResource TextMutedBrush}" TextWrapping="Wrap"/>
+                                                    </StackPanel>
+                                                </Border>
+
+                                                <Border BorderBrush="{StaticResource SurfaceLightBrush}" BorderThickness="0,1,0,0"
+                                                        Margin="0,10,0,0" Padding="0,10,0,0">
+                                                    <StackPanel>
                                                         <TextBlock Text="100% AUTO-LEARN — Claude Code hook" FontSize="11" FontWeight="SemiBold"
                                                                    Foreground="{StaticResource NeonGreenBrush}" Margin="0,0,0,6"/>
                                                         <TextBlock FontSize="10" Foreground="{StaticResource TextSecondaryBrush}"

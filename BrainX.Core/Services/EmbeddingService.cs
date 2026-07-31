@@ -29,14 +29,34 @@ public class EmbeddingService
 {
     public string OllamaUrl { get; set; } = "http://localhost:11434";
     public string Model { get; set; } = DefaultModel;
-    // 4000 chars (~roughly 1500-2000 tokens for mixed Thai/English markdown)
-    // sits comfortably under nomic-embed-text's 8192-token context window.
-    // 8000 chars looked fine for English but tipped Thai notes over the
-    // limit and produced silent 400s on the embed call — see embed-all
-    // diagnosis 2026-05-07.
-    public int MaxChars { get; set; } = 4000;
+    // How much of a note reaches the embedder. Anything past this is invisible
+    // to semantic search, so the limit IS the recall ceiling — see ResolveMaxChars.
+    public int MaxChars { get; set; } = DefaultMaxChars;
 
     public const string DefaultModel = "nomic-embed-text";
+
+    // 4000 chars was measured against nomic-embed-text on 2026-05-07: 8000 was
+    // fine for English but tipped Thai notes over its context and produced
+    // silent 400s. It is a nomic limit, not a universal one.
+    public const int DefaultMaxChars = 4000;
+
+    /// <summary>
+    /// Per-model input budget. Carrying nomic's 4000 over to bge-m3 capped the
+    /// vault at 13% of notes embedded in full — 87% of notes were silently
+    /// truncated, which is exactly the "the procedure is in the note but search
+    /// can't see it" complaint.
+    ///
+    /// Measured on this vault 2026-07-31 (Thai-heavy markdown, /api/embed):
+    /// appending distinctive text to a prefix still moved the vector at 20,000
+    /// chars (cosine 0.985) but not at all at 28,000 (cosine exactly 1.000000 =
+    /// silently dropped). 16,000 keeps ~25% headroom under the measured floor
+    /// and covers 79% of notes end-to-end, up from 13%.
+    ///
+    /// Raise this only with the same probe: "no HTTP error" does not mean
+    /// "the model read it".
+    /// </summary>
+    public static int ResolveMaxChars(string model)
+        => model.StartsWith("bge-m3", StringComparison.OrdinalIgnoreCase) ? 16000 : DefaultMaxChars;
 
     /// <summary>
     /// The embedding model actually used for the sidecars on disk is
@@ -70,7 +90,48 @@ public class EmbeddingService
         catch { return null; }
     }
 
-    private static void WriteManifest(string dir, string model, int dims)
+    /// <summary>
+    /// How many chars the sidecars on disk were actually built from. Null for
+    /// manifests written before this field existed — those predate the bge-m3
+    /// budget and were necessarily built at <see cref="DefaultMaxChars"/>.
+    /// </summary>
+    public static int? ReadManifestMaxChars(string vaultPath)
+    {
+        try
+        {
+            var path = Path.Combine(vaultPath, ".obsidianx", "embeddings", "model.json");
+            if (!File.Exists(path)) return null;
+            return JObject.Parse(File.ReadAllText(path))["maxChars"]?.Value<int?>();
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Read a boolean manifest field; null when absent or unreadable.</summary>
+    public static bool? ReadManifestFlag(string vaultPath, string field)
+        => ReadManifestValue(vaultPath, field)?.Value<bool?>();
+
+    /// <summary>Read a UTC timestamp manifest field; null when absent.</summary>
+    public static DateTime? ReadManifestTime(string vaultPath, string field)
+    {
+        var raw = ReadManifestValue(vaultPath, field)?.ToString();
+        return DateTime.TryParse(raw, null,
+            System.Globalization.DateTimeStyles.AdjustToUniversal
+            | System.Globalization.DateTimeStyles.AssumeUniversal, out var t) ? t : null;
+    }
+
+    private static JToken? ReadManifestValue(string vaultPath, string field)
+    {
+        try
+        {
+            var path = Path.Combine(vaultPath, ".obsidianx", "embeddings", "model.json");
+            if (!File.Exists(path)) return null;
+            return JObject.Parse(File.ReadAllText(path))[field];
+        }
+        catch { return null; }
+    }
+
+    private static void WriteManifest(string dir, string model, int dims, int maxChars,
+        bool complete, DateTime rebuildStartedAt)
     {
         try
         {
@@ -78,6 +139,9 @@ public class EmbeddingService
             {
                 ["model"] = model,
                 ["dims"] = dims,
+                ["maxChars"] = maxChars,
+                ["complete"] = complete,
+                ["rebuildStartedAt"] = rebuildStartedAt.ToString("O"),
                 ["updatedAt"] = DateTime.UtcNow.ToString("O")
             }.ToString();
             File.WriteAllText(Path.Combine(dir, "model.json"), json);
@@ -112,32 +176,69 @@ public class EmbeddingService
         // "unknown". Otherwise switching models on a legacy vault would
         // skip every existing (stale-dimension) sidecar via the mtime
         // check and semantic search would silently go dark.
+        MaxChars = ResolveMaxChars(Model);
         var manifestModel = ReadManifestModel(vaultPath) ?? DefaultModel;
         var modelChanged = !manifestModel.Equals(Model, StringComparison.OrdinalIgnoreCase);
+        // A budget change is as invalidating as a model change: the old vectors
+        // are honest vectors of a TRUNCATED note. Without this, raising MaxChars
+        // would leave the vault half-migrated with no visible symptom — every
+        // sidecar looks present and fresh, and only recall quietly stays broken.
+        var budgetChanged = (ReadManifestMaxChars(vaultPath) ?? DefaultMaxChars) != MaxChars;
+        var interrupted = ReadManifestFlag(vaultPath, "complete") == false;
+        var mustRebuild = modelChanged || budgetChanged || interrupted;
 
-        int written = 0, done = 0;
+        // A full rebuild is ~20 minutes of CPU on this vault, so it has to
+        // survive being cancelled. The manifest carries complete:false plus the
+        // moment the pass began; a sidecar written after that moment is already
+        // on the new budget and is skipped when the pass resumes. Without this,
+        // an interrupted rebuild either restarts from zero every time or — far
+        // worse — marks itself done while most vectors are still truncated.
+        var rebuildStartedAt = mustRebuild
+            ? (!modelChanged && !budgetChanged && interrupted
+                ? ReadManifestTime(vaultPath, "rebuildStartedAt") ?? DateTime.UtcNow
+                : DateTime.UtcNow)
+            : DateTime.MinValue;
+
+        int written = 0, done = 0, dims = 0;
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
         foreach (var node in nodes)
         {
             if (ct.IsCancellationRequested) break;
             done++;
             var sidecar = Path.Combine(dir, node.Id + ".bin");
-            if (!modelChanged && File.Exists(sidecar))
+            if (File.Exists(sidecar))
             {
+                var sidecarAt = File.GetLastWriteTimeUtc(sidecar);
                 // Skip when sidecar is newer than source — embedding is
                 // already up to date for this revision of the note.
-                if (File.GetLastWriteTimeUtc(sidecar) >= node.ModifiedAt)
-                    continue;
+                if (!mustRebuild && sidecarAt >= node.ModifiedAt) continue;
+                // Resuming a rebuild: this one was already redone this pass.
+                if (mustRebuild && sidecarAt >= rebuildStartedAt) continue;
             }
             var text = LoadEmbedText(node);
             if (string.IsNullOrWhiteSpace(text)) continue;
             var vec = await EmbedAsync(http, text, ct).ConfigureAwait(false);
             if (vec == null) continue;
-            await File.WriteAllBytesAsync(sidecar, FloatsToBytes(vec), ct).ConfigureAwait(false);
+            try
+            {
+                await File.WriteAllBytesAsync(sidecar, FloatsToBytes(vec), ct).ConfigureAwait(false);
+            }
+            // The client's VaultWatcher can be precomputing the same sidecar.
+            // A full pass is ~30 minutes; losing all of it to one contended
+            // file would be absurd when the next pass just redoes this note.
+            catch (IOException) { continue; }
+            catch (UnauthorizedAccessException) { continue; }
             written++;
-            if (written == 1) WriteManifest(dir, Model, vec.Length);
+            dims = vec.Length;
+            // Claim the new budget only as IN PROGRESS. Marking it complete here
+            // is what would strand the other 1200 notes on the old budget.
+            if (written == 1 && mustRebuild)
+                WriteManifest(dir, Model, dims, MaxChars, complete: false, rebuildStartedAt);
             progress?.Invoke(done, nodes.Count);
         }
+
+        if (written > 0 && !ct.IsCancellationRequested)
+            WriteManifest(dir, Model, dims, MaxChars, complete: true, rebuildStartedAt);
         return written;
     }
 

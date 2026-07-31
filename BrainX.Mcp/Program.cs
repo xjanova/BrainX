@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using BrainX.Core.Services;
+using BrainX.Mcp.Bridge;
 
 // ─────────────────────────────────────────────────────────────────────────
 // BrainX MCP Server (stdio, JSON-RPC 2.0)
@@ -192,6 +193,16 @@ internal static partial class Program
         var headless = Environment.GetEnvironmentVariable("BRAINX_HEADLESS") == "1";
         if (headless) Log("headless mode — skipping desktop config self-heal + client launch");
 
+        // Outbound bridges — the brain as an MCP HUB, not just a server. Any
+        // MCP server listed in <vault>/.obsidianx/mcp-bridges.json (Unity,
+        // Unreal, …) gets its tools merged into ours under a <id>__ prefix, so
+        // every agent already mounted on brainx-brain reaches them with no
+        // extra per-client config, and every call lands in the auto-journal.
+        // Started here, before the desktop courtesies below, so discovery runs
+        // while the client is still handshaking. Headless ⇒ disabled outright.
+        try { McpBridgeHub.Initialize(_vaultPath, headless, Log); }
+        catch (Exception ex) { Log($"bridge init failed (non-fatal): {ex.Message}"); }
+
         if (!headless)
         {
             try { EnsureDesktopConfigVersion(); }
@@ -228,6 +239,11 @@ internal static partial class Program
                 await writer.FlushAsync();
             }
         }
+
+        // stdin closed — the client is gone. Take the bridged servers with us:
+        // an orphaned engine server keeps an editor socket open and would fight
+        // the next session for it.
+        McpBridgeHub.Shutdown();
         return 0;
     }
 
@@ -281,9 +297,10 @@ internal static partial class Program
     {
         var name = _clientName;
         string bas;
-        if (string.IsNullOrWhiteSpace(name)) bas = "mcp";
-        else if (name.Contains("claude", StringComparison.OrdinalIgnoreCase)) bas = "claude-mcp";
-        else if (name.Contains("codex", StringComparison.OrdinalIgnoreCase)) bas = "codex-mcp";
+        if (name != null && name.Contains("claude", StringComparison.OrdinalIgnoreCase)) bas = "claude-mcp";
+        else if (name != null && name.Contains("codex", StringComparison.OrdinalIgnoreCase)) bas = "codex-mcp";
+        else if (CarriesNoVendorSignal(name) && HostVendor() is { } vendor) bas = vendor + "-mcp";
+        else if (string.IsNullOrWhiteSpace(name)) bas = "mcp";
         else
         {
             // Unknown client — keep the reported name but make it frontmatter-safe.
@@ -294,6 +311,104 @@ internal static partial class Program
         }
         return bas + suffix;
     }
+
+    /// <summary>
+    /// Does <paramref name="name"/> tell us nothing about WHICH product is on
+    /// the pipe?
+    ///
+    /// Some hosts name the CONNECTION rather than themselves. Claude Code's
+    /// desktop/SDK host reports clientInfo.name = "local-agent-mode-brainx-brain"
+    /// — a mode prefix plus OUR OWN server name. Slugging that produced two
+    /// real defects, both observed live on 2026-07-31:
+    ///   • notes written from that host were stamped
+    ///     `source: local-agent-mode-brainx-brain-mcp`, hiding the fact that
+    ///     Claude wrote them;
+    ///   • its agent-bus address became "local-agent-mode-brainx-brain", so
+    ///     CluadeX addressing "claude" — the only name any other agent could
+    ///     reasonably guess — reached an inbox that session was not reading.
+    /// </summary>
+    private static bool CarriesNoVendorSignal(string? name) =>
+        string.IsNullOrWhiteSpace(name) || name.Contains(ServerName, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Which vendor's app spawned this process, or null when we genuinely can't
+    /// tell. Consulted ONLY when clientInfo carries no vendor signal (above) —
+    /// a client that names itself is always believed over anything inferred.
+    ///
+    /// THE PARENT PROCESS IS THE SIGNAL THAT SURVIVES. The first attempt at this
+    /// keyed off CLAUDECODE, which Claude Code sets on the shells it launches —
+    /// and it was wrong: the desktop host spawns its MCP children with a curated
+    /// environment that does not include it. Proven on 2026-07-31 by a child
+    /// restarted onto the fixed binary that still resolved to the generic slug.
+    /// The parent image name is not curated: both of that host's MCP connections
+    /// (the one reporting "claude-ai" and the one reporting a connection name)
+    /// hang off the same claude.exe.
+    ///
+    /// The env vars stay as a secondary signal — they cover `brainx-mcp` started
+    /// by hand from a Claude Code terminal, where the parent is bash or node.
+    /// </summary>
+    private static string? HostVendor()
+    {
+        var parent = ParentProcessName();
+        if (parent != null)
+        {
+            // cluadex first. "CluadeX" happens not to contain "claude" — the
+            // letters are transposed — but leaning on that near-miss would be a
+            // trap for whoever renames the binary next.
+            if (parent.Contains("cluadex", StringComparison.OrdinalIgnoreCase)) return "cluadex";
+            if (parent.Contains("codex", StringComparison.OrdinalIgnoreCase)) return "codex";
+            if (parent.Contains("claude", StringComparison.OrdinalIgnoreCase)) return "claude";
+        }
+
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CLAUDECODE"))
+            || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CLAUDE_CODE_ENTRYPOINT")))
+            return "claude";
+
+        return null;
+    }
+
+    /// <summary>
+    /// Image name of the process that spawned us, or null. .NET exposes no
+    /// parent-process API, and System.Management would drag WMI into a console
+    /// app for one field, so ask ntdll directly.
+    /// </summary>
+    private static string? ParentProcessName()
+    {
+        if (!OperatingSystem.IsWindows()) return null;
+        try
+        {
+            var pbi = new ProcessBasicInformation();
+            using var self = System.Diagnostics.Process.GetCurrentProcess();
+            if (NtQueryInformationProcess(self.Handle, 0, ref pbi,
+                    System.Runtime.InteropServices.Marshal.SizeOf<ProcessBasicInformation>(), out _) != 0)
+                return null;
+
+            int ppid = pbi.InheritedFromUniqueProcessId.ToInt32();
+            if (ppid <= 0) return null;
+
+            // A parent that has already exited throws here — and its pid may by
+            // then belong to something unrelated, so a miss is the right answer.
+            using var parent = System.Diagnostics.Process.GetProcessById(ppid);
+            return parent.ProcessName;
+        }
+        catch { return null; }
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct ProcessBasicInformation
+    {
+        public IntPtr ExitStatus;
+        public IntPtr PebBaseAddress;
+        public IntPtr AffinityMask;
+        public IntPtr BasePriority;
+        public IntPtr UniqueProcessId;
+        public IntPtr InheritedFromUniqueProcessId;
+    }
+
+    [System.Runtime.InteropServices.DllImport("ntdll.dll")]
+    private static extern int NtQueryInformationProcess(
+        IntPtr processHandle, int processInformationClass,
+        ref ProcessBasicInformation processInformation, int processInformationLength, out int returnLength);
 
     private static string Initialize(JToken? id, JObject? parameters)
     {
@@ -400,9 +515,21 @@ internal static partial class Program
 
     // ───────────── tools/list ─────────────
 
-    private static string ToolsList(JToken? id) => BuildResult(id, new JObject
+    private static string ToolsList(JToken? id)
     {
-        ["tools"] = new JArray
+        var tools = CoreTools();
+
+        // Bridged tools (unity__*, unreal__*, …) ride along on the brain's own
+        // list. Assembled second and wrapped in a catch on purpose: a dead
+        // bridge must never cost the agent the brain itself.
+        try { McpBridgeHub.AppendTools(tools); }
+        catch (Exception ex) { Log($"bridge tools merge failed (non-fatal): {ex.Message}"); }
+
+        return BuildResult(id, new JObject { ["tools"] = tools });
+    }
+
+    /// <summary>The brain's own tools. Bridged ones are appended by ToolsList.</summary>
+    private static JArray CoreTools() => new()
         {
             Tool("brain_search",
                 "Full-text search across brain notes — matches titles, tags, AND full note bodies " +
@@ -441,6 +568,64 @@ internal static partial class Program
                     },
                     ["required"] = new JArray { "id" }
                 }),
+            // ── Agent Bus, declared THIRD on purpose ──
+            //
+            // A budget-limited client admits schemas in declaration order and
+            // drops the rest. CluadeX on a 12,288-token window with a project
+            // open could afford only SEVEN of these thirty-one, because the
+            // built-in file/build tools are admitted first — so a bus sitting
+            // anywhere but the front is simply absent, and an agent asked to
+            // report a build result had no way to send it (observed 2026-07-31).
+            //
+            // Search and fetch stay ahead of it: reading the brain is the reason
+            // to connect at all. Everything after this point is refinement by
+            // comparison — if only a handful fit, "search, read, and talk to the
+            // other agents" is the set worth having.
+            // ── Agent Bus: BrainX as the middleman between coding agents ──
+            Tool("agent_send",
+                "Send a message to ANOTHER AI agent connected to this same brain (Claude Code, Codex, …). " +
+                "BrainX is the middleman: every agent mounts this vault through its own brainx-mcp process, " +
+                "and this drops mail into the recipient's inbox on disk. to='codex'|'claude'|'all'. " +
+                "The recipient sees an `agentBus` unread notice piggybacked on its NEXT tool response and " +
+                "reads via agent_inbox. After sending, call agent_inbox {wait_seconds:60} to wait for the " +
+                "reply. Response includes whether each recipient is online right now (presence TTL 90s). " +
+                "Keep messages ≤64KB — park big payloads in a brain note and send the note id.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["to"] = new JObject { ["type"] = "string", ["description"] = "recipient agent: 'codex', 'claude', or 'all' (= every agent ever seen here except you). agent_peers lists who exists." },
+                        ["message"] = new JObject { ["type"] = "string", ["description"] = "the message body (markdown ok, ≤64KB)" },
+                        ["topic"] = new JObject { ["type"] = "string", ["description"] = "optional short thread label, e.g. 'review-authcontroller'" },
+                        ["reply_to"] = new JObject { ["type"] = "string", ["description"] = "optional id of the message this answers (from agent_inbox)" }
+                    },
+                    ["required"] = new JArray { "to", "message" }
+                }),
+            Tool("agent_inbox",
+                "Read messages other agents sent YOU through this brain. Messages are consumed on read " +
+                "(moved to the read/ audit folder; one-shot delivery per agent identity) — pass peek:true " +
+                "to look without consuming. Pass wait_seconds (max 300) to LONG-POLL: the call blocks until " +
+                "mail arrives or the window expires, which is how you wait for the other agent's reply " +
+                "after agent_send. Keep wait_seconds ≤60 per call and just call again to keep waiting — " +
+                "repeat calls are cheap. You rarely need to poll blind: every other tool response " +
+                "piggybacks an `agentBus` block whenever mail is waiting.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["wait_seconds"] = new JObject { ["type"] = "integer", ["default"] = 0, ["description"] = "0 = return immediately; N>0 = block up to N seconds for mail to arrive (max 300, suggest ≤60 per call)" },
+                        ["peek"] = new JObject { ["type"] = "boolean", ["default"] = false, ["description"] = "if true, read WITHOUT consuming (messages stay pending)" },
+                        ["limit"] = new JObject { ["type"] = "integer", ["default"] = 20, ["description"] = "max messages per call (1-100)" }
+                    }
+                }),
+            Tool("agent_peers",
+                "Who else is on this brain? Lists every agent that has ever connected, whether each is " +
+                "online RIGHT NOW (presence heartbeat, TTL 90s), which client binary it runs, and how deep " +
+                "its unread inbox is. Call before agent_send to see whether the other side is live, or when " +
+                "the user asks 'codex เปิดอยู่ไหม' / 'who's connected'.",
+                new JObject { ["type"] = "object", ["properties"] = new JObject() }),
             Tool("brain_expertise",
                 "List the owner's knowledge domains ranked by depth. Returns category, score (0-1), note count, word count.",
                 new JObject { ["type"] = "object", ["properties"] = new JObject() }),
@@ -472,11 +657,13 @@ internal static partial class Program
                 "High-level stats: brain name, address, note/word counts, top tags, top categories.",
                 new JObject { ["type"] = "object", ["properties"] = new JObject() }),
             Tool("brain_bundle",
-                "Load a PRE-BUILT context bundle for a hot topic. Each bundle is ~500 tokens — way cheaper than " +
+                "Load a PRE-BUILT context bundle for a hot topic. Each bundle is ~1200 tokens — way cheaper than " +
                 "brain_synthesize's full-content packing (~8000 tokens). Bundle includes top 5-10 related notes " +
                 "with title + tags + short summary + ready-to-paste [[wiki-link]] block. Use this FIRST when the " +
                 "user asks about a known topic; fall back to brain_search/brain_synthesize if no bundle exists. " +
-                "Run `brainx-mcp bake-bundles` to (re)generate.",
+                "Self-refreshing: a stale bundle is re-baked from the export on read (`rebaked:true`). Always check " +
+                "`stale` — when true, `staleReason` says why and the content predates the vault, so treat it as a " +
+                "lead rather than fact and verify with brain_search.",
                 new JObject
                 {
                     ["type"] = "object",
@@ -487,7 +674,8 @@ internal static partial class Program
                     ["required"] = new JArray { "topic" }
                 }),
             Tool("brain_bundles_list",
-                "Enumerate available pre-built context bundles (topic, type, note count, token estimate, last baked). " +
+                "Enumerate available pre-built context bundles (topic, type, note count, token estimate, last baked, " +
+                "plus ageDays/stale/staleReason per bundle and a top-level staleCount + exportAgeDays). " +
                 "Run BEFORE brain_bundle if you don't know what's available. Empty list = run `brainx-mcp bake-bundles`.",
                 new JObject { ["type"] = "object", ["properties"] = new JObject() }),
             Tool("brain_import_path",
@@ -775,6 +963,20 @@ internal static partial class Program
                     },
                     ["required"] = new JArray { "id", "verdict" }
                 }),
+            // ── Remote diagnostics, declared LAST on purpose ──
+            //
+            // A client with a small context window admits schemas until its
+            // budget runs out, then drops the tail. CluadeX on a 12,288-token
+            // local model kept 24 of these 30 and dropped exactly the last six —
+            // which, while ssh_* sat above the agent bus, meant a model asked to
+            // message another agent had no tool to do it with and answered out of
+            // brain_search instead (observed 2026-07-31).
+            //
+            // Declaration order is this server stating its own priority, and that
+            // is what a budget-limited client honours. ssh_* is a niche diagnostic
+            // that hands a weak local model a remote shell; the agent bus is the
+            // whole point of a shared brain and its schemas are tiny. If something
+            // must fall off the end, it should be ssh.
             Tool("ssh_profiles_list",
                 "List the SSH profiles the owner has registered for this brain. Returns id, host, user, " +
                 "description, and how many allow-patterns each profile has. Call this FIRST before ssh_run " +
@@ -814,53 +1016,16 @@ internal static partial class Program
                     },
                     ["required"] = new JArray { "profile_id", "path" }
                 }),
-            // ── Agent Bus: BrainX as the middleman between coding agents ──
-            Tool("agent_send",
-                "Send a message to ANOTHER AI agent connected to this same brain (Claude Code, Codex, …). " +
-                "BrainX is the middleman: every agent mounts this vault through its own brainx-mcp process, " +
-                "and this drops mail into the recipient's inbox on disk. to='codex'|'claude'|'all'. " +
-                "The recipient sees an `agentBus` unread notice piggybacked on its NEXT tool response and " +
-                "reads via agent_inbox. After sending, call agent_inbox {wait_seconds:60} to wait for the " +
-                "reply. Response includes whether each recipient is online right now (presence TTL 90s). " +
-                "Keep messages ≤64KB — park big payloads in a brain note and send the note id.",
-                new JObject
-                {
-                    ["type"] = "object",
-                    ["properties"] = new JObject
-                    {
-                        ["to"] = new JObject { ["type"] = "string", ["description"] = "recipient agent: 'codex', 'claude', or 'all' (= every agent ever seen here except you). agent_peers lists who exists." },
-                        ["message"] = new JObject { ["type"] = "string", ["description"] = "the message body (markdown ok, ≤64KB)" },
-                        ["topic"] = new JObject { ["type"] = "string", ["description"] = "optional short thread label, e.g. 'review-authcontroller'" },
-                        ["reply_to"] = new JObject { ["type"] = "string", ["description"] = "optional id of the message this answers (from agent_inbox)" }
-                    },
-                    ["required"] = new JArray { "to", "message" }
-                }),
-            Tool("agent_inbox",
-                "Read messages other agents sent YOU through this brain. Messages are consumed on read " +
-                "(moved to the read/ audit folder; one-shot delivery per agent identity) — pass peek:true " +
-                "to look without consuming. Pass wait_seconds (max 300) to LONG-POLL: the call blocks until " +
-                "mail arrives or the window expires, which is how you wait for the other agent's reply " +
-                "after agent_send. Keep wait_seconds ≤60 per call and just call again to keep waiting — " +
-                "repeat calls are cheap. You rarely need to poll blind: every other tool response " +
-                "piggybacks an `agentBus` block whenever mail is waiting.",
-                new JObject
-                {
-                    ["type"] = "object",
-                    ["properties"] = new JObject
-                    {
-                        ["wait_seconds"] = new JObject { ["type"] = "integer", ["default"] = 0, ["description"] = "0 = return immediately; N>0 = block up to N seconds for mail to arrive (max 300, suggest ≤60 per call)" },
-                        ["peek"] = new JObject { ["type"] = "boolean", ["default"] = false, ["description"] = "if true, read WITHOUT consuming (messages stay pending)" },
-                        ["limit"] = new JObject { ["type"] = "integer", ["default"] = 20, ["description"] = "max messages per call (1-100)" }
-                    }
-                }),
-            Tool("agent_peers",
-                "Who else is on this brain? Lists every agent that has ever connected, whether each is " +
-                "online RIGHT NOW (presence heartbeat, TTL 90s), which client binary it runs, and how deep " +
-                "its unread inbox is. Call before agent_send to see whether the other side is live, or when " +
-                "the user asks 'codex เปิดอยู่ไหม' / 'who's connected'.",
+            Tool("bridge_status",
+                "Diagnose the brain's OUTBOUND MCP bridges — the external MCP servers it hubs for " +
+                "(Unity Editor, Unreal Editor, …), whose tools appear here as <id>__<tool> " +
+                "(e.g. unity__manage_scene). Shows for each bridge: enabled, connected, tool count, " +
+                "the command it runs, the last error, and the setup steps still outstanding. " +
+                "Call this FIRST whenever a unity__/unreal__ tool is missing or failing, or when the " +
+                "user asks 'ต่อ unity/unreal ได้ไหม' — the answer is almost always a closed editor, a " +
+                "missing `uv`, or a path in mcp-bridges.json still pointing at the placeholder.",
                 new JObject { ["type"] = "object", ["properties"] = new JObject() })
-        }
-    });
+        };
 
     private static JObject Tool(string name, string description, JObject schema) => new()
     {
@@ -875,6 +1040,12 @@ internal static partial class Program
     {
         var name = parameters?["name"]?.ToString();
         var args = parameters?["arguments"] as JObject ?? new JObject();
+
+        // Bridged tool → hand the call to the engine that owns it. Its whole
+        // result envelope is forwarded untouched (see BridgedCall), which the
+        // brain's own path can't do because it re-serialises results to text.
+        if (name != null && McpBridgeHub.IsBridgedName(name))
+            return BridgedCall(id, name, args);
 
         try
         {
@@ -910,6 +1081,7 @@ internal static partial class Program
                 "agent_send"                => AgentSend(args),
                 "agent_inbox"               => AgentInbox(args),
                 "agent_peers"               => AgentPeers(),
+                "bridge_status"             => McpBridgeHub.StatusJson(),
                 _ => throw new InvalidOperationException($"unknown tool: {name}")
             };
 
@@ -953,6 +1125,86 @@ internal static partial class Program
                 }}
             });
         }
+    }
+
+    /// <summary>
+    /// Forward one bridged call (unity__*, unreal__*, …) to the MCP server that
+    /// owns it, returning ITS result envelope verbatim.
+    ///
+    /// Deliberately not routed through the switch above: that path re-serialises
+    /// whatever a tool returns into one text block, which would flatten an
+    /// engine's screenshots and structured content into JSON-of-JSON. The
+    /// journal and bus side effects are repeated here so a bridged call is as
+    /// visible in the brain's history as a native one — that visibility is the
+    /// entire reason the hub sits in the middle instead of each agent wiring up
+    /// the engine server itself.
+    /// </summary>
+    private static string BridgedCall(JToken? id, string name, JObject args)
+    {
+        try
+        {
+            var envelope = McpBridgeHub.CallTool(name, args);
+
+            AutoLogSession(name, SummarizeBridgeArgs(args));
+            NoteBusActivity(name);
+
+            // A server is free to answer with something other than the usual
+            // content array; wrap it rather than hand the client a malformed
+            // tools/call result.
+            if (envelope["content"] is not JArray content)
+            {
+                content = new JArray { new JObject
+                {
+                    ["type"] = "text",
+                    ["text"] = envelope.ToString(Formatting.Indented)
+                }};
+                envelope["content"] = content;
+            }
+
+            var busNotice = TryBuildAgentBusNotice(name);
+            if (busNotice != null)
+                content.Add(new JObject
+                {
+                    ["type"] = "text",
+                    ["text"] = new JObject { ["agentBus"] = busNotice }.ToString(Formatting.Indented)
+                });
+
+            return BuildResult(id, envelope);
+        }
+        catch (Exception ex)
+        {
+            // Same isError shape the native path uses — an agent shouldn't have
+            // to tell a bridged failure from a brain one to recover from it.
+            return BuildResult(id, new JObject
+            {
+                ["isError"] = true,
+                ["content"] = new JArray { new JObject
+                {
+                    ["type"] = "text",
+                    ["text"] = $"Error: {ex.Message}\n\nCall bridge_status to see what this bridge is missing."
+                }}
+            });
+        }
+    }
+
+    /// <summary>
+    /// One journal line for a bridged call. Keys and short values only: an
+    /// engine payload can carry a whole scene graph, and the journal is a
+    /// readable trail, not a transcript.
+    /// </summary>
+    private static string? SummarizeBridgeArgs(JObject args)
+    {
+        if (args.Count == 0) return null;
+        var parts = args.Properties().Take(4).Select(p =>
+        {
+            var v = p.Value.Type is JTokenType.Object or JTokenType.Array
+                ? $"<{p.Value.Type.ToString().ToLowerInvariant()}>"
+                : p.Value.ToString();
+            if (v.Length > 40) v = v[..40] + "…";
+            return $"{p.Name}={v}";
+        });
+        var summary = string.Join(" ", parts);
+        return args.Count > 4 ? $"{summary} (+{args.Count - 4})" : summary;
     }
 
     // ───────────── Tools ─────────────
@@ -1351,6 +1603,117 @@ internal static partial class Program
     //     "notes": [{ id, title, tags, summary, wikiLink, wordCount, modifiedAt }, …]
     //   }
 
+    // Staleness policy. A bundle is a CACHE of the export, which is itself a
+    // cache of the vault — so both hops can rot, and a re-bake only fixes the
+    // first one. Re-baking from a stale export would reset generatedAt and make
+    // old data look fresh, which is the exact failure this policy exists to
+    // prevent: a tool returning silently-stale data is worse than one erroring.
+    private const int BundleStaleDays = 30;
+    private const int ExportStaleDays = 14;
+    private const double BundleDriftFraction = 0.05;
+    private const int BundleDriftMinNotes = 40;
+    private const int MinBundleNotes = 3;
+    private const int DefaultLimitPerTopic = 8;
+
+    /// <summary>
+    /// Tags that are always baked, however unpopular. Procedural knowledge is
+    /// rare by definition — it will never climb into TopTags — but it is exactly
+    /// what a fresh session needs injected before it starts work, so it cannot
+    /// be left to popularity.
+    /// </summary>
+    private static readonly string[] PinnedBundleTags = ["playbook"];
+
+    /// <summary>
+    /// How trustworthy a bundle on disk still is. <paramref name="export"/> may
+    /// be null (no export file) — then only the bundle's own age is judged.
+    /// </summary>
+    private static (double AgeDays, double? ExportAgeDays, bool Stale, string? Reason)
+        EvaluateBundleFreshness(JObject bundle, BrainExport? export)
+    {
+        var now = DateTime.UtcNow;
+        var bakedAt = bundle["generatedAt"]?.Type == JTokenType.Date
+            ? bundle["generatedAt"]!.Value<DateTime>().ToUniversalTime()
+            : DateTime.TryParse(bundle["generatedAt"]?.ToString(), null,
+                System.Globalization.DateTimeStyles.AdjustToUniversal
+                | System.Globalization.DateTimeStyles.AssumeUniversal, out var parsed)
+                ? parsed
+                : now;
+        var ageDays = Math.Round((now - bakedAt).TotalDays, 1);
+
+        double? exportAgeDays = export == null
+            ? null
+            : Math.Round((now - export.GeneratedAt.ToUniversalTime()).TotalDays, 1);
+
+        // Ordered by how badly each one misleads a reader, worst first.
+        if (exportAgeDays > ExportStaleDays)
+            return (ageDays, exportAgeDays, true,
+                $"brain-export.json is {exportAgeDays:F0} days old — re-baking cannot help. " +
+                "Open BrainX → Settings → Export Brain Now, then retry.");
+
+        if (ageDays > BundleStaleDays)
+            return (ageDays, exportAgeDays, true, $"baked {ageDays:F0} days ago");
+
+        var bakedVaultCount = bundle["vaultNoteCount"]?.Value<int?>();
+        if (export != null && bakedVaultCount is > 0)
+        {
+            var delta = Math.Abs(export.Nodes.Count - bakedVaultCount.Value);
+            if (delta >= BundleDriftMinNotes && delta >= bakedVaultCount.Value * BundleDriftFraction)
+                return (ageDays, exportAgeDays, true,
+                    $"vault changed by {delta} notes since bake ({bakedVaultCount} → {export.Nodes.Count})");
+        }
+
+        return (ageDays, exportAgeDays, false, null);
+    }
+
+    /// <summary>
+    /// Bake one topic to <c>&lt;bundleDir&gt;/&lt;slug&gt;.json</c>. Returns false when the
+    /// topic has fewer than <see cref="MinBundleNotes"/> matches — a bundle of one
+    /// note costs more tokens than it saves. Shared by the CLI and the on-read
+    /// auto re-bake so the two can never drift apart.
+    /// </summary>
+    private static bool TryBakeBundle(
+        string topic, string topicType, BrainExport export,
+        int limitPerTopic, string bundleDir,
+        out JObject? bundle, out int matchCount)
+    {
+        NodeSummary[] picks;
+        if (topicType == "tag")
+        {
+            picks = export.Nodes
+                .Where(n => n.Tags.Any(t => t.Equals(topic, StringComparison.OrdinalIgnoreCase)))
+                .OrderByDescending(n => n.Importance)
+                .Take(limitPerTopic)
+                .ToArray();
+        }
+        else
+        {
+            var ql = topic.ToLowerInvariant();
+            picks = export.Nodes
+                .Select(n => (n, score: ScoreNode(n, ql)))
+                .Where(x => x.score > 0)
+                .OrderByDescending(x => x.score)
+                .Take(limitPerTopic)
+                .Select(x => x.n)
+                .ToArray();
+        }
+
+        matchCount = picks.Length;
+        bundle = null;
+        if (picks.Length < MinBundleNotes) return false;
+
+        var slug = SlugifyTopic(topic);
+        Directory.CreateDirectory(bundleDir);
+        bundle = BuildBundleJson(topic, slug, topicType, picks, export);
+
+        // Write via temp + replace: a reader in another process (the MCP server
+        // baking while the CLI bakes) must never see a half-written bundle.
+        var path = Path.Combine(bundleDir, slug + ".json");
+        var tmp = path + ".tmp";
+        File.WriteAllText(tmp, bundle.ToString(Newtonsoft.Json.Formatting.Indented));
+        File.Move(tmp, path, overwrite: true);
+        return true;
+    }
+
     /// <summary>Load a pre-baked bundle for a topic (tag or curated slug).</summary>
     private static JToken BrainBundle(JObject args)
     {
@@ -1383,7 +1746,37 @@ internal static partial class Program
         try
         {
             var bundle = JObject.Parse(File.ReadAllText(path));
+            var export = LoadExport();
+            var fresh = EvaluateBundleFreshness(bundle, export);
+
+            // Auto re-bake on read: cheap (one filter pass over the export, no
+            // LLM, no embeddings) and it keeps the cache honest without anyone
+            // remembering to run the CLI. Skipped when the export itself is the
+            // stale hop — re-baking there would only hide the problem.
+            if (fresh.Stale && export != null && fresh.ExportAgeDays <= ExportStaleDays)
+            {
+                var bakedTopic = bundle["topic"]?.ToString() ?? topic;
+                var bakedType = bundle["topicType"]?.ToString() ?? "tag";
+                if (TryBakeBundle(bakedTopic, bakedType, export, DefaultLimitPerTopic,
+                                  bundleDir, out var rebaked, out var matchCount) && rebaked != null)
+                {
+                    rebaked["rebaked"] = true;
+                    rebaked["rebakeReason"] = fresh.Reason;
+                    bundle = rebaked;
+                    fresh = EvaluateBundleFreshness(bundle, export);
+                }
+                else
+                {
+                    bundle["rebakeFailed"] =
+                        $"topic now matches only {matchCount} note(s) — kept the previous bundle";
+                }
+            }
+
             bundle["status"] = "ok";
+            bundle["ageDays"] = fresh.AgeDays;
+            bundle["stale"] = fresh.Stale;
+            if (fresh.ExportAgeDays != null) bundle["exportAgeDays"] = fresh.ExportAgeDays;
+            if (fresh.Stale) bundle["staleReason"] = fresh.Reason;
             // Log access so brain_suggest_topics can spot which bundles are useful
             LogAccess(slug, "bundle-read", topic);
             return bundle;
@@ -1415,12 +1808,18 @@ internal static partial class Program
             };
         }
 
+        var export = LoadExport();
         var summaries = new JArray();
+        var staleCount = 0;
+        double? exportAgeDays = null;
         foreach (var file in Directory.GetFiles(bundleDir, "*.json").OrderBy(f => f))
         {
             try
             {
                 var b = JObject.Parse(File.ReadAllText(file));
+                var fresh = EvaluateBundleFreshness(b, export);
+                if (fresh.Stale) staleCount++;
+                exportAgeDays = fresh.ExportAgeDays;
                 summaries.Add(new JObject
                 {
                     ["topic"] = b["topic"],
@@ -1428,7 +1827,10 @@ internal static partial class Program
                     ["topicType"] = b["topicType"],
                     ["noteCount"] = b["noteCount"],
                     ["tokenEstimate"] = b["tokenEstimate"],
-                    ["generatedAt"] = b["generatedAt"]
+                    ["generatedAt"] = b["generatedAt"],
+                    ["ageDays"] = fresh.AgeDays,
+                    ["stale"] = fresh.Stale,
+                    ["staleReason"] = fresh.Reason
                 });
             }
             catch
@@ -1437,14 +1839,27 @@ internal static partial class Program
             }
         }
 
+        // Listing does NOT re-bake: one brain_bundle call re-bakes one topic on
+        // demand, but a list is a cheap triage call and must stay cheap.
+        var hint = summaries.Count == 0
+            ? "Bundle dir exists but no bundles. Run `brainx-mcp bake-bundles`."
+            : staleCount == 0
+                ? "Call brain_bundle topic=<topicSlug> to load a specific bundle."
+                : exportAgeDays > ExportStaleDays
+                    ? $"{staleCount}/{summaries.Count} bundle(s) stale because brain-export.json is " +
+                      $"{exportAgeDays:F0} days old. Open BrainX → Settings → Export Brain Now, then " +
+                      "`brainx-mcp bake-bundles`."
+                    : $"{staleCount}/{summaries.Count} bundle(s) stale — brain_bundle re-bakes each one " +
+                      "on read, or run `brainx-mcp bake-bundles` to refresh them all at once.";
+
         return new JObject
         {
             ["status"] = summaries.Count == 0 ? "empty" : "ok",
             ["count"] = summaries.Count,
+            ["staleCount"] = staleCount,
+            ["exportAgeDays"] = exportAgeDays,
             ["bundles"] = summaries,
-            ["hint"] = summaries.Count == 0
-                ? "Bundle dir exists but no bundles. Run `brainx-mcp bake-bundles`."
-                : "Call brain_bundle topic=<topicSlug> to load a specific bundle."
+            ["hint"] = hint
         };
     }
 
@@ -1458,12 +1873,21 @@ internal static partial class Program
         var newestAt = files.Length == 0
             ? null
             : (DateTime?)files.Max(f => new FileInfo(f).LastWriteTimeUtc);
+        // Age off file mtime rather than parsing every bundle — brain_stats is a
+        // cheap call and the exact per-bundle verdict belongs to brain_bundles_list.
+        var staleCount = files.Count(f =>
+            (DateTime.UtcNow - new FileInfo(f).LastWriteTimeUtc).TotalDays > BundleStaleDays);
         return new JObject
         {
             ["count"] = files.Length,
             ["dir"] = bundleDir,
-            ["status"] = files.Length == 0 ? "empty" : "ok",
-            ["newestAt"] = newestAt
+            ["status"] = files.Length == 0 ? "empty" : staleCount > 0 ? "stale" : "ok",
+            ["newestAt"] = newestAt,
+            ["staleCount"] = staleCount,
+            ["oldestAgeDays"] = files.Length == 0
+                ? null
+                : (double?)Math.Round(files.Max(f =>
+                    (DateTime.UtcNow - new FileInfo(f).LastWriteTimeUtc).TotalDays), 1)
         };
     }
 
@@ -1472,7 +1896,7 @@ internal static partial class Program
     /// Discovers hot topics from the brain export (top tags) and queries
     /// (QueryGapAnalyzer) and bakes one JSON bundle per topic to
     /// `.obsidianx/bundles/<slug>.json`. Idempotent — overwrites existing
-    /// bundles on each run. Aim: ~500 tokens per bundle.
+    /// bundles on each run. ~1200 tokens per bundle at the default limit of 8 notes.
     /// </summary>
     internal static int BakeBundlesCli(string[] args)
     {
@@ -1536,7 +1960,15 @@ internal static partial class Program
         List<(string topic, string topicType)> topics;
         if (topicsArg != null && topicsArg.Length > 0)
         {
-            topics = topicsArg.Select(t => (t.Trim(), "manual")).ToList();
+            // `tag:name` forces exact-tag semantics; a bare word is scored as
+            // free text. Without the prefix there is no way to bundle a tag that
+            // hasn't reached TopTags.
+            topics = topicsArg
+                .Select(t => t.Trim())
+                .Select(t => t.StartsWith("tag:", StringComparison.OrdinalIgnoreCase)
+                    ? (t["tag:".Length..].Trim(), "tag")
+                    : (t, "manual"))
+                .ToList();
         }
         else
         {
@@ -1545,6 +1977,10 @@ internal static partial class Program
                 .Take(maxBundles)
                 .Select(t => (t.Tag, "tag"))
                 .ToList();
+
+            foreach (var pinned in PinnedBundleTags)
+                if (!topics.Any(t => t.Item1.Equals(pinned, StringComparison.OrdinalIgnoreCase)))
+                    topics.Add((pinned, "tag"));
         }
 
         var bundleDir = Path.Combine(vault, ".obsidianx", "bundles");
@@ -1557,50 +1993,27 @@ internal static partial class Program
         foreach (var (topic, topicType) in topics)
         {
             var slug = SlugifyTopic(topic);
-            var path = Path.Combine(bundleDir, slug + ".json");
-
-            // Find matching notes
-            NodeSummary[] picks;
-            if (topicType == "tag")
+            if (!TryBakeBundle(topic, topicType, export, limitPerTopic, bundleDir,
+                               out var bundle, out var matchCount) || bundle == null)
             {
-                picks = export.Nodes
-                    .Where(n => n.Tags.Any(t => t.Equals(topic, StringComparison.OrdinalIgnoreCase)))
-                    .OrderByDescending(n => n.Importance)
-                    .Take(limitPerTopic)
-                    .ToArray();
-            }
-            else
-            {
-                // Manual / query topic — fall back to full-text scoring
-                var ql = topic.ToLowerInvariant();
-                picks = export.Nodes
-                    .Select(n => (n, score: ScoreNode(n, ql)))
-                    .Where(x => x.score > 0)
-                    .OrderByDescending(x => x.score)
-                    .Take(limitPerTopic)
-                    .Select(x => x.n)
-                    .ToArray();
-            }
-
-            if (picks.Length < 3)
-            {
-                Console.WriteLine($"  ↷ {slug,-30} skipped (only {picks.Length} match — need ≥3)");
+                Console.WriteLine($"  ↷ {slug,-30} skipped (only {matchCount} match — need ≥{MinBundleNotes})");
                 skipped++;
                 continue;
             }
 
-            var bundle = BuildBundleJson(topic, slug, topicType, picks, export);
-            var serialized = bundle.ToString(Newtonsoft.Json.Formatting.Indented);
-            File.WriteAllText(path, serialized);
-            totalBytes += serialized.Length;
+            var bytes = bundle.ToString(Newtonsoft.Json.Formatting.Indented).Length;
+            totalBytes += bytes;
             // ~4 chars/token rule of thumb
-            var tokenEst = (int)(serialized.Length / 4.0);
-            Console.WriteLine($"  ✓ {slug,-30} {picks.Length} notes · ~{tokenEst} tokens · {serialized.Length} bytes");
+            Console.WriteLine($"  ✓ {slug,-30} {matchCount} notes · ~{(int)(bytes / 4.0)} tokens · {bytes} bytes");
             baked++;
         }
 
         Console.WriteLine();
         Console.WriteLine($"Done: {baked} baked, {skipped} skipped · {totalBytes:N0} bytes total (~{totalBytes / 4:N0} tokens)");
+        var exportAge = (DateTime.UtcNow - export.GeneratedAt.ToUniversalTime()).TotalDays;
+        if (exportAge > ExportStaleDays)
+            Console.WriteLine($"⚠  brain-export.json is {exportAge:F0} days old — these bundles describe a " +
+                              "vault that old. Open BrainX → Settings → Export Brain Now, then re-run.");
         Console.WriteLine($"Bundles available via brain_bundle topic=<slug> from inside Claude Code.");
         return 0;
     }
@@ -1641,6 +2054,9 @@ internal static partial class Program
             ["generatedAt"] = DateTime.UtcNow,
             ["exportGeneratedAt"] = export.GeneratedAt,
             ["noteCount"] = notes.Length,
+            // Vault size at bake time — lets a later read measure how much the
+            // brain has moved on without re-scanning anything.
+            ["vaultNoteCount"] = export.Nodes.Count,
             ["wikiLinkBlock"] = string.Join(" · ", wikiLinks),
             ["notes"] = notesArr,
             ["hint"] = "Pre-built bundle. Build [[title]] wiki-links from each note's title. wikiLinkBlock is ready to paste."
@@ -3778,9 +4194,16 @@ internal static partial class Program
 
     private static double ScoreNode(NodeSummary n, string ql, string? contentLower = null)
     {
+        // Section headings of this note, when its body is already cached.
+        // contentLower being non-null means GetContentLower just populated it.
+        string? headings = null;
+        if (contentLower != null && _contentCache.TryGetValue(n.Id, out var ce))
+            headings = ce.Headings;
+
         // Bonus when the full phrase appears verbatim
         double s = 0;
         if (n.Title.Contains(ql, StringComparison.OrdinalIgnoreCase)) s += 5;
+        else if (headings != null && headings.Contains(ql, StringComparison.Ordinal)) s += 3;
         else if (n.Preview.Contains(ql, StringComparison.OrdinalIgnoreCase)) s += 2;
         else if (contentLower != null && contentLower.Contains(ql, StringComparison.Ordinal)) s += 1.5;
 
@@ -3798,6 +4221,10 @@ internal static partial class Program
             if (n.Tags.Any(t => t.Contains(w, StringComparison.OrdinalIgnoreCase))) { s += 2; hit = true; }
             if (n.Preview.Contains(w, StringComparison.OrdinalIgnoreCase)) { s += 1; hit = true; }
             if (n.PrimaryCategory.Contains(w, StringComparison.OrdinalIgnoreCase)) { s += 1.5; hit = true; }
+            // A word in a section heading scores near title level — the note
+            // has a section devoted to it. Checked before the deep-content
+            // fallback so a heading hit never collapses to the +0.5 crumb.
+            if (headings != null && headings.Contains(w, StringComparison.Ordinal)) { s += 2.5; hit = true; }
             // Deep-content hit: worth less than a title/preview hit but
             // rescues keywords buried past the 500-char preview.
             if (!hit && contentLower != null
@@ -3883,7 +4310,74 @@ internal static partial class Program
         var degree = n.BacklinkIds.Count + n.LinkedNodeIds.Count;
         s *= 1.0 + Math.Min(degree, 10) * 0.02;
         if (DateTime.UtcNow - n.ModifiedAt < TimeSpan.FromDays(14)) s *= 1.10;
+        var usage = GetUsageScores().GetValueOrDefault(n.Id);
+        if (usage > 0) s *= 1.0 + Math.Min(usage, 8.0) * 0.02;
         return s;
+    }
+
+    // ───────────── usage signal ─────────────
+    //
+    // access-log.ndjson has recorded every retrieval since v2.x but has never
+    // fed ranking. It does now — with two guards that matter more than the
+    // boost itself:
+    //
+    //  1. Only DELIBERATE reads count. `search` and `semantic_search` log every
+    //     row they return, so ranking on those would be a feedback loop: a note
+    //     in the top 10 gets logged, gets boosted, ranks higher, gets logged
+    //     again. Impressions are not clicks. Only ops where something chose
+    //     THIS note by id are counted.
+    //  2. DISTINCT DAYS, not raw hits. One session re-reading a note five times
+    //     is one day of evidence, not five.
+    //
+    // Ceiling is +16%, the same tie-breaker weight class as the degree boost —
+    // popularity nudges ordering, it can never outrank a better text match.
+    private static readonly HashSet<string> _deliberateReadOps =
+        new(StringComparer.OrdinalIgnoreCase) { "get_note", "bundle-read", "synthesize", "get_backlinks" };
+
+    private static Dictionary<string, double>? _usageScores;
+    private static DateTime _usageLoadedAt = DateTime.MinValue;
+    private static readonly TimeSpan UsageTtl = TimeSpan.FromSeconds(60);
+
+    private static Dictionary<string, double> GetUsageScores()
+    {
+        // Time-based TTL, not the log's mtime: LogAccess appends on every single
+        // search, so an mtime check would rebuild this on literally every query.
+        if (_usageScores != null && DateTime.UtcNow - _usageLoadedAt < UsageTtl) return _usageScores;
+
+        var scores = new Dictionary<string, double>(StringComparer.Ordinal);
+        try
+        {
+            var logPath = Path.Combine(_vaultPath, ".obsidianx", "access-log.ndjson");
+            if (File.Exists(logPath))
+            {
+                var seen = new HashSet<(string Id, int Day)>();
+                var now = DateTime.UtcNow;
+                foreach (var line in File.ReadLines(logPath))
+                {
+                    if (string.IsNullOrWhiteSpace(line)) continue;
+                    JObject e;
+                    try { e = JObject.Parse(line); } catch { continue; }
+                    var op = e["op"]?.ToString();
+                    if (op == null || !_deliberateReadOps.Contains(op)) continue;
+                    var id = e["node_id"]?.ToString();
+                    if (string.IsNullOrEmpty(id)) continue;
+                    if (!DateTime.TryParse(e["ts"]?.ToString(), null,
+                            System.Globalization.DateTimeStyles.AdjustToUniversal
+                            | System.Globalization.DateTimeStyles.AssumeUniversal, out var ts)) continue;
+
+                    var ageDays = (now - ts).TotalDays;
+                    if (ageDays < 0 || ageDays > 90) continue;
+                    if (!seen.Add((id, (int)ageDays))) continue;     // one vote per note per day
+                    scores[id] = scores.GetValueOrDefault(id) + (ageDays <= 14 ? 1.0 : 0.5);
+                }
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+
+        _usageScores = scores;
+        _usageLoadedAt = DateTime.UtcNow;
+        return scores;
     }
 
     // Full-content cache (v2.8.0): brain-export.json only carries a
@@ -3892,7 +4386,7 @@ internal static partial class Program
     // mtime — the whole vault (~1M words) is 10-20 MB, cheap for a
     // long-lived process. First search after boot pays one bulk read;
     // every search after that is a pure in-memory substring sweep.
-    private static readonly Dictionary<string, (long Mtime, string Content)> _contentCache = new();
+    private static readonly Dictionary<string, (long Mtime, string Content, string Headings)> _contentCache = new();
 
     private static string? GetContentLower(BrainExport export, NodeSummary n)
     {
@@ -3903,10 +4397,39 @@ internal static partial class Program
             var mtime = File.GetLastWriteTimeUtc(path).Ticks;
             if (_contentCache.TryGetValue(n.Id, out var hit) && hit.Mtime == mtime) return hit.Content;
             var content = File.ReadAllText(path).ToLowerInvariant();
-            _contentCache[n.Id] = (mtime, content);
+            _contentCache[n.Id] = (mtime, content, ExtractHeadings(content));
             return content;
         }
         catch { return null; }
+    }
+
+    /// <summary>
+    /// Every markdown heading line, newline-joined. A heading is the author's
+    /// own label for a section, so a query word appearing in one means the note
+    /// has a part ABOUT that word — a far stronger signal than the same word
+    /// mentioned in passing in the body, which is all the old scorer could see.
+    /// This is what makes a procedure buried at "## วิธีวินิจฉัยเร็ว" on line 400
+    /// findable by someone searching for the procedure rather than the incident.
+    /// </summary>
+    private static string ExtractHeadings(string contentLower)
+    {
+        var sb = new System.Text.StringBuilder();
+        var inFence = false;
+        foreach (var line in contentLower.Split('\n'))
+        {
+            var t = line.TrimStart();
+            // These notes are full of bash blocks, and `# install deps` is a
+            // shell comment, not a section label.
+            if (t.StartsWith("```", StringComparison.Ordinal)
+                || t.StartsWith("~~~", StringComparison.Ordinal)) { inFence = !inFence; continue; }
+            if (inFence) continue;
+            if (t.Length < 2 || t[0] != '#') continue;
+            int h = 0;
+            while (h < t.Length && t[h] == '#') h++;
+            if (h > 6 || h >= t.Length || t[h] != ' ') continue;   // "#tag" is not a heading
+            sb.Append(t, h + 1, t.Length - h - 1).Append('\n');
+        }
+        return sb.ToString();
     }
 
     /// <summary>
