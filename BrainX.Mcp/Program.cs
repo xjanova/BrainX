@@ -3311,8 +3311,16 @@ internal static partial class Program
         int structuralChecked = 0;
         var titleSet = new HashSet<string>(export.Nodes.Select(n => n.Title), StringComparer.OrdinalIgnoreCase);
         // Ids are legitimate link targets (KnowledgeIndexer resolves them), so
-        // a `[[b5934f5023a9]]` citation is not a broken link.
-        foreach (var n in export.Nodes) titleSet.Add(n.Id);
+        // a `[[b5934f5023a9]]` citation is not a broken link. Same for an
+        // `aliases:` entry — one note answering to several spellings.
+        foreach (var n in export.Nodes)
+        {
+            titleSet.Add(n.Id);
+            var alias = PropString(n, "aliases") ?? PropString(n, "alias");
+            if (string.IsNullOrWhiteSpace(alias)) continue;
+            foreach (var a in alias.Split(new[] { ',', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+                titleSet.Add(a.Trim().Trim('[', ']', '"', '\'', '-', ' '));
+        }
         foreach (var n in export.Nodes.OrderByDescending(n => n.ModifiedAt).Take(structuralSampleSize))
         {
             structuralChecked++;

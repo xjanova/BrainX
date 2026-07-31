@@ -60,6 +60,17 @@ public partial class KnowledgeIndexer
             // now. Keyed alongside titles rather than as a fallback: a 12-hex
             // note TITLE would be the collision, and there is no such thing.
             if (!string.IsNullOrEmpty(node.Id)) nodeMap[node.Id.ToLowerInvariant()] = node;
+            // Obsidian's `aliases:` frontmatter, honoured. The same idea gets
+            // linked under several spellings over a year of notes — "Deploy CSS
+            // build gotcha" and "deploy-css-build-gotcha" were 16 references to
+            // one missing note in two casings. An alias lets one note answer to
+            // all of them instead of splitting the graph. First writer wins, so
+            // an alias can never shadow a real title.
+            foreach (var alias in ReadAliases(node))
+            {
+                var key = alias.ToLowerInvariant();
+                if (!nodeMap.ContainsKey(key)) nodeMap[key] = node;
+            }
             var rel = Path.GetRelativePath(vaultPath, file).Replace('\\', '/');
             nodeByPath[rel] = node;
             // Filename-only key for "file": "Note.md" without folder
@@ -427,6 +438,34 @@ public partial class KnowledgeIndexer
         var lowered = text.ToLowerInvariant();
         var collapsed = AnchorCleanupPattern().Replace(lowered, " ").Trim();
         return collapsed;
+    }
+
+    /// <summary>
+    /// `aliases:` from frontmatter, as a YAML list or a single scalar — both
+    /// spellings are valid Obsidian and both appear in this vault. Anything
+    /// else in that key is ignored rather than guessed at.
+    /// </summary>
+    private static IEnumerable<string> ReadAliases(KnowledgeNode node)
+    {
+        if (node.Properties == null) yield break;
+        foreach (var (key, value) in node.Properties)
+        {
+            if (!key.Equals("aliases", StringComparison.OrdinalIgnoreCase)
+                && !key.Equals("alias", StringComparison.OrdinalIgnoreCase)) continue;
+            if (value is System.Collections.IEnumerable list and not string)
+            {
+                foreach (var item in list)
+                {
+                    var s = item?.ToString()?.Trim();
+                    if (!string.IsNullOrEmpty(s)) yield return s;
+                }
+            }
+            else
+            {
+                var s = value?.ToString()?.Trim();
+                if (!string.IsNullOrEmpty(s)) yield return s;
+            }
+        }
     }
 
     /// <summary>
