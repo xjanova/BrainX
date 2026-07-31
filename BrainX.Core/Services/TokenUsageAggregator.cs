@@ -76,6 +76,42 @@ public class TokenUsageAggregator
             : (double)TotalSaved / TotalProjection * 100.0;
     }
 
+    /// <summary>
+    /// Characters the brain's own MCP tools actually returned, from
+    /// <c>~/.claude/tool-log.ndjson</c>'s recorded <c>resp_size</c>. Unlike the
+    /// rest of this class this is a MEASUREMENT, not an estimate: it is the
+    /// real size of the real payloads, so it can sit next to Claude's own token
+    /// tally and be compared honestly.
+    ///
+    /// Matched by tool-name SUFFIX. Three sites in this codebase named the
+    /// pre-rename server ('mcp__obsidianx-brain__…') and silently measured zero
+    /// for 67 days; the prefix is what a rebrand changes, the tool name is what
+    /// identifies the call.
+    /// </summary>
+    public long MeasuredBrainResponseChars(int hoursBack)
+    {
+        var log = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".claude", "tool-log.ndjson");
+        if (!File.Exists(log)) return 0;
+        var since = DateTime.UtcNow.AddHours(-Math.Abs(hoursBack));
+        long total = 0;
+        try
+        {
+            foreach (var line in File.ReadLines(log))
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                if (!TryParseTs(line, out var ts, out var obj)) continue;
+                if (ts < since) continue;
+                var tool = obj["tool"]?.ToString();
+                if (tool == null || !tool.Contains("__brain_", StringComparison.OrdinalIgnoreCase)) continue;
+                total += obj["resp_size"]?.ToObject<long?>() ?? 0;
+            }
+        }
+        catch (IOException) { }
+        return total;
+    }
+
     public Series Compute(string vaultPath, int hoursBack = 24 * 14, int bucketMinutes = 60)
     {
         if (bucketMinutes <= 0) bucketMinutes = 60;

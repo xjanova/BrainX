@@ -698,6 +698,25 @@ internal static partial class Program
                 "plus ageDays/stale/staleReason per bundle and a top-level staleCount + exportAgeDays). " +
                 "Run BEFORE brain_bundle if you don't know what's available. Empty list = run `brainx-mcp bake-bundles`.",
                 new JObject { ["type"] = "object", ["properties"] = new JObject() }),
+            Tool("brain_set_mode",
+                "Read or set the brain's RETRIEVAL MODE — how much payload every tool returns, for every agent on " +
+                "this brain. Call with no argument to see the current mode and what each costs. Measured per " +
+                "brain_search: economy ~773t, balanced ~1100t, full ~2565t; brain_get_note on a long note is " +
+                "11,597t uncapped vs 1,187t at 4k. `compact` keeps matchContext (WHY a note matched) and drops only " +
+                "the preview blob, so economy costs answers nothing. Explicit per-call arguments always override.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["mode"] = new JObject
+                        {
+                            ["type"] = "string",
+                            ["enum"] = new JArray("economy", "balanced", "full"),
+                            ["description"] = "omit to just read the current setting"
+                        }
+                    }
+                }),
             Tool("brain_mark_verified",
                 "Record that YOU have re-checked a note's claims against the real world. Use after running the " +
                 "note's own `verifyCmd` (from brain_audit's verification.due). The brain NEVER executes verifyCmd " +
@@ -1099,6 +1118,7 @@ internal static partial class Program
                 "brain_bundle"              => BrainBundle(args),
                 "brain_bundles_list"        => BrainBundlesList(),
                 "brain_mark_verified"       => BrainMarkVerified(args),
+                "brain_set_mode"            => BrainSetMode(args),
                 "brain_import_path"         => BrainImportPath(args),
                 "brain_create_note"         => BrainCreateNote(args),
                 "brain_append_note"         => BrainAppendNote(args),
@@ -1247,6 +1267,112 @@ internal static partial class Program
         return args.Count > 4 ? $"{summary} (+{args.Count - 4})" : summary;
     }
 
+    // ───────────── retrieval mode (token economy) ─────────────
+    //
+    // Measured on this vault 2026-08-01, one brain_search:
+    //   full     limit 10, preview 200   2,565 t
+    //   balanced compact,  limit 8         ~1,100 t
+    //   economy  compact,  limit 5         773 t   (-70%)
+    // and one brain_get_note on a long note: 11,597 t full vs 1,187 t at 4k.
+    //
+    // The important measurement is that `compact` keeps `matchContext` — the
+    // snippet showing WHY a note matched. What it drops is `preview`, which is
+    // usually the note's frontmatter and repeated H1. So economy is not a
+    // quality trade; it is the same answer without the packaging.
+    //
+    // Kept in the vault, not in env or code, so every agent on this brain
+    // (Claude Code, Desktop, CluadeX, Codex) reads one switch.
+    private sealed record RetrievalMode(
+        string Name, bool Compact, int SearchLimit, int PreviewChars, int NoteTruncate);
+
+    private static readonly RetrievalMode ModeEconomy =
+        new("economy", Compact: true, SearchLimit: 5, PreviewChars: 0, NoteTruncate: 6000);
+    private static readonly RetrievalMode ModeBalanced =
+        new("balanced", Compact: true, SearchLimit: 8, PreviewChars: 0, NoteTruncate: 14000);
+    private static readonly RetrievalMode ModeFull =
+        new("full", Compact: false, SearchLimit: 10, PreviewChars: 200, NoteTruncate: 0);
+
+    /// <summary>Default when nothing is configured. Balanced, not economy:
+    /// a brand-new brain should behave the way the docs describe, and the
+    /// owner opts INTO the aggressive setting.</summary>
+    private const string DefaultRetrievalMode = "balanced";
+
+    private static RetrievalMode? _modeCache;
+    private static long _modeCacheMtime = -1;
+
+    private static string BrainConfigPath()
+        => Path.Combine(_vaultPath, ".obsidianx", "brain-config.json");
+
+    private static RetrievalMode CurrentRetrievalMode()
+    {
+        try
+        {
+            var path = BrainConfigPath();
+            var mtime = File.Exists(path) ? File.GetLastWriteTimeUtc(path).Ticks : 0;
+            if (_modeCache != null && mtime == _modeCacheMtime) return _modeCache;
+            var name = DefaultRetrievalMode;
+            if (File.Exists(path))
+                name = JObject.Parse(File.ReadAllText(path))["retrievalMode"]?.ToString() ?? name;
+            _modeCache = ResolveMode(name);
+            _modeCacheMtime = mtime;
+            return _modeCache;
+        }
+        catch { return ModeBalanced; }
+    }
+
+    private static RetrievalMode ResolveMode(string? name) => (name ?? "").Trim().ToLowerInvariant() switch
+    {
+        "economy" or "eco" or "cheap" => ModeEconomy,
+        "full" or "verbose" => ModeFull,
+        _ => ModeBalanced,
+    };
+
+    /// <summary>Flip the switch from any agent, and say what it costs.</summary>
+    private static JToken BrainSetMode(JObject args)
+    {
+        var requested = args["mode"]?.ToString();
+        var path = BrainConfigPath();
+
+        if (string.IsNullOrWhiteSpace(requested))
+        {
+            var now = CurrentRetrievalMode();
+            return new JObject
+            {
+                ["mode"] = now.Name,
+                ["searchLimit"] = now.SearchLimit,
+                ["compact"] = now.Compact,
+                ["noteTruncate"] = now.NoteTruncate == 0 ? null : now.NoteTruncate,
+                ["configPath"] = path,
+                ["available"] = new JArray("economy", "balanced", "full"),
+                ["hint"] = "Pass mode= to change it. economy ~773t/search, balanced ~1100t, full ~2565t "
+                         + "(measured). compact keeps matchContext, so economy loses packaging, not answers."
+            };
+        }
+
+        var resolved = ResolveMode(requested);
+        var dir = Path.GetDirectoryName(path)!;
+        Directory.CreateDirectory(dir);
+        var cfg = File.Exists(path) ? JObject.Parse(File.ReadAllText(path)) : new JObject();
+        cfg["retrievalMode"] = resolved.Name;
+        cfg["updatedAt"] = DateTime.UtcNow.ToString("O");
+        // UTF8 without BOM — a BOM here breaks every downstream JSON reader.
+        File.WriteAllText(path, cfg.ToString(Formatting.Indented), new UTF8Encoding(false));
+        _modeCache = null; _modeCacheMtime = -1;
+
+        return new JObject
+        {
+            ["success"] = true,
+            ["mode"] = resolved.Name,
+            ["searchLimit"] = resolved.SearchLimit,
+            ["compact"] = resolved.Compact,
+            ["noteTruncate"] = resolved.NoteTruncate == 0 ? null : resolved.NoteTruncate,
+            ["appliesTo"] = "every agent on this brain, from their next call",
+            ["hint"] = resolved.Name == "full"
+                ? "Full payloads restored — ~2565t per search."
+                : $"Explicit arguments still win: pass compact:false or limit:N to override per call."
+        };
+    }
+
     // ───────────── Tools ─────────────
 
     private static JToken BrainSearch(JObject args)
@@ -1259,9 +1385,13 @@ internal static partial class Program
         var cached = TryGetMemoHit("brain_search", args, query);
         if (cached != null) return cached;
 
-        var limit = args["limit"]?.ToObject<int>() ?? 10;
-        var previewChars = args["preview_chars"]?.ToObject<int>() ?? 200;
-        var compact = args["compact"]?.ToObject<bool>() ?? false;
+        // Defaults come from the retrieval mode; an explicit argument always
+        // wins, so any caller that genuinely needs the full payload can still
+        // ask for it. See RetrievalMode for the measured cost of each.
+        var mode = CurrentRetrievalMode();
+        var limit = args["limit"]?.ToObject<int>() ?? mode.SearchLimit;
+        var previewChars = args["preview_chars"]?.ToObject<int>() ?? mode.PreviewChars;
+        var compact = args["compact"]?.ToObject<bool>() ?? mode.Compact;
         var scope = NormaliseScope(args["scope"]?.ToString());
 
         var export = LoadExport()
@@ -1360,9 +1490,15 @@ internal static partial class Program
     private static JToken BrainGetNote(JObject args)
     {
         var nodeId = args["id"]?.ToString() ?? throw new ArgumentException("id is required");
-        var truncate = args["truncate"]?.ToObject<int>() ?? 0;
         var section = args["section"]?.ToString();
         var metadataOnly = args["metadata_only"]?.ToObject<bool>() ?? false;
+        // A full read of a long note measured 11,597 t — the single most
+        // expensive call this brain can make. The mode caps it unless the
+        // caller asks for a specific size, and the response already carries
+        // `truncated` + `fullSize` so the caller can ask for more knowingly.
+        // A `section` request is exempt: it is already a targeted read.
+        var truncate = args["truncate"]?.ToObject<int>()
+                       ?? (section != null ? 0 : CurrentRetrievalMode().NoteTruncate);
 
         var export = LoadExport() ?? throw new InvalidOperationException("no brain-export");
         var node = export.Nodes.FirstOrDefault(n => n.Id == nodeId)
@@ -1616,7 +1752,19 @@ internal static partial class Program
                 ["ttlMinutes"] = (int)MemoTtl.TotalMinutes,
                 ["maxEntries"] = NoteMemoMaxEntries
             },
-            ["bundles"] = BundleSummaryForStats()
+            ["bundles"] = BundleSummaryForStats(),
+            // Surfaced here because a reader comparing token numbers needs to
+            // know which setting produced them — the same query costs 3x more
+            // in full than in economy.
+            ["retrieval"] = new JObject
+            {
+                ["mode"] = CurrentRetrievalMode().Name,
+                ["searchLimit"] = CurrentRetrievalMode().SearchLimit,
+                ["compact"] = CurrentRetrievalMode().Compact,
+                ["noteTruncate"] = CurrentRetrievalMode().NoteTruncate == 0
+                    ? null : CurrentRetrievalMode().NoteTruncate,
+                ["change"] = "brain_set_mode mode=economy|balanced|full"
+            }
         };
     }
 

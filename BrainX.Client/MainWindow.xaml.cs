@@ -10823,12 +10823,49 @@ public partial class MainWindow : Window
                 bucketMinutes: bucketMinutes);
 
             // Top-line stat cards (always reflect the visible range)
-            TokensActualText.Text     = $"{series.TotalActual:N0}";
-            TokensProjectionText.Text = $"{series.TotalProjection:N0}";
-            TokensSavedText.Text      = $"{series.TotalSaved:N0}";
-            TokensSavedPctText.Text   = series.TotalProjection == 0
-                ? "no data yet"
-                : $"{series.SavingsPercent:F0}% of projection";
+            // Card 1 is MEASURED — Claude's own transcripts, via
+            // ClaudeTranscriptTally, which counts real tokens rather than
+            // multiplying call counts by tuned constants. Its windows are
+            // fixed (5h/24h/7d), so show the one that fits the chart range and
+            // say which; a number whose window does not match the chart beside
+            // it is worse than no number.
+            var tally = _hudTally;
+            var (tallyTokens, tallyWindow) = _tokenChartHoursBack switch
+            {
+                <= 5       => (tally?.Tokens5h  ?? 0, "last 5 h"),
+                <= 24      => (tally?.Tokens24h ?? 0, "last 24 h"),
+                <= 24 * 7  => (tally?.Tokens7d  ?? 0, "last 7 d"),
+                _          => (tally?.TokensTotal ?? 0, "all time"),
+            };
+            if (tally == null || tallyTokens == 0)
+            {
+                TokensActualText.Text = "—";
+                TokensActualSubText.Text = "no Claude transcripts found";
+            }
+            else
+            {
+                TokensActualText.Text = $"{tallyTokens:N0}";
+                TokensActualSubText.Text = $"Claude transcripts · {tallyWindow}";
+            }
+
+            // Card 2 is also MEASURED, but of a different thing: the bytes the
+            // brain's own tools actually returned. Real, and directly
+            // comparable to card 1 — this is the brain's share of that spend.
+            var brainChars = _tokenUsage.MeasuredBrainResponseChars(_tokenChartHoursBack);
+            var brainTokens = brainChars / 4;
+            TokensProjectionText.Text = brainTokens > 0 ? $"{brainTokens:N0}" : "—";
+            TokensBrainShareSubText.Text = (brainTokens > 0 && tallyTokens > 0)
+                ? $"{(100.0 * brainTokens / tallyTokens):F1}% of measured spend"
+                : "what brain calls returned";
+
+            // Card 3 is the only estimate on this page, and it stays labelled
+            // as one. It is a counterfactual — nobody can measure the tokens a
+            // session did NOT spend — so it must never be dressed up in the
+            // same colour as the two numbers that are real.
+            TokensSavedText.Text    = $"~{series.TotalSaved:N0}";
+            TokensSavedPctText.Text = series.TotalSaved == 0
+                ? "not measured"
+                : "estimate · heuristic, not measured";
             int brainCalls = series.Buckets.Sum(b => b.BrainCalls);
             int otherCalls = series.Buckets.Sum(b => b.OtherToolCalls);
             TokensCallsText.Text = $"{brainCalls} / {otherCalls}";

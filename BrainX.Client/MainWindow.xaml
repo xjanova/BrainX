@@ -4199,29 +4199,35 @@
                                     </Grid.ColumnDefinitions>
                                     <Border Grid.Column="0" Style="{StaticResource CardPanel}" Margin="0,0,8,0" Padding="16,12">
                                         <StackPanel>
-                                            <TextBlock Text="ACTUAL SPENT" FontSize="10" Foreground="{StaticResource TextMutedBrush}"/>
+                                            <!-- MEASURED: Claude's own transcripts, counted by
+                                                 ClaudeTranscriptTally. The card next door is a guess,
+                                                 and the two must never look alike. -->
+                                            <TextBlock Text="SPENT (MEASURED)" FontSize="10" Foreground="{StaticResource TextMutedBrush}"/>
                                             <TextBlock x:Name="TokensActualText" Text="0" FontSize="22" FontWeight="Bold"
                                                        Foreground="{StaticResource NeonCyanBrush}"
                                                        FontFamily="{StaticResource MonoFont}"/>
-                                            <TextBlock Text="tokens, last 14 days" FontSize="10" Foreground="{StaticResource TextMutedBrush}"/>
+                                            <TextBlock x:Name="TokensActualSubText" Text="from Claude transcripts" FontSize="10" Foreground="{StaticResource TextMutedBrush}"/>
                                         </StackPanel>
                                     </Border>
                                     <Border Grid.Column="1" Style="{StaticResource CardPanel}" Margin="4,0,4,0" Padding="16,12">
                                         <StackPanel>
-                                            <TextBlock Text="WITHOUT BRAIN (PROJECTION)" FontSize="10" Foreground="{StaticResource TextMutedBrush}"/>
+                                            <TextBlock Text="BRAIN SHARE (MEASURED)" FontSize="10" Foreground="{StaticResource TextMutedBrush}"/>
                                             <TextBlock x:Name="TokensProjectionText" Text="0" FontSize="22" FontWeight="Bold"
-                                                       Foreground="{StaticResource NeonPinkBrush}"
+                                                       Foreground="{StaticResource NeonCyanBrush}"
                                                        FontFamily="{StaticResource MonoFont}"/>
-                                            <TextBlock Text="if no brain shortcuts" FontSize="10" Foreground="{StaticResource TextMutedBrush}"/>
+                                            <TextBlock x:Name="TokensBrainShareSubText" Text="what brain calls returned" FontSize="10" Foreground="{StaticResource TextMutedBrush}"/>
                                         </StackPanel>
                                     </Border>
                                     <Border Grid.Column="2" Style="{StaticResource CardPanel}" Margin="4,0,4,0" Padding="16,12">
                                         <StackPanel>
-                                            <TextBlock Text="SAVED" FontSize="10" Foreground="{StaticResource TextMutedBrush}"/>
+                                            <!-- A counterfactual. Labelled, dimmed, and never coloured
+                                                 like the measured cards - it is the one number here
+                                                 that nobody can check. -->
+                                            <TextBlock Text="SAVED (ESTIMATE)" FontSize="10" Foreground="{StaticResource TextMutedBrush}"/>
                                             <TextBlock x:Name="TokensSavedText" Text="0" FontSize="22" FontWeight="Bold"
-                                                       Foreground="#5DFF9D"
+                                                       Foreground="{StaticResource TextMutedBrush}"
                                                        FontFamily="{StaticResource MonoFont}"/>
-                                            <TextBlock x:Name="TokensSavedPctText" Text="0%" FontSize="10" Foreground="{StaticResource TextMutedBrush}"/>
+                                            <TextBlock x:Name="TokensSavedPctText" Text="not measured" FontSize="10" Foreground="{StaticResource TextMutedBrush}"/>
                                         </StackPanel>
                                     </Border>
                                     <Border Grid.Column="3" Style="{StaticResource CardPanel}" Margin="8,0,0,0" Padding="16,12">
