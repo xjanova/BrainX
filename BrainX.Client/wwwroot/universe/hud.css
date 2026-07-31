@@ -28,6 +28,12 @@ body.hud-active {
     --hud-panel-glow: 0 0 24px -6px rgba(108, 240, 255, 0.28);
     --hud-label: rgba(180, 176, 220, 0.62);
     --hud-mono: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+    /* ONE width for every corner panel. Sizing each to its own content left
+       both columns ragged and the two sides unequal — the eye reads that as
+       sloppiness long before it reads any of the numbers. Narrower than the old
+       420px cap: these panels are instrumentation printed on the glass, and the
+       galaxy behind them is the thing worth looking at. */
+    --hud-col: min(26vw, 360px);
 }
 
 #hud-layer {
@@ -153,20 +159,25 @@ body.hud-active #settings-toggle {
 
 #hud-layer > * { pointer-events: auto; }
 
+/* Both columns, all six panels, one width — so the left and right edges of the
+   screen are each a single straight line and the two sides match. */
+#hud-layer > .hud-panel.hud-tl,
+#hud-layer > .hud-panel.hud-tr,
+#hud-layer > .hud-panel.hud-ml,
+#hud-layer > .hud-panel.hud-mr,
+#hud-layer > .hud-panel.hud-bl,
+#hud-layer > .hud-panel.hud-br { width: var(--hud-col); max-width: var(--hud-col); }
+
 .hud-tl { grid-area: tl; justify-self: start; align-self: start; }
 /* Wider than the other panels: it carries the five action buttons now, and at
    the shared 420px cap "Copy address" wrapped onto a second row on its own. */
 .hud-tc { grid-area: tc; justify-self: center; align-self: start; max-width: min(40vw, 500px); }
 .hud-tr { grid-area: tr; justify-self: end;   align-self: start; }
 .hud-ml { grid-area: ml; justify-self: start; align-self: center; }
-/* System sits directly above MCP in the same right-hand column. Both were
-   sized to their content, so the two panels ended at different x and the
-   column's edge zig-zagged. Pin them to the shared cap instead — one straight
-   edge down the side of the screen. */
-.hud-mr { grid-area: mr; justify-self: end;   align-self: center; width: min(30vw, 420px); }
+.hud-mr { grid-area: mr; justify-self: end;   align-self: center; }
 .hud-bl { grid-area: bl; justify-self: start; align-self: end; }
 .hud-bc { grid-area: bc; justify-self: center; align-self: end; }
-.hud-br { grid-area: br; justify-self: end;   align-self: end; width: min(30vw, 420px); }
+.hud-br { grid-area: br; justify-self: end;   align-self: end; }
 
 /* Clear the settings gear. #settings-toggle is a 36px fixed button pinned to
    the bottom-right OUTSIDE this grid, so the bottom-right readout has to step
@@ -381,7 +392,11 @@ body.hud-active #settings-toggle {
 
 /* ── Agent Bus solar system ───────────────────────────────────── */
 
-.hud-panel-bus { min-width: min(28vw, 250px); }
+/* No min-width any more: it used to be wider than the shared column on a
+   narrow window, which put one panel out of line with the other five. The
+   canvas has its own min-height, which is the dimension that actually
+   protects the render. */
+.hud-panel-bus { min-width: 0; }
 
 /* The render is now the only child, and the only representation of the bus —
    the text roster that used to sit under it is gone, because it repeated what
