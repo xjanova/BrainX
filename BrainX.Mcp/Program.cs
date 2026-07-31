@@ -135,6 +135,18 @@ internal static partial class Program
             return 0;
         }
 
+        // Server mode is now two processes. What the client spawns is a thin
+        // LAUNCHER (Launcher.cs) that pumps stdio and hot-swaps the real
+        // server when the binary on disk changes — that is how a live Claude
+        // session picks up a BrainX update without anyone restarting anything.
+        // `--serve` marks the WORKER. The env marker is the anti-fork-bomb
+        // backstop: a child that lost its flag must serve, never launch again.
+        var serveWorker = args.Contains("--serve", StringComparer.OrdinalIgnoreCase)
+                       || Environment.GetEnvironmentVariable("BRAINX_MCP_LAUNCHER_CHILD") == "1";
+        if (!serveWorker)
+            return await McpLauncher.RunAsync(args).ConfigureAwait(false);
+        args = args.Where(a => !a.Equals("--serve", StringComparison.OrdinalIgnoreCase)).ToArray();
+
         // stdin/stdout must be UTF-8, no BOM; stderr is free for logs.
         Console.InputEncoding = new UTF8Encoding(false);
         Console.OutputEncoding = new UTF8Encoding(false);
@@ -451,7 +463,10 @@ internal static partial class Program
         ["serverInfo"] = new JObject { ["name"] = ServerName, ["version"] = ServerVersion },
         ["capabilities"] = new JObject
         {
-            ["tools"] = new JObject(),
+            // listChanged: after a hot-swap the launcher emits
+            // notifications/tools/list_changed; declaring the capability is
+            // what tells a client that notification is worth listening to.
+            ["tools"] = new JObject { ["listChanged"] = true },
             ["resources"] = new JObject()
         },
         ["instructions"] =

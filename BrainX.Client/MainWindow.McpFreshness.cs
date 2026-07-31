@@ -92,10 +92,29 @@ public partial class MainWindow
         var parents = ParentMap();
         var found = new List<McpProc>();
 
+        // Launcher-era topology (BrainX.Mcp/Launcher.cs): the client spawns a
+        // thin launcher, which spawns the real server as a --serve child and
+        // hot-swaps it whenever the binary changes. Neither half is worth
+        // flagging: a stale WORKER is gone within seconds of the update (its
+        // launcher swaps it), and a stale LAUNCHER is irrelevant — it is a
+        // byte pump whose version carries no tools. Only an old-style direct
+        // server (no mcp parent, no mcp child — pre-launcher sessions) still
+        // needs the restart flow.
+        var mcpPids = new HashSet<int>();
+        foreach (var p in Process.GetProcessesByName("brainx-mcp"))
+        {
+            mcpPids.Add(p.Id);
+            p.Dispose();
+        }
+
         foreach (var p in Process.GetProcessesByName("brainx-mcp"))
         {
             try
             {
+                // Worker: its parent is another brainx-mcp — self-heals.
+                if (parents.TryGetValue(p.Id, out var pp) && mcpPids.Contains(pp)) continue;
+                // Launcher: some brainx-mcp names it as parent.
+                if (parents.Any(kv => kv.Value == p.Id && mcpPids.Contains(kv.Key))) continue;
                 // The path the process is actually RUNNING. Not the path the
                 // app would resolve today — that is the whole point.
                 var exe = p.MainModule?.FileName;
