@@ -4531,6 +4531,7 @@ internal static partial class Program
         Console.WriteLine($"  vault: {_vaultPath}");
         Console.WriteLine($"  model: {model}");
         Console.WriteLine($"  notes: {nodes.Count}");
+        Console.Out.Flush();
 
         if (!await svc.OllamaReachableAsync().ConfigureAwait(false))
         {
@@ -4554,7 +4555,8 @@ internal static partial class Program
         if (written == 0)
             Console.WriteLine("  nothing to do (all sidecars fresh, or Ollama unreachable).");
         else
-            Console.WriteLine($"[OK] wrote {written} embedding(s) in {sw.Elapsed:mm\\:ss} · model={svc.Model}");
+            Console.WriteLine($"[OK] wrote {written} embedding(s) in {sw.Elapsed:mm\\:ss} · model={svc.Model}"
+                + $" · {svc.MaxChars} chars · {(svc.GpuInUse ? "GPU" : "CPU")}");
         return 0;
     }
 

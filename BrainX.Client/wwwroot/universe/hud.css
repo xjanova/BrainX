@@ -159,10 +159,14 @@ body.hud-active #settings-toggle {
 .hud-tc { grid-area: tc; justify-self: center; align-self: start; max-width: min(40vw, 500px); }
 .hud-tr { grid-area: tr; justify-self: end;   align-self: start; }
 .hud-ml { grid-area: ml; justify-self: start; align-self: center; }
-.hud-mr { grid-area: mr; justify-self: end;   align-self: center; }
+/* System sits directly above MCP in the same right-hand column. Both were
+   sized to their content, so the two panels ended at different x and the
+   column's edge zig-zagged. Pin them to the shared cap instead — one straight
+   edge down the side of the screen. */
+.hud-mr { grid-area: mr; justify-self: end;   align-self: center; width: min(30vw, 420px); }
 .hud-bl { grid-area: bl; justify-self: start; align-self: end; }
 .hud-bc { grid-area: bc; justify-self: center; align-self: end; }
-.hud-br { grid-area: br; justify-self: end;   align-self: end; }
+.hud-br { grid-area: br; justify-self: end;   align-self: end; width: min(30vw, 420px); }
 
 /* Clear the settings gear. #settings-toggle is a 36px fixed button pinned to
    the bottom-right OUTSIDE this grid, so the bottom-right readout has to step
@@ -379,13 +383,11 @@ body.hud-active #settings-toggle {
 
 .hud-panel-bus { min-width: min(28vw, 250px); }
 
-/* The render absorbs the squeeze, not the roster. As a flex column the canvas
-   is the only growable child, so on a short window it shrinks toward its
-   minimum and every agent's name and status stays whole — a graphic that got
-   slightly smaller beats a roster whose last two agents fell off the bottom. */
+/* The render is now the only child, and the only representation of the bus —
+   the text roster that used to sit under it is gone, because it repeated what
+   the orbits already show and the names are one wheel-scroll away. */
 #hud-layer > .hud-panel.hud-bl { display: flex; flex-direction: column; }
 #hud-bus-canvas { flex: 1 1 auto; min-height: 84px; }
-#hud-agents-body { flex: 0 0 auto; }
 
 #hud-bus-canvas {
     display: block;
@@ -407,10 +409,11 @@ body.hud-active #settings-toggle {
 
 #hud-bus-canvas:active { cursor: grabbing; }
 
-/* On a short viewport the roster carries the information and the render is
-   the first thing to go — it is the decoration, the names are the data. */
+/* On a short viewport the render shrinks — it must never be hidden. It used to
+   be droppable because the roster underneath still named every agent; with the
+   roster gone, hiding it would leave the panel showing nothing but its title. */
 @media (max-height: 620px) {
-    #hud-bus-canvas { display: none; }
+    #hud-bus-canvas { min-height: 56px; }
 }
 
 /* ── Feed ─────────────────────────────────────────────────────── */

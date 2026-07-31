@@ -295,14 +295,10 @@ function renderAgents(d = {}) {
     // into the star. Capped so a burst reads as busy rather than as confetti.
     (d.traffic || []).slice(0, 4).forEach((t, i) =>
         setTimeout(() => { bus?.fireTraffic(t.agent, t.inbound !== false); }, i * 160));
-    setHTML('hud-agents-body', list.map(a =>
-        `<div class="hud-row">
-           <span class="hud-row-name">
-             <i class="hud-swatch" style="background:${esc(a.color || '#8e9aa6')};
-                box-shadow:${a.online ? `0 0 8px ${esc(a.color || '#8e9aa6')}` : 'none'}"></i>${esc(a.name)}
-           </span>
-           <span class="hud-row-val">${a.online ? esc(a.detail || 'online') : 'offline'}</span>
-         </div>`).join('') || emptyRow('no agents connected'));
+    // No text roster under the map. It repeated, in words, what the orbits
+    // already say in colour and motion — and the name is one wheel-scroll away
+    // on the planet itself. The count stays in the panel title, because
+    // "how many are up" is the one thing the picture doesn't state outright.
     setText('hud-agents-count', `${list.filter(a => a.online).length} online`);
     markStep('agents');
 }
@@ -312,7 +308,7 @@ function renderAgents(d = {}) {
  *  worth seeing, and a bare percentage never shows it. The host samples every
  *  2 s, so 60 points ≈ 2 minutes. */
 const LOAD_KEEP = 60;
-const _load = { gpu: [], cpu: [] };
+const _load = { gpu: [], cpu: [], temp: [], ram: [], vram: [] };
 function pushLoad(series, v) {
     if (v == null) return;
     series.push(Math.max(0, Math.min(100, Number(v) || 0)));
@@ -322,6 +318,9 @@ function pushLoad(series, v) {
 function renderSystem(d = {}) {
     pushLoad(_load.gpu, d.gpu);
     pushLoad(_load.cpu, d.cpu);
+    pushLoad(_load.temp, d.gpuTemp);
+    pushLoad(_load.ram, d.ram);
+    pushLoad(_load.vram, d.vram);
 
     const rows = [];
     // GPU and CPU carry a graph instead of a bar: same pixels, and the bar
@@ -330,6 +329,18 @@ function renderSystem(d = {}) {
         sparkline(_load.gpu, { id: 'spark-gpu', color: '#6cf0ff', max: 100, height: 16 })]);
     if (d.cpu != null) rows.push(['CPU', `${Math.round(d.cpu)}%`, null,
         sparkline(_load.cpu, { id: 'spark-cpu', color: '#a68bff', max: 100, height: 16 })]);
+    // Temperature is the one that says whether the load above is SUSTAINABLE.
+    // Drawn against a fixed 100 °C ceiling so the line's height means the same
+    // thing every time you glance at it — autoscaling would make 45 °C idle
+    // look identical to 85 °C under load.
+    if (d.gpuTemp != null) rows.push(['GPU temp', `${Math.round(d.gpuTemp)}°C`, null,
+        sparkline(_load.temp, { id: 'spark-temp', color: '#ff9f4a', max: 100, height: 16 })]);
+    // VRAM before RAM: on this box the card is 8 GB and it is what runs out
+    // first when a local model loads.
+    if (d.vram != null) rows.push(['VRAM', d.vramLabel || `${Math.round(d.vram)}%`, null,
+        sparkline(_load.vram, { id: 'spark-vram', color: '#5ce0a0', max: 100, height: 16 })]);
+    if (d.ram != null) rows.push(['RAM', d.ramLabel || `${Math.round(d.ram)}%`, null,
+        sparkline(_load.ram, { id: 'spark-ram', color: '#f07de0', max: 100, height: 16 })]);
     // The old SYSTEM HEALTH card, verbatim — these are the lines the owner
     // actually checks when something looks wrong.
     if (d.vault) rows.push(['Vault', d.vault, null]);
@@ -337,7 +348,6 @@ function renderSystem(d = {}) {
     if (d.index) rows.push(['Index', d.index, null]);
     if (d.ai) rows.push(['AI', d.ai, null]);
     if (d.mesh) rows.push(['Mesh', d.mesh, null]);
-    if (d.version) rows.push(['Version', d.version, null]);
     dotClass('hud-health-dot', d.healthy === false ? 'warn' : '');
 
     setHTML('hud-system-body', rows.map(([l, v, bar, graph]) =>
@@ -747,11 +757,15 @@ function runDemo() {
         renderActivity([{ id: demoId, time: new Date().toTimeString().slice(0, 8), tag: 'MCP',
                           text: `brain_search "live feed sample ${demoId}"` }]);
     }, 2600);
+    // Mirrors the host allowlist (BusWellKnownAgents in MainWindow.AgentBus.cs):
+    // exactly these five, never a stray. unreal stands in for a bridge that has
+    // connected before, unity for one that never has.
     step(2100, () => renderAgents({ agents: [
         { name: 'claude',  online: true,  color: '#e8825a', detail: 'brain_search' },
         { name: 'codex',   online: true,  color: '#19a385', detail: 'agent_peers' },
         { name: 'cluadex', online: true,  color: '#8b7cf6', detail: 'idle' },
-        { name: 'local-agent', online: false, everSeen: true, color: '#8e9aa6' },
+        { name: 'unreal',  online: false, everSeen: true,  color: '#4fb3e8' },
+        { name: 'unity',   online: false, everSeen: false, color: '#c9cfd6' },
     ] }));
     // Keep the system busy so the orbit + traffic animation can be judged.
     setInterval(() => {
@@ -761,9 +775,15 @@ function runDemo() {
     }, 1800);
     const demoSystem = (gpu, cpu) => renderSystem({
         gpu, cpu, healthy: true,
+        // Temp trails load rather than tracking it instantly — a card does not
+        // cool down the moment the work stops, and the demo should not imply
+        // it does.
+        gpuTemp: 44 + gpu * 0.42,
+        vram: 38 + gpu * 0.25, vramLabel: `${(3.1 + gpu * 0.02).toFixed(1)}/8.0 GB`,
+        ram: 52 + cpu * 0.2, ramLabel: `${(16.6 + cpu * 0.06).toFixed(1)}/32.0 GB`,
         vault: 'G:\\Obsidian · 1.2 MB', db: 'SQLite · 1.5 GB',
-        index: '1,204 nodes · 8,087 links', ai: 'Ollama · bge-m3',
-        mesh: '1 peer · :5142', version: 'v2.0.166 · mcp 2.9.171',
+        index: '1,222 nodes · 8,263 links', ai: 'Ollama · bge-m3',
+        mesh: '1 peer · :5142',
     });
     step(2700, () => {
         // Seed a plausible two minutes of history so the load graphs can be

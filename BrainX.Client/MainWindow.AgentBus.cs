@@ -39,7 +39,18 @@ namespace BrainX.Client;
 public partial class MainWindow
 {
     private const int BusPresenceTtlSeconds = 90;   // keep in sync with Program.AgentBus.cs
-    private static readonly string[] BusWellKnownAgents = { "claude", "codex", "cluadex" };
+
+    /// <summary>
+    /// The ONLY agents the bus will ever draw — this is an allowlist, not a
+    /// seed list. Presence is self-registering (any MCP client announcing a
+    /// name in its initialize handshake mints a presence file), so before this
+    /// the map slowly filled with throwaway identities from test harnesses:
+    /// `verify`, `ab`, `reg`, `probe`, `timing-probe`. A diagram whose roster
+    /// grows on its own stops being a diagram of anything.
+    /// Adding a node is a deliberate edit here, never a side effect.
+    /// </summary>
+    private static readonly string[] BusWellKnownAgents =
+        { "claude", "codex", "cluadex", "unity", "unreal" };
 
     private System.Windows.Threading.DispatcherTimer? _busTimer;
     private bool _busFirstScan = true;
@@ -58,6 +69,8 @@ public partial class MainWindow
         ["claude"] = Color.FromRgb(0xE8, 0x82, 0x5A),   // Anthropic coral
         ["codex"] = Color.FromRgb(0x19, 0xA3, 0x85),   // OpenAI green
         ["cluadex"] = Color.FromRgb(0x8B, 0x7C, 0xF6),   // CluadeX violet
+        ["unity"] = Color.FromRgb(0xC9, 0xCF, 0xD6),   // Unity light grey
+        ["unreal"] = Color.FromRgb(0x4F, 0xB3, 0xE8),   // Unreal blue
     };
     private static readonly Color BusColorUnknown = Color.FromRgb(0x8E, 0x9A, 0xA6);
     private static readonly Color BusColorBrain = Color.FromRgb(0x6F, 0xA8, 0xFF);
@@ -159,8 +172,10 @@ public partial class MainWindow
             {
                 var name = IOPath.GetFileNameWithoutExtension(f);
                 if (string.IsNullOrWhiteSpace(name)) continue;
-                if (!byName.TryGetValue(name, out var st))
-                    byName[name] = st = new BusAgentState { Name = name };
+                // Allowlist: an unknown presence file updates nothing and draws
+                // nothing. Deleting the stray json is still worth doing, but the
+                // map no longer depends on anyone remembering to.
+                if (!byName.TryGetValue(name, out var st)) continue;
                 st.EverSeen = true;
                 try
                 {
@@ -183,8 +198,7 @@ public partial class MainWindow
             foreach (var dir in Directory.GetDirectories(inboxRoot))
             {
                 var name = IOPath.GetFileName(dir);
-                if (!byName.TryGetValue(name, out var st))
-                    byName[name] = st = new BusAgentState { Name = name, EverSeen = true };
+                if (!byName.TryGetValue(name, out var st)) continue;   // allowlist
                 st.Pending = Directory.EnumerateFiles(dir, "*.json").Count();
             }
         }
@@ -713,6 +727,8 @@ public partial class MainWindow
         "claude" => "Claude",
         "codex" => "Codex",
         "cluadex" => "CluadeX",
+        "unity" => "Unity",
+        "unreal" => "Unreal",
         "brain" => "BrainX",
         // Unknown clients can report long slugs (e.g.
         // "local-agent-mode-brainx-brain") that would run past the card's

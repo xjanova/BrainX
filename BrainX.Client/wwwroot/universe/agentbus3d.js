@@ -22,6 +22,8 @@ const AGENT_COLORS = {
     claude:  0xe8825a,
     codex:   0x19a385,
     cluadex: 0x8b7cf6,
+    unity:   0xc9cfd6,
+    unreal:  0x4fb3e8,
     brain:   0x6fa8ff,
 };
 const UNKNOWN_COLOR = 0x8e9aa6;
@@ -289,8 +291,13 @@ export function createAgentBus3D(canvas) {
         p.mesh.material.color.setHex(p.everSeen ? color : 0x3a3550);
         p.mesh.material.emissive.setHex(p.online ? color : 0x000000);
         p.mesh.material.emissiveIntensity = p.online ? 1.15 : 0;
-        p.mesh.visible = p.everSeen;              // never connected → bare orbit
-        p.ring.material.opacity = p.online ? 0.34 : (p.everSeen ? 0.16 : 0.07);
+        // A never-connected agent used to be a bare orbit with no body. But the
+        // roster is now a fixed allowlist, so an empty ring reads as "something
+        // is broken" rather than "this one is configured and idle" — which is
+        // exactly the state unity/unreal sit in until their editor is open.
+        // Show it, dark and small; presence is what lights it up.
+        p.mesh.visible = true;
+        p.ring.material.opacity = p.online ? 0.34 : (p.everSeen ? 0.16 : 0.1);
         p.mesh.scale.setScalar(p.online ? 1 : 0.78);
     }
 
@@ -349,9 +356,11 @@ export function createAgentBus3D(canvas) {
             p.phase += p.speed * dt * (p.online ? 1 : 0.35);
             p.pivot.position.set(Math.cos(p.phase) * p.orbitR, 0, Math.sin(p.phase) * p.orbitR);
             if (p.label) {
-                // An agent that has never connected is a bare orbit; naming it
-                // would be labelling an absence.
-                const a = p.everSeen ? labelAlpha : 0;
+                // Every node on the allowlist names itself on zoom-in, including
+                // ones that have never connected — that IS the answer to "which
+                // dark planet is that?", and it is the only place the name
+                // appears now that the text roster is gone.
+                const a = p.everSeen ? labelAlpha : labelAlpha * 0.55;
                 p.label.visible = a > 0.01;
                 p.label.material.opacity = a;
             }
@@ -458,10 +467,18 @@ function labelTexture(name, color) {
     return tex;
 }
 
-/** Long client slugs ("local-agent-mode-brainx-brain") would render as a
- *  smear at this size; the roster underneath carries the full name. */
+/** The zoom-in label is now the ONLY place a name is written, so it has to
+ *  match how the product spells itself — plain capitalisation gave "Cluadex".
+ *  Keep in sync with BusDisplayName in MainWindow.AgentBus.cs. */
+const DISPLAY_NAMES = {
+    claude: 'Claude', codex: 'Codex', cluadex: 'CluadeX',
+    unity: 'Unity', unreal: 'Unreal', brain: 'BrainX',
+};
+
 function displayName(name) {
     const s = String(name);
+    const known = DISPLAY_NAMES[s.toLowerCase()];
+    if (known) return known;
     const pretty = s.charAt(0).toUpperCase() + s.slice(1);
     return pretty.length <= 14 ? pretty : pretty.slice(0, 13) + '…';
 }

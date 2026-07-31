@@ -58,6 +58,9 @@ public class EmbeddingService
     public static int ResolveMaxChars(string model)
         => model.StartsWith("bge-m3", StringComparison.OrdinalIgnoreCase) ? 16000 : DefaultMaxChars;
 
+    /// <summary>Whether the last pass ran on the GPU. Set by PrecomputeAsync.</summary>
+    public bool GpuInUse { get; private set; }
+
     /// <summary>
     /// The embedding model actually used for the sidecars on disk is
     /// recorded in <c>.obsidianx/embeddings/model.json</c>. Every writer
@@ -200,7 +203,22 @@ public class EmbeddingService
             : DateTime.MinValue;
 
         int written = 0, done = 0, dims = 0;
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+        // 30s was sized for 4000-char inputs on an idle machine. At 16,000 the
+        // model does ~4x the work per call, and when a second process embeds at
+        // the same time (the client's precompute racing the CLI) the queue put
+        // real latency past 40s — so every call timed out, EmbedAsync returned
+        // null, and the pass wrote nothing while looking busy. A timeout shorter
+        // than the work it waits on fails silently and looks like "no results",
+        // the same shape as the 8s-timeout bug that hid semantic search for
+        // weeks. Scale it with the budget and leave room for contention.
+        var timeout = TimeSpan.FromSeconds(Math.Max(60, MaxChars / 100));
+        using var http = new HttpClient { Timeout = timeout };
+
+        // Decided once per pass, not per note: the answer only changes when the
+        // user loads a local model, and re-asking 1,200 times would add a round
+        // trip to every single embed.
+        _gpuLayers = await ResolveGpuLayersAsync(http, ct).ConfigureAwait(false);
+        GpuInUse = _gpuLayers > 0;
         foreach (var node in nodes)
         {
             if (ct.IsCancellationRequested) break;
@@ -272,11 +290,63 @@ public class EmbeddingService
         catch { return false; }
     }
 
+    /// <summary>
+    /// GPU layers to request for this pass: all of them when the card is idle,
+    /// none when another model is resident on it.
+    ///
+    /// The rule this encodes: <b>an embedder must never compete with the model
+    /// doing the actual work.</b> Pinning the embedder beside a 7B coder on the
+    /// same 8 GB card contributed to a hard power-limit reset on 2026-07-29, so
+    /// the query path hard-codes CPU. But refusing the GPU when nothing else is
+    /// on it is its own bug: measured on this box, one 16,000-char embed costs
+    /// ~3 s on the card and ~86 s on the CPU, which is the difference between a
+    /// 20-minute rebuild and an overnight one.
+    ///
+    /// Ollama itself is the authority on what is resident — any model reporting
+    /// size_vram &gt; 0 owns the card, so we stand down. Force either way with
+    /// BRAINX_EMBED_GPU=1 / =0.
+    /// </summary>
+    private async Task<int> ResolveGpuLayersAsync(HttpClient http, CancellationToken ct)
+    {
+        var env = Environment.GetEnvironmentVariable("BRAINX_EMBED_GPU");
+        if (env == "1") return 999;
+        if (env == "0") return 0;
+        try
+        {
+            using var resp = await http.GetAsync($"{OllamaUrl}/api/ps", ct).ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode) return 0;      // can't tell → assume busy
+            var models = JObject.Parse(await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false))
+                ["models"] as JArray;
+            if (models == null) return 0;
+            foreach (var m in models)
+            {
+                // Our own embedder already being resident is not competition.
+                var name = m["name"]?.ToString() ?? "";
+                if (name.StartsWith(Model, StringComparison.OrdinalIgnoreCase)) continue;
+                if ((m["size_vram"]?.ToObject<long>() ?? 0) > 0) return 0;
+            }
+            return 999;
+        }
+        catch { return 0; }                               // unreachable → assume busy
+    }
+
+    private int _gpuLayers;
+
     private async Task<float[]?> EmbedAsync(HttpClient http, string text, CancellationToken ct)
     {
         try
         {
-            var body = new JObject { ["model"] = Model, ["input"] = text }.ToString();
+            var body = new JObject
+            {
+                ["model"] = Model,
+                ["input"] = text,
+                ["options"] = new JObject { ["num_gpu"] = _gpuLayers },
+                // Short lease when we borrowed the card: the moment the batch
+                // ends the VRAM goes back, so a local model loading afterwards
+                // never lands on top of a still-resident embedder. Ollama
+                // refreshes this on every request, so a running batch holds.
+                ["keep_alive"] = _gpuLayers > 0 ? "60s" : "10m",
+            }.ToString();
             var content = new StringContent(body, System.Text.Encoding.UTF8, "application/json");
             using var resp = await http.PostAsync($"{OllamaUrl}/api/embed", content, ct)
                 .ConfigureAwait(false);

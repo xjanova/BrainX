@@ -431,21 +431,136 @@ public partial class MainWindow
             System.Diagnostics.Debug.WriteLine($"HUD load sample: {ex.Message}");
         }
 
+        // The counter sum above is the FALLBACK, not the answer. On an NVIDIA
+        // box nvidia-smi is asked instead — see ReadNvidiaTelemetry for why the
+        // counter cannot see CUDA work at all.
+        var nv = ReadNvidiaTelemetry();
+        if (nv != null) gpu = nv.Value.Util;
+
         if (_hudHealth == null || _hudTick % 5 == 0) _hudHealth = BuildHudHealth();
         var h = _hudHealth;
+
+        var ram = ReadSystemMemory();
 
         PostHud("hudSystem", new
         {
             gpu,
             cpu,
+            gpuTemp = nv?.TempC,
+            vram = nv?.VramUsedMb is { } used && nv?.VramTotalMb is { } total && total > 0
+                ? (double?)(100.0 * used / total) : null,
+            vramLabel = nv?.VramUsedMb is { } u2 && nv?.VramTotalMb is { } t2 && t2 > 0
+                ? $"{u2 / 1024.0:0.0}/{t2 / 1024.0:0.0} GB" : null,
+            ram = ram?.Percent,
+            ramLabel = ram is { } r ? $"{r.UsedGb:0.0}/{r.TotalGb:0.0} GB" : null,
             vault = h?.Vault,
             db = h?.Db,
             index = h?.Index,
             ai = h?.Ai,
             mesh = h?.Mesh,
-            version = h?.Version,
             healthy = h?.Healthy ?? true,
         });
+    }
+
+    // ───────────── real GPU telemetry ─────────────
+
+    /// <summary>
+    /// Why this exists: the Windows "GPU Engine" performance counters that the
+    /// dashboard sums do NOT report CUDA compute. Measured on this box while
+    /// Ollama pegged the card — nvidia-smi said 99% and 150 W, while the counter
+    /// breakdown was 3D 89%, VideoDecode 3.4%, Copy 1.8% and <b>no Compute
+    /// instance at all</b>. The 89% was the app's own WebView2 drawing the
+    /// galaxy. So the old meter answered "how busy is the desktop", printed
+    /// under a label that says GPU.
+    ///
+    /// Summing every instance is wrong twice over: each instance is already a
+    /// percentage of the whole card, so adding processes and engine types
+    /// together double-counts (hence the Math.Min(100) clamp hiding it).
+    ///
+    /// nvidia-smi is spawned at most every 2.5 s and the result cached; the HUD
+    /// ticks faster than that and a process spawn per tick is not worth 4 numbers.
+    /// No NVIDIA card, no nvidia-smi, or any parse failure → null, and every row
+    /// this feeds disappears rather than showing a confident wrong number.
+    /// </summary>
+    private record struct NvTelemetry(double Util, double TempC, double VramUsedMb, double VramTotalMb);
+
+    private NvTelemetry? _nvCache;
+    private DateTime _nvCacheAt = DateTime.MinValue;
+    private bool _nvUnavailable;
+
+    private NvTelemetry? ReadNvidiaTelemetry()
+    {
+        if (_nvUnavailable) return null;
+        if (_nvCache != null && (DateTime.UtcNow - _nvCacheAt).TotalSeconds < 2.5) return _nvCache;
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "nvidia-smi",
+                Arguments = "--query-gpu=utilization.gpu,temperature.gpu,memory.used,memory.total"
+                          + " --format=csv,noheader,nounits",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            using var p = System.Diagnostics.Process.Start(psi);
+            if (p == null) { _nvUnavailable = true; return null; }
+            var line = p.StandardOutput.ReadLine();
+            if (!p.WaitForExit(2000)) { try { p.Kill(); } catch { } return _nvCache; }
+            // Multi-GPU: the first line is the primary card. Reporting a sum or
+            // an average of two different cards would be a number describing
+            // neither of them.
+            var parts = line?.Split(',');
+            if (parts is not { Length: >= 4 }) return _nvCache;
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            if (!double.TryParse(parts[0].Trim(), System.Globalization.NumberStyles.Any, inv, out var util)
+             || !double.TryParse(parts[1].Trim(), System.Globalization.NumberStyles.Any, inv, out var temp)
+             || !double.TryParse(parts[2].Trim(), System.Globalization.NumberStyles.Any, inv, out var used)
+             || !double.TryParse(parts[3].Trim(), System.Globalization.NumberStyles.Any, inv, out var total))
+                return _nvCache;
+            _nvCache = new NvTelemetry(util, temp, used, total);
+            _nvCacheAt = DateTime.UtcNow;
+            return _nvCache;
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            _nvUnavailable = true;      // no nvidia-smi on PATH — stop trying
+            return null;
+        }
+        catch { return _nvCache; }
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct MemoryStatusEx
+    {
+        public uint dwLength;
+        public uint dwMemoryLoad;
+        public ulong ullTotalPhys, ullAvailPhys;
+        public ulong ullTotalPageFile, ullAvailPageFile;
+        public ulong ullTotalVirtual, ullAvailVirtual, ullAvailExtendedVirtual;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool GlobalMemoryStatusEx(ref MemoryStatusEx buffer);
+
+    /// <summary>
+    /// Physical RAM in use. GlobalMemoryStatusEx rather than a PerformanceCounter:
+    /// it is a single cheap call with no instance enumeration and no first-read
+    /// warm-up, and dwMemoryLoad is exactly the percentage Task Manager shows.
+    /// </summary>
+    private static (double Percent, double UsedGb, double TotalGb)? ReadSystemMemory()
+    {
+        try
+        {
+            var m = new MemoryStatusEx { dwLength = (uint)System.Runtime.InteropServices.Marshal.SizeOf<MemoryStatusEx>() };
+            if (!GlobalMemoryStatusEx(ref m) || m.ullTotalPhys == 0) return null;
+            const double gb = 1024.0 * 1024 * 1024;
+            var totalGb = m.ullTotalPhys / gb;
+            return (m.dwMemoryLoad, totalGb - (m.ullAvailPhys / gb), totalGb);
+        }
+        catch { return null; }
     }
 
     /// <summary>
