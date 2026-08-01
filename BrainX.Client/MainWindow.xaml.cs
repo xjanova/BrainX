@@ -10823,6 +10823,23 @@ public partial class MainWindow : Window
                 bucketMinutes: bucketMinutes);
 
             // Top-line stat cards (always reflect the visible range)
+            // The mode chip: the one setting that changes what everything on
+            // this page costs, so it belongs beside the numbers rather than
+            // buried in settings.
+            if (TokensModeText != null)
+            {
+                var cfg = System.IO.Path.Combine(_vaultPath, ".obsidianx", "brain-config.json");
+                var modeName = "balanced";
+                try
+                {
+                    if (System.IO.File.Exists(cfg))
+                        modeName = Newtonsoft.Json.Linq.JObject
+                            .Parse(System.IO.File.ReadAllText(cfg))["retrievalMode"]?.ToString() ?? modeName;
+                }
+                catch { /* unreadable config → show the documented default */ }
+                TokensModeText.Text = modeName;
+            }
+
             // Card 1 is MEASURED — Claude's own transcripts, via
             // ClaudeTranscriptTally, which counts real tokens rather than
             // multiplying call counts by tuned constants. Its windows are

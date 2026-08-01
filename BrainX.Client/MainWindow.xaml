@@ -510,8 +510,12 @@
                                             </Border>
                                         </Grid>
                                     </Button>
-                                    <!-- Universe is the app's front door now — it opens on the
-                                         galaxy with the HUD over it. -->
+                                    <!-- The app's front door: the galaxy with the HUD over it.
+                                         Labelled "Dashboard" because that is what it now IS —
+                                         the old WPF Dashboard above is retired and collapsed.
+                                         Tag stays "Universe": it is the routing key threaded
+                                         through Nav_Click, the view name and the settings, and
+                                         renaming a label should not rename an identifier. -->
                                     <Button x:Name="NavUniverse" Style="{StaticResource NavButtonActive}"
                                             Click="Nav_Click" Tag="Universe">
                                         <Grid>
@@ -519,7 +523,7 @@
                                                 <ColumnDefinition Width="*"/>
                                                 <ColumnDefinition Width="Auto"/>
                                             </Grid.ColumnDefinitions>
-                                            <TextBlock Grid.Column="0" Text="&#x1F30C;  Universe"
+                                            <TextBlock Grid.Column="0" Text="&#x1F30C;  Dashboard"
                                                        VerticalAlignment="Center"/>
                                             <Border Grid.Column="1" Background="{StaticResource NeuralBgInset}"
                                                     BorderBrush="{StaticResource NeuralLine}" BorderThickness="1"
@@ -4184,11 +4188,35 @@
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
-                                <StackPanel Margin="0,0,0,22">
-                                    <TextBlock Text="Token Economy" Style="{StaticResource TypeViewTitle}"/>
-                                    <TextBlock Text="Per-hour comparison: actual tokens (with brain) vs projected without brain — heuristic from local logs"
-                                               Style="{StaticResource TypeViewSubtitle}" TextWrapping="Wrap"/>
-                                </StackPanel>
+                                <!-- Header. The subtitle names the SOURCE of the numbers,
+                                     because this page mixes two measured figures with one
+                                     estimate and the difference is the whole point. The
+                                     mode chip sits here because it is the single setting
+                                     that changes what every call below costs. -->
+                                <Grid Margin="0,0,0,20">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0">
+                                        <TextBlock Text="Token economy" Style="{StaticResource TypeViewTitle}"/>
+                                        <TextBlock Text="Measured from Claude's own transcripts and the brain's own responses. One figure here is an estimate and is marked as such."
+                                                   Style="{StaticResource TypeViewSubtitle}" TextWrapping="Wrap" MaxWidth="640"
+                                                   HorizontalAlignment="Left"/>
+                                    </StackPanel>
+                                    <Border Grid.Column="1" VerticalAlignment="Top" Margin="16,4,0,0"
+                                            Background="{StaticResource NeuralBgInset}"
+                                            BorderBrush="{StaticResource NeuralLine}" BorderThickness="1"
+                                            CornerRadius="12" Padding="12,6">
+                                        <StackPanel>
+                                            <TextBlock Text="retrieval mode" FontSize="9.5"
+                                                       Foreground="{StaticResource TextMutedBrush}"/>
+                                            <TextBlock x:Name="TokensModeText" Text="—" FontSize="13" FontWeight="SemiBold"
+                                                       FontFamily="{StaticResource MonoFont}"
+                                                       Foreground="{StaticResource NeonCyanBrush}"/>
+                                        </StackPanel>
+                                    </Border>
+                                </Grid>
                                 <!-- Top-line stat cards -->
                                 <Grid Grid.Row="1" Margin="0,0,0,16">
                                     <Grid.ColumnDefinitions>
@@ -4197,47 +4225,79 @@
                                         <ColumnDefinition Width="*"/>
                                         <ColumnDefinition Width="*"/>
                                     </Grid.ColumnDefinitions>
-                                    <Border Grid.Column="0" Style="{StaticResource CardPanel}" Margin="0,0,8,0" Padding="16,12">
-                                        <StackPanel>
-                                            <!-- MEASURED: Claude's own transcripts, counted by
-                                                 ClaudeTranscriptTally. The card next door is a guess,
-                                                 and the two must never look alike. -->
-                                            <TextBlock Text="SPENT (MEASURED)" FontSize="10" Foreground="{StaticResource TextMutedBrush}"/>
-                                            <TextBlock x:Name="TokensActualText" Text="0" FontSize="22" FontWeight="Bold"
-                                                       Foreground="{StaticResource NeonCyanBrush}"
-                                                       FontFamily="{StaticResource MonoFont}"/>
-                                            <TextBlock x:Name="TokensActualSubText" Text="from Claude transcripts" FontSize="10" Foreground="{StaticResource TextMutedBrush}"/>
-                                        </StackPanel>
+                                    <!-- Measured cards carry a cyan rule down their left edge;
+                                         the estimate carries none and is drawn in grey. The
+                                         reader should be able to tell which numbers are real
+                                         without reading a word. -->
+                                    <Border Grid.Column="0" Style="{StaticResource CardPanel}" Margin="0,0,6,0" Padding="0">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="3"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <Rectangle Grid.Column="0" Fill="{StaticResource NeonCyanBrush}"/>
+                                            <StackPanel Grid.Column="1" Margin="16,13,16,13">
+                                                <TextBlock Text="spent" FontSize="10.5" Foreground="{StaticResource TextMutedBrush}"/>
+                                                <TextBlock x:Name="TokensActualText" Text="0" FontSize="26" FontWeight="Bold"
+                                                           Foreground="{StaticResource TextPrimaryBrush}"
+                                                           FontFamily="{StaticResource MonoFont}" Margin="0,1,0,2"/>
+                                                <TextBlock x:Name="TokensActualSubText" Text="Claude transcripts" FontSize="10"
+                                                           Foreground="{StaticResource TextMutedBrush}" TextTrimming="CharacterEllipsis"/>
+                                            </StackPanel>
+                                        </Grid>
                                     </Border>
-                                    <Border Grid.Column="1" Style="{StaticResource CardPanel}" Margin="4,0,4,0" Padding="16,12">
-                                        <StackPanel>
-                                            <TextBlock Text="BRAIN SHARE (MEASURED)" FontSize="10" Foreground="{StaticResource TextMutedBrush}"/>
-                                            <TextBlock x:Name="TokensProjectionText" Text="0" FontSize="22" FontWeight="Bold"
-                                                       Foreground="{StaticResource NeonCyanBrush}"
-                                                       FontFamily="{StaticResource MonoFont}"/>
-                                            <TextBlock x:Name="TokensBrainShareSubText" Text="what brain calls returned" FontSize="10" Foreground="{StaticResource TextMutedBrush}"/>
-                                        </StackPanel>
+                                    <Border Grid.Column="1" Style="{StaticResource CardPanel}" Margin="6,0,6,0" Padding="0">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="3"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <Rectangle Grid.Column="0" Fill="{StaticResource NeonCyanBrush}"/>
+                                            <StackPanel Grid.Column="1" Margin="16,13,16,13">
+                                                <TextBlock Text="brain share" FontSize="10.5" Foreground="{StaticResource TextMutedBrush}"/>
+                                                <TextBlock x:Name="TokensProjectionText" Text="0" FontSize="26" FontWeight="Bold"
+                                                           Foreground="{StaticResource TextPrimaryBrush}"
+                                                           FontFamily="{StaticResource MonoFont}" Margin="0,1,0,2"/>
+                                                <TextBlock x:Name="TokensBrainShareSubText" Text="what brain calls returned" FontSize="10"
+                                                           Foreground="{StaticResource TextMutedBrush}" TextTrimming="CharacterEllipsis"/>
+                                            </StackPanel>
+                                        </Grid>
                                     </Border>
-                                    <Border Grid.Column="2" Style="{StaticResource CardPanel}" Margin="4,0,4,0" Padding="16,12">
-                                        <StackPanel>
-                                            <!-- A counterfactual. Labelled, dimmed, and never coloured
-                                                 like the measured cards - it is the one number here
-                                                 that nobody can check. -->
-                                            <TextBlock Text="SAVED (ESTIMATE)" FontSize="10" Foreground="{StaticResource TextMutedBrush}"/>
-                                            <TextBlock x:Name="TokensSavedText" Text="0" FontSize="22" FontWeight="Bold"
-                                                       Foreground="{StaticResource TextMutedBrush}"
-                                                       FontFamily="{StaticResource MonoFont}"/>
-                                            <TextBlock x:Name="TokensSavedPctText" Text="not measured" FontSize="10" Foreground="{StaticResource TextMutedBrush}"/>
-                                        </StackPanel>
+                                    <Border Grid.Column="2" Style="{StaticResource CardPanel}" Margin="6,0,6,0" Padding="0">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="3"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <!-- Deliberately no accent rule: this one is a
+                                                 counterfactual and nobody can check it. -->
+                                            <Rectangle Grid.Column="0" Fill="{StaticResource NeuralLine}"/>
+                                            <StackPanel Grid.Column="1" Margin="16,13,16,13">
+                                                <TextBlock Text="saved · estimate" FontSize="10.5" Foreground="{StaticResource TextMutedBrush}"/>
+                                                <TextBlock x:Name="TokensSavedText" Text="0" FontSize="26" FontWeight="Normal"
+                                                           Foreground="{StaticResource TextMutedBrush}"
+                                                           FontFamily="{StaticResource MonoFont}" Margin="0,1,0,2"/>
+                                                <TextBlock x:Name="TokensSavedPctText" Text="not measured" FontSize="10"
+                                                           Foreground="{StaticResource TextMutedBrush}" TextTrimming="CharacterEllipsis"/>
+                                            </StackPanel>
+                                        </Grid>
                                     </Border>
-                                    <Border Grid.Column="3" Style="{StaticResource CardPanel}" Margin="8,0,0,0" Padding="16,12">
-                                        <StackPanel>
-                                            <TextBlock Text="CALLS" FontSize="10" Foreground="{StaticResource TextMutedBrush}"/>
-                                            <TextBlock x:Name="TokensCallsText" Text="0 / 0" FontSize="22" FontWeight="Bold"
-                                                       Foreground="{StaticResource TextPrimaryBrush}"
-                                                       FontFamily="{StaticResource MonoFont}"/>
-                                            <TextBlock Text="brain / other" FontSize="10" Foreground="{StaticResource TextMutedBrush}"/>
-                                        </StackPanel>
+                                    <Border Grid.Column="3" Style="{StaticResource CardPanel}" Margin="6,0,0,0" Padding="0">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="3"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <Rectangle Grid.Column="0" Fill="{StaticResource NeonCyanBrush}"/>
+                                            <StackPanel Grid.Column="1" Margin="16,13,16,13">
+                                                <TextBlock Text="calls" FontSize="10.5" Foreground="{StaticResource TextMutedBrush}"/>
+                                                <TextBlock x:Name="TokensCallsText" Text="0 / 0" FontSize="26" FontWeight="Bold"
+                                                           Foreground="{StaticResource TextPrimaryBrush}"
+                                                           FontFamily="{StaticResource MonoFont}" Margin="0,1,0,2"/>
+                                                <TextBlock Text="brain / other tools" FontSize="10"
+                                                           Foreground="{StaticResource TextMutedBrush}" TextTrimming="CharacterEllipsis"/>
+                                            </StackPanel>
+                                        </Grid>
                                     </Border>
                                 </Grid>
                                 <!-- Comparison chart -->
@@ -4815,7 +4875,7 @@
                                             </TextBlock>
                                         </Grid>
                                         <TextBlock x:Name="UniverseLoadingText"
-                                                   Text="Initializing Universe galaxy..."
+                                                   Text="Initializing Dashboard galaxy..."
                                                    FontSize="11"
                                                    FontFamily="Consolas, JetBrains Mono, Cascadia Mono"
                                                    Foreground="#FFE8E6FF"
