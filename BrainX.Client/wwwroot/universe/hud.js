@@ -906,8 +906,11 @@ function runDemo() {
         { name: 'local-agent-mode-brainx-brain', kind: 'agent', state: 'live', online: true, everSeen: true, moonOf: 'claude', color: '#e8825a', detail: 'brain_create_note' },
         { name: 'codex',   kind: 'agent',  state: 'live',  online: true,  everSeen: true,  color: '#19a385', detail: 'agent_peers' },
         { name: 'cluadex', kind: 'agent',  state: 'idle',  online: false, everSeen: true,  color: '#8b7cf6', detail: '4 min ago' },
-        { name: 'unity',   kind: 'bridge', state: 'ready', online: false, everSeen: true,  color: '#c9cfd6', detail: 'ready · 47 tools' },
-        { name: 'unreal',  kind: 'bridge', state: 'off',   online: false, everSeen: false, color: '#4fb3e8', detail: 'disabled' },
+        // A bridge is "live" when the ENGINE answers its own ping, not only
+        // when a session happens to be holding it open — an editor sitting
+        // there ready to work is online by any definition the owner uses.
+        { name: 'unity',   kind: 'bridge', state: 'live',  online: true,  everSeen: true,  color: '#c9cfd6', detail: 'editor up · 47 tools' },
+        { name: 'unreal',  kind: 'bridge', state: 'down',  online: false, everSeen: true,  color: '#4fb3e8', detail: 'editor closed' },
     ] }));
     // Keep the system busy so the orbit + traffic animation can be judged.
     setInterval(() => {

@@ -75,6 +75,11 @@ public static class McpBridgeHub
         public long Calls;
         public string? LastTool;
         public DateTime? LastCallUtc;
+
+        /// <summary>Did the ENGINE answer its own liveness probe — regardless of
+        /// whether this session happens to be holding a bridge open to it.</summary>
+        public bool Reachable;
+        public DateTime? ProbedUtc;
     }
 
     /// <summary>
@@ -413,6 +418,9 @@ public static class McpBridgeHub
                 ["id"] = def.Id,
                 ["enabled"] = def.Enabled,
                 ["connected"] = live,
+                // Whether the ENGINE answers, which is a different question
+                // from whether this session is holding a bridge to it open.
+                ["engineReachable"] = def.Probe == null ? null : s.Reachable,
                 ["tools"] = s.Tools?.Count ?? 0,
                 ["hiddenLongNames"] = s.Dropped.Count,
                 ["allowlist"] = def.ToolAllowlist.Count == 0 ? "(all)" : string.Join(", ", def.ToolAllowlist),
@@ -461,7 +469,21 @@ public static class McpBridgeHub
 
     private static void PublishStatus()
     {
-        foreach (var def in _defs.Where(d => d.Enabled)) PublishStatus(def);
+        foreach (var def in _defs.Where(d => d.Enabled))
+        {
+            // The probe belongs to the heartbeat and NOWHERE else: a bridged
+            // tool call must never pay a socket timeout so a dashboard can be
+            // repainted. This is also the only place the dashboard learns the
+            // difference between "nobody has dialled the editor" and "there is
+            // no editor to dial" — before it, both drew the same dim node.
+            if (def.Probe != null)
+            {
+                var st = StateFor(def.Id);
+                st.Reachable = EngineProbe.IsAlive(def.Probe);
+                st.ProbedUtc = DateTime.UtcNow;
+            }
+            PublishStatus(def);
+        }
     }
 
     /// <summary>
@@ -487,6 +509,11 @@ public static class McpBridgeHub
                 ["pid"] = Environment.ProcessId,
                 ["agent"] = SafeIdentity(),
                 ["connected"] = live,
+                // Tri-state on purpose. true/false is the engine's own answer;
+                // null means no probe is configured, and "I did not ask" must
+                // not be drawn as "it said no".
+                ["reachable"] = def.Probe == null ? null : s.Reachable,
+                ["probedUtc"] = s.ProbedUtc?.ToString("o"),
                 ["tools"] = s.Tools?.Count ?? 0,
                 ["calls"] = s.Calls,
                 ["lastTool"] = s.LastTool,

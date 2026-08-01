@@ -57,6 +57,13 @@ public partial class MainWindow
     private const int BusPresenceTtlSeconds = 90;   // keep in sync with Program.AgentBus.cs
     private const int BusBridgeTtlSeconds = 90;     // fallback; each file carries its own ttlSeconds
 
+    /// <summary>One leg of a round trip. Slower than it needs to be, because
+    /// the point is to be FOLLOWED by eye, not to be efficient.</summary>
+    private const int BusLegMs = 620;
+
+    /// <summary>Head plus echoes. Three was a smear; four reads as a comet.</summary>
+    private const int BusCometParts = 4;
+
     /// <summary>
     /// The ONLY agents the bus will ever draw — this is an allowlist, not a
     /// seed list. Presence is self-registering (any MCP client announcing a
@@ -170,6 +177,12 @@ public partial class MainWindow
         /// <summary>enabled:true in mcp-bridges.json. A disabled bridge is drawn
         /// (the owner configured it) but reads as off, not as broken.</summary>
         public bool BridgeEnabled;
+        /// <summary>A brain session is holding a bridge open to it right now.
+        /// Rarer than being usable, and not the same question.</summary>
+        public bool BridgeConnected;
+        /// <summary>Did the ENGINE ITSELF answer a liveness probe. null = no
+        /// probe configured, which is "unknown" and must never be drawn as no.</summary>
+        public bool? Reachable;
         public int Tools;
         /// <summary>Why the last attempt failed — almost always a closed editor.</summary>
         public string? LastError;
@@ -336,6 +349,13 @@ public partial class MainWindow
 
             ReadBridgeSessions(st);
 
+            // ONLINE means "call it and it will answer", which is the question
+            // the owner is actually asking. A held-open bridge proves it; so
+            // does the engine answering its own probe, and that is the usual
+            // case — the hub dials lazily, so an editor can be open and busy
+            // for hours with no bridge connection in existence.
+            st.Online = st.BridgeConnected || st.Reachable == true;
+
             // "Has come up on this machine at least once" — the only evidence of
             // that is tools, from either the cache or a live session.
             st.EverSeen = st.Tools > 0;
@@ -378,7 +398,11 @@ public partial class MainWindow
                 var ttl = o["ttlSeconds"]?.ToObject<int>() ?? BusBridgeTtlSeconds;
                 if ((DateTime.UtcNow - seen).TotalSeconds > ttl) continue;
 
-                if (o["connected"]?.ToObject<bool>() == true) st.Online = true;
+                if (o["connected"]?.ToObject<bool>() == true) st.BridgeConnected = true;
+                // Any session that got an answer settles it for everyone: the
+                // engine is one machine, and it is either serving or it is not.
+                if (o["reachable"]?.Type == JTokenType.Boolean)
+                    st.Reachable = st.Reachable == true || o["reachable"]!.ToObject<bool>();
                 calls += o["calls"]?.ToObject<long>() ?? 0;
 
                 var tools = o["tools"]?.ToObject<int>() ?? 0;
@@ -675,6 +699,30 @@ public partial class MainWindow
         var moon = a.MoonOf != null;
         double ringD = moon ? 17 : 26, innerD = moon ? 7 : 10, dotD = moon ? 6 : 7;
 
+        // An online node GLOWS, and it breathes while it does. Opacity alone
+        // was not carrying it — this is the same device the brain node has
+        // always had, which is exactly why the brain always looked alive on
+        // this card and the agents around it never did.
+        if (a.Online)
+        {
+            double haloD = moon ? 27 : 44;
+            var halo = new Ellipse
+            {
+                Width = haloD, Height = haloD,
+                Fill = new SolidColorBrush(color) { Opacity = 0.32 },
+                Effect = new BlurEffect { Radius = moon ? 9 : 15 },
+                IsHitTestVisible = false
+            };
+            Canvas.SetLeft(halo, p.X - haloD / 2); Canvas.SetTop(halo, p.Y - haloD / 2);
+            canvas.Children.Add(halo);
+            halo.BeginAnimation(OpacityProperty,
+                new DoubleAnimation(0.5, 1.0, TimeSpan.FromSeconds(1.9))
+                {
+                    AutoReverse = true,
+                    RepeatBehavior = RepeatBehavior.Forever
+                });
+        }
+
         var ring = new Ellipse
         {
             Width = ringD, Height = ringD,
@@ -803,6 +851,10 @@ public partial class MainWindow
         {
             if (!a.BridgeEnabled) return "off";
             if (a.Online) return "live";
+            // The engine was asked and said nothing. That is the one case that
+            // genuinely means "you cannot use this right now", and it is the
+            // answer the dashboard could never give before the probe existed.
+            if (a.Reachable == false) return "down";
             if (a.LastError != null) return "fault";
             // Enabled and never up is UNKNOWN, not failed — nothing has tried.
             return a.EverSeen ? "ready" : "never";
@@ -811,23 +863,28 @@ public partial class MainWindow
         return a.EverSeen ? "idle" : "never";
     }
 
-    /// <summary>How solid the node reads.</summary>
+    /// <summary>
+    /// How solid the node reads. The gap between lit and unlit is deliberately
+    /// wide: 0.55 against 1.0 looks like one ring in two lights, and the whole
+    /// job of this card is to be readable at a glance from across the desk.
+    /// </summary>
     private static double BusNodeDim(BusAgentState a) => BusNodeState(a) switch
     {
         "live" => 1.0,
-        "ready" => 0.72,
-        "fault" => 0.62,
-        "idle" => 0.55,
-        "off" => 0.30,
-        _ => a.IsBridge ? 0.42 : 0.35,      // never
+        "ready" => 0.66,
+        "fault" => 0.55,
+        "down" => 0.46,
+        "idle" => 0.40,
+        "off" => 0.20,
+        _ => a.IsBridge ? 0.34 : 0.26,      // never
     };
 
-    /// <summary>The rim dot: green live · blue ready · red failed · grey otherwise.</summary>
+    /// <summary>The rim dot: green live · blue ready · red down or failed · grey otherwise.</summary>
     private static Color BusStatusColor(BusAgentState a) => BusNodeState(a) switch
     {
         "live" => BusColorLive,
         "ready" => BusColorReady,
-        "fault" => BusColorFault,
+        "fault" or "down" => BusColorFault,
         _ => BusColorIdle,
     };
 
@@ -844,8 +901,12 @@ public partial class MainWindow
             sb.Append(" — bridge: สมองเรียกออกไปหา engine\n");
             sb.Append(a.BridgeEnabled ? "เปิดใช้ใน mcp-bridges.json" : "ปิดไว้ใน mcp-bridges.json");
             sb.Append(a.Online
-                ? "\nต่ออยู่ตอนนี้"
-                : $"\nยังไม่ได้ต่อ — hub จะต่อตอนมีการเรียก {a.Name}__ ครั้งแรก");
+                ? (a.BridgeConnected
+                    ? "\nต่ออยู่ตอนนี้"
+                    : $"\neditor ตอบ ping — เรียก {a.Name}__ ได้เลย (hub จะต่อให้ตอนนั้น)")
+                : a.Reachable == false
+                    ? "\neditor ไม่ตอบ ping — เปิด editor หรือยัง?"
+                    : $"\nยังไม่ได้ต่อ — hub จะต่อตอนมีการเรียก {a.Name}__ ครั้งแรก");
             if (a.Tools > 0) sb.Append($"\n{a.Tools} tools");
             if (!string.IsNullOrEmpty(a.ClientInfo)) sb.Append($"\nเปิดค้างไว้โดย {BusDisplayName(a.ClientInfo)}");
             if (a.LastError != null) sb.Append($"\nError: {a.LastError}");
@@ -878,8 +939,12 @@ public partial class MainWindow
         {
             if (a.AgeSeconds is double fresh && fresh < 25 && !string.IsNullOrEmpty(a.LastTool))
                 return Ellipsize(a.LastTool!, 18);
-            return a.Tools > 0 ? $"ต่ออยู่ · {a.Tools} tools" : "ต่ออยู่";
+            if (a.BridgeConnected) return a.Tools > 0 ? $"ต่ออยู่ · {a.Tools} tools" : "ต่ออยู่";
+            // Answering its own probe without a bridge dialled is the ordinary
+            // state of a healthy engine, and it is usable right now.
+            return a.Tools > 0 ? $"เปิดอยู่ · {a.Tools} tools" : "editor เปิดอยู่";
         }
+        if (a.Reachable == false) return "editor ปิดอยู่";
         // The reason goes on the traffic line, which has a whole row for it.
         if (a.LastError != null) return "ต่อไม่ได้";
         if (!a.EverSeen) return "ยังไม่เคยต่อสำเร็จ";
@@ -953,7 +1018,9 @@ public partial class MainWindow
         {
             var who = BusDisplayName(b.Name);
             if (!b.BridgeEnabled) line.Add($"{who} ปิดไว้");
-            else if (b.Online) line.Add($"{who} ต่ออยู่ {b.Tools} tools");
+            else if (b.BridgeConnected) line.Add($"{who} ต่ออยู่ {b.Tools} tools");
+            else if (b.Online) line.Add($"{who} editor เปิดอยู่ {b.Tools} tools");
+            else if (b.Reachable == false) line.Add($"{who} editor ปิดอยู่ — เปิด editor ก่อน");
             else if (b.LastError != null) line.Add($"{who} ต่อไม่ได้: {Ellipsize(b.LastError, 70)}");
             else if (!b.EverSeen) line.Add($"{who} ยังไม่เคยต่อสำเร็จ");
             else line.Add($"{who} พร้อม {b.Tools} tools");
@@ -985,23 +1052,12 @@ public partial class MainWindow
             !_busNodePos.TryGetValue(to, out var pTo) ||
             !_busNodePos.TryGetValue("brain", out var pBrain)) return;
 
-        var dot = NewBusFlowDot(BusAgentColor(from), 7, 1.0);
-        PlaceBusDot(dot, pFrom, 7);
-        DashAgentBusFxCanvas.Children.Add(dot);
-
-        var leg1 = BusLegAnimation(dot, pFrom, pBrain, 650, 7);
-        leg1.Completed += (_, _) =>
+        var color = BusAgentColor(from);
+        AnimateBusComet(pFrom, pBrain, color, 11, BusLegMs, 0, () =>
         {
-            var leg2 = BusLegAnimation(dot, pBrain, pTo, 650, 7);
-            leg2.Completed += (_, _) =>
-            {
-                var fade = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(250));
-                fade.Completed += (_, _) => DashAgentBusFxCanvas.Children.Remove(dot);
-                dot.BeginAnimation(OpacityProperty, fade);
-            };
-            leg2.Begin();
-        };
-        leg1.Begin();
+            PulseBusNode("brain");                       // it passes THROUGH the brain
+            AnimateBusComet(pBrain, pTo, color, 11, BusLegMs, 0, () => PulseBusNode(to));
+        });
     }
 
     /// <summary>
@@ -1025,42 +1081,54 @@ public partial class MainWindow
         var reqColor = fromBrain ? BusColorBrain : color;
         var resColor = fromBrain ? color : BusColorBrain;
 
-        var req = NewBusFlowDot(reqColor, 7, 0);     // starts invisible; fades in on cue
-        PlaceBusDot(req, pSrc, 7);
-        DashAgentBusFxCanvas.Children.Add(req);
-
-        var begin = TimeSpan.FromMilliseconds(delayMs);
-        var outbound = BusLegAnimation(req, pSrc, pDst, 480, 7);
-        outbound.BeginTime = begin;
-        req.BeginAnimation(OpacityProperty,
-            new DoubleAnimation(0, 0.95, TimeSpan.FromMilliseconds(110)) { BeginTime = begin });
-
-        outbound.Completed += (_, _) =>
+        AnimateBusComet(pSrc, pDst, reqColor, 11, BusLegMs, delayMs, () =>
         {
-            DashAgentBusFxCanvas.Children.Remove(req);
             PulseBusNode(fromBrain ? agent : "brain");   // whoever received it
+            AnimateBusComet(pDst, pSrc, resColor, 8, BusLegMs, 0);
+        });
+    }
 
-            var res = NewBusFlowDot(resColor, 5, 0.8);
-            PlaceBusDot(res, pDst, 5);
-            DashAgentBusFxCanvas.Children.Add(res);
+    /// <summary>
+    /// One travelling packet, drawn as a comet: a bright head with three
+    /// echoes strung out behind it. A lone dot this size reads as a blink —
+    /// the tail is what makes the eye catch it and follow which way it went,
+    /// which is the entire reason the card animates anything at all.
+    /// </summary>
+    private void AnimateBusComet(Point from, Point to, Color color, double size, int ms, int beginMs,
+                                 Action? onArrive = null)
+    {
+        for (int i = 0; i < BusCometParts; i++)
+        {
+            var scale = 1.0 - i * 0.19;
+            var d = size * scale;
+            var dot = NewBusFlowDot(color, d, 0);        // starts invisible; fades in on cue
+            PlaceBusDot(dot, from, d);
+            DashAgentBusFxCanvas.Children.Add(dot);
 
-            var inbound = BusLegAnimation(res, pDst, pSrc, 480, 5);
-            inbound.Completed += (_, _) =>
+            var begin = TimeSpan.FromMilliseconds(beginMs + i * 54);
+            var leg = BusLegAnimation(dot, from, to, ms, d);
+            leg.BeginTime = begin;
+            dot.BeginAnimation(OpacityProperty,
+                new DoubleAnimation(0, 1.0 - i * 0.21, TimeSpan.FromMilliseconds(90)) { BeginTime = begin });
+
+            var isHead = i == 0;
+            leg.Completed += (_, _) =>
             {
-                var fade = new DoubleAnimation(0.8, 0, TimeSpan.FromMilliseconds(180));
-                fade.Completed += (_, _) => DashAgentBusFxCanvas.Children.Remove(res);
-                res.BeginAnimation(OpacityProperty, fade);
+                DashAgentBusFxCanvas.Children.Remove(dot);
+                if (isHead) onArrive?.Invoke();
             };
-            inbound.Begin();
-        };
-        outbound.Begin();
+            leg.Begin();
+        }
     }
 
     private static Ellipse NewBusFlowDot(Color color, double size, double opacity) => new()
     {
         Width = size, Height = size, Opacity = opacity,
         Fill = new SolidColorBrush(color),
-        Effect = new DropShadowEffect { Color = color, BlurRadius = 9, ShadowDepth = 0, Opacity = 0.9 }
+        // A wide, fully-opaque bloom. The dot itself is small; what the eye
+        // actually catches crossing the card is the light around it.
+        Effect = new DropShadowEffect { Color = color, BlurRadius = 18, ShadowDepth = 0, Opacity = 1.0 },
+        IsHitTestVisible = false
     };
 
     private static void PlaceBusDot(Ellipse dot, Point p, double size)
@@ -1088,18 +1156,19 @@ public partial class MainWindow
         if (!_busNodePos.TryGetValue(agent, out var p)) return;
         var ring = new Ellipse
         {
-            Width = 12, Height = 12,
+            Width = 14, Height = 14,
             Stroke = new SolidColorBrush(BusAgentColor(agent)),
-            StrokeThickness = 2, Opacity = 0.9
+            StrokeThickness = 2.6, Opacity = 1.0,
+            IsHitTestVisible = false
         };
-        Canvas.SetLeft(ring, p.X - 6); Canvas.SetTop(ring, p.Y - 6);
+        Canvas.SetLeft(ring, p.X - 7); Canvas.SetTop(ring, p.Y - 7);
         DashAgentBusFxCanvas.Children.Add(ring);
 
-        var ms = TimeSpan.FromMilliseconds(620);
-        var grow = new DoubleAnimation(12, 44, ms);
-        var shiftX = new DoubleAnimation(p.X - 6, p.X - 22, ms);
-        var shiftY = new DoubleAnimation(p.Y - 6, p.Y - 22, ms);
-        var fade = new DoubleAnimation(0.9, 0, ms);
+        var ms = TimeSpan.FromMilliseconds(680);
+        var grow = new DoubleAnimation(14, 58, ms);
+        var shiftX = new DoubleAnimation(p.X - 7, p.X - 29, ms);
+        var shiftY = new DoubleAnimation(p.Y - 7, p.Y - 29, ms);
+        var fade = new DoubleAnimation(1.0, 0, ms);
         fade.Completed += (_, _) => DashAgentBusFxCanvas.Children.Remove(ring);
         ring.BeginAnimation(WidthProperty, grow);
         ring.BeginAnimation(HeightProperty, grow);

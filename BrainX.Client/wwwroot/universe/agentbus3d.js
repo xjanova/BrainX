@@ -105,10 +105,10 @@ export function createAgentBus3D(canvas) {
 
     const planets = new Map();   // name → { pivot, mesh, ring, orbitR, speed, phase, online, everSeen }
     const motes = [];            // in-flight traffic
-    const moteGeo = new THREE.SphereGeometry(0.075, 8, 8);
+    const moteGeo = new THREE.SphereGeometry(0.115, 10, 10);
     /** Points in a comet tail. Long enough to read as motion, short enough
      *  that a burst of traffic is still a burst and not a cobweb. */
-    const TRAIL_LEN = 14;
+    const TRAIL_LEN = 22;
 
     /* Name tags. They start appearing when the camera is closer than FAR and
      * are fully solid by NEAR — a fade rather than a switch, so zooming feels
@@ -384,8 +384,12 @@ export function createAgentBus3D(canvas) {
      * machine, not a dead one, and it spends almost all of its life there —
      * the hub dials the engine lazily so an idle session never pays for a
      * Python process pair per window. */
-    const RING_OPACITY = { live: 0.34, ready: 0.24, fault: 0.20, idle: 0.16, off: 0.08, never: 0.10 };
-    const BODY_SCALE = { live: 1, ready: 0.9, fault: 0.84, idle: 0.78, off: 0.7, never: 0.78 };
+    const RING_OPACITY = { live: 0.46, ready: 0.22, fault: 0.18, down: 0.16, idle: 0.12, off: 0.06, never: 0.08 };
+    const BODY_SCALE = { live: 1.12, ready: 0.86, fault: 0.8, down: 0.76, idle: 0.72, off: 0.62, never: 0.72 };
+    /** How hard a body burns. The gap between lit and unlit is deliberately
+     *  large — a 15% difference in brightness is a difference nobody sees from
+     *  a metre away, and this panel is read at a glance or not at all. */
+    const BODY_GLOW = { live: 1.9, fault: 0.55, down: 0.35 };
 
     function applyPresence(p, a) {
         // Fall back for the browser demo and for any host older than `state`.
@@ -396,12 +400,13 @@ export function createAgentBus3D(canvas) {
         const color = colorOf(a.name);
         const dark = state === 'never' || state === 'off';
         p.mesh.material.color.setHex(dark ? 0x3a3550 : color);
-        // A failed bridge smoulders rather than glowing: visibly not the same
-        // as connected, visibly not the same as switched off either.
+        // A failed or unreachable engine SMOULDERS rather than glowing: visibly
+        // not connected, visibly not switched off either.
         p.mesh.material.emissive.setHex(
-            state === 'live' ? color : state === 'fault' ? 0x5a1f18 : 0x000000);
-        p.mesh.material.emissiveIntensity =
-            state === 'live' ? 1.15 : state === 'fault' ? 0.55 : 0;
+            state === 'live' ? color
+            : (state === 'fault' || state === 'down') ? 0x5a1f18
+            : 0x000000);
+        p.mesh.material.emissiveIntensity = BODY_GLOW[state] ?? 0;
 
         // A never-connected node used to be a bare orbit with no body. But the
         // roster is a deliberate list, so an empty ring reads as "something is

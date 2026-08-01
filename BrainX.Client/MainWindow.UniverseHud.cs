@@ -507,8 +507,10 @@ public partial class MainWindow
         {
             if (a.AgeSeconds is double fresh && fresh < 25 && !string.IsNullOrEmpty(a.LastTool))
                 return Ellipsize(a.LastTool!, 18);
-            return a.Tools > 0 ? $"live · {a.Tools} tools" : "live";
+            if (a.BridgeConnected) return a.Tools > 0 ? $"live · {a.Tools} tools" : "live";
+            return a.Tools > 0 ? $"editor up · {a.Tools} tools" : "editor up";
         }
+        if (a.Reachable == false) return "editor closed";
         if (a.LastError != null) return "cannot connect";
         if (!a.EverSeen) return "never came up";
         return $"ready · {a.Tools} tools";

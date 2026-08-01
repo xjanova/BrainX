@@ -52,6 +52,13 @@ public sealed class McpBridgeDef
     /// </summary>
     public List<string> ToolAllowlist { get; set; } = new();
 
+    /// <summary>
+    /// How to ask the engine whether it is alive WITHOUT spawning its MCP
+    /// server. Optional — a bridge with no probe can never report more than
+    /// "configured", because the hub dials lazily and silence means nothing.
+    /// </summary>
+    public McpBridgeProbe? Probe { get; set; }
+
     /// <summary>Where the owner gets this server. Documentation only.</summary>
     public string? Docs { get; set; }
 
@@ -92,6 +99,31 @@ public sealed class McpBridgeDef
     }
 
     public string Prefix => Id + "__";
+}
+
+/// <summary>
+/// The liveness question, addressed to the engine itself rather than to
+/// anything BrainX runs. See <c>EngineProbe</c> for why a listening port is not
+/// on its own an answer.
+/// </summary>
+public sealed class McpBridgeProbe
+{
+    /// <summary>Loopback by design: unity-mcp's stdio listener binds
+    /// IPAddress.Loopback, so it is unreachable from another host anyway.</summary>
+    public string Host { get; set; } = "127.0.0.1";
+
+    /// <summary>0 = let the probe discover it the way the engine's own client
+    /// does. Otherwise the port to talk to.</summary>
+    public int Port { get; set; }
+
+    /// <summary>
+    /// <c>unity</c> — the framed WELCOME / ping / pong exchange, which proves
+    /// the editor's MAIN THREAD is serving. <c>tcp</c> — connect only, which
+    /// proves a process bound the port and nothing beyond that.
+    /// </summary>
+    public string Kind { get; set; } = "unity";
+
+    public bool IsFramed => Kind.Equals("unity", StringComparison.OrdinalIgnoreCase);
 }
 
 /// <summary>
@@ -145,6 +177,14 @@ public static class McpBridgeConfig
                 if (bad != null) { log($"bridge '{def.Id}' skipped: {bad}"); continue; }
                 if (list.Any(d => string.Equals(d.Id, def.Id, StringComparison.OrdinalIgnoreCase)))
                 { log($"bridge '{def.Id}' skipped: duplicate id"); continue; }
+
+                // A config written before probes existed still deserves one:
+                // without it the dashboard can say only "configured", which is
+                // the exact ambiguity the probe exists to remove. Anything
+                // written in the file wins, including a deliberate omission of
+                // the port, which means "discover it".
+                if (def.Probe == null && def.Id.Equals("unity", StringComparison.OrdinalIgnoreCase))
+                    def.Probe = new McpBridgeProbe { Kind = "unity" };
 
                 list.Add(def);
             }
@@ -225,6 +265,10 @@ public static class McpBridgeConfig
                         ["env"] = new JObject(),
                         ["timeoutSeconds"] = 180,
                         ["toolAllowlist"] = new JArray(),
+                        // port 0 = discover it the way unity-mcp's own client
+                        // does, from the editor's status file. The editor moves
+                        // to 6401+ when 6400 is taken.
+                        ["probe"] = new JObject { ["kind"] = "unity", ["host"] = "127.0.0.1", ["port"] = 0 },
                         ["docs"] = "https://github.com/CoplayDev/unity-mcp",
                         ["setup"] = "Install uv, clone CoplayDev/unity-mcp, and add the MCP For Unity package to the Unity project (Window ▸ Package Manager ▸ add by git URL). The Unity Editor must be OPEN — the server talks to the editor bridge, not to project files.",
                     },
