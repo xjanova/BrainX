@@ -1460,8 +1460,66 @@ public partial class MainWindow
     private BrainX.Client.Services.ClaudeUsageProbe? _claudeProbe;
     private bool _claudeScraperAlive;
 
+    /// <summary>Cancels the background calibration if the window closes while
+    /// it is still walking transcripts.</summary>
+    private readonly CancellationTokenSource _calibrationCts = new();
+
+    /// <summary>
+    /// Re-fit the chars→tokens coefficients against this machine's own Claude
+    /// transcripts, in the background, once per launch.
+    ///
+    /// Built-in coefficients are already measured, but they were measured on
+    /// one person's language mix. Refitting locally means the numbers track
+    /// whoever is actually using it. It runs off the UI thread because it
+    /// walks up to 400 transcripts (~2 s), and it is allowed to REFUSE: if the
+    /// local fit loses to chars/4 on held-out samples, or there are fewer than
+    /// TokenEstimator.MinSamples of them, the defaults stay.
+    /// </summary>
+    private void StartTokenCalibration()
+    {
+        // Whatever a previous run fitted applies immediately, so the first
+        // render is never stuck on the defaults waiting for the walk.
+        _tokenEstimator.TryLoadCalibration();
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                var result = _tokenEstimator.Calibrate(ct: _calibrationCts.Token);
+                System.Diagnostics.Debug.WriteLine(result is null
+                    ? "token calibration: refused (kept defaults)"
+                    : $"token calibration: n={result.SampleCount}, held-out {result.HeldOutMedianError:P1} " +
+                      $"vs chars/4 {result.BaselineMedianError:P1}");
+                if (result is null || _calibrationCts.IsCancellationRequested) return;
+                // Redraw so the page shows figures from the new coefficients
+                // rather than a mix of old numbers and a new provenance line.
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (TokensView?.Visibility == System.Windows.Visibility.Visible)
+                        RenderTokenEconomyChart();
+                }));
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"token calibration: {ex.Message}");
+            }
+        }, _calibrationCts.Token);
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        // The calibration walks hundreds of files on a background thread. If
+        // the window goes away mid-walk it must stop, not keep reading and
+        // then post to a dead dispatcher.
+        try { _calibrationCts.Cancel(); _calibrationCts.Dispose(); } catch { }
+        try { _claudeTally?.Dispose(); } catch { }
+        base.OnClosed(e);
+    }
+
     private void StartDashClaudeUsage()
     {
+        StartTokenCalibration();
+
         try
         {
             _claudeTally = new BrainX.Client.Services.ClaudeTranscriptTally();
@@ -1541,6 +1599,23 @@ public partial class MainWindow
 
         if (DashClaudePlanText != null && !string.IsNullOrWhiteSpace(snap.PlanLabel))
             DashClaudePlanText.Text = snap.PlanLabel!;
+
+        // Pair this percentage reading with the cumulative token counter, so
+        // the quota can be DERIVED later from how the two move together.
+        // Anthropic publishes plan limits in messages per 5 h, not tokens, and
+        // says the figure varies by conversation length and model — there is no
+        // token number to look up, only one to measure.
+        //
+        // Cumulative, not the 5 h window: our window slides continuously while
+        // theirs resets on session boundaries, so differencing the windowed
+        // figure would also capture whatever aged out of the back of ours.
+        // Weighted, not raw: cache reads are ~90% of the raw count and bill at
+        // a tenth.
+        if (snap.Authenticated && snap.Session is { Percent: >= 0 } sessionRow && _hudTally is { } t)
+        {
+            try { _quotaCalibrator.Record(sessionRow.Percent, t.WeightedTotal, t.TokensTotal, snap.PlanLabel); }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"quota sample: {ex.Message}"); }
+        }
 
         void Apply(System.Windows.Controls.TextBlock? pct,
                     System.Windows.Controls.TextBlock? reset,

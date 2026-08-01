@@ -666,8 +666,10 @@ function onHostMessage(evt) {
             if (scene && msg.address) scene.pulsePeerActivity(msg.address, msg.color);
             break;
         case 'tokenStats':
-            // C# forwards TokenSavingsTracker.Compute output as
-            // { text: "💰 +12.3k tok", tooltip: "...multi-line..." }.
+            // C# forwards BrainCostTracker.Compute output as
+            // { text: "🧠 12.3k tok/24h", tooltip: "...multi-line..." }.
+            // This is the brain's measured COST, not a savings figure — the
+            // old "+12.3k saved" came from invented per-op constants.
             if ($tokenChip && $tokenText && msg.text) {
                 $tokenText.textContent = msg.text;
                 $tokenChip.title = msg.tooltip || '';

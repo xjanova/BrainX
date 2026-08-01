@@ -2161,11 +2161,13 @@
                                                     Padding="10,3" FontSize="10"
                                                     Click="GraphActivityToggle_Click" Margin="0,0,6,0"
                                                     ToolTip="Toggle the live brain-activity overlay (reads/writes/tool calls)"/>
-                                            <!-- Token savings gauge — hover for breakdown by op.
-                                                 Runs Compute() on the access-log every ~5s and shows
-                                                 net saved tokens. Click to toggle bypass (pauses the
-                                                 brain-first hooks so trivial conversations don't
-                                                 waste 160 tok/turn on reminders). -->
+                                            <!-- Brain cost gauge — hover for breakdown by op.
+                                                 Shows the tokens the brain's responses actually put
+                                                 into context over the last 24 h, measured from the
+                                                 tool log. It used to show "net SAVED", computed from
+                                                 a table of invented per-op constants; what the brain
+                                                 saved needs brain-off runs to compare against and is
+                                                 not claimed here. Click to toggle bypass. -->
                                             <Border x:Name="TokenSavingsChip" Padding="8,3"
                                                     Margin="0,0,6,0" CornerRadius="3"
                                                     Background="#1A00FF88"
@@ -4176,11 +4178,19 @@
                             </Grid>
                         </Grid>
 
-                        <!-- ═══ TOKEN ECONOMY VIEW ═══
-                             Side-by-side comparison of "actual usage with brain" vs
-                             "projection without brain". Both lines are HEURISTIC
-                             estimates based on access-log.ndjson + tool-log.ndjson.
-                             We don't see real Anthropic API tokens. -->
+        <!-- ═══ TOKEN ECONOMY VIEW ═══
+                             What Claude actually cost, and the brain's share of it.
+
+                             This view used to draw a second line labelled "projection
+                             without brain", defined in code as actual + saved — an
+                             arithmetic identity that sat above the actual line for any
+                             input whatsoever. The shaded band between them was
+                             guaranteed before any data was read. It is gone; a chart
+                             that cannot fail is not evidence.
+
+                             The spend line now comes from Claude's own transcripts
+                             (real billed tokens, deduplicated per message), not from
+                             multiplying tool calls by tuned constants. -->
                         <Grid x:Name="TokensView" Visibility="Collapsed">
                             <Grid.Resources>
                                 <!-- Mode pills. Same shape language as the chart chips below,
@@ -4318,15 +4328,19 @@
                                                 <ColumnDefinition Width="3"/>
                                                 <ColumnDefinition Width="*"/>
                                             </Grid.ColumnDefinitions>
-                                            <!-- Deliberately no accent rule: this one is a
-                                                 counterfactual and nobody can check it. -->
-                                            <Rectangle Grid.Column="0" Fill="{StaticResource NeuralLine}"/>
+                                            <!-- Amber, not cyan: this one is DERIVED. It is not
+                                                 read off a log like the two cards to its left,
+                                                 it is regressed from paired observations, so it
+                                                 carries a sample count and refuses to print at
+                                                 all below the minimum. Third visual class for a
+                                                 third kind of number. -->
+                                            <Rectangle Grid.Column="0" Fill="#FFC040"/>
                                             <StackPanel Grid.Column="1" Margin="16,13,16,13">
-                                                <TextBlock Text="saved · estimate" FontSize="10.5" Foreground="{StaticResource TextMutedBrush}"/>
-                                                <TextBlock x:Name="TokensSavedText" Text="0" FontSize="26" FontWeight="Normal"
-                                                           Foreground="{StaticResource TextMutedBrush}"
+                                                <TextBlock Text="100% quota · derived" FontSize="10.5" Foreground="{StaticResource TextMutedBrush}"/>
+                                                <TextBlock x:Name="TokensSavedText" Text="—" FontSize="26" FontWeight="Normal"
+                                                           Foreground="{StaticResource TextSecondaryBrush}"
                                                            FontFamily="{StaticResource MonoFont}" Margin="0,1,0,2"/>
-                                                <TextBlock x:Name="TokensSavedPctText" Text="not measured" FontSize="10"
+                                                <TextBlock x:Name="TokensSavedPctText" Text="collecting samples" FontSize="10"
                                                            Foreground="{StaticResource TextMutedBrush}" TextTrimming="CharacterEllipsis"/>
                                             </StackPanel>
                                         </Grid>
@@ -4477,17 +4491,17 @@
                                                             <TextBlock Grid.Row="0" Grid.Column="1" x:Name="TokensTooltipActual"
                                                                        FontSize="10" Foreground="{StaticResource TextPrimaryBrush}"
                                                                        FontFamily="{StaticResource MonoFont}" Margin="0,0,0,2"/>
-                                                            <TextBlock Grid.Row="1" Grid.Column="0" Text="saved " FontSize="10"
-                                                                       Foreground="#FF6B9D" Margin="0,0,8,2"/>
+                                                            <TextBlock Grid.Row="1" Grid.Column="0" Text="weighted " FontSize="10"
+                                                                       Foreground="#FFC040" Margin="0,0,8,2"/>
                                                             <TextBlock Grid.Row="1" Grid.Column="1" x:Name="TokensTooltipSaved"
                                                                        FontSize="10" Foreground="{StaticResource TextPrimaryBrush}"
                                                                        FontFamily="{StaticResource MonoFont}" Margin="0,0,0,2"/>
-                                                            <TextBlock Grid.Row="2" Grid.Column="0" Text="proj. " FontSize="10"
-                                                                       Foreground="{StaticResource TextMutedBrush}" Margin="0,0,8,2"/>
+                                                            <TextBlock Grid.Row="2" Grid.Column="0" Text="brain " FontSize="10"
+                                                                       Foreground="#5DE0FF" Margin="0,0,8,2"/>
                                                             <TextBlock Grid.Row="2" Grid.Column="1" x:Name="TokensTooltipProj"
                                                                        FontSize="10" Foreground="{StaticResource TextPrimaryBrush}"
                                                                        FontFamily="{StaticResource MonoFont}" Margin="0,0,0,2"/>
-                                                            <TextBlock Grid.Row="3" Grid.Column="0" Text="brain " FontSize="10"
+                                                            <TextBlock Grid.Row="3" Grid.Column="0" Text="calls " FontSize="10"
                                                                        Foreground="{StaticResource TextMutedBrush}" Margin="0,4,8,0"/>
                                                             <TextBlock Grid.Row="3" Grid.Column="1" x:Name="TokensTooltipBrainCalls"
                                                                        FontSize="10" Foreground="{StaticResource TextPrimaryBrush}"
@@ -4504,9 +4518,9 @@
                                         </Grid>
                                         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Center">
                                             <Border Width="14" Height="3" Background="#5DFF9D" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                                            <TextBlock Text="actual (with brain)" FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,16,0"/>
-                                            <Border Width="14" Height="3" Background="#FF6B9D" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                                            <TextBlock Text="saved (vs no-brain projection)" FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,16,0"/>
+                                            <TextBlock Text="billed (Claude transcripts)" FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,16,0"/>
+                                            <Border Width="14" Height="3" Background="#5DE0FF" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                            <TextBlock Text="brain share of it" FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,16,0"/>
                                             <Border Width="14" Height="3" Background="#FFC040" VerticalAlignment="Center" Margin="0,0,6,0"/>
                                             <TextBlock Text="bypass-mode bucket" FontSize="11" Foreground="{StaticResource TextSecondaryBrush}"/>
                                         </StackPanel>

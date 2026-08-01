@@ -56,8 +56,12 @@ public partial class MainWindow : Window
     private readonly VaultImporter _importer = new();
     private readonly BrainExporter _exporter = new();
     private readonly EmbeddingService _embeddings = new();
-    private readonly TokenSavingsTracker _tokenSavings = new();
-    private readonly TokenUsageAggregator _tokenUsage = new();
+    // One estimator, shared: calibrating twice would fit the same coefficients
+    // from the same transcripts and then disagree at the last decimal.
+    private static readonly TokenEstimator _tokenEstimator = new();
+    private readonly BrainCostTracker _tokenCost = new(_tokenEstimator);
+    private readonly TokenUsageAggregator _tokenUsage = new(_tokenEstimator);
+    private readonly QuotaCalibrator _quotaCalibrator = new();
     private System.Windows.Threading.DispatcherTimer? _tokenSavingsTimer;
     /// <summary>
     /// Path to the brain-mode file the UserPromptSubmit/Stop hooks read.
@@ -7405,43 +7409,47 @@ public partial class MainWindow : Window
         if (TokenSavingsText == null || TokenSavingsChip == null) return;
         try
         {
-            var stats = _tokenSavings.Compute(_vaultPath);
-            // Format as "+12.3k" or "+456" depending on size, with the
-            // up-arrow when net positive (most of the time) or "(-)"
-            // when net negative (a fresh brain that's been called a lot
-            // but hasn't replaced any external work yet).
-            var net = stats.NetSaved;
-            var sign = net >= 0 ? "+" : "";
-            var formatted = Math.Abs(net) >= 1000
-                ? $"{sign}{net / 1000.0:F1}k"
-                : $"{sign}{net}";
+            // This chip used to read "+12.3k tok SAVED", from a table of
+            // invented per-op constants. It now shows what the brain COST,
+            // which is the part that can be measured: the tokens its responses
+            // actually put in front of the model. A savings figure needs
+            // sessions that ran without the brain to compare against — see the
+            // mode comparison on the Token economy page, which stays blank
+            // until those exist rather than filling in a guess.
+            var stats = _tokenCost.Compute(hoursBack: 24);
+            var spent = stats.ResponseTokens;
+            var formatted = spent >= 1000 ? $"{spent / 1000.0:F1}k" : spent.ToString();
 
             var mode = ReadBrainMode();
             // Chip prefix carries the mode at a glance:
-            //   💰 = always (full coverage, max savings potential)
+            //   🧠 = always (hooks fire on every prompt)
             //   🤖 = auto   (skips short prompts to dodge wasted reminders)
             //   🚫 = off    (no hooks fire — pure manual operation)
             var prefix = mode switch
             {
                 "off"  => "🚫",
                 "auto" => "🤖",
-                _      => "💰"
+                _      => "🧠"
             };
-            var chipText = $"{prefix} {formatted} tok";
+            var chipText = $"{prefix} {formatted} tok/24h";
             TokenSavingsText.Text = chipText;
             var tooltip =
-                $"Brain net savings: {net:N0} tokens\n" +
-                $"Calls: {stats.TotalCalls} ({stats.GrossSaved:N0} avoided − {stats.GrossSpent:N0} spent)\n" +
-                $"Mode: {mode.ToUpperInvariant()} — click to cycle Always → Auto → Off\n" +
+                $"Brain context cost: {spent:N0} tokens in the last 24 h\n" +
+                $"Calls: {stats.TotalCalls} · {stats.ResponseChars:N0} chars returned\n" +
+                $"Token figure: {stats.Provenance}" +
+                (stats.FullyMeasured ? "" : "\n  (some rows predate response-composition logging — assumed script mix)") +
+                $"\nMode: {mode.ToUpperInvariant()} — click to cycle Always → Auto → Off\n" +
+                "\nThis is cost, not savings. Savings would need runs with the\n" +
+                "brain off to compare against; none have been recorded.\n" +
                 "\nBreakdown by op:\n" +
                 string.Join("\n", stats.CallsByOp.OrderByDescending(kv => kv.Value)
                     .Take(8).Select(kv => $"  {kv.Key}: {kv.Value}"));
             TokenSavingsChip.ToolTip = tooltip;
 
             // Mirror the chip into the Universe HUD so users on the Universe
-            // landing view see the same savings counter without switching
-            // back to BrainGraph. Tooltip relayed too so hover works the
-            // same in both surfaces.
+            // landing view see the same counter without switching back to
+            // BrainGraph. Tooltip relayed too so hover works the same in both
+            // surfaces.
             BroadcastTokenStatsToUniverse(chipText, tooltip);
 
             // Tint matches the chip prefix so the user reads the mode
@@ -10777,14 +10785,20 @@ public partial class MainWindow : Window
         public TokenUsageAggregator.HourBucket Bucket = null!;
         /// <summary>Pixel X centre of the bucket on the canvas.</summary>
         public double X;
-        /// <summary>Pixel Y of the actual line/bar top (cumulative = running actual).</summary>
+        /// <summary>Pixel Y of the billed line/bar top (cumulative = running billed).</summary>
         public double ActualY;
-        /// <summary>Pixel Y of the projection line/bar top (cumulative = running projection).</summary>
-        public double ProjY;
-        /// <summary>Running cumulative actual up to and including this bucket.</summary>
+        /// <summary>Pixel Y of the brain's share.
+        ///
+        /// This used to be the "projection without brain", drawn ABOVE the
+        /// actual line and defined as actual + saved — so it could only ever
+        /// be above it. The brain's share is a genuine SUBSET of what was
+        /// billed, so this line sits below and can fall to zero. The band
+        /// between the two is now something that can shrink.</summary>
+        public double BrainY;
+        /// <summary>Running cumulative billed tokens up to and including this bucket.</summary>
         public long ActualCum;
-        /// <summary>Running cumulative projection up to and including this bucket.</summary>
-        public long ProjCum;
+        /// <summary>Running cumulative brain-response tokens up to and including this bucket.</summary>
+        public long BrainCum;
     }
     private List<TokenChartPoint>? _tokenChartPoints;
     private double _tokenChartPlotTop, _tokenChartPlotBottom;
@@ -10843,49 +10857,75 @@ public partial class MainWindow : Window
                 SyncTokensModePills(modeName);
             }
 
-            // Card 1 is MEASURED — Claude's own transcripts, via
-            // ClaudeTranscriptTally, which counts real tokens rather than
-            // multiplying call counts by tuned constants. Its windows are
-            // fixed (5h/24h/7d), so show the one that fits the chart range and
-            // say which; a number whose window does not match the chart beside
-            // it is worse than no number.
-            var tally = _hudTally;
-            var (tallyTokens, tallyWindow) = _tokenChartHoursBack switch
-            {
-                <= 5       => (tally?.Tokens5h  ?? 0, "last 5 h"),
-                <= 24      => (tally?.Tokens24h ?? 0, "last 24 h"),
-                <= 24 * 7  => (tally?.Tokens7d  ?? 0, "last 7 d"),
-                _          => (tally?.TokensTotal ?? 0, "all time"),
-            };
-            if (tally == null || tallyTokens == 0)
+            // Card 1 is MEASURED — what Anthropic actually billed, read from
+            // Claude's own transcripts and deduplicated by message id.
+            //
+            // The dedupe is the whole reason this number changed. Claude Code
+            // writes one JSONL line per content block and repeats the message's
+            // usage object on each, so summing per line multiplied every figure
+            // by its block count: measured across 816 transcripts, 2.29x.
+            //
+            // It now covers exactly the chart's range rather than the tally's
+            // nearest fixed window, so the card and the chart beside it can no
+            // longer disagree about which hours they are describing.
+            var actualRaw = series.TotalActualRaw;
+            var actualWeighted = series.TotalActualWeighted;
+            if (actualRaw == 0)
             {
                 TokensActualText.Text = "—";
-                TokensActualSubText.Text = "no Claude transcripts found";
+                TokensActualSubText.Text = "no Claude transcripts in range";
             }
             else
             {
-                TokensActualText.Text = $"{tallyTokens:N0}";
-                TokensActualSubText.Text = $"Claude transcripts · {tallyWindow}";
+                TokensActualText.Text = FormatTokens(actualRaw);
+                // Both numbers, because they answer different questions and the
+                // difference between them is ~10x. Raw says how many tokens
+                // moved; weighted says what they cost.
+                TokensActualSubText.Text =
+                    $"{series.TotalMessages:N0} msgs · {FormatTokens((long)actualWeighted)} input-equiv";
             }
 
-            // Card 2 is also MEASURED, but of a different thing: the bytes the
-            // brain's own tools actually returned. Real, and directly
-            // comparable to card 1 — this is the brain's share of that spend.
-            var brainChars = _tokenUsage.MeasuredBrainResponseChars(_tokenChartHoursBack);
-            var brainTokens = brainChars / 4;
-            TokensProjectionText.Text = brainTokens > 0 ? $"{brainTokens:N0}" : "—";
-            TokensBrainShareSubText.Text = (brainTokens > 0 && tallyTokens > 0)
-                ? $"{(100.0 * brainTokens / tallyTokens):F1}% of measured spend"
-                : "what brain calls returned";
+            // Card 2 is MEASURED too, of a different thing: the tokens the
+            // brain's own tools put into the context. Converted through the
+            // calibrated estimator, not chars/4 — on this vault's Thai-heavy
+            // mix that rule was 67.6% wrong at the median, always in the
+            // direction that made the brain look cheap.
+            var brainTokens = series.TotalBrainTokens;
+            TokensProjectionText.Text = brainTokens > 0 ? FormatTokens(brainTokens) : "—";
+            // Percent of NEW context, not of the raw total — a brain response is
+            // billed once and then re-read from cache every later turn, so the
+            // raw total is the wrong denominator by an order of magnitude.
+            // Formatted so a genuinely small share reads as small rather than
+            // as "0.00%", which looks like a broken number.
+            var sharePct = series.BrainSharePercent;
+            var shareText = sharePct >= 1 ? $"{sharePct:F1}%"
+                          : sharePct >= 0.01 ? $"{sharePct:F2}%"
+                          : sharePct > 0 ? "<0.01%"
+                          : "0%";
+            TokensBrainShareSubText.Text = brainTokens <= 0
+                ? "no brain calls in range"
+                : series.TotalNewContext > 0
+                    ? $"{shareText} of new context" +
+                      (series.BrainTokensFullyMeasured ? "" : " · some rows assumed")
+                    : "what brain calls returned";
 
-            // Card 3 is the only estimate on this page, and it stays labelled
-            // as one. It is a counterfactual — nobody can measure the tokens a
-            // session did NOT spend — so it must never be dressed up in the
-            // same colour as the two numbers that are real.
-            TokensSavedText.Text    = $"~{series.TotalSaved:N0}";
-            TokensSavedPctText.Text = series.TotalSaved == 0
-                ? "not measured"
-                : "estimate · heuristic, not measured";
+            // Card 3 is DERIVED — regressed from paired (percent, tokens)
+            // observations, not read off a log. It prints nothing at all until
+            // there are enough pairs, because a derived number without its
+            // sample count reads exactly like a measured one.
+            var quota = _quotaCalibrator.Compute();
+            if (quota is null)
+            {
+                TokensSavedText.Text = "—";
+                TokensSavedPctText.Text = _quotaCalibrator.ProgressNote() ?? "collecting samples";
+            }
+            else
+            {
+                TokensSavedText.Text = FormatTokens((long)quota.TokensPer100Percent);
+                TokensSavedPctText.Text =
+                    $"±{quota.Spread:P0} · {quota.PairCount} pairs · {quota.Plan}";
+            }
+
             int brainCalls = series.Buckets.Sum(b => b.BrainCalls);
             int otherCalls = series.Buckets.Sum(b => b.OtherToolCalls);
             TokensCallsText.Text = $"{brainCalls} / {otherCalls}";
@@ -10933,24 +10973,25 @@ public partial class MainWindow : Window
             // Compute cumulative running totals once — used by tooltip in
             // both modes, and as the Y series in cumulative mode.
             var points = new List<TokenChartPoint>(series.Buckets.Count);
-            long actualSum = 0, projSum = 0;
+            long actualSum = 0, brainSum = 0;
             foreach (var b in series.Buckets)
             {
-                actualSum += b.ActualSpent;
-                projSum   += b.ProjectionWithoutBrain;
+                actualSum += b.ActualRaw;
+                brainSum  += b.BrainResponseTokens;
                 points.Add(new TokenChartPoint
                 {
                     Bucket = b,
                     X = XForBucket(b.Hour),
                     ActualCum = actualSum,
-                    ProjCum   = projSum,
+                    BrainCum  = brainSum,
                 });
             }
 
-            // Y-axis scale depends on which view we're rendering.
+            // Y-axis scale keys off the billed line, which is the larger of the
+            // two by construction — the brain's tokens are part of it.
             long maxY = _tokenChartCumulative
-                ? Math.Max(projSum, 1)
-                : Math.Max(series.Buckets.Max(b => b.ProjectionWithoutBrain), 1);
+                ? Math.Max(actualSum, 1)
+                : Math.Max(series.Buckets.Max(b => b.ActualRaw), 1);
 
             // Y axis grid + labels (shared by both views)
             var muted = (SolidColorBrush)FindResource("TextMutedBrush");
@@ -11071,8 +11112,8 @@ public partial class MainWindow : Window
         double Y(long v) => padT + chartH * (1 - Math.Clamp((double)v / maxY, 0, 1));
         foreach (var p in points)
         {
-            p.ActualY = Y(p.Bucket.ActualSpent);
-            p.ProjY   = Y(p.Bucket.ProjectionWithoutBrain);
+            p.ActualY = Y(p.Bucket.ActualRaw);
+            p.BrainY  = Y(p.Bucket.BrainResponseTokens);
         }
 
         var cyan = Color.FromRgb(0x6C, 0xF0, 0xFF);
@@ -11127,31 +11168,34 @@ public partial class MainWindow : Window
         foreach (var p in points)
         {
             p.ActualY = padT + chartH * (1 - (double)p.ActualCum / maxY);
-            p.ProjY   = padT + chartH * (1 - (double)p.ProjCum   / maxY);
+            p.BrainY  = padT + chartH * (1 - (double)p.BrainCum  / maxY);
         }
 
-        // Shaded "savings" band — fill the gap between projection and
-        // actual so the eye reads the difference instantly.
+        // Fill from the baseline up to the brain's cumulative share, so the
+        // shaded region IS the brain's contribution to the bill rather than a
+        // gap to an imaginary line above it. When the brain is quiet this
+        // collapses to nothing, which is the point: it can show zero.
+        var baseline = padT + chartH;
         var fill = new System.Windows.Shapes.Polygon
         {
-            Fill = new SolidColorBrush(Color.FromArgb(0x22, 0x5D, 0xFF, 0x9D)),
+            Fill = new SolidColorBrush(Color.FromArgb(0x2E, 0x5D, 0xE0, 0xFF)),
             Stroke = null
         };
         var fillPts = new System.Windows.Media.PointCollection();
-        foreach (var p in points) fillPts.Add(new Point(p.X, p.ProjY));
+        foreach (var p in points) fillPts.Add(new Point(p.X, p.BrainY));
         for (int i = points.Count - 1; i >= 0; i--)
-            fillPts.Add(new Point(points[i].X, points[i].ActualY));
+            fillPts.Add(new Point(points[i].X, baseline));
         fill.Points = fillPts;
         TokensCanvas.Children.Add(fill);
 
-        var projLine = new System.Windows.Shapes.Polyline
+        var brainLine = new System.Windows.Shapes.Polyline
         {
-            Stroke = new SolidColorBrush(Color.FromRgb(0xFF, 0x6B, 0x9D)),
+            Stroke = new SolidColorBrush(Color.FromRgb(0x5D, 0xE0, 0xFF)),
             StrokeThickness = 2,
             StrokeDashArray = new DoubleCollection { 4, 3 }
         };
-        foreach (var p in points) projLine.Points.Add(new Point(p.X, p.ProjY));
-        TokensCanvas.Children.Add(projLine);
+        foreach (var p in points) brainLine.Points.Add(new Point(p.X, p.BrainY));
+        TokensCanvas.Children.Add(brainLine);
 
         var actualLine = new System.Windows.Shapes.Polyline
         {
@@ -11163,8 +11207,13 @@ public partial class MainWindow : Window
     }
 
     /// <summary>Per-bucket view — each bucket renders as a stacked bar:
-    /// green = tokens actually spent that bucket, pink = tokens estimated
-    /// saved that bucket. Bar total = projection-without-brain.</summary>
+    /// green = tokens billed that bucket, cyan = the brain's share OF that,
+    /// drawn inside the same bar rather than stacked on top of it.
+    ///
+    /// The stacked version said "bar total = projection without brain", which
+    /// made every bucket taller than what was actually spent by an amount
+    /// nobody could check. The brain's tokens are part of the bill, so they
+    /// belong inside the bar.</summary>
     private void DrawPerBucket(List<TokenChartPoint> points, long maxY,
         double padL, double padR, double padT, double chartW, double chartH,
         double w, int bucketCount)
@@ -11172,14 +11221,16 @@ public partial class MainWindow : Window
         // Bar width: divide the plot by bucket count, leave a tiny gap.
         var barW = Math.Max(1.5, chartW / Math.Max(1, bucketCount) - 1);
         var barFillActual = new SolidColorBrush(Color.FromRgb(0x5D, 0xFF, 0x9D));
-        var barFillSaved  = new SolidColorBrush(Color.FromArgb(0xCC, 0xFF, 0x6B, 0x9D));
+        var barFillBrain  = new SolidColorBrush(Color.FromArgb(0xEE, 0x5D, 0xE0, 0xFF));
 
         foreach (var p in points)
         {
-            var actualH = chartH * ((double)p.Bucket.ActualSpent / maxY);
-            var savedH  = chartH * ((double)p.Bucket.BrainSaved  / maxY);
+            var actualH = chartH * ((double)p.Bucket.ActualRaw / maxY);
+            // Clamped to the bar it sits inside: a rounding artefact must not
+            // be able to draw the subset taller than the whole.
+            var brainH  = Math.Min(actualH, chartH * ((double)p.Bucket.BrainResponseTokens / maxY));
             var actualTop = padT + chartH - actualH;
-            var savedTop  = actualTop - savedH;
+            var brainTop  = padT + chartH - brainH;
 
             if (actualH > 0.5)
             {
@@ -11192,21 +11243,21 @@ public partial class MainWindow : Window
                 Canvas.SetTop(rActual, actualTop);
                 TokensCanvas.Children.Add(rActual);
             }
-            if (savedH > 0.5)
+            if (brainH > 0.5)
             {
-                var rSaved = new System.Windows.Shapes.Rectangle
+                var rBrain = new System.Windows.Shapes.Rectangle
                 {
-                    Width = barW, Height = savedH,
-                    Fill = barFillSaved, RadiusX = 0.5, RadiusY = 0.5
+                    Width = barW, Height = brainH,
+                    Fill = barFillBrain, RadiusX = 0.5, RadiusY = 0.5
                 };
-                Canvas.SetLeft(rSaved, p.X - barW / 2);
-                Canvas.SetTop(rSaved, savedTop);
-                TokensCanvas.Children.Add(rSaved);
+                Canvas.SetLeft(rBrain, p.X - barW / 2);
+                Canvas.SetTop(rBrain, brainTop);
+                TokensCanvas.Children.Add(rBrain);
             }
 
             // ActualY = top of green bar, used for the mode dot above.
             p.ActualY = actualH > 0.5 ? actualTop : padT + chartH - 1;
-            p.ProjY   = savedTop;
+            p.BrainY  = brainTop;
         }
     }
 
@@ -11350,15 +11401,15 @@ public partial class MainWindow : Window
 
         if (_tokenChartCumulative)
         {
-            TokensTooltipActual.Text = $"{p.Bucket.ActualSpent:N0}  (Σ {p.ActualCum:N0})";
-            TokensTooltipSaved.Text  = $"{p.Bucket.BrainSaved:N0}  (Σ {p.ProjCum - p.ActualCum:N0})";
-            TokensTooltipProj.Text   = $"{p.Bucket.ProjectionWithoutBrain:N0}  (Σ {p.ProjCum:N0})";
+            TokensTooltipActual.Text = $"{p.Bucket.ActualRaw:N0}  (Σ {p.ActualCum:N0})";
+            TokensTooltipSaved.Text  = $"{p.Bucket.ActualWeighted:N0}  input-equiv";
+            TokensTooltipProj.Text   = $"{p.Bucket.BrainResponseTokens:N0}  (Σ {p.BrainCum:N0})";
         }
         else
         {
-            TokensTooltipActual.Text = $"{p.Bucket.ActualSpent:N0}";
-            TokensTooltipSaved.Text  = $"{p.Bucket.BrainSaved:N0}";
-            TokensTooltipProj.Text   = $"{p.Bucket.ProjectionWithoutBrain:N0}";
+            TokensTooltipActual.Text = $"{p.Bucket.ActualRaw:N0}";
+            TokensTooltipSaved.Text  = $"{p.Bucket.ActualWeighted:N0}  input-equiv";
+            TokensTooltipProj.Text   = $"{p.Bucket.BrainResponseTokens:N0}";
         }
         TokensTooltipBrainCalls.Text = p.Bucket.BrainCalls.ToString();
         TokensTooltipOtherCalls.Text = p.Bucket.OtherToolCalls.ToString();
