@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
 using System.Windows;
@@ -15,6 +15,7 @@ using BrainX.Client.Editor;
 using BrainX.Client.Services;
 using BrainX.Core.Models;
 using BrainX.Core.Services;
+using System.Globalization;
 
 namespace BrainX.Client;
 
@@ -5528,7 +5529,7 @@ public partial class MainWindow : Window
                 {
                     var loc = asm.Location;
                     if (!string.IsNullOrEmpty(loc) && File.Exists(loc))
-                        build = File.GetLastWriteTime(loc).ToString("yyyy-MM-dd HH:mm");
+                        build = File.GetLastWriteTime(loc).ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
                 }
                 catch { }
                 // Detail line carries the full informational string
@@ -7127,7 +7128,7 @@ public partial class MainWindow : Window
 
         var ts = new TextBlock
         {
-            Text = DateTime.Now.ToString("HH:mm:ss"),
+            Text = DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture),
             FontSize = 9,
             FontFamily = (System.Windows.Media.FontFamily)FindResource("MonoFont"),
             Foreground = (Brush)FindResource("TextMutedBrush"),
@@ -11168,7 +11169,11 @@ public partial class MainWindow : Window
                 var ts = first.AddHours(span * t).ToLocalTime();
                 var label = new TextBlock
                 {
-                    Text = ts.ToString(fmt),
+                    // Invariant: `MMM`/`ddd` render Thai month and day
+                    // names on this machine, in a mono font with no Thai
+                    // glyphs — the axis read "n.a. 18 / a.e. 1" instead of
+                    // "Jul 18 / Aug 1". Same family as the 2569 dates.
+                    Text = ts.ToString(fmt, CultureInfo.InvariantCulture),
                     FontSize = 9, Foreground = muted,
                     FontFamily = (FontFamily)FindResource("MonoFont")
                 };
@@ -11505,7 +11510,8 @@ public partial class MainWindow : Window
             ? _tokenChartPoints[1].Bucket.Hour - _tokenChartPoints[0].Bucket.Hour
             : TimeSpan.FromMinutes(60));
         var localEnd = (p.Bucket.Hour + bucketLen).ToLocalTime();
-        TokensTooltipTime.Text = $"{localStart:MMM d HH:mm} → {localEnd:HH:mm}";
+        TokensTooltipTime.Text = string.Format(CultureInfo.InvariantCulture,
+            "{0:MMM d HH:mm} → {1:HH:mm}", localStart, localEnd);
         TokensTooltipMode.Text = $"mode: {p.Bucket.DominantMode}";
 
         if (_tokenChartCumulative)
@@ -11833,7 +11839,8 @@ public partial class MainWindow : Window
                 GrowthCanvas.Children.Add(tick);
                 var label = new TextBlock
                 {
-                    Text = date.ToString(span > 730 ? "yyyy" : (span > 90 ? "MMM yy" : "d MMM")),
+                    Text = date.ToString(span > 730 ? "yyyy" : (span > 90 ? "MMM yy" : "d MMM"),
+                                         CultureInfo.InvariantCulture),
                     FontSize = 9, Foreground = muted,
                     FontFamily = (FontFamily)FindResource("MonoFont")
                 };
@@ -12287,7 +12294,7 @@ public partial class MainWindow : Window
             var plus = key.IndexOf('+'); if (plus >= 0) key = key[..plus];
             var dash = key.IndexOf('-'); if (dash >= 0) key = key[..dash];
 
-            var built = File.GetLastWriteTime(target).ToString("yyyy-MM-dd HH:mm");
+            var built = File.GetLastWriteTime(target).ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
             var tooltip = $"MCP v{product}\nBinary: {target}\nBuilt:  {built}";
             return ($"MCP v{key}", tooltip);
         }
@@ -14470,7 +14477,7 @@ public partial class MainWindow : Window
                          $"• {info.MarkdownNoteCount} notes\n" +
                          $"• {info.AttachmentCount} attachments\n" +
                          $"• {sizeMb:F1} MB total\n" +
-                         $"• Last edit: {(info.LastModified?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "—")}" +
+                         $"• Last edit: {(info.LastModified?.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) ?? "—")}" +
                          pluginLine + "\n\n" +
                          $"Files will be copied into:\n  {Path.Combine(_vaultPath, "Imported", info.Name)}\n\n" +
                          "Original vault stays untouched.";

@@ -1,4 +1,4 @@
-// MainWindow.Dashboard.cs — populate Activity Feed + Recently Edited cards
+﻿// MainWindow.Dashboard.cs — populate Activity Feed + Recently Edited cards
 // on the redesigned Dashboard view. Partial class extension so the existing
 // 9000-line MainWindow.xaml.cs stays untouched.
 //
@@ -18,6 +18,7 @@ using System.IO;
 using System.Linq;
 using System.Windows.Media;
 using BrainX.Core.Models;
+using System.Globalization;
 
 namespace BrainX.Client;
 
@@ -210,7 +211,7 @@ public partial class MainWindow
                 (Brush)(System.Windows.Application.Current.TryFindResource(key) ?? Brushes.Gray);
             _dashActivityRows.Add(new DashActivityRow
             {
-                Time = System.DateTime.Now.ToString("HH:mm:ss"),
+                Time = System.DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture),
                 KindLabel = "IND", KindBrush = B("ActKindIndex"),
                 Message = _graph == null
                     ? "Waiting for brain index…"
@@ -282,11 +283,11 @@ public partial class MainWindow
                 System.Globalization.DateTimeStyles.AdjustToUniversal,
                 out var dt))
             {
-                timeStr = dt.ToLocalTime().ToString("HH:mm:ss");
+                timeStr = dt.ToLocalTime().ToString("HH:mm:ss", CultureInfo.InvariantCulture);
             }
             else
             {
-                timeStr = System.DateTime.Now.ToString("HH:mm:ss");
+                timeStr = System.DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture);
             }
 
             // Kind classification from op prefix
