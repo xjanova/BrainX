@@ -431,6 +431,11 @@
                 <span class="hud-sub" id="hud-agents-count">—</span>
             </div>
             <canvas id="hud-bus-canvas" aria-label="Agents orbiting the brain"></canvas>
+            <!-- The motes above say that something moved. This says what, and
+                 who moved it. Both are driven by the same events, so the
+                 picture can always be checked against the words — which is the
+                 only reason to trust the picture. -->
+            <ol class="hud-flow" id="hud-flow" aria-label="Live agent traffic"></ol>
         </section>
 
         <!-- bottom-centre is deliberately EMPTY. It is the landing zone for

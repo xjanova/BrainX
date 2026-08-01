@@ -1,4 +1,4 @@
-// MainWindow.UniverseHud.cs — the live data behind the Universe HUD.
+﻿// MainWindow.UniverseHud.cs — the live data behind the Universe HUD.
 //
 // The HUD (wwwroot/universe/hud.js) is where the Dashboard's readouts moved
 // to: the same facts, drawn over the galaxy instead of inside WPF cards.
@@ -56,6 +56,12 @@ public partial class MainWindow
     /// card's <c>_busSeenCalls</c> so the two surfaces never eat each other's
     /// deltas when both happen to be alive.</summary>
     private readonly Dictionary<string, long> _hudSeenCalls = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Timestamp of the newest access-log row already sent to the HUD.
+    /// The log is append-only, so this is enough to emit each event exactly
+    /// once without re-reading what has already been shown.</summary>
+    private DateTime _hudFlowSince = DateTime.MinValue;
+    private bool _hudFlowSeeded;
 
     /// <summary>Latest peer count from the mesh, mirrored out of
     /// <see cref="OnPeerCountChanged"/> so the HUD doesn't have to scrape a
@@ -127,6 +133,7 @@ public partial class MainWindow
             {
                 _hudTick++;
                 PostHudAgents();
+                PostHudFlow();
                 PostHudActivity();
                 await PostHudSystemAsync();
 
@@ -171,6 +178,7 @@ public partial class MainWindow
             PostHudExpertise();
             PostHudActivity();
             PostHudAgents();
+            PostHudFlow();
             PostHudRecent();
             PostHudNetwork();
             PostHudMcp();
@@ -340,6 +348,98 @@ public partial class MainWindow
             traffic,
         });
     }
+
+    /// <summary>
+    /// The traffic that never stops: every read and write an agent makes
+    /// against the brain, as it happens.
+    ///
+    /// The bus card has only ever animated agent↔agent MESSAGES, which are
+    /// rare — 7 in the whole log, none in the last day — so the panel read as
+    /// dead while 2,001 reads and writes went by unshown. Those were always
+    /// recorded in access-log.ndjson; what was missing was WHO, because
+    /// LogAccess wrote the constant "mcp" into every row. With the agent name
+    /// now on each row, a flow has a source, a verb and a destination.
+    ///
+    /// Emits only rows newer than the last one sent, so an event appears
+    /// exactly once. The first pass seeds silently: replaying an entire log as
+    /// a burst of motes on the first paint is noise, not signal.
+    /// </summary>
+    private void PostHudFlow()
+    {
+        var path = Path.Combine(_vaultPath, ".obsidianx", "access-log.ndjson");
+        if (!File.Exists(path)) return;
+
+        var events = new List<object>();
+        var newest = _hudFlowSince;
+        var skippedNoAgent = 0;
+
+        try
+        {
+            foreach (var line in SafeReadTailLines(path, 400))
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                Newtonsoft.Json.Linq.JObject obj;
+                try { obj = Newtonsoft.Json.Linq.JObject.Parse(line); } catch { continue; }
+
+                if (!DateTime.TryParse(obj["ts"]?.ToString(), null,
+                        System.Globalization.DateTimeStyles.AssumeUniversal |
+                        System.Globalization.DateTimeStyles.AdjustToUniversal,
+                        out var ts)) continue;
+                if (ts <= _hudFlowSince) continue;
+                if (ts > newest) newest = ts;
+
+                // Rows written before the agent field existed cannot say who
+                // they were. Counted and reported rather than drawn as an
+                // anonymous mote — an unattributed flow is the thing this
+                // panel exists to stop showing.
+                var agent = obj["agent"]?.ToString();
+                if (string.IsNullOrWhiteSpace(agent)) { skippedNoAgent++; continue; }
+
+                var nodeId = obj["node_id"]?.ToString() ?? "";
+                var node = string.IsNullOrEmpty(nodeId) || _graph == null
+                    ? null
+                    : _graph.Nodes.FirstOrDefault(n => n.Id == nodeId);
+
+                var op = obj["op"]?.ToString() ?? "";
+                events.Add(new
+                {
+                    ts = ts.ToLocalTime().ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture),
+                    agent,
+                    op,
+                    write = IsWriteOp(op),
+                    nodeId,
+                    title = node?.Title ?? "",
+                    context = Trim(obj["context"]?.ToString() ?? "", 70),
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"PostHudFlow read: {ex.Message}");
+            return;
+        }
+
+        _hudFlowSince = newest;
+        if (!_hudFlowSeeded) { _hudFlowSeeded = true; return; }   // first pass primes, never floods
+        if (events.Count == 0 && skippedNoAgent == 0) return;
+
+        // Newest last, so the ticker reads top-to-bottom in the order things
+        // actually happened.
+        events.Reverse();
+        PostHud("hudFlow", new { events, unattributed = skippedNoAgent });
+    }
+
+    /// <summary>Ops that change the vault, as opposed to reading it. Drives the
+    /// colour of the mote, so a write is never mistaken for a read.</summary>
+    private static bool IsWriteOp(string op) =>
+        op.Contains("write", StringComparison.OrdinalIgnoreCase)
+        || op.Contains("create", StringComparison.OrdinalIgnoreCase)
+        || op.Contains("append", StringComparison.OrdinalIgnoreCase)
+        || op.Contains("edit", StringComparison.OrdinalIgnoreCase)
+        || op.Contains("delete", StringComparison.OrdinalIgnoreCase);
+
+    private static string Trim(string s, int max) =>
+        s.Length <= max ? s : s[..max].TrimEnd() + "…";
 
     /// <summary>What an online agent is doing right now, in the width the
     /// roster row has: the tool it just served, else how long it has been

@@ -845,3 +845,76 @@ body.hud-active.has-notice #hud-layer {
     .hud-boot-step.pending .mark, .hud-boot-step.just-landed { animation: none; }
     .hud-bar > i, .hud-boot-fill { transition: none; }
 }
+
+/* ── Agent Bus: the live flow ticker ───────────────────────────────
+   Sits under the orbit canvas and names what the motes are. A mote
+   proves motion; only this proves WHOSE motion and toward what — the
+   panel spent its life animating traffic it could not identify,
+   because every access-log row said the actor was "mcp".
+
+   Fixed height with the newest row at the bottom, so the eye rests
+   where the next line will appear instead of chasing a jumping list. */
+.hud-flow {
+    list-style: none;
+    margin: 6px 0 0;
+    padding: 0 2px;
+    max-height: 92px;
+    overflow: hidden;
+    /* The panel is a flex column and the canvas is the elastic child
+       (flex:1 1 auto). Leaving this list shrinkable meant IT gave up the space
+       instead, and rows were sliced 5px short of their own height. The orbit
+       can afford a few pixels; a half-drawn line of text cannot. */
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    gap: 1px;
+    font-size: 10px;
+    /* Measured, not chosen by eye: the panel leaves this list 76px. At 1.35 the
+       five rows needed 80 and the oldest was cut 4px short of its own height.
+       1.15 puts five rows in 62 with room to spare. */
+    line-height: 1.15;
+    font-family: var(--mono, ui-monospace, "Cascadia Mono", Consolas, monospace);
+}
+.hud-flow li {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    white-space: nowrap;
+    /* Without this the ellipsis on .fl-what never engages and a long note
+       title pushes the row past the panel edge, where overflow:hidden simply
+       cuts it off mid-word. Measured: rows were 329px inside a 328px box. */
+    overflow: hidden;
+    opacity: 0;
+    /* Opacity only, deliberately. A translateY entrance looked better for
+       260ms and then cost 4px of phantom scroll height forever: CSS transforms
+       count toward a scroll container's overflow area, so the newest row sat
+       past the bottom edge and the oldest was clipped at the top — in a box
+       whose contents otherwise fit exactly. */
+    animation: hud-flow-in 260ms ease-out forwards;
+}
+@keyframes hud-flow-in { to { opacity: 1; } }
+/* Older lines recede rather than vanish, so the list reads as a tail
+   of recent history and not as a single blinking value. */
+.hud-flow li:nth-last-child(1) { opacity: 1; }
+.hud-flow li:nth-last-child(n+4) { opacity: .55; }
+.hud-flow li:nth-last-child(n+6) { opacity: .3; }
+
+.hud-flow .fl-t    { color: var(--muted, #7b8794); font-variant-numeric: tabular-nums; }
+.hud-flow .fl-a    { font-weight: 600; }
+.hud-flow .fl-arrow{ color: var(--muted, #7b8794); }
+/* Read and write must not look alike. A write changed the vault. */
+.hud-flow .fl-op          { color: #6fd3ff; }
+.hud-flow li.is-write .fl-op { color: #57e08a; }
+.hud-flow .fl-what {
+    color: var(--dim, #9aa7b4);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    /* flex items default to min-width:auto, which refuses to shrink below the
+       content — the one line that makes the ellipsis possible at all. */
+    flex: 1 1 auto;
+    min-width: 0;
+}
+/* Never let a truncated count hide behind an ellipsis: if rows were
+   dropped for lacking an actor, the panel says so out loud. */
+.hud-flow li.is-note { color: var(--muted, #7b8794); font-style: italic; }

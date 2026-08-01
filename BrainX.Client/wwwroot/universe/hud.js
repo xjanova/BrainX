@@ -303,6 +303,81 @@ function renderAgents(d = {}) {
     markStep('agents');
 }
 
+/* ── Live flow: the traffic that never stops ──────────────────────
+   The bus card only ever animated agent↔agent MESSAGES, which are rare —
+   so it read as dead while thousands of reads and writes went past
+   unshown. Those were always in the access log; what was missing was
+   the actor, because every row recorded the transport ("mcp") instead
+   of the agent.
+
+   One event stream drives both surfaces on purpose: the ticker states
+   what happened in words, and the mote animates the same event. If the
+   picture and the text ever disagree, the picture is wrong — and you
+   can see that they disagree, which is the point. */
+// 4, not 7: the panel gives this list ~60px and seven rows need ~81px, so
+// the older ones were being sliced in half at the top edge. Measured in a
+// browser against the real panel, not guessed from the markup.
+const FLOW_KEEP = 5;
+const _flow = [];
+
+function renderFlow(d = {}) {
+    const events = d.events || [];
+    const el = document.getElementById('hud-flow');
+
+    // Animate first — a mote per real event, direction carrying meaning:
+    // a write is the agent pushing INTO the brain (mote in the agent's own
+    // colour), a read is the brain answering OUT (mote in the brain's).
+    // Capped, and the cap is reported rather than silently swallowing the
+    // rest.
+    const shown = events.slice(-5);
+    shown.forEach((e, i) =>
+        setTimeout(() => { bus?.fireTraffic(e.agent, !!e.write); }, i * 140));
+
+    for (const e of events) {
+        _flow.push(e);
+        if (_flow.length > FLOW_KEEP) _flow.shift();
+    }
+    if (!el) return;
+
+    const dropped = events.length - shown.length;
+    el.innerHTML = '';
+    for (const e of _flow) {
+        const li = document.createElement('li');
+        if (e.write) li.classList.add('is-write');
+        // What the event touched: the note's real title when the id resolved,
+        // else the query text. Never a bare id — an id names nothing to a human.
+        const what = e.title || e.context || '';
+        li.innerHTML =
+            `<span class="fl-t">${esc(e.ts)}</span>` +
+            `<span class="fl-a" style="color:${agentColor(e.agent)}">${esc(e.agent)}</span>` +
+            `<span class="fl-arrow">${e.write ? '▸' : '◂'}</span>` +
+            `<span class="fl-op">${esc(e.op)}</span>` +
+            (what ? `<span class="fl-what">${esc(what)}</span>` : '');
+        el.appendChild(li);
+    }
+    if (dropped > 0 || d.unattributed > 0) {
+        const li = document.createElement('li');
+        li.className = 'is-note';
+        const bits = [];
+        if (dropped > 0) bits.push(`+${dropped} more this tick`);
+        if (d.unattributed > 0) bits.push(`${d.unattributed} row(s) predate agent tracking`);
+        li.textContent = bits.join(' · ');
+        el.appendChild(li);
+    }
+}
+
+/** Match the orbit colours exactly, so a name in the ticker and its planet
+ *  above are visibly the same agent. */
+const FLOW_COLORS = {
+    claude: '#d97757', codex: '#7dd3fc', cluadex: '#c084fc',
+    brain: '#57e08a', 'local-agent-mode-brainx-brain': '#57e08a',
+};
+const agentColor = (n) => FLOW_COLORS[String(n).toLowerCase()] || '#8e9aa6';
+// NOTE: `esc` already exists at the top of this file — redeclaring it here was
+// a module-level SyntaxError, which does not break one panel, it stops the
+// whole file parsing and takes the entire HUD dark. Nothing in the app would
+// have said so; the page just renders empty.
+
 /** Load history, so the panel can show the SHAPE of the last two minutes and
  *  not just this instant — a 90 % spike that has already passed is the thing
  *  worth seeing, and a bare percentage never shows it. The host samples every
@@ -573,6 +648,7 @@ function onHudMessage(evt) {
         case 'hudExpertise': renderExpertise(m.payload); break;
         case 'hudActivity':  renderActivity(m.payload); break;
         case 'hudAgents':    renderAgents(m.payload); break;
+        case 'hudFlow':      renderFlow(m.payload); break;
         case 'hudSystem':    renderSystem(m.payload); break;
         case 'hudRecent':    renderRecent(m.payload); break;
         case 'hudNetwork':   renderNetwork(m.payload); break;
@@ -701,6 +777,18 @@ export function initHud() {
     addEventListener('resize', markScrollable);
 
     try { window.chrome?.webview?.addEventListener('message', onHudMessage); } catch { /* not hosted */ }
+
+    // Outside the WPF host there is no chrome.webview, so nothing above
+    // attaches and the page cannot be fed anything — which meant the only way
+    // to look at this UI was to build, install and launch the whole app. The
+    // token chart shipped with an unreadable X axis for weeks behind exactly
+    // that gap. Listening on `window` when unhosted makes the HUD drivable in
+    // a plain browser with the real payload shapes.
+    //
+    // Guarded on being unhosted, so the hosted path is untouched and no
+    // message can ever be handled twice.
+    if (!window.chrome?.webview)
+        window.addEventListener('message', onHudMessage);
 
     // The canvas is up as soon as this module runs; the galaxy step completes
     // for real when the brain payload lands, but mark a floor here so the bar
