@@ -332,8 +332,13 @@ function renderSystem(d = {}) {
         if (value == null) return;
         const pct = Math.max(0, Math.min(100, Number(value) || 0));
         const hot = redline != null && pct >= redline;
+        // History sits BEHIND the readout, not under it — one instrument per
+        // metric rather than a readout and a chart competing for the same
+        // glance. It also buys back the vertical space five stacked graphs
+        // were spending.
         gauges.push(
             `<div class="hud-gauge${hot ? ' is-hot' : ''}" style="--g:${color}">
+               <span class="hud-gauge-bg">${spark}</span>
                <div class="hud-gauge-head">
                  <span class="hud-gauge-label">${esc(label)}</span>
                  <span class="hud-gauge-val">${text}</span>
@@ -342,7 +347,6 @@ function renderSystem(d = {}) {
                  <i class="hud-gauge-fill" style="width:${pct}%"></i>
                  ${redline != null ? `<b class="hud-gauge-redline" style="left:${redline}%"></b>` : ''}
                </div>
-               ${spark}
              </div>`);
     };
 

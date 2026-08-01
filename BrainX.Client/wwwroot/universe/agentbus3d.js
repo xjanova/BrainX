@@ -52,10 +52,22 @@ export function createAgentBus3D(canvas) {
      * The default is the old fixed framing — low and tilted, so the orbits
      * read as ellipses instead of concentric circles, which is what makes it
      * look like a system and not a dartboard. */
+    /* Labels fade in between FAR and NEAR — see the tick loop. Declared here
+     * because the opening distance is derived from them: the panel should show
+     * the names when it opens, and a hard-coded default would drift away from
+     * these the first time either is tuned. */
+    const LABEL_FAR = 6.4, LABEL_NEAR = 4.2;
+
+    /* Open just inside the fade, where the names are legible (alpha ≈ 0.55)
+     * without being right on top of the star. At FOV 38° and phi 0.43 the
+     * outer orbit's apparent height is ~1.5 against a ~1.8 half-frame here, so
+     * the whole system still fits — closer than about 4.6 starts clipping it. */
+    const DEFAULT_DIST = LABEL_FAR - 1.2;
+
     const view = {
         theta: 0,                 // around the vertical axis
         phi: 0.43,                // above the orbital plane, radians
-        dist: 8.15,               // matches the original (0, 3.4, 7.4)
+        dist: DEFAULT_DIST,
         target: new THREE.Vector3(0, 0, 0),
     };
     const DIST_MIN = 2.2, DIST_MAX = 16;
@@ -101,7 +113,6 @@ export function createAgentBus3D(canvas) {
     /* Name tags. They start appearing when the camera is closer than FAR and
      * are fully solid by NEAR — a fade rather than a switch, so zooming feels
      * like approaching something rather than tripping a sensor. */
-    const LABEL_FAR = 6.4, LABEL_NEAR = 4.2;
     const LABEL_W = 1.35, LABEL_H = 0.34;
 
     let raf = 0, running = false, lastT = 0;
@@ -148,7 +159,7 @@ export function createAgentBus3D(canvas) {
     // Double-click puts it back — a view you can lose is a view you need a way
     // out of, and "drag until it looks right again" is not one.
     canvas.addEventListener('dblclick', (e) => {
-        view.theta = 0; view.phi = 0.43; view.dist = 8.15;
+        view.theta = 0; view.phi = 0.43; view.dist = DEFAULT_DIST;
         userMoved = false;
         applyCamera();
         e.stopPropagation(); e.preventDefault();

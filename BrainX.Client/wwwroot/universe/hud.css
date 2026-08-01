@@ -429,8 +429,26 @@ body.hud-active #settings-toggle {
    fill, so the lit blocks line up with the unlit ones at every width — no
    per-segment DOM, and it stays crisp while the value animates.
    --g is set per gauge by hud.js and drives value, fill and glow together. */
-.hud-gauge { margin: 1px 0 8px; }
-.hud-gauge-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.hud-gauge { position: relative; margin: 1px 0 8px; }
+
+/* The history trace, as the instrument's backdrop. Faint enough that the
+   number and the bar stay the things you read, present enough that a glance
+   still tells you whether this reading is a spike or a plateau. Hit-test
+   transparent and behind everything: it is scenery, not a control. */
+.hud-gauge-bg {
+    position: absolute; inset: -1px 0 5px; z-index: 0;
+    pointer-events: none; overflow: hidden;
+    opacity: 0.3;
+    -webkit-mask-image: linear-gradient(90deg, transparent, #000 18%, #000 100%);
+    mask-image: linear-gradient(90deg, transparent, #000 18%, #000 100%);
+}
+.hud-gauge-bg .hud-spark { height: 100%; margin: 0; }
+/* Behind a readout the trace should suggest a shape, not draw a chart —
+   thinner line, no glow of its own, and the fill carries most of it. */
+.hud-gauge-bg .hud-spark polyline { stroke-width: 1; filter: none; }
+.hud-gauge-bg .hud-spark polygon { opacity: 0.55; }
+
+.hud-gauge-head { position: relative; z-index: 1; display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .hud-gauge-label {
     font-size: 9px; letter-spacing: 0.16em; text-transform: uppercase;
     color: var(--hud-label); white-space: nowrap;
