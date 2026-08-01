@@ -1960,8 +1960,19 @@ internal static partial class Program
                 }
                 else
                 {
+                    // The topic shrank below the bake threshold, so this bundle
+                    // can never refresh itself again — and what it is still
+                    // serving was baked against a vault that no longer exists.
+                    // The `obsidianx` bundle proved the cost: 79 days old, and
+                    // every wiki-link in it named a note by its pre-rename title
+                    // ("Session … — ObsidianX Universe Phase 1"), none of which
+                    // resolve. A cache that cannot be refreshed must stop
+                    // answering as though it can.
+                    bundle["obsolete"] = true;
                     bundle["rebakeFailed"] =
-                        $"topic now matches only {matchCount} note(s) — kept the previous bundle";
+                        $"topic now matches only {matchCount} note(s) (need ≥{MinBundleNotes}) — this bundle can no longer be refreshed";
+                    bundle["warning"] =
+                        $"OBSOLETE — baked {fresh.AgeDays:F0} days ago against an older vault. Titles and wiki-links in it may name notes that have since been renamed or removed; do not cite them without checking. Run `brainx-mcp bake-bundles` to retire it.";
                 }
             }
 
@@ -2201,8 +2212,32 @@ internal static partial class Program
             baked++;
         }
 
+        // Retire bundles whose topic is no longer in the bake set at all. These
+        // never get re-baked, so they hold their age forever and keep serving
+        // whatever the vault looked like when they were made — `obsidianx` sat
+        // at 79 days handing out wiki-links to notes renamed in the ObsidianX →
+        // BrainX rebrand. Moved, not deleted: a bundle is derived data, but
+        // "safe to lose" is a reason to be relaxed about recovery, not to make
+        // recovery impossible.
+        var live = topics.Select(t => SlugifyTopic(t.topic)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var retiredDir = Path.Combine(bundleDir, "retired");
+        int retired = 0;
+        foreach (var file in Directory.GetFiles(bundleDir, "*.json"))
+        {
+            var slug = Path.GetFileNameWithoutExtension(file);
+            if (live.Contains(slug)) continue;
+            try
+            {
+                Directory.CreateDirectory(retiredDir);
+                File.Move(file, Path.Combine(retiredDir, Path.GetFileName(file)), overwrite: true);
+                Console.WriteLine($"  ⌫ {slug,-30} retired (topic no longer in the bake set) → bundles/retired/");
+                retired++;
+            }
+            catch (Exception ex) { Console.WriteLine($"  ! {slug,-30} could not retire: {ex.Message}"); }
+        }
+
         Console.WriteLine();
-        Console.WriteLine($"Done: {baked} baked, {skipped} skipped · {totalBytes:N0} bytes total (~{totalBytes / 4:N0} tokens)");
+        Console.WriteLine($"Done: {baked} baked, {skipped} skipped, {retired} retired · {totalBytes:N0} bytes total (~{totalBytes / 4:N0} tokens)");
         var exportAge = (DateTime.UtcNow - export.GeneratedAt.ToUniversalTime()).TotalDays;
         if (exportAge > ExportStaleDays)
             Console.WriteLine($"⚠  brain-export.json is {exportAge:F0} days old — these bundles describe a " +
