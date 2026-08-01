@@ -48,6 +48,17 @@ public class BrainCostTracker
         public string Provenance { get; set; } = "";
     }
 
+    // The chip that consumes this refreshes on a 5 s timer, so the whole log
+    // would be re-parsed twelve times a minute forever. Skip when neither the
+    // file nor the window has moved. Keyed on length+mtime rather than a
+    // duration, because an append-only log that has not been appended to
+    // cannot have a different answer.
+    private long _cacheLen = -1;
+    private DateTime _cacheStamp;
+    private int _cacheHours = int.MinValue;
+    private DateTime _cacheComputedAt;
+    private Stats? _cached;
+
     /// <summary>
     /// Measure over a window. <paramref name="hoursBack"/> of 0 or less means
     /// everything the log still holds.
@@ -59,6 +70,22 @@ public class BrainCostTracker
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             ".claude", "tool-log.ndjson");
         if (!File.Exists(path)) return s;
+
+        try
+        {
+            var fi = new FileInfo(path);
+            // A windowed query also goes stale as rows age out of the back of
+            // the window, so an unchanged file is only reusable for a while.
+            if (_cached is not null && _cacheHours == hoursBack
+                && _cacheLen == fi.Length && _cacheStamp == fi.LastWriteTimeUtc
+                && (hoursBack <= 0 || DateTime.UtcNow - _cacheComputedAt < TimeSpan.FromMinutes(1)))
+                return _cached;
+            _cacheLen = fi.Length;
+            _cacheStamp = fi.LastWriteTimeUtc;
+            _cacheHours = hoursBack;
+            _cacheComputedAt = DateTime.UtcNow;
+        }
+        catch { /* stat failed — fall through and just read it */ }
 
         var since = hoursBack > 0 ? DateTime.UtcNow.AddHours(-hoursBack) : DateTime.MinValue;
         try
@@ -106,6 +133,7 @@ public class BrainCostTracker
             }
         }
         catch { /* best-effort: a truncated tail stops the count, doesn't crash */ }
+        _cached = s;
         return s;
     }
 
