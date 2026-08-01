@@ -3554,17 +3554,57 @@ internal static partial class Program
         //   • missing notes — a real title that several notes reach for and
         //     nobody has written. THIS is the useful output: the brain saying
         //     what it wants next, ranked by how many notes asked.
+        //   • slug refs    — `[[consult-brainx-before-acting]]`. Same species as
+        //     the memory refs above, but written without the `rule_`/`feedback_`
+        //     prefix the first pass keyed on, so all of them fell through into
+        //     "notes worth writing". Notes in this vault are titled in prose;
+        //     a lowercase, space-free, hyphen/underscore-joined target is the
+        //     shape of a memory-file or project key, not of a title anyone here
+        //     would write. Kept as its own bucket rather than folded into
+        //     memoryRefs — this is a shape heuristic, and calling it a proven
+        //     memory reference would be claiming more than was measured.
+        //   • alias candidates — `[[Session 2026-05-23]]` when
+        //     "Session 2026-05-23 — Stripe…" exists. The note is NOT missing;
+        //     the vault reached for it by a short name nothing declared. The fix
+        //     is an `aliases:` line on the note that exists, not a new note, and
+        //     telling someone to WRITE a note that is already written is the
+        //     worst thing this report could do.
         var memoryRefs = 0;
         var sourceFileRefs = 0;
+        var slugRefs = 0;
         var wanted = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         foreach (var (_, targets) in brokenWikiLinks)
             foreach (var t in targets)
             {
                 if (Regex.IsMatch(t, @"^(rule|feedback|reference|incident|feature|user|project)_")) { memoryRefs++; continue; }
                 if (Regex.IsMatch(t, @"\.(cs|ts|js|json|xaml|md|ps1|py|php|css|html)$", RegexOptions.IgnoreCase)) { sourceFileRefs++; continue; }
+                if (Regex.IsMatch(t, @"^[a-z0-9]+([-_][a-z0-9]+)+$")) { slugRefs++; continue; }
                 wanted[t] = wanted.GetValueOrDefault(t) + 1;
             }
-        var wantedRanked = wanted.OrderByDescending(k => k.Value).ThenBy(k => k.Key).ToList();
+
+        // Split the survivors: which of these titles is a real note wearing a
+        // short name? Prefix match only, and the character after the prefix must
+        // be a non-alphanumeric, so "Session 2026-05-23" claims
+        // "Session 2026-05-23 — …" but "Note" cannot claim "Notebook". The
+        // length floor stops short generic words matching half the vault.
+        const int MinAliasPrefix = 8;
+        var titles = export.Nodes.Select(n => n.Title).Where(t => !string.IsNullOrEmpty(t)).ToList();
+        var aliasCandidates = new List<(string Target, int Refs, string ProbableNote, int OtherMatches)>();
+        var stillWanted = new List<KeyValuePair<string, int>>();
+        foreach (var w in wanted)
+        {
+            var matches = w.Key.Length < MinAliasPrefix
+                ? []
+                : titles.Where(t => t.Length > w.Key.Length
+                                    && t.StartsWith(w.Key, StringComparison.OrdinalIgnoreCase)
+                                    && !char.IsLetterOrDigit(t[w.Key.Length]))
+                        .OrderBy(t => t.Length)
+                        .ToList();
+            if (matches.Count > 0) aliasCandidates.Add((w.Key, w.Value, matches[0], matches.Count - 1));
+            else stillWanted.Add(w);
+        }
+        var aliasRanked = aliasCandidates.OrderByDescending(a => a.Refs).ThenBy(a => a.Target).ToList();
+        var wantedRanked = stillWanted.OrderByDescending(k => k.Value).ThenBy(k => k.Key).ToList();
 
         // ── 3b. Fact verification — the one check that compares a note to the
         // WORLD rather than to other notes. Everything above can only tell you
@@ -3663,9 +3703,18 @@ internal static partial class Program
         if (untagged.Count > totalNotes * 0.10)
             actions.Add(MakeAction("medium", "untagged", $"{untagged.Count} note(s) with <2 tags",
                 "brain_apply_audit_fix kind=untagged model=gemma3:4b dryRun=true"));
-        // Only the notes-that-should-exist are worth an action. Memory refs and
-        // source-file names are permanent by design, and listing them as work
-        // just trains everyone to ignore the whole category.
+        // Cheapest fix in the report, so it goes first: an alias line resolves
+        // every reference to a note that already exists. Writing a note here
+        // would fork a topic that is not actually missing.
+        var topAlias = aliasRanked.Where(a => a.Refs >= 2 && a.OtherMatches == 0).Take(5).ToList();
+        if (topAlias.Count > 0)
+            actions.Add(MakeAction("medium", "aliases-worth-adding",
+                $"{topAlias.Count} short name(s) that 2+ notes link to, where the note ALREADY EXISTS: "
+                + string.Join(", ", topAlias.Select(a => $"\"{a.Target}\" ({a.Refs}) → \"{a.ProbableNote}\"")),
+                "add an 'aliases:' line to the note in probablyMeans and re-index — do NOT write a new note"));
+        // Only the notes-that-should-exist are worth an action. Memory refs,
+        // source-file names and slugs are permanent by design, and listing them
+        // as work just trains everyone to ignore the whole category.
         var topWanted = wantedRanked.Where(w => w.Value >= 2).Take(5).ToList();
         if (topWanted.Count > 0)
             actions.Add(MakeAction("medium", "notes-worth-writing",
@@ -3804,15 +3853,28 @@ internal static partial class Program
                 {
                     ["memoryRefs"] = memoryRefs,
                     ["sourceFileRefs"] = sourceFileRefs,
+                    ["slugRefs"] = slugRefs,
+                    ["aliasCandidatesDistinct"] = aliasRanked.Count,
+                    ["aliasCandidates"] = new JArray(aliasRanked.Take(perCategoryLimit).Select(a => new JObject
+                    {
+                        ["target"] = a.Target,
+                        ["referencedBy"] = a.Refs,
+                        ["probablyMeans"] = a.ProbableNote,
+                        ["otherMatches"] = a.OtherMatches
+                    })),
                     ["wantedNotesDistinct"] = wantedRanked.Count,
                     ["wantedNotes"] = new JArray(wantedRanked.Take(perCategoryLimit).Select(w => new JObject
                     {
                         ["title"] = w.Key,
                         ["referencedBy"] = w.Value
                     })),
-                    ["hint"] = "memoryRefs and sourceFileRefs are expected — a Claude memory file "
-                             + "and a source filename are not notes and never resolve. wantedNotes is "
-                             + "the actionable part: titles the vault keeps reaching for."
+                    ["hint"] = "Four buckets, only one of which is work. memoryRefs / sourceFileRefs / "
+                             + "slugRefs never resolve by design — a Claude memory file, a source "
+                             + "filename, and a slug-shaped key are not note titles. aliasCandidates "
+                             + "are notes that ALREADY EXIST under a longer title: fix with an "
+                             + "'aliases:' line on probablyMeans, never by writing a new note "
+                             + "(check probablyMeans first — otherMatches>0 means the prefix was "
+                             + "ambiguous). wantedNotes is the only bucket that needs writing."
                 },
                 ["missingFrontmatter"] = AuditList(missingFrontmatter, perCategoryLimit),
                 ["brokenWikiLinks"] = new JArray(brokenWikiLinks.Take(perCategoryLimit).Select(b => new JObject
