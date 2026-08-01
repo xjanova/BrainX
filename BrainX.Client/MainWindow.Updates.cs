@@ -64,7 +64,12 @@ public partial class MainWindow
             UpdApplyBtn.IsEnabled = _vpkPending != null;
             UpdInstallerBtn.Visibility = (!installed && newer) ? Visibility.Visible : Visibility.Collapsed;
 
-            if (_vpkPending != null)
+            // A paused auto-update must say so here. Silence would read as "no
+            // update available" — the one reading that is certainly wrong.
+            var history = UpdateLog.Describe();
+            if (history != null)
+                UpdStatusText.Text = "⚠ " + history;
+            else if (_vpkPending != null)
                 UpdStatusText.Text = $"✅ Update v{_vpkPending.TargetFullRelease.Version} downloaded — click “Restart & apply”.";
         }
         catch { /* presentation-only; never throw into the UI */ }
@@ -107,8 +112,11 @@ public partial class MainWindow
         if (_vpkMgr == null || _vpkPending == null) { UpdStatusText.Text = "No staged update to apply yet — press “Check for updates” first."; return; }
         try
         {
+            // Explicit user action overriding any auto-apply pause — still
+            // recorded, so a repeatedly-failing package stays visible as one.
+            UpdateLog.RecordAttempt(_vpkPending.TargetFullRelease.Version.ToString());
             UpdStatusText.Text = "Applying update… BrainX will restart.";
-            _vpkMgr.ApplyUpdatesAndRestart(_vpkPending);
+            ApplyStagedUpdateAndQuit();
         }
         catch (Exception ex) { UpdStatusText.Text = $"Apply failed: {ex.Message}"; }
     }

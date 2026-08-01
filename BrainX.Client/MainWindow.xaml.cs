@@ -2306,10 +2306,17 @@ public partial class MainWindow : Window
         // refreshes the bottom-bar label if a newer build is available.
         // Doesn't block startup — UX nicety only.
         _ = CheckLatestReleaseAsync();
+        // We are running, so whatever update was last attempted either landed
+        // (this IS the target version — clear the history) or it did not (the
+        // count stands). Must happen before the check below reads that count.
+        try { UpdateLog.NoteRunningVersion(GetLocalVersion().compareKey); } catch { }
         // Full auto-update on launch: find + download + apply + restart, itself,
         // with no clicking (user spec). autoApply:true is safe here — the editor
         // is always clean at startup. Mid-session re-checks pass false.
         _ = VelopackCheckAndStageAsync(autoApply: true);
+        // ...and keep looking. A launch-only check leaves an app that stays open
+        // for days permanently on the version it started with.
+        StartUpdateRecheckTimer();
 
         Services.StartupProgress.Report("Initializing brain identity", 0.22, tag: "identity");
         InitializeIdentity();
@@ -5645,8 +5652,48 @@ public partial class MainWindow : Window
     private Velopack.UpdateManager? _vpkMgr;
     private Velopack.UpdateInfo? _vpkPending;
     // Guards the auto-apply path so a background re-check can't fire a second
-    // restart while the first is already tearing the process down.
+    // restart while the first is already tearing the process down. In-memory on
+    // purpose — it only has to survive this process. What must survive the
+    // RESTART lives in _updateLog.
     private bool _autoUpdateFiring;
+
+    /// <summary>Consecutive-failure history, on disk, because an update attempt
+    /// ends the process that would otherwise remember it.</summary>
+    private BrainX.Core.Services.UpdateAttemptLog? _updateLog;
+    private System.Windows.Threading.DispatcherTimer? _updateRecheckTimer;
+
+    private BrainX.Core.Services.UpdateAttemptLog UpdateLog =>
+        _updateLog ??= BrainX.Core.Services.UpdateAttemptLog.Load(
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BrainX"));
+
+    /// <summary>
+    /// The update check used to run exactly once, at launch, with no timer
+    /// anywhere. On 2026-08-01 the app checked at 13:46, was told it was current
+    /// — true at that instant — and then sat through the release of 2.0.201 and
+    /// 2.0.203 without ever looking again. An app people leave open for days
+    /// never learns anything after its first second.
+    ///
+    /// Re-checks pass autoApply:false: mid-session we stage and arm the chip,
+    /// never yank the window away from someone using it.
+    /// </summary>
+    private void StartUpdateRecheckTimer()
+    {
+        if (_updateRecheckTimer != null) return;
+        _updateRecheckTimer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromHours(4),
+        };
+        _updateRecheckTimer.Tick += async (_, _) =>
+        {
+            try
+            {
+                await CheckLatestReleaseAsync();
+                await VelopackCheckAndStageAsync(autoApply: false);
+            }
+            catch (Exception ex) { Debug.WriteLine($"Update re-check: {ex.Message}"); }
+        };
+        _updateRecheckTimer.Start();
+    }
 
     private async System.Threading.Tasks.Task VelopackCheckAndStageAsync(bool autoApply = false)
     {
@@ -5672,6 +5719,21 @@ public partial class MainWindow : Window
             //    app silently relaunches once onto the new build. If an update
             //    lands mid-session while they're editing, we DON'T yank the app
             //    away — we fall through to the click-to-apply chip instead.
+            // Has this exact version already failed to apply, repeatedly? If so
+            // stop trying by itself. An un-appliable package used to mean an app
+            // that relaunched every 18 seconds forever; it should mean one
+            // sentence on the update card and a button the user can press.
+            var target = info.TargetFullRelease.Version.ToString();
+            if (UpdateLog.ShouldStopTrying(target))
+            {
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    StatusText.Text = $"⚠ Update v{target} failed to apply {UpdateLog.Failures}× — automatic install paused. Use Settings ▸ Software update.";
+                    RefreshUpdatePanel();
+                });
+                autoApply = false;
+            }
+
             var safeToAutoApply = autoApply && await Dispatcher.InvokeAsync(() =>
                 !_autoUpdateFiring && (_mdEditor == null || !_mdEditor.IsDirty));
 
@@ -5693,14 +5755,12 @@ public partial class MainWindow : Window
                 {
                     try
                     {
-                        // NOTE: Claude may be running brainx-mcp.exe out of
-                        // <current>\mcp — Velopack swaps whole versioned folders
-                        // and flips the `current` junction, so the live MCP's
-                        // open handles don't block the swap; the stale MCP dies
-                        // with its Claude session and the config already points
-                        // at the (stable) current\mcp path, so the next spawn is
-                        // the new build. No need to pre-kill it here.
-                        mgr.ApplyUpdatesAndRestart(info);
+                        // Written BEFORE we hand over control, because nothing
+                        // of ours runs after this point to record that we tried.
+                        // The next launch reads it back: still on the old
+                        // version means this attempt failed.
+                        UpdateLog.RecordAttempt(info.TargetFullRelease.Version.ToString());
+                        await Dispatcher.InvokeAsync(ApplyStagedUpdateAndQuit);
                         return;
                     }
                     catch (Exception ex)
@@ -5725,15 +5785,57 @@ public partial class MainWindow : Window
         catch (Exception ex) { Debug.WriteLine($"Velopack check: {ex.Message}"); }
     }
 
-    private void VersionText_Click(object sender, MouseButtonEventArgs e)
+    /// <summary>
+    /// Hand a staged update to the updater and then shut ourselves down —
+    /// the order Velopack documents ("launch the updater, tell it to wait for
+    /// this program to exit gracefully, then clean up any state and exit").
+    ///
+    /// The old path called <c>ApplyUpdatesAndRestart</c>, which ends the process
+    /// with <c>Environment.Exit</c>. That skips WPF shutdown entirely: WebView2's
+    /// browser processes and anything else holding a file under the install
+    /// directory get no chance to close. Velopack then tried to rename
+    /// <c>current</c>, found it held, retried ten times and gave up — and on
+    /// 2026-08-01 its own log recorded that it could not even open our process
+    /// handle to wait on ("Access is denied... Continuing..."), so it was racing
+    /// a live app it had never actually waited for.
+    ///
+    /// Exiting ourselves means we are gone whether or not the updater's wait
+    /// works, which removes the race instead of hoping to win it.
+    /// </summary>
+    private void ApplyStagedUpdateAndQuit()
     {
-        if (_vpkMgr == null || _vpkPending == null) return;   // no staged update → ignore the click
+        if (_vpkMgr == null || _vpkPending == null) return;
         try
         {
             StatusText.Text = "Applying update… BrainX will restart.";
-            _vpkMgr.ApplyUpdatesAndRestart(_vpkPending);
+            _vpkMgr.WaitExitThenApplyUpdates(_vpkPending.TargetFullRelease, silent: false, restart: true);
         }
-        catch (Exception ex) { Debug.WriteLine($"Velopack apply: {ex.Message}"); }
+        catch (Exception ex)
+        {
+            // Nothing was handed over — stay open and let the user retry.
+            _autoUpdateFiring = false;
+            StatusText.Text = $"Update could not start: {ex.Message}";
+            Debug.WriteLine($"Velopack WaitExitThenApplyUpdates: {ex}");
+            return;
+        }
+
+        // Updater is armed and waiting on us. Release what we hold, then go.
+        // The WebView2 controls matter most: each owns msedgewebview2.exe child
+        // processes with handles under the install directory, and those are
+        // exactly what a rename of `current` trips over.
+        try { _updateRecheckTimer?.Stop(); } catch { }
+        foreach (var wv in new[] { UniverseWebView, DashUniverseWebView, DashClaudeProbeWebView })
+            try { wv?.Dispose(); } catch { }
+        try { Application.Current.Shutdown(); } catch { Environment.Exit(0); }
+    }
+
+    private void VersionText_Click(object sender, MouseButtonEventArgs e)
+    {
+        if (_vpkMgr == null || _vpkPending == null) return;   // no staged update → ignore the click
+        // A manual click is the user overriding the pause, so it records the
+        // attempt too — three silent manual failures should still be visible.
+        try { UpdateLog.RecordAttempt(_vpkPending.TargetFullRelease.Version.ToString()); } catch { }
+        ApplyStagedUpdateAndQuit();
     }
 
 
