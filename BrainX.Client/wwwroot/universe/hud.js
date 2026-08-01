@@ -349,7 +349,7 @@ function renderFlow(d = {}) {
         const what = e.title || e.context || '';
         li.innerHTML =
             `<span class="fl-t">${esc(e.ts)}</span>` +
-            `<span class="fl-a" style="color:${agentColor(e.agent)}">${esc(e.agent)}</span>` +
+            `<span class="fl-a" style="color:${agentColor(e.agent)}">${esc(agentLabel(e.agent))}</span>` +
             `<span class="fl-arrow">${e.write ? '▸' : '◂'}</span>` +
             `<span class="fl-op">${esc(e.op)}</span>` +
             (what ? `<span class="fl-what">${esc(what)}</span>` : '');
@@ -373,6 +373,10 @@ const FLOW_COLORS = {
     brain: '#57e08a', 'local-agent-mode-brainx-brain': '#57e08a',
 };
 const agentColor = (n) => FLOW_COLORS[String(n).toLowerCase()] || '#8e9aa6';
+/* Filled in when agentbus3d loads. Until then the raw name is shown rather
+ * than a guess at a shorter one — a wrong short label is worse than a long
+ * right one. */
+let agentLabel = (n) => String(n);
 // NOTE: `esc` already exists at the top of this file — redeclaring it here was
 // a module-level SyntaxError, which does not break one panel, it stops the
 // whole file parsing and takes the entire HUD dark. Nothing in the app would
@@ -691,7 +695,9 @@ async function initBus() {
     const canvas = $('hud-bus-canvas');
     if (!canvas) return;
     try {
-        const { createAgentBus3D } = await import('./agentbus3d.js');
+        const { createAgentBus3D, displayName } = await import('./agentbus3d.js');
+        // The ticker must call an agent whatever its planet calls it.
+        agentLabel = displayName;
         bus = createAgentBus3D(canvas);
         // Demo mode only: a console handle for checking orbits/traffic without
         // a screenshot. Never exposed in the shipped HUD.

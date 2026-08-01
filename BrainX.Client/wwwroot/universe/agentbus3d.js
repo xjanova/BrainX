@@ -484,9 +484,16 @@ function labelTexture(name, color) {
 const DISPLAY_NAMES = {
     claude: 'Claude', codex: 'Codex', cluadex: 'CluadeX',
     unity: 'Unity', unreal: 'Unreal', brain: 'BrainX',
+    // The bus identity derives from the provenance tag, so an agent running in
+    // local-agent mode announces itself as the whole slug. Twenty-nine
+    // characters is a planet label nobody can read and a ticker row with no
+    // room left for what the agent actually did.
+    'local-agent-mode-brainx-brain': 'Local agent',
 };
 
-function displayName(name) {
+/** Exported so the flow ticker names an agent exactly as its planet does.
+ *  Two surfaces deriving the same label separately is how they drift. */
+export function displayName(name) {
     const s = String(name);
     const known = DISPLAY_NAMES[s.toLowerCase()];
     if (known) return known;
