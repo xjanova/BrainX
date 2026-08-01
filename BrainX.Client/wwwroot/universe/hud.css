@@ -34,6 +34,12 @@ body.hud-active {
        420px cap: these panels are instrumentation printed on the glass, and the
        galaxy behind them is the thing worth looking at. */
     --hud-col: min(26vw, 360px);
+    /* The right stack carries the dense readouts — Activity, System, MCP +
+       Claude usage. Narrower than the left, because its content is short
+       label/value pairs and gauges rather than note titles, and every pixel it
+       gives back is galaxy. Density comes from the tighter type scale below,
+       not from hiding rows. */
+    --hud-col-right: min(20vw, 292px);
 }
 
 #hud-layer {
@@ -162,11 +168,36 @@ body.hud-active #settings-toggle {
 /* Both columns, all six panels, one width — so the left and right edges of the
    screen are each a single straight line and the two sides match. */
 #hud-layer > .hud-panel.hud-tl,
-#hud-layer > .hud-panel.hud-tr,
 #hud-layer > .hud-panel.hud-ml,
+#hud-layer > .hud-panel.hud-bl { width: var(--hud-col); max-width: var(--hud-col); }
+
+#hud-layer > .hud-panel.hud-tr,
 #hud-layer > .hud-panel.hud-mr,
-#hud-layer > .hud-panel.hud-bl,
-#hud-layer > .hud-panel.hud-br { width: var(--hud-col); max-width: var(--hud-col); }
+#hud-layer > .hud-panel.hud-br { width: var(--hud-col-right); max-width: var(--hud-col-right); }
+
+/* Denser type for the right stack only. Same information, less room: the
+   readouts there are numbers with short labels, which stay legible much
+   smaller than the note titles on the left do. Shrinking both columns to this
+   scale would have made the left one hard to read for no gain. */
+#hud-layer > .hud-panel.hud-tr,
+#hud-layer > .hud-panel.hud-mr,
+#hud-layer > .hud-panel.hud-br {
+    font-size: clamp(9px, 0.66vw, 10.5px);
+    line-height: 1.28;
+}
+#hud-layer > .hud-panel.hud-mr .hud-row,
+#hud-layer > .hud-panel.hud-br .hud-row { font-size: inherit; gap: 6px; }
+/* Gauges give up their breathing room first — five of them stacked is where
+   the height goes, and the bargraph reads fine at 5px. */
+#hud-layer > .hud-panel.hud-mr .hud-gauge { margin: 0 0 5px; }
+#hud-layer > .hud-panel.hud-mr .hud-gauge-track { height: 5px; margin-top: 3px; }
+#hud-layer > .hud-panel.hud-mr .hud-gauge-val { font-size: clamp(10.5px, 0.8vw, 12.5px); }
+#hud-layer > .hud-panel.hud-mr .hud-gauge-label { font-size: 8.5px; letter-spacing: 0.14em; }
+#hud-layer > .hud-panel.hud-mr .hud-spark { height: 13px; margin: 0; }
+/* Taller ceiling to spend the width we just saved: the point of shrinking the
+   column was to see MORE at once, so the panel must be allowed to grow down
+   or the rows just get clipped instead. */
+#hud-layer > .hud-panel.hud-mr { max-height: calc(62vh - var(--hud-gap) * 2); }
 
 .hud-tl { grid-area: tl; justify-self: start; align-self: start; }
 /* Wider than the other panels: it carries the five action buttons now, and at

@@ -769,7 +769,16 @@ internal static class CliInstall
         var loc = System.Reflection.Assembly.GetExecutingAssembly().Location;
         if (string.IsNullOrEmpty(loc)) return "brainx-mcp.exe";
         var exe = Path.ChangeExtension(loc, ".exe");
-        return File.Exists(exe) ? exe : loc;
+        var self = File.Exists(exe) ? exe : loc;
+
+        // Never register a path inside Velopack's `current`: an agent holding
+        // a file there blocks every future update of the app, and the app's
+        // endless apply-retry turns that into a restart loop. McpRuntime
+        // mirrors the shipped server to a sibling directory the updater does
+        // not touch and hands back that path — or the original one unchanged
+        // if the relocation could not be done, because a failed tidy-up must
+        // never cost the user their brain.
+        return McpRuntime.EnsureStable(self, m => Console.WriteLine("  " + m));
     }
 
     /// <summary>

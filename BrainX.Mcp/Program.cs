@@ -117,6 +117,11 @@ internal static partial class Program
             Console.OutputEncoding = new UTF8Encoding(false);
             return await EmbedCliAsync(args.Skip(1).ToArray()).ConfigureAwait(false);
         }
+        if (args.Length > 0 && args[0].Equals("sync-runtime", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.OutputEncoding = new UTF8Encoding(false);
+            return McpRuntime.SyncCli(args.Skip(1).ToArray());
+        }
         if (args.Length > 0 && args[0].Equals("garden", StringComparison.OrdinalIgnoreCase))
         {
             Console.OutputEncoding = new UTF8Encoding(false);

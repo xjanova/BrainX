@@ -143,15 +143,57 @@ public partial class MainWindow
     {
         var baseDir = AppContext.BaseDirectory;
 
+        // 0) Never hand out a path inside Velopack's `current`.
+        //
+        //    The packaged MCP is the right BUILD, but the wrong PLACE to run
+        //    it from: an agent holding a file under `current` blocks the
+        //    updater, which renames that whole directory to apply a release.
+        //    One open Claude session was enough, and because a failed apply
+        //    retries forever it showed up as the app restarting every ~19s
+        //    (2026-08-01 incident).
+        //
+        //    `brainx-mcp sync-runtime` mirrors the shipped server to
+        //    %LOCALAPPDATA%\BrainX\mcp — a sibling the updater never touches —
+        //    and prints nothing we need. If it fails for any reason we keep
+        //    the packaged path: the old behaviour is worse for updates but it
+        //    WORKS, and losing brain access is the more expensive failure.
+        static string RelocateOutOfCurrent(string packaged)
+        {
+            var norm = packaged.Replace('/', '\\');
+            if (!norm.Contains("\\BrainX\\current\\", StringComparison.OrdinalIgnoreCase))
+                return packaged;
+            try
+            {
+                var stable = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "BrainX", "mcp", "brainx-mcp.exe");
+                var psi = new ProcessStartInfo
+                {
+                    FileName = packaged,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+                psi.ArgumentList.Add("sync-runtime");
+                psi.ArgumentList.Add("--quiet");
+                using var p = Process.Start(psi);
+                p?.WaitForExit(20000);
+                if (File.Exists(stable)) return stable;
+            }
+            catch (Exception ex) { Debug.WriteLine($"RelocateOutOfCurrent: {ex.Message}"); }
+            return packaged;
+        }
+
         // 1) Packaged beside the running client — version-matched, always wins.
         //    Subfolder layout (what the CI publish step produces) first, then
         //    a flat layout as a fallback for hand-assembled packages. The
         //    installed build itself exits here (baseDir = current, so
         //    current\mcp is "beside" it).
         var packagedSub  = Path.Combine(baseDir, "mcp", "brainx-mcp.exe");
-        if (File.Exists(packagedSub))  return packagedSub;
+        if (File.Exists(packagedSub))  return RelocateOutOfCurrent(packagedSub);
         var packagedFlat = Path.Combine(baseDir, "brainx-mcp.exe");
-        if (File.Exists(packagedFlat)) return packagedFlat;
+        if (File.Exists(packagedFlat)) return RelocateOutOfCurrent(packagedFlat);
 
         // 2) DEV checkout (no packaged MCP beside us). Consider the INSTALLED
         //    app's MCP alongside the solution's dev builds and pick the
