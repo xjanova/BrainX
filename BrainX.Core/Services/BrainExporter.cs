@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using Newtonsoft.Json;
 using BrainX.Core.Models;
 
@@ -20,6 +20,13 @@ namespace BrainX.Core.Services;
 public class BrainExporter
 {
     public const string SchemaVersion = "brain-export/v1";
+
+    /// <summary>Every string in this file is written into a document a human
+    /// reads. This machine's Thai locale renders `yyyy` as the Buddhist era,
+    /// so the exported brain profile claimed it was generated in <c>2569</c>.
+    /// Formatting here is never culture-dependent.</summary>
+    private static readonly System.Globalization.CultureInfo Inv
+        = System.Globalization.CultureInfo.InvariantCulture;
 
     private const string ClaudeBeginMarker = "<!-- BRAIN:BEGIN -->";
     private const string ClaudeEndMarker = "<!-- BRAIN:END -->";
@@ -195,8 +202,8 @@ public class BrainExporter
         sb.AppendLine($"# Brain: {export.DisplayName}");
         sb.AppendLine();
         sb.AppendLine($"- **Address:** `{export.BrainAddress}`");
-        sb.AppendLine($"- **Notes:** {export.TotalNotes} · **Words:** {export.TotalWords:N0} · **Links:** {export.TotalEdges}");
-        sb.AppendLine($"- **Generated:** {export.GeneratedAt:yyyy-MM-dd HH:mm} UTC");
+        sb.AppendLine(string.Format(Inv, "- **Notes:** {0} · **Words:** {1:N0} · **Links:** {2}", export.TotalNotes, export.TotalWords, export.TotalEdges));
+        sb.AppendLine(string.Format(Inv, "- **Generated:** {0:yyyy-MM-dd HH:mm} UTC", export.GeneratedAt));
         sb.AppendLine($"- **Schema:** `{export.Schema}`");
         sb.AppendLine();
         sb.AppendLine("## Expertise");
@@ -205,7 +212,7 @@ public class BrainExporter
         sb.AppendLine("|----------|------:|------:|------:|-------:|");
         foreach (var e in export.Expertise)
         {
-            sb.AppendLine($"| {e.Category} | {e.Score:F2} | {e.NoteCount} | {e.TotalWords:N0} | {e.GrowthRate:P0} |");
+            sb.AppendLine(string.Format(Inv, "| {0} | {1:F2} | {2} | {3:N0} | {4:P0} |", e.Category, e.Score, e.NoteCount, e.TotalWords, e.GrowthRate));
         }
         sb.AppendLine();
 
@@ -240,6 +247,25 @@ public class BrainExporter
         }
 
         var existing = File.ReadAllText(path);
+
+        // A splice trusts whatever sits outside the markers to be the user's
+        // prose. Once, an unclean shutdown left CLAUDE.md as 2,397 NUL bytes
+        // followed by the managed block — and because those NULs read back as
+        // ordinary characters, every subsequent export dutifully preserved them
+        // as "the prefix" and wrote them out again. The corruption happened
+        // once; the exporter made it permanent.
+        //
+        // NUL cannot occur in markdown anyone wrote. Treat the file as lost,
+        // keep the bytes beside it so nothing is destroyed by this decision,
+        // and rebuild from the managed section alone.
+        if (existing.IndexOf('\0') >= 0)
+        {
+            var quarantine = path + ".corrupt";
+            try { File.Copy(path, quarantine, overwrite: true); } catch { /* best effort */ }
+            File.WriteAllText(path, injected + "\n");
+            return;
+        }
+
         var begin = existing.IndexOf(ClaudeBeginMarker, StringComparison.Ordinal);
         var end = existing.IndexOf(ClaudeEndMarker, StringComparison.Ordinal);
 
@@ -277,15 +303,15 @@ public class BrainExporter
         sb.AppendLine("## Brain Profile (for Claude & external tools)");
         sb.AppendLine();
         sb.AppendLine($"**Brain:** {export.DisplayName} (`{export.BrainAddress}`)");
-        sb.AppendLine($"**Stats:** {export.TotalNotes} notes · {export.TotalWords:N0} words · {export.TotalEdges} wiki-links");
-        sb.AppendLine($"**Updated:** {export.GeneratedAt:yyyy-MM-dd HH:mm} UTC");
+        sb.AppendLine(string.Format(Inv, "**Stats:** {0} notes · {1:N0} words · {2} wiki-links", export.TotalNotes, export.TotalWords, export.TotalEdges));
+        sb.AppendLine(string.Format(Inv, "**Updated:** {0:yyyy-MM-dd HH:mm} UTC", export.GeneratedAt));
         sb.AppendLine();
         sb.AppendLine("**Top expertise** (higher score = deeper knowledge):");
         foreach (var e in export.Expertise.Take(5))
         {
             var bar = new string('█', (int)Math.Round(e.Score * 20));
             var pad = new string('░', 20 - bar.Length);
-            sb.AppendLine($"- `{e.Category,-25}` {bar}{pad} {e.Score:P0} · {e.NoteCount} notes");
+            sb.AppendLine(string.Format(Inv, "- `{0,-25}` {1}{2} {3:P0} · {4} notes", e.Category, bar, pad, e.Score, e.NoteCount));
         }
         sb.AppendLine();
         sb.AppendLine("**Hot tags:** " + (export.TopTags.Count == 0 ? "_none yet_"
