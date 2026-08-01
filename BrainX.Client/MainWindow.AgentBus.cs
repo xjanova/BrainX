@@ -79,6 +79,25 @@ public partial class MainWindow
     private static readonly string[] BusWellKnownAgents =
         { "claude", "codex", "cluadex", "local-agent-mode-brainx-brain" };
 
+    /// <summary>
+    /// Agents that are a VARIANT of another agent rather than a peer of it:
+    /// same product, different address on the bus. Claude Code in local-agent
+    /// mode has its own inbox — a message sent to "claude" will never reach it —
+    /// so folding the two into one node would make the map lie about where mail
+    /// goes. Giving it a plain second node lied the other way: two coral bodies
+    /// side by side read as roster pollution, which is what the allowlist above
+    /// exists to prevent.
+    ///
+    /// So it is drawn as a MOON of its host: its own body, its own traffic, in
+    /// orbit around the thing it is a variant of. That says both true things at
+    /// once, and it is why the colour stays the same rather than being changed
+    /// to tell them apart.
+    /// </summary>
+    private static readonly Dictionary<string, string> BusMoonHosts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["local-agent-mode-brainx-brain"] = "claude",
+    };
+
     private System.Windows.Threading.DispatcherTimer? _busTimer;
     private bool _busFirstScan = true;
     private readonly HashSet<string> _busSeenInbox = new(StringComparer.OrdinalIgnoreCase);
@@ -129,6 +148,9 @@ public partial class MainWindow
         /// <summary>An engine the brain calls OUT to, rather than a client that
         /// called in. Changes what every field below is read from.</summary>
         public bool IsBridge;
+        /// <summary>Host agent this one orbits, or null if it stands on its own
+        /// ring around the brain. See <see cref="BusMoonHosts"/>.</summary>
+        public string? MoonOf;
 
         /// <summary>Agent: has a presence file. Bridge: its tools were
         /// discovered at least once, so it HAS come up on this machine.</summary>
@@ -219,7 +241,15 @@ public partial class MainWindow
     {
         var byName = new Dictionary<string, BusAgentState>(StringComparer.OrdinalIgnoreCase);
         foreach (var known in BusWellKnownAgents)
-            byName[known] = new BusAgentState { Name = known };
+            byName[known] = new BusAgentState
+            {
+                Name = known,
+                // A moon whose host is not on the allowlist has nothing to
+                // orbit, so it falls back to a ring of its own.
+                MoonOf = BusMoonHosts.TryGetValue(known, out var host)
+                         && BusWellKnownAgents.Contains(host, StringComparer.OrdinalIgnoreCase)
+                    ? host : null,
+            };
 
         var presenceDir = IOPath.Combine(BusRootDir, "presence");
         if (Directory.Exists(presenceDir))
@@ -496,19 +526,48 @@ public partial class MainWindow
         const double labelBlock = 46;
         double rx = Math.Max(70, Math.Min(w * 0.34, 210));
         double ry = Math.Max(28, Math.Min(h * 0.32, h / 2 - labelBlock));
-        for (int i = 0; i < agents.Count; i++)
+
+        // Only primaries get a slot on the ellipse. A moon rides its host, so
+        // counting it here would spread everyone else out to make room for a
+        // ring that is never drawn.
+        var primaries = agents.Where(a => a.MoonOf == null).ToList();
+        for (int i = 0; i < primaries.Count; i++)
         {
-            var angle = Math.PI + (2 * Math.PI * i / agents.Count);
-            _busNodePos[agents[i].Name] = new Point(
+            var angle = Math.PI + (2 * Math.PI * i / primaries.Count);
+            _busNodePos[primaries[i].Name] = new Point(
                 center.X + rx * Math.Cos(angle),
                 center.Y + ry * Math.Sin(angle));
+        }
+
+        // Moons go up and to the LEFT of their host. Not outward from the
+        // brain, which lands on the host's own name and caption; not to the
+        // right, where the rim status dot already sits. Up-left is the one
+        // corner of a node that is always empty.
+        foreach (var a in agents.Where(a => a.MoonOf != null))
+        {
+            if (!_busNodePos.TryGetValue(a.MoonOf!, out var host)) continue;
+            _busNodePos[a.Name] = new Point(host.X - 17, host.Y - 15);
         }
 
         // Spokes below nodes.
         foreach (var a in agents)
         {
-            var p = _busNodePos[a.Name];
+            if (!_busNodePos.TryGetValue(a.Name, out var p)) continue;
             var color = BusAgentColor(a.Name);
+
+            // A moon does not spoke to the brain — it hangs off its host, and
+            // drawing a second line to the centre would claim it is a peer.
+            if (a.MoonOf != null)
+            {
+                if (!_busNodePos.TryGetValue(a.MoonOf, out var host)) continue;
+                canvas.Children.Add(new Line
+                {
+                    X1 = host.X, Y1 = host.Y, X2 = p.X, Y2 = p.Y,
+                    Stroke = new SolidColorBrush(color) { Opacity = a.Online ? 0.5 : 0.22 },
+                    StrokeThickness = 1.0
+                });
+                continue;
+            }
 
             var line = new Line
             {
@@ -552,7 +611,10 @@ public partial class MainWindow
         }
 
         DrawBusBrainNode(canvas, center, agents.Any(a => a.Online));
-        foreach (var a in agents) DrawBusAgentNode(canvas, a, _busNodePos[a.Name]);
+        // Moons last, so a moon overlapping its host sits on top of it rather
+        // than being half-swallowed by it.
+        foreach (var a in agents.OrderBy(a => a.MoonOf != null))
+            if (_busNodePos.TryGetValue(a.Name, out var p)) DrawBusAgentNode(canvas, a, p);
     }
 
     private void DrawBusBrainNode(Canvas canvas, Point center, bool anyOnline)
@@ -607,38 +669,43 @@ public partial class MainWindow
     {
         var color = BusAgentColor(a.Name);
         var dim = BusNodeDim(a);
+        // A moon is the same node, smaller. Same colour too: it IS the same
+        // product, and the size and the orbit are what say "variant of that
+        // one" without a second palette entry to keep in sync.
+        var moon = a.MoonOf != null;
+        double ringD = moon ? 17 : 26, innerD = moon ? 7 : 10, dotD = moon ? 6 : 7;
 
         var ring = new Ellipse
         {
-            Width = 26, Height = 26,
+            Width = ringD, Height = ringD,
             Fill = new SolidColorBrush(Color.FromRgb(0x14, 0x1B, 0x2A)),
             Stroke = new SolidColorBrush(color) { Opacity = dim },
-            StrokeThickness = a.Online ? 2.0 : 1.4,
+            StrokeThickness = a.Online ? (moon ? 1.6 : 2.0) : 1.4,
             // Filled, so the whole disc is hit-testable and the tooltip is
             // findable by pointing at the node rather than at its 1.4px rim.
             ToolTip = BusNodeTooltip(a)
         };
-        Canvas.SetLeft(ring, p.X - 13); Canvas.SetTop(ring, p.Y - 13);
+        Canvas.SetLeft(ring, p.X - ringD / 2); Canvas.SetTop(ring, p.Y - ringD / 2);
         canvas.Children.Add(ring);
 
         var inner = new Ellipse
         {
-            Width = 10, Height = 10,
+            Width = innerD, Height = innerD,
             Fill = new SolidColorBrush(color) { Opacity = dim }
         };
-        Canvas.SetLeft(inner, p.X - 5); Canvas.SetTop(inner, p.Y - 5);
+        Canvas.SetLeft(inner, p.X - innerD / 2); Canvas.SetTop(inner, p.Y - innerD / 2);
         canvas.Children.Add(inner);
 
         // Status dot pinned to the ring's rim — the one pixel that answers
         // "can this thing connect right now, and if not, why not".
         var dot = new Ellipse
         {
-            Width = 7, Height = 7,
+            Width = dotD, Height = dotD,
             Fill = new SolidColorBrush(BusStatusColor(a)),
             Stroke = new SolidColorBrush(Color.FromRgb(0x14, 0x1B, 0x2A)),
             StrokeThickness = 1.2
         };
-        Canvas.SetLeft(dot, p.X + 6); Canvas.SetTop(dot, p.Y - 13);
+        Canvas.SetLeft(dot, p.X + ringD / 2 - 7); Canvas.SetTop(dot, p.Y - ringD / 2);
         canvas.Children.Add(dot);
 
         // Pending-mail badge.
@@ -664,13 +731,22 @@ public partial class MainWindow
         var name = new TextBlock
         {
             Text = BusDisplayName(a.Name),
-            FontSize = 10.5, FontWeight = FontWeights.SemiBold,
+            FontSize = moon ? 9 : 10.5, FontWeight = FontWeights.SemiBold,
             Foreground = new SolidColorBrush(color) { Opacity = Math.Max(dim, 0.55) }
         };
         name.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
         Canvas.SetLeft(name, p.X - name.DesiredSize.Width / 2);
-        Canvas.SetTop(name, p.Y + 15);
+        // A moon's name goes ABOVE it: the space below belongs to its host's
+        // own name and caption, and two labels in one place is worse than none.
+        // Clamped, because the top node of the ellipse sits close to the edge.
+        Canvas.SetTop(name, moon
+            ? Math.Max(1, p.Y - ringD / 2 - name.DesiredSize.Height - 1)
+            : p.Y + 15);
         canvas.Children.Add(name);
+
+        // No status caption for a moon — there is nowhere to put it that is not
+        // already spoken for, and the hover tooltip says everything it would.
+        if (moon) return;
 
         var caption = new TextBlock
         {
@@ -777,7 +853,9 @@ public partial class MainWindow
             return sb.ToString();
         }
 
-        sb.Append(" — agent: ต่อเข้ามาหาสมอง\n");
+        sb.Append(a.MoonOf != null
+            ? $" — agent: ต่อเข้ามาหาสมอง · คนละ inbox กับ {BusDisplayName(a.MoonOf)}\n"
+            : " — agent: ต่อเข้ามาหาสมอง\n");
         sb.Append(a.Online ? "online" : a.EverSeen ? "offline" : "ยังไม่เคยเชื่อมต่อ");
         if (!string.IsNullOrEmpty(a.ClientInfo)) sb.Append($"\nclient: {a.ClientInfo}");
         if (a.Calls > 0) sb.Append($"\n{a.Calls} calls");

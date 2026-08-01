@@ -901,6 +901,9 @@ function runDemo() {
     // that works and simply is not dialled at this instant.
     step(2100, () => renderAgents({ agents: [
         { name: 'claude',  kind: 'agent',  state: 'live',  online: true,  everSeen: true,  color: '#e8825a', detail: 'brain_search' },
+        // Same product, different bus address — drawn as a moon of its host
+        // rather than a second coral planet. See buildMoon in agentbus3d.js.
+        { name: 'local-agent-mode-brainx-brain', kind: 'agent', state: 'live', online: true, everSeen: true, moonOf: 'claude', color: '#e8825a', detail: 'brain_create_note' },
         { name: 'codex',   kind: 'agent',  state: 'live',  online: true,  everSeen: true,  color: '#19a385', detail: 'agent_peers' },
         { name: 'cluadex', kind: 'agent',  state: 'idle',  online: false, everSeen: true,  color: '#8b7cf6', detail: '4 min ago' },
         { name: 'unity',   kind: 'bridge', state: 'ready', online: false, everSeen: true,  color: '#c9cfd6', detail: 'ready · 47 tools' },

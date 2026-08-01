@@ -114,6 +114,11 @@ export function createAgentBus3D(canvas) {
      * are fully solid by NEAR — a fade rather than a switch, so zooming feels
      * like approaching something rather than tripping a sensor. */
     const LABEL_W = 1.35, LABEL_H = 0.34;
+    /** Moon orbit radius, in the same units as a planet's 0.2 body. Wide
+     *  enough to read as an orbit at the default framing, tight enough that the
+     *  pair never looks like two planets sharing a ring. */
+    const MOON_R = 0.44;
+    const ORIGIN = new THREE.Vector3(0, 0, 0);
 
     let raf = 0, running = false, lastT = 0;
 
@@ -172,21 +177,34 @@ export function createAgentBus3D(canvas) {
     function setAgents(list) {
         let rosterChanged = false;
         const seen = new Set();
-        list.forEach((a, i) => {
+        // Hosts before moons: a moon is parented to its host's pivot, so the
+        // host has to exist first, and nothing guarantees the roster arrives in
+        // that order.
+        const ordered = [...list.filter(a => !a.moonOf), ...list.filter(a => a.moonOf)];
+        ordered.forEach((a, i) => {
             const name = a.name;
             seen.add(name);
             let p = planets.get(name);
             if (!p) {
-                p = buildPlanet(name, i, list.length, a.kind);
+                const host = a.moonOf ? planets.get(a.moonOf) : null;
+                // A moon whose host is not on the roster has nothing to orbit.
+                // Give it a ring of its own rather than dropping it — a body
+                // that exists and is not drawn is the bug this panel keeps
+                // having.
+                p = host ? buildMoon(name, a.moonOf, host, i)
+                         : buildPlanet(name, i, list.length, a.kind);
                 planets.set(name, p);
                 rosterChanged = true;
             }
             applyPresence(p, a);
         });
-        // Drop agents that vanished from the roster.
+        // Drop agents that vanished from the roster — and any moon left
+        // orbiting one, whose geometry the host's disposal has just freed.
         for (const [name, p] of planets) {
-            if (seen.has(name)) continue;
-            scene.remove(p.pivot, p.ring);
+            const hostGone = p.hostName && !seen.has(p.hostName);
+            if (seen.has(name) && !hostGone) continue;
+            p.pivot.parent?.remove(p.pivot);
+            p.ring.parent?.remove(p.ring);
             disposeDeep(p.pivot); disposeDeep(p.ring);
             planets.delete(name);
             rosterChanged = true;
@@ -297,10 +315,65 @@ export function createAgentBus3D(canvas) {
 
         return {
             pivot, mesh, ring, label, orbitR: 1, online: false, everSeen: false, isBridge,
+            // World position, refreshed every tick. Motes read THIS, not
+            // pivot.position, because a moon's pivot position is local to the
+            // planet it hangs off and would send its traffic to the wrong place.
+            pos: new THREE.Vector3(),
             // Inner orbits move faster, like a real system — and it keeps two
             // planets from sitting locked next to each other forever.
             speed: 0.34 - index * 0.045,
             phase: (index / Math.max(1, total)) * Math.PI * 2,
+        };
+    }
+
+    /**
+     * A body that orbits another AGENT instead of the brain.
+     *
+     * Claude Code in local-agent mode is the same product as Claude but a
+     * different address on the bus — a message sent to "claude" never reaches
+     * it. Folding them into one planet would hide that; a second coral planet
+     * made the roster look like it had started growing on its own again, which
+     * is the thing the allowlist exists to stop. A moon says both true things:
+     * its own body and its own traffic, plainly belonging to what it circles.
+     *
+     * Everything hangs off the host's pivot, so it follows the host around the
+     * star for free and owns no position maths beyond its local orbit.
+     */
+    function buildMoon(name, hostName, host, index) {
+        const color = colorOf(name);
+        const pivot = new THREE.Object3D();
+        const mesh = new THREE.Mesh(
+            new THREE.SphereGeometry(0.085, 14, 10),
+            new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.9, roughness: 0.55 }));
+        pivot.add(mesh);
+        host.pivot.add(pivot);
+
+        // The orbit ring doubles as the tether — the one line that says these
+        // two are one system rather than two dots that happen to be near each
+        // other. Parented to the host too, so it travels with it.
+        const ring = new THREE.Line(
+            ringGeometry(MOON_R),
+            new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.2 }));
+        ring.rotation.x = Math.PI / 2;
+        host.pivot.add(ring);
+
+        const label = new THREE.Sprite(new THREE.SpriteMaterial({
+            map: labelTexture(name, color),
+            transparent: true, depthWrite: false, depthTest: false, opacity: 0,
+        }));
+        label.scale.set(LABEL_W * 0.78, LABEL_H * 0.78, 1);
+        label.position.y = 0.26;
+        label.visible = false;
+        pivot.add(label);
+
+        return {
+            pivot, mesh, ring, label, orbitR: MOON_R,
+            online: false, everSeen: false, isBridge: false, isMoon: true,
+            host, hostName, pos: new THREE.Vector3(),
+            // Faster than any planet: a moon drifting at planet speed reads as
+            // a second planet that happens to be parked nearby.
+            speed: 1.35,
+            phase: index * 1.7,
         };
     }
 
@@ -366,9 +439,13 @@ export function createAgentBus3D(canvas) {
     }
 
     function layoutOrbits() {
-        const n = planets.size || 1;
+        // Moons are not laid out here: their orbit is a fixed radius around a
+        // host, not a slot in the system, and rewriting their ring geometry to
+        // a star-sized radius would fling them across the panel.
+        const primaries = [...planets.values()].filter(p => !p.isMoon);
+        const n = primaries.length || 1;
         let i = 0;
-        for (const p of planets.values()) {
+        for (const p of primaries) {
             p.orbitR = 1.5 + i * (2.6 / Math.max(1, n));
             p.ring.geometry.dispose();
             p.ring.geometry = ringGeometry(p.orbitR);
@@ -390,7 +467,7 @@ export function createAgentBus3D(canvas) {
         // planet — they all share the same distance from the star.
         const labelAlpha = clamp((LABEL_FAR - view.dist) / (LABEL_FAR - LABEL_NEAR), 0, 1);
 
-        for (const p of planets.values()) {
+        const advance = (p) => {
             p.phase += p.speed * dt * (p.online ? 1 : 0.35);
             p.pivot.position.set(Math.cos(p.phase) * p.orbitR, 0, Math.sin(p.phase) * p.orbitR);
             // Bridges turn on their own axis — an octahedron that never rotates
@@ -405,6 +482,20 @@ export function createAgentBus3D(canvas) {
                 p.label.visible = a > 0.01;
                 p.label.material.opacity = a;
             }
+        };
+
+        // Hosts first, then moons — a moon's world position is its host's plus
+        // its own local orbit, and taking the host's from THIS frame rather
+        // than the last one keeps its traffic leaving from where it is drawn.
+        for (const p of planets.values()) {
+            if (p.isMoon) continue;
+            advance(p);
+            p.pos.copy(p.pivot.position);
+        }
+        for (const p of planets.values()) {
+            if (!p.isMoon) continue;
+            advance(p);
+            p.pos.copy(p.host.pos).add(p.pivot.position);
         }
 
         for (let i = motes.length - 1; i >= 0; i--) {
@@ -416,8 +507,11 @@ export function createAgentBus3D(canvas) {
                 motes.splice(i, 1);
                 continue;
             }
-            const from = m.inbound ? m.planet.pivot.position : new THREE.Vector3(0, 0, 0);
-            const to   = m.inbound ? new THREE.Vector3(0, 0, 0) : m.planet.pivot.position;
+            // p.pos, not p.pivot.position: a moon's pivot position is local to
+            // the planet it hangs off, so using it would fire the mote from a
+            // point half a system away from the body it belongs to.
+            const from = m.inbound ? m.planet.pos : ORIGIN;
+            const to   = m.inbound ? ORIGIN : m.planet.pos;
             // Arc the path slightly above the orbital plane so an inbound and
             // an outbound mote on the same spoke never overlap.
             const k = m.t;
@@ -448,7 +542,8 @@ export function createAgentBus3D(canvas) {
             trails: motes.filter(m => m.trail).length,
             planets: [...planets.entries()].map(([name, p]) => ({
                 name, online: p.online, r: +p.orbitR.toFixed(2),
-                x: +p.pivot.position.x.toFixed(3), z: +p.pivot.position.z.toFixed(3),
+                x: +p.pos.x.toFixed(3), z: +p.pos.z.toFixed(3),
+                moonOf: p.hostName ?? null,
                 // Which body was actually built, and how lit it is: the only
                 // way to check the bridge branch from a browser without being
                 // able to look at the pixels.

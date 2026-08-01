@@ -372,6 +372,10 @@ public partial class MainWindow
                 // out "ready vs never" from its own copy of the rules is a HUD
                 // that will one day disagree with the card about the same node.
                 state = BusNodeState(a),
+                // Same product, different bus address — it orbits its host
+                // instead of the brain. Two coral planets side by side read as
+                // roster pollution; a moon reads as what it is.
+                moonOf = a.MoonOf,
             }).ToList(),
             calls,
         });
