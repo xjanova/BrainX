@@ -4235,6 +4235,9 @@
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
+                                    <!-- Mode comparison, above the chart because it is the
+                                         page's actual claim and the chart is its evidence. -->
+                                    <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
                                 <!-- Header. The subtitle names the SOURCE of the numbers,
@@ -4363,8 +4366,38 @@
                                         </Grid>
                                     </Border>
                                 </Grid>
+                                <!-- Mode comparison. The one element on this page that could
+                                     ever support the claim the page exists to make — that the
+                                     brain is worth its tokens — expressed as cost per message
+                                     in one mode against another. Its predecessor was faked:
+                                     a "without brain" line defined as actual + saved.
+                                     So this one is honest in BOTH directions. When it cannot
+                                     be computed it prints why, with the counts, because a
+                                     panel that is silently empty gets read as broken — which
+                                     is precisely how it was reported. -->
+                                <Border Grid.Row="2" Style="{StaticResource CardPanel}" Margin="0,0,0,16" Padding="0">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="3"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <!-- Amber = derived, matching the quota card. Goes grey
+                                             when there is nothing to derive from. -->
+                                        <Rectangle x:Name="TokensCompareRule" Grid.Column="0" Fill="#FFC040"/>
+                                        <StackPanel Grid.Column="1" Margin="16,11,16,11">
+                                            <TextBlock x:Name="TokensCompareTitle" Text="mode comparison"
+                                                       FontSize="10.5" Foreground="{StaticResource TextMutedBrush}"/>
+                                            <TextBlock x:Name="TokensCompareText" Text="—" FontSize="15" FontWeight="SemiBold"
+                                                       Foreground="{StaticResource TextSecondaryBrush}"
+                                                       FontFamily="{StaticResource MonoFont}" Margin="0,3,0,3"
+                                                       TextWrapping="Wrap"/>
+                                            <TextBlock x:Name="TokensCompareSubText" Text="" FontSize="10"
+                                                       Foreground="{StaticResource TextMutedBrush}" TextWrapping="Wrap"/>
+                                        </StackPanel>
+                                    </Grid>
+                                </Border>
                                 <!-- Comparison chart -->
-                                <Border Grid.Row="2" Style="{StaticResource CardPanel}">
+                                <Border Grid.Row="3" Style="{StaticResource CardPanel}">
                                     <Border.Resources>
                                         <!-- Pill-style toggle used by range + view-mode buttons. -->
                                         <Style x:Key="TokensChip" TargetType="ToggleButton">

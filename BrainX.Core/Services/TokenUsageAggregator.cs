@@ -158,6 +158,14 @@ public class TokenUsageAggregator
         /// one mode, and must render as "no comparison yet".</summary>
         public ModeComparison? Comparison { get; set; }
 
+        /// <summary>
+        /// Why <see cref="Comparison"/> is null, in words a page can print,
+        /// with the counts behind them. A panel that is empty for a reason has
+        /// to SAY the reason: silence gets read as a broken feature, which is
+        /// exactly how this one was reported.
+        /// </summary>
+        public string? ComparisonBlockedReason { get; set; }
+
         /// <summary>How the token figures were derived, for display.</summary>
         public string EstimatorProvenance { get; set; } = "";
     }
@@ -275,7 +283,7 @@ public class TokenUsageAggregator
         series.Buckets = byHour.Values.OrderBy(b => b.Hour).ToList();
         series.Tools = tools.Values.OrderByDescending(t => t.Calls).ToList();
         series.BrainTokensFullyMeasured = fullyMeasured;
-        series.Comparison = CompareModes(series.Buckets);
+        (series.Comparison, series.ComparisonBlockedReason) = CompareModes(series.Buckets);
         return series;
     }
 
@@ -286,7 +294,7 @@ public class TokenUsageAggregator
     /// whole life so far, and inventing a comparison from that would be the
     /// same mistake the projection line made.
     /// </summary>
-    private static ModeComparison? CompareModes(List<HourBucket> buckets)
+    private static (ModeComparison? Result, string? Reason) CompareModes(List<HourBucket> buckets)
     {
         const int MinBuckets = 5;
         var groups = buckets
@@ -299,16 +307,28 @@ public class TokenUsageAggregator
                 Messages = g.Sum(b => b.Messages),
                 Weighted = g.Sum(b => b.ActualWeighted),
             })
-            .Where(g => g.Buckets >= MinBuckets && g.Messages > 0)
+            .Where(g => g.Messages > 0)
             .OrderByDescending(g => g.Messages)
             .ToList();
 
-        if (groups.Count < 2) return null;
-        var a = groups[0];
-        var b = groups[1];
-        return new ModeComparison(
+        if (groups.Count == 0)
+            return (null, "no brain mode recorded against any bucket in range — the grouping key is the "
+                        + "'mode' field on each row of ~/.claude/tool-log.ndjson, written by the hooks.");
+
+        var eligible = groups.Where(g => g.Buckets >= MinBuckets).ToList();
+        var seen = string.Join(" · ", groups.Select(g => $"{g.Mode} {g.Buckets} buckets, {g.Messages:N0} msgs"));
+
+        if (eligible.Count < 2)
+            return (null, groups.Count < 2
+                ? $"only one mode has ever run here: {seen}. Switch the brain to another mode and work "
+                + $"normally for ≥{MinBuckets} buckets, and this fills itself in — nothing is inferred until then."
+                : $"a second mode exists but is too thin to compare: {seen}. Needs ≥{MinBuckets} buckets each.");
+
+        var a = eligible[0];
+        var b = eligible[1];
+        return (new ModeComparison(
             a.Mode, a.Weighted / a.Messages, a.Buckets, a.Messages,
-            b.Mode, b.Weighted / b.Messages, b.Buckets, b.Messages);
+            b.Mode, b.Weighted / b.Messages, b.Buckets, b.Messages), null);
     }
 
     /// <summary>Tokens for one tool-log row. Uses the real non-ASCII count when

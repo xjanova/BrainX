@@ -10938,6 +10938,46 @@ public partial class MainWindow : Window
         _           => 720,   //  >30d → 12-h buckets
     };
 
+    /// <summary>
+    /// Cost per assistant message in one brain mode against another.
+    ///
+    /// This is the only element on the page that could ever support the claim
+    /// the page exists to make. Its predecessor was an arithmetic identity
+    /// dressed as evidence, so this one is built to be honest in BOTH
+    /// directions: when the data cannot support a comparison it prints exactly
+    /// why, with the counts behind it. The aggregator has computed this for
+    /// some time and NOTHING rendered it — a silently empty page reads as a
+    /// broken feature, which is how it was reported.
+    /// </summary>
+    private void RenderModeComparison(TokenUsageAggregator.Series series)
+    {
+        if (TokensCompareText == null || TokensCompareTitle == null ||
+            TokensCompareSubText == null || TokensCompareRule == null) return;
+
+        var c = series.Comparison;
+        if (c == null)
+        {
+            TokensCompareTitle.Text = "mode comparison · ยังเทียบไม่ได้";
+            TokensCompareText.Text = "ไม่มีโหมดที่สองให้เทียบ";
+            TokensCompareSubText.Text = series.ComparisonBlockedReason ?? "";
+            // Grey, not amber: there is nothing derived here to flag.
+            TokensCompareRule.Fill = new SolidColorBrush(Color.FromRgb(0x6B, 0x74, 0x80));
+            return;
+        }
+
+        var diff = c.DifferencePercent;
+        var word = diff >= 0 ? "ถูกกว่า" : "แพงกว่า";
+        TokensCompareTitle.Text = "mode comparison · observational, not a controlled test";
+        TokensCompareText.Text =
+            $"{c.ModeA} {c.WeightedPerMessageA:N0}/msg · {word} {c.ModeB} {Math.Abs(diff):F1}%";
+        TokensCompareSubText.Text =
+            $"{c.ModeA}: {c.BucketsA} buckets · {c.MessagesA:N0} msgs   |   " +
+            $"{c.ModeB}: {c.BucketsB} buckets · {c.MessagesB:N0} msgs   —   " +
+            "modes were never assigned randomly, so this is a correlation over whatever work " +
+            "happened to be done in each, not a measured effect of the brain.";
+        TokensCompareRule.Fill = new SolidColorBrush(Color.FromRgb(0xFF, 0xC0, 0x40));
+    }
+
     private void DrawTokenEconomyCore()
     {
         try
@@ -10978,6 +11018,8 @@ public partial class MainWindow : Window
             // It now covers exactly the chart's range rather than the tally's
             // nearest fixed window, so the card and the chart beside it can no
             // longer disagree about which hours they are describing.
+            RenderModeComparison(series);
+
             var actualRaw = series.TotalActualRaw;
             var actualWeighted = series.TotalActualWeighted;
             if (actualRaw == 0)
