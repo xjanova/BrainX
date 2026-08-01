@@ -5846,12 +5846,22 @@ internal static partial class Program
             Directory.CreateDirectory(dir);
             var logPath = Path.Combine(dir, "access-log.ndjson");
 
+            // `client` was the literal string "mcp" on every row ever written.
+            // Every read and write in this log therefore came from "mcp" — which
+            // is the transport, not an actor. The bus knew the real name the
+            // whole time (BusIdentity() is what names the presence file:
+            // claude, codex, cluadex...), and nothing joined the two, so the
+            // brain could show *that* traffic happened but never *who*.
+            //
+            // `client` is kept as-is so older readers of this file do not break;
+            // `agent` is the field that actually identifies anyone.
             var entry = new JObject
             {
                 ["ts"] = DateTime.UtcNow.ToString("O"),
                 ["node_id"] = nodeId,
                 ["op"] = op,
                 ["client"] = "mcp",
+                ["agent"] = BusIdentity(),
                 ["context"] = context ?? ""
             }.ToString(Formatting.None);
 
