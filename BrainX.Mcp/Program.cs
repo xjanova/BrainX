@@ -222,7 +222,7 @@ internal static partial class Program
         // extra per-client config, and every call lands in the auto-journal.
         // Started here, before the desktop courtesies below, so discovery runs
         // while the client is still handshaking. Headless ⇒ disabled outright.
-        try { McpBridgeHub.Initialize(_vaultPath, headless, Log); }
+        try { McpBridgeHub.Initialize(_vaultPath, headless, Log, BusIdentity); }
         catch (Exception ex) { Log($"bridge init failed (non-fatal): {ex.Message}"); }
 
         if (!headless)

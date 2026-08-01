@@ -30,6 +30,18 @@ public static class McpBridgeHub
     private const int MaxToolNameLength = 60;
     private const int MaxResultChars = 256 * 1024;
 
+    /// <summary>Republish interval for the on-disk status file — half the
+    /// reader's TTL, so a live session survives one missed write.</summary>
+    private const int StatusHeartbeatSeconds = 30;
+
+    /// <summary>A status file older than this belonged to a session that is
+    /// gone. Keep in sync with BusBridgeTtlSeconds in MainWindow.AgentBus.cs.</summary>
+    private const int StatusTtlSeconds = 90;
+
+    /// <summary>Well past the TTL — a file this stale is from a session that
+    /// died without cleaning up, so the directory can't grow forever.</summary>
+    private const int StatusReapMinutes = 10;
+
     private static readonly object Gate = new();
     private static readonly Dictionary<string, McpBridgeConnection> Live = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, BridgeState> States = new(StringComparer.OrdinalIgnoreCase);
@@ -38,6 +50,15 @@ public static class McpBridgeHub
     private static string _vaultPath = "";
     private static bool _enabled;
     private static Action<string> _log = _ => { };
+    private static System.Threading.Timer? _statusTimer;
+
+    /// <summary>
+    /// This brain session's bus name ("claude", "codex", …), so a status file
+    /// says WHICH agent is holding the engine open. Resolved lazily: the MCP
+    /// learns its client's identity in the initialize handshake, which can land
+    /// after <see cref="Initialize"/>.
+    /// </summary>
+    private static Func<string> _identity = () => "agent";
 
     private sealed class BridgeState
     {
@@ -48,6 +69,12 @@ public static class McpBridgeHub
         public string? LastError;
         public Task? InFlight;
         public List<string> Dropped = new();
+
+        /// <summary>Calls forwarded to this bridge by THIS session — the
+        /// dashboard diffs it between polls to animate real engine traffic.</summary>
+        public long Calls;
+        public string? LastTool;
+        public DateTime? LastCallUtc;
     }
 
     /// <summary>
@@ -62,11 +89,13 @@ public static class McpBridgeHub
     /// default-deny would already refuse the tools — this makes it structural
     /// rather than a policy line someone could relax by accident.
     /// </summary>
-    public static void Initialize(string vaultPath, bool headless, Action<string> log)
+    /// <param name="identity">This session's bus name, read lazily — see <see cref="_identity"/>.</param>
+    public static void Initialize(string vaultPath, bool headless, Action<string> log, Func<string>? identity = null)
     {
         _vaultPath = vaultPath;
         _log = log;
         _enabled = !headless;
+        if (identity != null) _identity = identity;
         if (!_enabled) return;
 
         _defs = McpBridgeConfig.Load(vaultPath, log);
@@ -76,6 +105,15 @@ public static class McpBridgeHub
         if (on.Count == 0) return;
 
         log($"bridges: {string.Join(", ", on.Select(d => d.Id))}");
+
+        // Publish before discovery, not after: an enabled bridge whose editor is
+        // closed still has to appear on the dashboard — as "enabled, not
+        // connected", which is a state, not a silence.
+        PublishStatus();
+        _statusTimer = new System.Threading.Timer(
+            _ => { try { PublishStatus(); } catch { } }, null,
+            TimeSpan.FromSeconds(StatusHeartbeatSeconds), TimeSpan.FromSeconds(StatusHeartbeatSeconds));
+
         foreach (var def in on) BeginDiscover(def);
     }
 
@@ -181,15 +219,21 @@ public static class McpBridgeHub
             throw new InvalidOperationException($"tool '{remoteTool}' is not in the '{def.Id}' bridge allowlist");
 
         var conn = Connect(def);
+        var state = StateFor(def.Id);
+        state.Calls++;
+        state.LastTool = remoteTool;
+        state.LastCallUtc = DateTime.UtcNow;
+
         try
         {
             var result = conn.CallTool(remoteTool, args);
-            StateFor(def.Id).LastError = null;
+            state.LastError = null;
+            PublishStatus(def);
             return Cap(result, def.Id);
         }
         catch (Exception ex)
         {
-            StateFor(def.Id).LastError = ex.Message;
+            state.LastError = ex.Message;
 
             // Drop the connection ONLY if the transport is compromised. A tool
             // that answers "no GameObject named X" is a perfectly healthy
@@ -197,6 +241,7 @@ public static class McpBridgeHub
             // when an agent drives an editor. Respawning on each one would cost
             // an engine-server startup (and an editor reconnect) per typo.
             if (conn.Poisoned || !conn.IsAlive) DropConnection(def.Id);
+            PublishStatus(def);
 
             throw new InvalidOperationException($"{def.Id} bridge: {ex.Message}");
         }
@@ -294,6 +339,7 @@ public static class McpBridgeHub
                     state.LastError = null;
                 }
                 SaveCache();
+                PublishStatus(def);
                 _log($"bridge '{def.Id}': {tools.Count} tool(s)");
             }
             catch (Exception ex)
@@ -305,6 +351,7 @@ public static class McpBridgeHub
                 }
                 DropConnection(def.Id);
                 SaveCache();
+                PublishStatus(def);
                 _log($"bridge '{def.Id}' unavailable: {ex.Message}");
             }
         });
@@ -322,11 +369,27 @@ public static class McpBridgeHub
     /// <summary>Kill every child. Called on shutdown — an orphaned engine server holds an editor socket.</summary>
     public static void Shutdown()
     {
+        try { _statusTimer?.Dispose(); } catch { }
+        _statusTimer = null;
+
         lock (Gate)
         {
             foreach (var conn in Live.Values) { try { conn.Dispose(); } catch { } }
             Live.Clear();
         }
+
+        // Remove this session's status files rather than leaving the dashboard
+        // to time them out: a brain that just exited is not "connected for
+        // another 90 seconds".
+        //
+        // This only fires on a clean stdin EOF. brainx-mcp runs as a launcher +
+        // worker pair so the binary can be hot-swapped mid-session (Launcher.cs),
+        // and a worker that is replaced — or killed alongside its launcher —
+        // never reaches here. Measured, not assumed: a probe whose launcher was
+        // closed left its worker's file behind. That is what ReapDeadSessions
+        // and the reader's TTL exist for; this is the fast path, not the
+        // guarantee.
+        foreach (var def in _defs) { try { File.Delete(StatusPathFor(def.Id)); } catch { } }
     }
 
     // ───────────── status ─────────────
@@ -373,6 +436,110 @@ public static class McpBridgeHub
         };
     }
 
+    // ───────────── live status on disk ─────────────
+    //
+    // bridge_status answers all of this, but only an AGENT can call it. The
+    // owner watching the dashboard had no way to see whether Unity was
+    // reachable, because the bus card reads presence files and a bridge never
+    // writes one — presence is minted by clients that connect IN and announce a
+    // name in the initialize handshake, while a bridge is a child process the
+    // brain spawns and talks OUT to. The two mechanisms never touched, so the
+    // card's unity node was structurally guaranteed to read "never connected"
+    // forever, no matter how much Unity work went past it.
+    //
+    // One file per (bridge, brain session), because "connected" is per-session
+    // truth: each MCP host spawns its own child, so Claude Code can be holding
+    // a live Unity connection while CluadeX is not. A reader asking "is Unity
+    // reachable at all" ORs them. A stale file means a dead session, not an
+    // offline engine — hence lastSeenUtc and the TTL.
+
+    private static string StatusDirFor(string bridgeId) =>
+        Path.Combine(_vaultPath, ".obsidianx", "agent-bus", "bridges", bridgeId);
+
+    private static string StatusPathFor(string bridgeId) =>
+        Path.Combine(StatusDirFor(bridgeId), Environment.ProcessId + ".json");
+
+    private static void PublishStatus()
+    {
+        foreach (var def in _defs.Where(d => d.Enabled)) PublishStatus(def);
+    }
+
+    /// <summary>
+    /// Best-effort by construction: a vault on a disconnected network drive
+    /// must cost the owner a dashboard node, never a bridged call.
+    /// </summary>
+    private static void PublishStatus(McpBridgeDef def)
+    {
+        // A disabled bridge publishes nothing. The card reads mcp-bridges.json
+        // for the roster and draws it as "off" from there — a file saying "I am
+        // not running this" adds nothing and outlives the config that caused it.
+        if (!_enabled || !def.Enabled) return;
+
+        try
+        {
+            var s = StateFor(def.Id);
+            bool live;
+            lock (Gate) live = Live.TryGetValue(def.Id, out var c) && c.IsAlive;
+
+            var o = new JObject
+            {
+                ["bridge"] = def.Id,
+                ["pid"] = Environment.ProcessId,
+                ["agent"] = SafeIdentity(),
+                ["connected"] = live,
+                ["tools"] = s.Tools?.Count ?? 0,
+                ["calls"] = s.Calls,
+                ["lastTool"] = s.LastTool,
+                ["lastCallUtc"] = s.LastCallUtc?.ToString("o"),
+                ["lastError"] = string.IsNullOrWhiteSpace(s.LastError) ? null : s.LastError,
+                ["lastSeenUtc"] = DateTime.UtcNow.ToString("o"),
+                // Self-describing, so a reader doesn't have to hardcode the
+                // number this writer heartbeats at.
+                ["ttlSeconds"] = StatusTtlSeconds,
+            };
+
+            var dir = StatusDirFor(def.Id);
+            Directory.CreateDirectory(dir);
+
+            // Write-then-move: the dashboard polls this every 2 s, and a
+            // half-written file would read as a broken bridge.
+            var path = StatusPathFor(def.Id);
+            var tmp = path + ".tmp";                 // pid in the name — no cross-session collision
+            File.WriteAllText(tmp, o.ToString(Formatting.None), new UTF8Encoding(false));
+            File.Move(tmp, path, overwrite: true);
+
+            ReapDeadSessions(dir);
+        }
+        catch { /* status is a courtesy, never a failure mode */ }
+    }
+
+    /// <summary>The identity callback reads the MCP's handshake state; a throw
+    /// there must not cost the status file.</summary>
+    private static string SafeIdentity()
+    {
+        try { return _identity(); } catch { return "agent"; }
+    }
+
+    /// <summary>
+    /// Drop files from sessions that died without reaching <see cref="Shutdown"/>
+    /// — a killed terminal, a crashed host. The reader's TTL already ignores
+    /// them; this stops the directory growing by one file per crash forever.
+    /// </summary>
+    private static void ReapDeadSessions(string dir)
+    {
+        var mine = Environment.ProcessId + ".json";
+        foreach (var f in Directory.EnumerateFiles(dir, "*.json"))
+        {
+            if (string.Equals(Path.GetFileName(f), mine, StringComparison.OrdinalIgnoreCase)) continue;
+            try
+            {
+                if (DateTime.UtcNow - File.GetLastWriteTimeUtc(f) > TimeSpan.FromMinutes(StatusReapMinutes))
+                    File.Delete(f);
+            }
+            catch { /* another session may be rewriting it this instant */ }
+        }
+    }
+
     // ───────────── schema cache ─────────────
     //
     // Without this, every agent session would spawn every enabled engine server
@@ -402,7 +569,12 @@ public static class McpBridgeHub
                 s.Tools = entry["tools"] as JArray;
                 s.FetchedUtc = entry["fetchedUtc"]?.ToObject<DateTime?>();
                 s.FailedUtc = entry["failedUtc"]?.ToObject<DateTime?>();
-                s.LastError = entry["lastError"]?.ToString();
+                // ?.ToString() on a JSON null yields "" — which bridge_status
+                // then reported as an error with no message, on a bridge that
+                // had never failed.
+                s.LastError = entry["lastError"]?.Type == JTokenType.String
+                    ? entry["lastError"]!.ToString()
+                    : null;
             }
         }
         catch (Exception ex) { _log($"bridge cache unreadable ({ex.Message}) — rediscovering"); }

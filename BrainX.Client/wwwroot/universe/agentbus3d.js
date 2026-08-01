@@ -177,7 +177,7 @@ export function createAgentBus3D(canvas) {
             seen.add(name);
             let p = planets.get(name);
             if (!p) {
-                p = buildPlanet(name, i, list.length);
+                p = buildPlanet(name, i, list.length, a.kind);
                 planets.set(name, p);
                 rosterChanged = true;
             }
@@ -257,11 +257,20 @@ export function createAgentBus3D(canvas) {
 
     // ── Internals ───────────────────────────────────────────────
 
-    function buildPlanet(name, index, total) {
+    function buildPlanet(name, index, total, kind) {
         const color = colorOf(name);
+        // A bridge is not one more agent orbiting the brain — it is an engine
+        // the brain reaches OUT to, and drawing it as another planet is exactly
+        // how Unity read as "an agent that never showed up" for two releases.
+        // Faceted body, slow axial spin: machinery, not a client. The orbit
+        // itself stays in the XZ plane, because the ring geometry is rotated to
+        // match it and tilting one without the other detaches a body from its
+        // own orbit.
+        const isBridge = kind === 'bridge';
         const pivot = new THREE.Object3D();
         const mesh = new THREE.Mesh(
-            new THREE.SphereGeometry(0.2, 20, 16),
+            isBridge ? new THREE.OctahedronGeometry(0.23)
+                     : new THREE.SphereGeometry(0.2, 20, 16),
             new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.9, roughness: 0.55 }));
         pivot.add(mesh);
         scene.add(pivot);
@@ -287,7 +296,7 @@ export function createAgentBus3D(canvas) {
         pivot.add(label);
 
         return {
-            pivot, mesh, ring, label, orbitR: 1, online: false, everSeen: false,
+            pivot, mesh, ring, label, orbitR: 1, online: false, everSeen: false, isBridge,
             // Inner orbits move faster, like a real system — and it keeps two
             // planets from sitting locked next to each other forever.
             speed: 0.34 - index * 0.045,
@@ -295,21 +304,39 @@ export function createAgentBus3D(canvas) {
         };
     }
 
+    /* Six states, one word each, decided by the host (BusNodeState in
+     * MainWindow.AgentBus.cs) so this file never re-derives the rules and
+     * drifts. `ready` is the one that matters most: a bridge that has come up
+     * before and will connect on the first call is a WORKING part of the
+     * machine, not a dead one, and it spends almost all of its life there —
+     * the hub dials the engine lazily so an idle session never pays for a
+     * Python process pair per window. */
+    const RING_OPACITY = { live: 0.34, ready: 0.24, fault: 0.20, idle: 0.16, off: 0.08, never: 0.10 };
+    const BODY_SCALE = { live: 1, ready: 0.9, fault: 0.84, idle: 0.78, off: 0.7, never: 0.78 };
+
     function applyPresence(p, a) {
-        p.online = !!a.online;
+        // Fall back for the browser demo and for any host older than `state`.
+        const state = a.state || (a.online ? 'live' : (a.everSeen !== false ? 'idle' : 'never'));
+        p.online = state === 'live';
         p.everSeen = a.everSeen !== false;
+
         const color = colorOf(a.name);
-        p.mesh.material.color.setHex(p.everSeen ? color : 0x3a3550);
-        p.mesh.material.emissive.setHex(p.online ? color : 0x000000);
-        p.mesh.material.emissiveIntensity = p.online ? 1.15 : 0;
-        // A never-connected agent used to be a bare orbit with no body. But the
-        // roster is now a fixed allowlist, so an empty ring reads as "something
-        // is broken" rather than "this one is configured and idle" — which is
-        // exactly the state unity/unreal sit in until their editor is open.
-        // Show it, dark and small; presence is what lights it up.
+        const dark = state === 'never' || state === 'off';
+        p.mesh.material.color.setHex(dark ? 0x3a3550 : color);
+        // A failed bridge smoulders rather than glowing: visibly not the same
+        // as connected, visibly not the same as switched off either.
+        p.mesh.material.emissive.setHex(
+            state === 'live' ? color : state === 'fault' ? 0x5a1f18 : 0x000000);
+        p.mesh.material.emissiveIntensity =
+            state === 'live' ? 1.15 : state === 'fault' ? 0.55 : 0;
+
+        // A never-connected node used to be a bare orbit with no body. But the
+        // roster is a deliberate list, so an empty ring reads as "something is
+        // broken" rather than "this one is configured and idle". Show it, dark
+        // and small; state is what lights it up.
         p.mesh.visible = true;
-        p.ring.material.opacity = p.online ? 0.34 : (p.everSeen ? 0.16 : 0.1);
-        p.mesh.scale.setScalar(p.online ? 1 : 0.78);
+        p.ring.material.opacity = RING_OPACITY[state] ?? 0.1;
+        p.mesh.scale.setScalar(BODY_SCALE[state] ?? 0.78);
     }
 
     /**
@@ -366,6 +393,9 @@ export function createAgentBus3D(canvas) {
         for (const p of planets.values()) {
             p.phase += p.speed * dt * (p.online ? 1 : 0.35);
             p.pivot.position.set(Math.cos(p.phase) * p.orbitR, 0, Math.sin(p.phase) * p.orbitR);
+            // Bridges turn on their own axis — an octahedron that never rotates
+            // just looks like a badly tessellated planet.
+            if (p.isBridge) p.mesh.rotation.y += dt * (p.online ? 1.1 : 0.4);
             if (p.label) {
                 // Every node on the allowlist names itself on zoom-in, including
                 // ones that have never connected — that IS the answer to "which
@@ -419,6 +449,13 @@ export function createAgentBus3D(canvas) {
             planets: [...planets.entries()].map(([name, p]) => ({
                 name, online: p.online, r: +p.orbitR.toFixed(2),
                 x: +p.pivot.position.x.toFixed(3), z: +p.pivot.position.z.toFixed(3),
+                // Which body was actually built, and how lit it is: the only
+                // way to check the bridge branch from a browser without being
+                // able to look at the pixels.
+                bridge: !!p.isBridge,
+                geometry: p.mesh.geometry.type,
+                ring: +p.ring.material.opacity.toFixed(2),
+                glow: +p.mesh.material.emissiveIntensity.toFixed(2),
             })),
             motes: motes.length,
         };

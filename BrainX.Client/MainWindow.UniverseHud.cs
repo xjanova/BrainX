@@ -363,6 +363,15 @@ public partial class MainWindow
                 everSeen = a.EverSeen,
                 color = HexOf(BusAgentColor(a.Name)),
                 detail = HudAgentDetail(a),
+                // An engine the brain calls OUT to, not a client that called
+                // in. The HUD draws it as a different body, because a viewer
+                // who reads Unity as "an agent that never showed up" has been
+                // told something false about their own machine.
+                kind = a.IsBridge ? "bridge" : "agent",
+                // Computed by the card, not re-derived here: a HUD that works
+                // out "ready vs never" from its own copy of the rules is a HUD
+                // that will one day disagree with the card about the same node.
+                state = BusNodeState(a),
             }).ToList(),
             calls,
         });
@@ -470,6 +479,7 @@ public partial class MainWindow
     /// quiet.</summary>
     private static string HudAgentDetail(BusAgentState a)
     {
+        if (a.IsBridge) return HudBridgeDetail(a);
         if (!a.EverSeen) return "never seen";
         if (a.Online && a.AgeSeconds is double fresh && fresh < 25 && !string.IsNullOrEmpty(a.LastTool))
             return Ellipsize(a.LastTool!, 18);
@@ -478,6 +488,26 @@ public partial class MainWindow
         if (s < 3600) return $"{Math.Max(1, Math.Round(s / 60))} min ago";
         if (s < 86400) return $"{Math.Round(s / 3600)} h ago";
         return $"{Math.Round(s / 86400)} d ago";
+    }
+
+    /// <summary>
+    /// A bridge answers a different question: off, never up, up and idle, or in
+    /// use. "not connected" on its own was the useless answer — it is also the
+    /// resting state of a perfectly healthy bridge, because the hub spawns the
+    /// engine server lazily, on the first &lt;id&gt;__ call.
+    /// </summary>
+    private static string HudBridgeDetail(BusAgentState a)
+    {
+        if (!a.BridgeEnabled) return "disabled";
+        if (a.Online)
+        {
+            if (a.AgeSeconds is double fresh && fresh < 25 && !string.IsNullOrEmpty(a.LastTool))
+                return Ellipsize(a.LastTool!, 18);
+            return a.Tools > 0 ? $"live · {a.Tools} tools" : "live";
+        }
+        if (a.LastError != null) return "cannot connect";
+        if (!a.EverSeen) return "never came up";
+        return $"ready · {a.Tools} tools";
     }
 
     private void PostHudRecent()

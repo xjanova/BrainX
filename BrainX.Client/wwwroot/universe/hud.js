@@ -301,7 +301,15 @@ function renderAgents(d = {}) {
     // already say in colour and motion — and the name is one wheel-scroll away
     // on the planet itself. The count stays in the panel title, because
     // "how many are up" is the one thing the picture doesn't state outright.
-    setText('hud-agents-count', `${list.filter(a => a.online).length} online`);
+    // Two populations, counted separately. Folding them into one "N online" is
+    // how a live Unity and a dead one looked identical from the panel title —
+    // a bridge is never "online", it is dialled on demand.
+    const clients = list.filter(a => a.kind !== 'bridge');
+    const bridges = list.filter(a => a.kind === 'bridge');
+    const enabled = bridges.filter(b => b.state !== 'off').length;
+    const live = bridges.filter(b => b.state === 'live').length;
+    const online = clients.filter(a => a.online).length;
+    setText('hud-agents-count', enabled ? `${online} online · ${live}/${enabled} bridge` : `${online} online`);
     markStep('agents');
 }
 
@@ -886,15 +894,17 @@ function runDemo() {
         renderActivity([{ id: demoId, time: new Date().toTimeString().slice(0, 8), tag: 'MCP',
                           text: `brain_search "live feed sample ${demoId}"` }]);
     }, 2600);
-    // Mirrors the host allowlist (BusWellKnownAgents in MainWindow.AgentBus.cs):
-    // exactly these five, never a stray. unreal stands in for a bridge that has
-    // connected before, unity for one that never has.
+    // Mirrors what the host sends: agents from the presence allowlist
+    // (BusWellKnownAgents) and bridges from mcp-bridges.json, never a stray.
+    // Doubles as the legend — one example of every state the real panel can
+    // show. `ready` is the state that used to be undrawable here: a bridge
+    // that works and simply is not dialled at this instant.
     step(2100, () => renderAgents({ agents: [
-        { name: 'claude',  online: true,  color: '#e8825a', detail: 'brain_search' },
-        { name: 'codex',   online: true,  color: '#19a385', detail: 'agent_peers' },
-        { name: 'cluadex', online: true,  color: '#8b7cf6', detail: 'idle' },
-        { name: 'unreal',  online: false, everSeen: true,  color: '#4fb3e8' },
-        { name: 'unity',   online: false, everSeen: false, color: '#c9cfd6' },
+        { name: 'claude',  kind: 'agent',  state: 'live',  online: true,  everSeen: true,  color: '#e8825a', detail: 'brain_search' },
+        { name: 'codex',   kind: 'agent',  state: 'live',  online: true,  everSeen: true,  color: '#19a385', detail: 'agent_peers' },
+        { name: 'cluadex', kind: 'agent',  state: 'idle',  online: false, everSeen: true,  color: '#8b7cf6', detail: '4 min ago' },
+        { name: 'unity',   kind: 'bridge', state: 'ready', online: false, everSeen: true,  color: '#c9cfd6', detail: 'ready · 47 tools' },
+        { name: 'unreal',  kind: 'bridge', state: 'off',   online: false, everSeen: false, color: '#4fb3e8', detail: 'disabled' },
     ] }));
     // Keep the system busy so the orbit + traffic animation can be judged.
     setInterval(() => {

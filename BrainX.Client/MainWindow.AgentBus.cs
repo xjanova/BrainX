@@ -7,18 +7,33 @@
 // ด้วยอีกโปรแกรมที่เชื่อมต่อได้".
 //
 // Data source is the MCP Agent Bus on disk — no IPC with the MCP processes:
-//   <vault>/.obsidianx/agent-bus/presence/<agent>.json   heartbeat (online ≤ 90s)
-//   <vault>/.obsidianx/agent-bus/inbox/<to>/<file>.json  pending mail
-//   <vault>/.obsidianx/agent-bus/read/<to>/<file>.json   consumed mail (audit)
-// File names encode <utcTicks>-<from>-<rand>, so traffic edges and flow
-// animations never need to open a file.
+//   <vault>/.obsidianx/agent-bus/presence/<agent>.json    heartbeat (online ≤ 90s)
+//   <vault>/.obsidianx/agent-bus/inbox/<to>/<file>.json   pending mail
+//   <vault>/.obsidianx/agent-bus/read/<to>/<file>.json    consumed mail (audit)
+//   <vault>/.obsidianx/agent-bus/bridges/<id>/<pid>.json  outbound engine link
+//   <vault>/.obsidianx/mcp-bridges.json[.cache]           bridge roster + schemas
+// The first three encode <utcTicks>-<from>-<rand> in the FILE NAME, so traffic
+// edges and flow animations never need to open a file.
+//
+// TWO kinds of node, because the brain sits between two opposite flows and
+// conflating them is exactly how Unity ended up permanently dark here:
+//
+//   AGENT   connects IN and names itself in the MCP initialize handshake,
+//           which mints presence/<name>.json. claude · codex · cluadex.
+//   BRIDGE  is an MCP server the brain SPAWNS and calls OUT to — a game
+//           engine. It never connects in, so it never writes presence. For
+//           two releases this card listed unity/unreal among the presence
+//           agents, which no code path could ever light: the node was
+//           guaranteed to read "ยังไม่เคยเชื่อมต่อ" while 47 unity__ tools
+//           worked perfectly. The roster now comes from mcp-bridges.json and
+//           liveness from bridges/<id>/<pid>.json, written by McpBridgeHub.
+//
+// Agents are drawn dimmed with a dashed spoke until they first connect, so the
+// owner can SEE what COULD join the mesh, per the spec calling out CluadeX.
 //
 // Rendering: TWO stacked canvases. The static layer (nodes, spokes, labels)
 // is cheap and fully redrawn each 2 s poll; the FX layer holds in-flight
 // message dots + pulse rings so a static redraw never kills an animation.
-// Well-known agents (claude / codex / cluadex) are always drawn — dimmed
-// with a dashed spoke until they first connect — so the owner can SEE what
-// COULD join the mesh, per the spec calling out CluadeX explicitly.
 
 using System;
 using System.Collections.Generic;
@@ -31,6 +46,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
 using System.Windows.Shapes;
+using BrainX.Core.Services;
 using Newtonsoft.Json.Linq;
 using IOPath = System.IO.Path;   // System.Windows.Shapes.Path shadows System.IO.Path here
 
@@ -39,6 +55,7 @@ namespace BrainX.Client;
 public partial class MainWindow
 {
     private const int BusPresenceTtlSeconds = 90;   // keep in sync with Program.AgentBus.cs
+    private const int BusBridgeTtlSeconds = 90;     // fallback; each file carries its own ttlSeconds
 
     /// <summary>
     /// The ONLY agents the bus will ever draw — this is an allowlist, not a
@@ -48,9 +65,19 @@ public partial class MainWindow
     /// `verify`, `ab`, `reg`, `probe`, `timing-probe`. A diagram whose roster
     /// grows on its own stops being a diagram of anything.
     /// Adding a node is a deliberate edit here, never a side effect.
+    ///
+    /// unity/unreal are NOT here any more: they are bridges, not agents, and
+    /// listing them among the presence names promised a state nothing could
+    /// ever write. See <see cref="ReadBridges"/>.
+    ///
+    /// The long slug is Claude Code running in local-agent mode, which is what
+    /// the SDK announces in its handshake. It writes presence like any other
+    /// client and its work already appears in the HUD ticker — leaving it off
+    /// the allowlist meant a session that was demonstrably live had no node at
+    /// all, which is the same class of lie as a dark Unity.
     /// </summary>
     private static readonly string[] BusWellKnownAgents =
-        { "claude", "codex", "cluadex", "unity", "unreal" };
+        { "claude", "codex", "cluadex", "local-agent-mode-brainx-brain" };
 
     private System.Windows.Threading.DispatcherTimer? _busTimer;
     private bool _busFirstScan = true;
@@ -67,6 +94,7 @@ public partial class MainWindow
     private static readonly Dictionary<string, Color> BusAgentColors = new(StringComparer.OrdinalIgnoreCase)
     {
         ["claude"] = Color.FromRgb(0xE8, 0x82, 0x5A),   // Anthropic coral
+        ["local-agent-mode-brainx-brain"] = Color.FromRgb(0xE8, 0x82, 0x5A),   // …also Claude
         ["codex"] = Color.FromRgb(0x19, 0xA3, 0x85),   // OpenAI green
         ["cluadex"] = Color.FromRgb(0x8B, 0x7C, 0xF6),   // CluadeX violet
         ["unity"] = Color.FromRgb(0xC9, 0xCF, 0xD6),   // Unity light grey
@@ -74,6 +102,10 @@ public partial class MainWindow
     };
     private static readonly Color BusColorUnknown = Color.FromRgb(0x8E, 0x9A, 0xA6);
     private static readonly Color BusColorBrain = Color.FromRgb(0x6F, 0xA8, 0xFF);
+    private static readonly Color BusColorLive = Color.FromRgb(0x38, 0xD9, 0x7A);   // connected
+    private static readonly Color BusColorReady = Color.FromRgb(0x6F, 0xA8, 0xFF);   // configured, not connected
+    private static readonly Color BusColorFault = Color.FromRgb(0xE8, 0x6C, 0x5A);   // last attempt failed
+    private static readonly Color BusColorIdle = Color.FromRgb(0x6B, 0x74, 0x80);   // off / never seen
 
     // ═════════════════════════════════════════════════════════════════
     // Entry point — called from PopulateDashSidebar. Idempotent.
@@ -94,14 +126,31 @@ public partial class MainWindow
     private sealed class BusAgentState
     {
         public string Name = "";
+        /// <summary>An engine the brain calls OUT to, rather than a client that
+        /// called in. Changes what every field below is read from.</summary>
+        public bool IsBridge;
+
+        /// <summary>Agent: has a presence file. Bridge: its tools were
+        /// discovered at least once, so it HAS come up on this machine.</summary>
         public bool EverSeen;
+        /// <summary>Agent: heartbeat within the TTL. Bridge: some brain session
+        /// is holding a live connection to it right now.</summary>
         public bool Online;
         public double? AgeSeconds;
         public string ClientInfo = "";
         public int Pending;
-        /// <summary>Tool calls this agent has served since its MCP started.</summary>
+        /// <summary>Tool calls this agent has served since its MCP started, or
+        /// calls forwarded to this bridge. Deltas become flow animations.</summary>
         public long Calls;
         public string? LastTool;
+
+        // ── bridge only ──
+        /// <summary>enabled:true in mcp-bridges.json. A disabled bridge is drawn
+        /// (the owner configured it) but reads as off, not as broken.</summary>
+        public bool BridgeEnabled;
+        public int Tools;
+        /// <summary>Why the last attempt failed — almost always a closed editor.</summary>
+        public string? LastError;
     }
 
     private void RefreshAgentBusCard()
@@ -152,8 +201,15 @@ public partial class MainWindow
         sb.Append((int)DashAgentBusCanvas.ActualWidth).Append('x')
           .Append((int)DashAgentBusCanvas.ActualHeight).Append('|');
         foreach (var a in agents)
+        {
             sb.Append(a.Name).Append(a.Online ? '+' : '-')
-              .Append(a.EverSeen ? 'k' : 'n').Append(a.Pending).Append(';');
+              .Append(a.EverSeen ? 'k' : 'n').Append(a.Pending);
+            // A bridge being switched off, or failing, changes the node's
+            // colours — so it has to be part of what triggers a redraw.
+            if (a.IsBridge)
+                sb.Append(a.BridgeEnabled ? 'E' : 'D').Append(a.LastError == null ? 'o' : 'x');
+            sb.Append(';');
+        }
         return sb.ToString();
     }
 
@@ -203,7 +259,119 @@ public partial class MainWindow
             }
         }
 
-        return byName.Values.OrderBy(a => a.Name, StringComparer.Ordinal).ToList();
+        // Agents first, then bridges — so the outbound half of the map lands
+        // together on the ellipse instead of interleaving with the clients.
+        var all = byName.Values.OrderBy(a => a.Name, StringComparer.Ordinal).ToList();
+        all.AddRange(ReadBridges());
+        return all;
+    }
+
+    /// <summary>
+    /// The outbound half of the map: engines the brain spawns and calls into.
+    ///
+    /// Three files, three questions, none of which the other two can answer:
+    ///   mcp-bridges.json        which bridges exist, and is each turned on
+    ///   mcp-bridges.cache.json  did discovery ever succeed, with how many tools
+    ///   bridges/&lt;id&gt;/&lt;pid&gt;.json is a brain session holding it open RIGHT NOW
+    ///
+    /// Tools in the cache with no live session is the NORMAL steady state, not a
+    /// fault: the hub connects lazily on the first <c>&lt;id&gt;__</c> call, so an
+    /// idle session never pays a Python process pair per window. Drawing that as
+    /// "offline" would be the same lie in the opposite direction.
+    /// </summary>
+    private List<BusAgentState> ReadBridges()
+    {
+        var list = new List<BusAgentState>();
+
+        List<McpBridgeDef> defs;
+        // seedIfMissing:false — drawing a card must never create the owner's
+        // config as a side effect. The MCP seeds it on its first run.
+        try { defs = McpBridgeConfig.Load(_vaultPath, _ => { }, seedIfMissing: false); }
+        catch { return list; }
+        if (defs.Count == 0) return list;
+
+        var cache = McpBridgeConfig.ReadCache(_vaultPath);
+
+        foreach (var def in defs.OrderBy(d => d.Id, StringComparer.Ordinal))
+        {
+            var st = new BusAgentState { Name = def.Id, IsBridge = true, BridgeEnabled = def.Enabled };
+
+            if (cache.TryGetValue(def.Id, out var c))
+            {
+                st.Tools = c.Tools;
+                st.LastError = string.IsNullOrWhiteSpace(c.Error) ? null : c.Error;
+                if (c.FetchedUtc is DateTime fetched)
+                    st.AgeSeconds = Math.Max(0, (DateTime.UtcNow - fetched).TotalSeconds);
+            }
+
+            ReadBridgeSessions(st);
+
+            // "Has come up on this machine at least once" — the only evidence of
+            // that is tools, from either the cache or a live session.
+            st.EverSeen = st.Tools > 0;
+            // A live connection outranks a remembered failure. Errors that
+            // happen WHILE connected are the engine answering "no GameObject
+            // named X" — a healthy server, not a broken bridge.
+            if (st.Online) st.LastError = null;
+
+            list.Add(st);
+        }
+
+        return list;
+    }
+
+    /// <summary>
+    /// Fold every brain session's view of one bridge into a single node. Each
+    /// MCP host spawns its OWN child, so "connected" is per-session truth and
+    /// the honest summary is "at least one session has it open". Calls are
+    /// summed for the same reason: the map animates engine traffic, not one
+    /// window's share of it.
+    /// </summary>
+    private void ReadBridgeSessions(BusAgentState st)
+    {
+        var dir = IOPath.Combine(BusRootDir, "bridges", st.Name);
+        if (!Directory.Exists(dir)) return;
+
+        long calls = 0;
+        var newestCall = DateTime.MinValue;
+
+        foreach (var f in Directory.EnumerateFiles(dir, "*.json"))
+        {
+            try
+            {
+                var o = JObject.Parse(File.ReadAllText(f));
+                var seen = DateTime.Parse(o["lastSeenUtc"]?.ToString() ?? "",
+                    null, System.Globalization.DateTimeStyles.RoundtripKind);
+                // A file left by a killed session would claim "connected"
+                // forever. Age it out rather than trust it; the writer states
+                // its own TTL so the two can't drift apart silently.
+                var ttl = o["ttlSeconds"]?.ToObject<int>() ?? BusBridgeTtlSeconds;
+                if ((DateTime.UtcNow - seen).TotalSeconds > ttl) continue;
+
+                if (o["connected"]?.ToObject<bool>() == true) st.Online = true;
+                calls += o["calls"]?.ToObject<long>() ?? 0;
+
+                var tools = o["tools"]?.ToObject<int>() ?? 0;
+                if (tools > st.Tools) st.Tools = tools;
+
+                if (o["lastError"]?.Type == JTokenType.String) st.LastError = o["lastError"]!.ToString();
+
+                if (o["lastCallUtc"]?.Type == JTokenType.String &&
+                    DateTime.TryParse(o["lastCallUtc"]!.ToString(), null,
+                        System.Globalization.DateTimeStyles.RoundtripKind, out var lastCall) &&
+                    lastCall > newestCall)
+                {
+                    newestCall = lastCall;
+                    st.LastTool = o["lastTool"]?.ToString();
+                    st.ClientInfo = o["agent"]?.ToString() ?? "";
+                }
+            }
+            catch { /* half-written heartbeat — the next tick catches up */ }
+        }
+
+        st.Calls = calls;
+        if (newestCall > DateTime.MinValue)
+            st.AgeSeconds = Math.Max(0, (DateTime.UtcNow - newestCall).TotalSeconds);
     }
 
     /// <summary>Sender slug embedded in a bus file name: (ticks)-(from)-(rand).</summary>
@@ -256,7 +424,7 @@ public partial class MainWindow
             // render every packet.
             var shots = (int)Math.Min(delta, 3);
             for (int i = 0; i < shots; i++)
-                AnimateBusRoundTrip(a.Name, i * 140);
+                AnimateBusRoundTrip(a.Name, i * 140, fromBrain: a.IsBridge);
         }
     }
 
@@ -348,18 +516,26 @@ public partial class MainWindow
                 Stroke = new SolidColorBrush(color) { Opacity = a.Online ? 0.34 : 0.18 },
                 StrokeThickness = a.Online ? 1.6 : 1.0
             };
-            if (!a.EverSeen) line.StrokeDashArray = new DoubleCollection { 3, 4 };
+            // Dashed = this link has never carried anything: an agent that has
+            // never announced itself, or a bridge that has never come up (or is
+            // switched off in the config).
+            if (!a.EverSeen || (a.IsBridge && !a.BridgeEnabled))
+                line.StrokeDashArray = new DoubleCollection { 3, 4 };
             canvas.Children.Add(line);
 
-            // Live link: dashes marching along an online agent's spoke, so a
-            // connected agent reads as connected even while it is idle. This
-            // is an "alive" indicator, NOT a direction claim — the link is
-            // bidirectional, and direction is carried by the flow dots.
+            // Live link: dashes marching along a connected node's spoke, so it
+            // reads as connected even while idle. This is an "alive" indicator,
+            // NOT a direction claim about traffic — direction is carried by the
+            // flow dots. The one thing it does assert is who dials whom, and
+            // that genuinely differs: an agent dials INTO the brain, the brain
+            // dials OUT to an engine. So a bridge's dashes march the other way.
             if (a.Online)
             {
+                var from = a.IsBridge ? center : p;
+                var to = a.IsBridge ? p : center;
                 var flow = new Line
                 {
-                    X1 = p.X, Y1 = p.Y, X2 = center.X, Y2 = center.Y,
+                    X1 = from.X, Y1 = from.Y, X2 = to.X, Y2 = to.Y,
                     Stroke = new SolidColorBrush(color) { Opacity = 0.85 },
                     StrokeThickness = 1.7,
                     StrokeDashCap = PenLineCap.Round,
@@ -430,14 +606,17 @@ public partial class MainWindow
     private void DrawBusAgentNode(Canvas canvas, BusAgentState a, Point p)
     {
         var color = BusAgentColor(a.Name);
-        var dim = !a.EverSeen ? 0.35 : (a.Online ? 1.0 : 0.55);
+        var dim = BusNodeDim(a);
 
         var ring = new Ellipse
         {
             Width = 26, Height = 26,
             Fill = new SolidColorBrush(Color.FromRgb(0x14, 0x1B, 0x2A)),
             Stroke = new SolidColorBrush(color) { Opacity = dim },
-            StrokeThickness = a.Online ? 2.0 : 1.4
+            StrokeThickness = a.Online ? 2.0 : 1.4,
+            // Filled, so the whole disc is hit-testable and the tooltip is
+            // findable by pointing at the node rather than at its 1.4px rim.
+            ToolTip = BusNodeTooltip(a)
         };
         Canvas.SetLeft(ring, p.X - 13); Canvas.SetTop(ring, p.Y - 13);
         canvas.Children.Add(ring);
@@ -450,11 +629,12 @@ public partial class MainWindow
         Canvas.SetLeft(inner, p.X - 5); Canvas.SetTop(inner, p.Y - 5);
         canvas.Children.Add(inner);
 
-        // Status dot pinned to the ring's rim.
+        // Status dot pinned to the ring's rim — the one pixel that answers
+        // "can this thing connect right now, and if not, why not".
         var dot = new Ellipse
         {
             Width = 7, Height = 7,
-            Fill = new SolidColorBrush(a.Online ? Color.FromRgb(0x38, 0xD9, 0x7A) : Color.FromRgb(0x6B, 0x74, 0x80)),
+            Fill = new SolidColorBrush(BusStatusColor(a)),
             Stroke = new SolidColorBrush(Color.FromRgb(0x14, 0x1B, 0x2A)),
             StrokeThickness = 1.2
         };
@@ -527,7 +707,108 @@ public partial class MainWindow
         }
     }
 
-    private static string BusAgentCaption(BusAgentState a)
+    /// <summary>
+    /// One name for what a node is doing, computed ONCE and shared by the card
+    /// and the Universe HUD, so two surfaces cannot drift into describing the
+    /// same node differently — which is exactly how the ticker ended up calling
+    /// an agent by a name its own planet did not use.
+    ///
+    ///   live   connected right now
+    ///   ready  a bridge that has come up before; the hub will dial it on the
+    ///          first &lt;id&gt;__ call. The normal resting state, NOT a fault.
+    ///   idle   an agent that has connected before and is quiet now
+    ///   fault  a bridge whose last attempt failed — usually a closed editor
+    ///   off    a bridge disabled in mcp-bridges.json
+    ///   never  configured or known, but has never once connected
+    /// </summary>
+    private static string BusNodeState(BusAgentState a)
+    {
+        if (a.IsBridge)
+        {
+            if (!a.BridgeEnabled) return "off";
+            if (a.Online) return "live";
+            if (a.LastError != null) return "fault";
+            // Enabled and never up is UNKNOWN, not failed — nothing has tried.
+            return a.EverSeen ? "ready" : "never";
+        }
+        if (a.Online) return "live";
+        return a.EverSeen ? "idle" : "never";
+    }
+
+    /// <summary>How solid the node reads.</summary>
+    private static double BusNodeDim(BusAgentState a) => BusNodeState(a) switch
+    {
+        "live" => 1.0,
+        "ready" => 0.72,
+        "fault" => 0.62,
+        "idle" => 0.55,
+        "off" => 0.30,
+        _ => a.IsBridge ? 0.42 : 0.35,      // never
+    };
+
+    /// <summary>The rim dot: green live · blue ready · red failed · grey otherwise.</summary>
+    private static Color BusStatusColor(BusAgentState a) => BusNodeState(a) switch
+    {
+        "live" => BusColorLive,
+        "ready" => BusColorReady,
+        "fault" => BusColorFault,
+        _ => BusColorIdle,
+    };
+
+    /// <summary>
+    /// The long answer, one hover away — so the card can stay a picture and
+    /// still say exactly why something is not connected, without the owner
+    /// having to ask an agent to run bridge_status.
+    /// </summary>
+    private static string BusNodeTooltip(BusAgentState a)
+    {
+        var sb = new StringBuilder(BusDisplayName(a.Name));
+        if (a.IsBridge)
+        {
+            sb.Append(" — bridge: สมองเรียกออกไปหา engine\n");
+            sb.Append(a.BridgeEnabled ? "เปิดใช้ใน mcp-bridges.json" : "ปิดไว้ใน mcp-bridges.json");
+            sb.Append(a.Online
+                ? "\nต่ออยู่ตอนนี้"
+                : $"\nยังไม่ได้ต่อ — hub จะต่อตอนมีการเรียก {a.Name}__ ครั้งแรก");
+            if (a.Tools > 0) sb.Append($"\n{a.Tools} tools");
+            if (!string.IsNullOrEmpty(a.ClientInfo)) sb.Append($"\nเปิดค้างไว้โดย {BusDisplayName(a.ClientInfo)}");
+            if (a.LastError != null) sb.Append($"\nError: {a.LastError}");
+            sb.Append("\nรายละเอียดเต็ม: ให้ agent เรียก bridge_status");
+            return sb.ToString();
+        }
+
+        sb.Append(" — agent: ต่อเข้ามาหาสมอง\n");
+        sb.Append(a.Online ? "online" : a.EverSeen ? "offline" : "ยังไม่เคยเชื่อมต่อ");
+        if (!string.IsNullOrEmpty(a.ClientInfo)) sb.Append($"\nclient: {a.ClientInfo}");
+        if (a.Calls > 0) sb.Append($"\n{a.Calls} calls");
+        if (a.Pending > 0) sb.Append($"\n{a.Pending} ข้อความรออ่าน");
+        return sb.ToString();
+    }
+
+    private static string BusAgentCaption(BusAgentState a) =>
+        a.IsBridge ? BusBridgeCaption(a) : BusPresenceCaption(a);
+
+    /// <summary>
+    /// Four states the owner otherwise has to run bridge_status to learn.
+    /// "ไม่ได้ต่อ" on its own was the useless answer: it is also the resting
+    /// state of a perfectly healthy lazy bridge.
+    /// </summary>
+    private static string BusBridgeCaption(BusAgentState a)
+    {
+        if (!a.BridgeEnabled) return "ปิดไว้ในคอนฟิก";
+        if (a.Online)
+        {
+            if (a.AgeSeconds is double fresh && fresh < 25 && !string.IsNullOrEmpty(a.LastTool))
+                return Ellipsize(a.LastTool!, 18);
+            return a.Tools > 0 ? $"ต่ออยู่ · {a.Tools} tools" : "ต่ออยู่";
+        }
+        // The reason goes on the traffic line, which has a whole row for it.
+        if (a.LastError != null) return "ต่อไม่ได้";
+        if (!a.EverSeen) return "ยังไม่เคยต่อสำเร็จ";
+        return $"พร้อม · {a.Tools} tools";
+    }
+
+    private static string BusPresenceCaption(BusAgentState a)
     {
         if (!a.EverSeen) return "ยังไม่เคยเชื่อมต่อ";
         // Presence is rewritten on every tool call, so a very fresh timestamp
@@ -546,12 +827,22 @@ public partial class MainWindow
 
     private void UpdateBusHeaderAndTraffic(List<BusAgentState> agents)
     {
-        var online = agents.Count(a => a.Online);
-        var known = agents.Count(a => a.EverSeen);
-        DashBusOnlineCountText.Text = $"{online} online · {known} known";
-        DashBusLiveDot.Fill = online > 0
-            ? new SolidColorBrush(Color.FromRgb(0x38, 0xD9, 0x7A))
-            : BusThemeBrush("TextMutedBrush", Color.FromRgb(0x6B, 0x74, 0x80));
+        var clients = agents.Where(a => !a.IsBridge).ToList();
+        var bridges = agents.Where(a => a.IsBridge).ToList();
+
+        var online = clients.Count(a => a.Online);
+        var known = clients.Count(a => a.EverSeen);
+        var bridgesOn = bridges.Count(b => b.BridgeEnabled);
+        var bridgesLive = bridges.Count(b => b.Online);
+
+        // Two populations, two counts. Folding them into one "N online" was
+        // how a live Unity and a dead one looked identical from the header.
+        DashBusOnlineCountText.Text = bridgesOn > 0
+            ? $"{online} online · {bridgesLive}/{bridgesOn} bridge"
+            : $"{online} online · {known} known";
+        DashBusLiveDot.Fill = online > 0 || bridgesLive > 0
+            ? new SolidColorBrush(BusColorLive)
+            : BusThemeBrush("TextMutedBrush", BusColorIdle);
 
         // Today's traffic per (from → to), counted from file names across
         // inbox (pending) + read (consumed). No file is ever opened.
@@ -576,15 +867,32 @@ public partial class MainWindow
             }
         }
 
-        if (pairs.Count == 0)
+        // Bridge health LEADS the line — it is the only part of this card the
+        // owner cannot learn anywhere else without asking an agent to run
+        // bridge_status, and the row trims from the right.
+        var line = new List<string>();
+        foreach (var b in bridges)
         {
-            DashBusTrafficText.Text = "ยังไม่มีข้อความวันนี้ — agent คุยกันผ่าน agent_send / agent_inbox";
-            return;
+            var who = BusDisplayName(b.Name);
+            if (!b.BridgeEnabled) line.Add($"{who} ปิดไว้");
+            else if (b.Online) line.Add($"{who} ต่ออยู่ {b.Tools} tools");
+            else if (b.LastError != null) line.Add($"{who} ต่อไม่ได้: {Ellipsize(b.LastError, 70)}");
+            else if (!b.EverSeen) line.Add($"{who} ยังไม่เคยต่อสำเร็จ");
+            else line.Add($"{who} พร้อม {b.Tools} tools");
         }
-        var total = pairs.Values.Sum();
-        var parts = pairs.OrderByDescending(kv => kv.Value)
-                         .Select(kv => $"{kv.Key} {kv.Value}");
-        DashBusTrafficText.Text = $"วันนี้ {total} ข้อความ · " + string.Join(" · ", parts);
+
+        if (pairs.Count > 0)
+        {
+            var total = pairs.Values.Sum();
+            var byPair = pairs.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key} {kv.Value}");
+            line.Add($"วันนี้ {total} ข้อความ · " + string.Join(" · ", byPair));
+        }
+        else if (line.Count == 0)
+        {
+            line.Add("ยังไม่มีข้อความวันนี้ — agent คุยกันผ่าน agent_send / agent_inbox");
+        }
+
+        DashBusTrafficText.Text = string.Join(" · ", line);
     }
 
     // ───────────── FX layer ─────────────
@@ -619,26 +927,32 @@ public partial class MainWindow
     }
 
     /// <summary>
-    /// One request/response round-trip on an agent's spoke: a bright dot in
-    /// the agent's colour travelling agent → brain, then a smaller blue one
-    /// coming back brain → agent. Colour carries the direction — outbound is
-    /// the caller's identity, inbound is the brain's — so the two legs stay
-    /// distinguishable even when several overlap.
+    /// One request/response round-trip on a spoke. For an AGENT the request is
+    /// outbound in the agent's colour (it called the brain) and the answer
+    /// returns in the brain's blue. For a BRIDGE the roles swap — the brain is
+    /// the caller and the engine answers — so <paramref name="fromBrain"/>
+    /// flips both the geometry and the colours. Colour carries the direction,
+    /// which is what keeps overlapping legs distinguishable.
     /// </summary>
     /// <param name="delayMs">Stagger for bursts, so N calls read as N pulses
     /// rather than one thick blob.</param>
-    private void AnimateBusRoundTrip(string agent, int delayMs)
+    private void AnimateBusRoundTrip(string agent, int delayMs, bool fromBrain = false)
     {
         if (!_busNodePos.TryGetValue(agent, out var pAgent) ||
             !_busNodePos.TryGetValue("brain", out var pBrain)) return;
 
         var color = BusAgentColor(agent);
-        var req = NewBusFlowDot(color, 7, 0);        // starts invisible; fades in on cue
-        PlaceBusDot(req, pAgent, 7);
+        var pSrc = fromBrain ? pBrain : pAgent;
+        var pDst = fromBrain ? pAgent : pBrain;
+        var reqColor = fromBrain ? BusColorBrain : color;
+        var resColor = fromBrain ? color : BusColorBrain;
+
+        var req = NewBusFlowDot(reqColor, 7, 0);     // starts invisible; fades in on cue
+        PlaceBusDot(req, pSrc, 7);
         DashAgentBusFxCanvas.Children.Add(req);
 
         var begin = TimeSpan.FromMilliseconds(delayMs);
-        var outbound = BusLegAnimation(req, pAgent, pBrain, 480, 7);
+        var outbound = BusLegAnimation(req, pSrc, pDst, 480, 7);
         outbound.BeginTime = begin;
         req.BeginAnimation(OpacityProperty,
             new DoubleAnimation(0, 0.95, TimeSpan.FromMilliseconds(110)) { BeginTime = begin });
@@ -646,13 +960,13 @@ public partial class MainWindow
         outbound.Completed += (_, _) =>
         {
             DashAgentBusFxCanvas.Children.Remove(req);
-            PulseBusNode("brain");                   // the brain acknowledges
+            PulseBusNode(fromBrain ? agent : "brain");   // whoever received it
 
-            var res = NewBusFlowDot(BusColorBrain, 5, 0.8);
-            PlaceBusDot(res, pBrain, 5);
+            var res = NewBusFlowDot(resColor, 5, 0.8);
+            PlaceBusDot(res, pDst, 5);
             DashAgentBusFxCanvas.Children.Add(res);
 
-            var inbound = BusLegAnimation(res, pBrain, pAgent, 480, 5);
+            var inbound = BusLegAnimation(res, pDst, pSrc, 480, 5);
             inbound.Completed += (_, _) =>
             {
                 var fade = new DoubleAnimation(0.8, 0, TimeSpan.FromMilliseconds(180));
@@ -730,6 +1044,11 @@ public partial class MainWindow
         "unity" => "Unity",
         "unreal" => "Unreal",
         "brain" => "BrainX",
+        // Claude Code in local-agent mode announces the whole slug in its
+        // handshake. Same spelling the HUD uses (DISPLAY_NAMES in
+        // agentbus3d.js) — two surfaces naming one agent differently is how
+        // the ticker and its own planet drifted apart last time.
+        "local-agent-mode-brainx-brain" => "Local agent",
         // Unknown clients can report long slugs (e.g.
         // "local-agent-mode-brainx-brain") that would run past the card's
         // edge and collide with the neighbouring node's label.

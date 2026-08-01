@@ -1487,7 +1487,7 @@
                                                            Style="{StaticResource TypeCardTitle}"
                                                            VerticalAlignment="Center"/>
                                                 <TextBlock Grid.Column="1"
-                                                           Text=" · Claude ⇄ Codex ⇄ CluadeX ผ่านสมอง"
+                                                           Text=" · agent คุยกันผ่านสมอง · สมองเรียกออกไปหา engine"
                                                            FontSize="11" Foreground="{StaticResource NeuralText3}"
                                                            VerticalAlignment="Center" Margin="6,0,6,0"
                                                            TextTrimming="CharacterEllipsis"/>
