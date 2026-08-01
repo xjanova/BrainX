@@ -5839,7 +5839,11 @@ public partial class MainWindow : Window
     {
         var wikiEdges = _graph.Edges.Count(e => e.RelationType == "wiki-link");
         var autoEdges = _graph.Edges.Count - wikiEdges;
-        StatusText.Text = $"Indexed {_graph.TotalNodes} nodes · {wikiEdges} wiki · {autoEdges} auto-links · storage: {_storage?.ProviderName ?? "File"}{_lastExportMsg}";
+        // .brainxignore is appended here rather than left to the log: a node
+        // count that dropped for a reason must never look like one that dropped
+        // on its own.
+        var ignoreMsg = string.IsNullOrEmpty(_graph.IgnoreReport) ? "" : $" · {_graph.IgnoreReport}";
+        StatusText.Text = $"Indexed {_graph.TotalNodes} nodes · {wikiEdges} wiki · {autoEdges} auto-links · storage: {_storage?.ProviderName ?? "File"}{_lastExportMsg}{ignoreMsg}";
     }
 
     /// <summary>
@@ -9385,6 +9389,9 @@ public partial class MainWindow : Window
                 }
                 catch { }
             }
+
+            // Never let a filtered note count look like a lost one.
+            if (!string.IsNullOrEmpty(g.IgnoreReport)) exportMsg += $" · {g.IgnoreReport}";
 
             return new IndexResult(g, exportMsg, null);
         }

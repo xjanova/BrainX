@@ -40,8 +40,15 @@ public partial class KnowledgeIndexer
         var graph = new KnowledgeGraph();
         if (!Directory.Exists(vaultPath)) return graph;
 
+        // `.obsidian`/`.trash` stay a substring test on purpose: `.obsidianx`
+        // (the brain's own metadata dir) contains `.obsidian`, so tightening
+        // this to a path-segment match would start indexing brain-export.json's
+        // neighbours. Note it also deliberately does NOT exclude all dot-folders
+        // — `Imported/.claude` holds 24 real notes.
+        var ignore = VaultIgnore.Load(vaultPath);
         var mdFiles = Directory.GetFiles(vaultPath, "*.md", SearchOption.AllDirectories)
-            .Where(f => !f.Contains(".obsidian") && !f.Contains(".trash"));
+            .Where(f => !f.Contains(".obsidian") && !f.Contains(".trash"))
+            .Where(f => !ignore.ShouldSkip(Path.GetRelativePath(vaultPath, f)));
 
         var nodeMap = new Dictionary<string, KnowledgeNode>();
         // Track notes by relative path too so canvas file-references
@@ -76,6 +83,9 @@ public partial class KnowledgeIndexer
             // Filename-only key for "file": "Note.md" without folder
             nodeByPath[Path.GetFileName(file)] = node;
         }
+        // mdFiles is a deferred query — the counts are only real once the loop
+        // above has pulled it, so read the report here and not a line earlier.
+        graph.IgnoreReport = ignore.Describe();
 
         // Build edges from [[wiki-links]] and ![[embeds]]. The regex
         // captures Obsidian's full link syntax in one pass:

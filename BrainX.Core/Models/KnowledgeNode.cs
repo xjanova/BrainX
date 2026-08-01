@@ -107,6 +107,14 @@ public class KnowledgeGraph
     public long TotalNodes => Nodes.Count;
     public long TotalEdges => Edges.Count;
     public long TotalWords => Nodes.Sum(n => n.WordCount);
+
+    /// <summary>
+    /// Human-readable summary of what <c>.brainxignore</c> kept out of this
+    /// index, or null when nothing was filtered. Surfaced so a shrinking note
+    /// count always has a visible reason — an unexplained drop reads as data
+    /// loss.
+    /// </summary>
+    public string? IgnoreReport { get; set; }
 }
 
 public class KnowledgeEdge
