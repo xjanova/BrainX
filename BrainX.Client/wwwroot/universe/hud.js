@@ -291,10 +291,12 @@ function renderActivity(list = []) {
 function renderAgents(d = {}) {
     const list = d.agents || [];
     bus?.setAgents(list);
-    // Traffic the host reports since the last poll, replayed as motes falling
-    // into the star. Capped so a burst reads as busy rather than as confetti.
-    (d.traffic || []).slice(0, 4).forEach((t, i) =>
-        setTimeout(() => { bus?.fireTraffic(t.agent, t.inbound !== false); }, i * 160));
+    // Motes are NOT fired here any more. This used to replay a call-counter
+    // delta as one mote in and one mote out — abstract motion that could not
+    // say what had moved. Real access-log events drive the animation now
+    // (renderFlow), and firing both meant a single search matching two notes
+    // produced four motes, two of them meaningless. Every mote must have a
+    // ticker line that explains it.
     // No text roster under the map. It repeated, in words, what the orbits
     // already say in colour and motion — and the name is one wheel-scroll away
     // on the planet itself. The count stays in the panel title, because
@@ -355,12 +357,16 @@ function renderFlow(d = {}) {
             (what ? `<span class="fl-what">${esc(what)}</span>` : '');
         el.appendChild(li);
     }
-    if (dropped > 0 || d.unattributed > 0) {
+    if (dropped > 0 || d.unattributed > 0 || d.undescribed > 0) {
         const li = document.createElement('li');
         li.className = 'is-note';
         const bits = [];
         if (dropped > 0) bits.push(`+${dropped} more this tick`);
         if (d.unattributed > 0) bits.push(`${d.unattributed} row(s) predate agent tracking`);
+        // Calls the presence counters saw that the log cannot explain — an
+        // unlogged tool, mostly. Said out loud, because the alternative is a
+        // panel that looks idle while work is going on.
+        if (d.undescribed > 0) bits.push(`${d.undescribed} call(s) not detailed in the log`);
         li.textContent = bits.join(' · ');
         el.appendChild(li);
     }

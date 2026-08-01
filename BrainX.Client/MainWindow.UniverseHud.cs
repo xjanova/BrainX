@@ -51,11 +51,17 @@ public partial class MainWindow
     /// </summary>
     private bool _hudBrainReady;
 
-    /// <summary>Per-agent call counters from the last poll. Deltas become the
-    /// motes falling into the HUD's star. Kept separate from the dashboard
-    /// card's <c>_busSeenCalls</c> so the two surfaces never eat each other's
-    /// deltas when both happen to be alive.</summary>
+    /// <summary>Per-agent call counters from the last poll. Deltas no longer
+    /// fire motes — real access-log events do that now — they measure how much
+    /// traffic happened that the log could not describe. Kept separate from the
+    /// dashboard card's <c>_busSeenCalls</c> so the two surfaces never eat each
+    /// other's deltas when both happen to be alive.</summary>
     private readonly Dictionary<string, long> _hudSeenCalls = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Tool calls counted on this tick from the presence counters.
+    /// Compared against the events the access log produced, so the panel can
+    /// say how much traffic it is not able to describe.</summary>
+    private int _hudCallsThisTick;
 
     /// <summary>Timestamp of the newest access-log row already sent to the HUD.
     /// The log is append-only, so this is enough to emit each event exactly
@@ -298,10 +304,14 @@ public partial class MainWindow
     }
 
     /// <summary>
-    /// The agent roster + whatever traffic happened since the last poll.
-    /// Direction comes from each agent's call counter, exactly as the WPF
-    /// card derived it: a counter that moved means a request went out and an
-    /// answer came back, and both legs are replayed as motes.
+    /// The agent roster, plus how many tool calls happened since the last poll.
+    ///
+    /// The call count no longer draws anything. It used to be the animation —
+    /// a counter that moved fired a mote out and a mote back — but that could
+    /// only ever say "something happened", and it now double-counts everything
+    /// <see cref="PostHudFlow"/> can describe properly. It is kept because the
+    /// difference between it and the logged events is the traffic the panel
+    /// cannot explain, which is worth stating rather than hiding.
     /// </summary>
     private void PostHudAgents()
     {
@@ -313,13 +323,26 @@ public partial class MainWindow
             return;
         }
 
-        var traffic = new List<object>();
+        // Tool calls since the last poll, from each agent's presence counter.
+        //
+        // This used to BE the animation: a counter that moved fired a mote in
+        // and a mote out. It could not say what moved, and now that the access
+        // log names every read and write, it double-counts everything it can
+        // see — one search matching two notes fired four motes, two of them
+        // carrying no information at all.
+        //
+        // So it stops driving motes and becomes what it is actually good for:
+        // the count of calls the log did NOT record. brain_search and friends
+        // are logged; agent_send, stats and bundle listing are not. Reporting
+        // the difference keeps the panel honest about the traffic it is not
+        // drawing, instead of the panel silently under- or over-stating it.
+        var calls = 0;
         foreach (var a in agents)
         {
             if (!_hudSeenCalls.TryGetValue(a.Name, out var prev))
             {
-                // Seed silently — replaying a whole session's history as an
-                // animation storm on first paint is noise, not signal.
+                // Seed silently — replaying a whole session's history on the
+                // first paint is noise, not signal.
                 _hudSeenCalls[a.Name] = a.Calls;
                 continue;
             }
@@ -327,13 +350,9 @@ public partial class MainWindow
             // A restarted MCP resets its counter; treat a decrease as a new
             // baseline rather than negative traffic.
             var delta = a.Calls - prev;
-            if (delta <= 0) continue;
-            for (int i = 0; i < Math.Min(delta, 2); i++)
-            {
-                traffic.Add(new { agent = a.Name, inbound = true });
-                traffic.Add(new { agent = a.Name, inbound = false });
-            }
+            if (delta > 0) calls += (int)delta;
         }
+        _hudCallsThisTick = calls;
 
         PostHud("hudAgents", new
         {
@@ -345,7 +364,7 @@ public partial class MainWindow
                 color = HexOf(BusAgentColor(a.Name)),
                 detail = HudAgentDetail(a),
             }).ToList(),
-            traffic,
+            calls,
         });
     }
 
@@ -421,12 +440,17 @@ public partial class MainWindow
 
         _hudFlowSince = newest;
         if (!_hudFlowSeeded) { _hudFlowSeeded = true; return; }   // first pass primes, never floods
-        if (events.Count == 0 && skippedNoAgent == 0) return;
+        if (events.Count == 0 && skippedNoAgent == 0 && _hudCallsThisTick == 0) return;
 
         // Newest last, so the ticker reads top-to-bottom in the order things
         // actually happened.
         events.Reverse();
-        PostHud("hudFlow", new { events, unattributed = skippedNoAgent });
+        // `undescribed` is the traffic the counters saw that the log could not
+        // explain — an unlogged tool, or a call whose rows predate the agent
+        // field. Motes are only fired for events we CAN describe, so this is
+        // the number the picture is deliberately not drawing.
+        var undescribed = Math.Max(0, _hudCallsThisTick - events.Count);
+        PostHud("hudFlow", new { events, unattributed = skippedNoAgent, undescribed });
     }
 
     /// <summary>Ops that change the vault, as opposed to reading it. Drives the
