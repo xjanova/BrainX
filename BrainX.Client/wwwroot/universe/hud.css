@@ -390,6 +390,53 @@ body.hud-active #settings-toggle {
 
 .hud-swatch { width: 7px; height: 7px; border-radius: 2px; flex: none; }
 
+/* ── System instruments ───────────────────────────────────────── */
+
+/* A smooth bar says "loading". A segmented one says "instrument", and that
+   is what these are: five live readouts of the machine the galaxy runs on.
+   The segments come from a repeating gradient over both the track and the
+   fill, so the lit blocks line up with the unlit ones at every width — no
+   per-segment DOM, and it stays crisp while the value animates.
+   --g is set per gauge by hud.js and drives value, fill and glow together. */
+.hud-gauge { margin: 1px 0 8px; }
+.hud-gauge-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.hud-gauge-label {
+    font-size: 9px; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--hud-label); white-space: nowrap;
+}
+.hud-gauge-val {
+    font-family: var(--hud-mono); font-variant-numeric: tabular-nums;
+    font-size: clamp(11.5px, 0.95vw, 14px); color: #eae8ff; white-space: nowrap;
+    text-shadow: 0 0 12px var(--g, #6cf0ff), 0 0 3px rgba(0,0,0,.95);
+}
+.hud-gauge-val small { font-size: 0.72em; color: var(--hud-label); margin-left: 2px; }
+
+.hud-gauge-track {
+    position: relative; height: 7px; margin-top: 4px; border-radius: 2px;
+    background: repeating-linear-gradient(90deg,
+        rgba(255,255,255,0.075) 0 3px, transparent 3px 5px);
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.05);
+    overflow: visible;
+}
+.hud-gauge-fill {
+    position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px;
+    background: repeating-linear-gradient(90deg, var(--g, #6cf0ff) 0 3px, transparent 3px 5px);
+    filter: drop-shadow(0 0 5px var(--g, #6cf0ff));
+    transition: width 600ms cubic-bezier(.2, .8, .3, 1);
+}
+/* Where the reading stops being comfortable. Drawn on the track, not in the
+   fill, so it stays put as the value moves past it. */
+.hud-gauge-redline {
+    position: absolute; top: -2px; bottom: -2px; width: 1px;
+    background: rgba(255, 106, 106, 0.62);
+    box-shadow: 0 0 5px rgba(255, 106, 106, 0.5);
+}
+/* Past the redline the whole readout goes hot — the number, not just the bar,
+   because the number is what gets read. */
+.hud-gauge.is-hot .hud-gauge-val { color: #ffb3b3; }
+
+@media (prefers-reduced-motion: reduce) { .hud-gauge-fill { transition: none; } }
+
 /* ── Agent Bus solar system ───────────────────────────────────── */
 
 /* No min-width any more: it used to be wider than the shared column on a

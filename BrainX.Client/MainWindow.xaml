@@ -4182,6 +4182,45 @@
                              estimates based on access-log.ndjson + tool-log.ndjson.
                              We don't see real Anthropic API tokens. -->
                         <Grid x:Name="TokensView" Visibility="Collapsed">
+                            <Grid.Resources>
+                                <!-- Mode pills. Same shape language as the chart chips below,
+                                     one size down, so the header reads as a control strip
+                                     rather than a second toolbar competing with the title. -->
+                                <Style x:Key="TokensModeChip" TargetType="ToggleButton">
+                                    <Setter Property="Background" Value="Transparent"/>
+                                    <Setter Property="Foreground" Value="{StaticResource TextMutedBrush}"/>
+                                    <Setter Property="BorderBrush" Value="{StaticResource NeuralLine}"/>
+                                    <Setter Property="BorderThickness" Value="1"/>
+                                    <Setter Property="FontSize" Value="10.5"/>
+                                    <Setter Property="FontFamily" Value="{StaticResource MonoFont}"/>
+                                    <Setter Property="Padding" Value="10,3"/>
+                                    <Setter Property="Margin" Value="4,0,0,0"/>
+                                    <Setter Property="Cursor" Value="Hand"/>
+                                    <Setter Property="Template">
+                                        <Setter.Value>
+                                            <ControlTemplate TargetType="ToggleButton">
+                                                <Border Background="{TemplateBinding Background}"
+                                                        BorderBrush="{TemplateBinding BorderBrush}"
+                                                        BorderThickness="{TemplateBinding BorderThickness}"
+                                                        Padding="{TemplateBinding Padding}"
+                                                        CornerRadius="10">
+                                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                </Border>
+                                            </ControlTemplate>
+                                        </Setter.Value>
+                                    </Setter>
+                                    <Style.Triggers>
+                                        <Trigger Property="IsChecked" Value="True">
+                                            <Setter Property="Background" Value="{StaticResource NeonCyanBrush}"/>
+                                            <Setter Property="Foreground" Value="#06060F"/>
+                                            <Setter Property="BorderBrush" Value="{StaticResource NeonCyanBrush}"/>
+                                        </Trigger>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}"/>
+                                        </Trigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Grid.Resources>
                             <Grid Margin="24,16">
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
@@ -4204,18 +4243,28 @@
                                                    Style="{StaticResource TypeViewSubtitle}" TextWrapping="Wrap" MaxWidth="640"
                                                    HorizontalAlignment="Left"/>
                                     </StackPanel>
-                                    <Border Grid.Column="1" VerticalAlignment="Top" Margin="16,4,0,0"
-                                            Background="{StaticResource NeuralBgInset}"
-                                            BorderBrush="{StaticResource NeuralLine}" BorderThickness="1"
-                                            CornerRadius="12" Padding="12,6">
-                                        <StackPanel>
-                                            <TextBlock Text="retrieval mode" FontSize="9.5"
-                                                       Foreground="{StaticResource TextMutedBrush}"/>
-                                            <TextBlock x:Name="TokensModeText" Text="—" FontSize="13" FontWeight="SemiBold"
-                                                       FontFamily="{StaticResource MonoFont}"
-                                                       Foreground="{StaticResource NeonCyanBrush}"/>
+                                    <!-- The switch itself, not a readout of it. It writes the same
+                                         vault config brain_set_mode writes, so the app and the
+                                         agents can never hold different ideas of the current mode. -->
+                                    <StackPanel Grid.Column="1" VerticalAlignment="Top" Margin="16,2,0,0">
+                                        <TextBlock Text="retrieval mode · cost per call" FontSize="9.5"
+                                                   Foreground="{StaticResource TextMutedBrush}"
+                                                   HorizontalAlignment="Right" Margin="0,0,2,5"/>
+                                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                            <ToggleButton x:Name="TokensModeEconomy" Content="economy"
+                                                          Style="{StaticResource TokensModeChip}" Tag="economy"
+                                                          ToolTip="Smallest payloads — ~773 tokens per search. compact keeps matchContext, so this drops packaging, not answers."
+                                                          Click="TokensMode_Click"/>
+                                            <ToggleButton x:Name="TokensModeBalanced" Content="balanced"
+                                                          Style="{StaticResource TokensModeChip}" Tag="balanced"
+                                                          ToolTip="Default — ~1,258 tokens per search."
+                                                          Click="TokensMode_Click"/>
+                                            <ToggleButton x:Name="TokensModeFull" Content="full"
+                                                          Style="{StaticResource TokensModeChip}" Tag="full"
+                                                          ToolTip="Everything, previews included — ~2,565 tokens per search."
+                                                          Click="TokensMode_Click"/>
                                         </StackPanel>
-                                    </Border>
+                                    </StackPanel>
                                 </Grid>
                                 <!-- Top-line stat cards -->
                                 <Grid Grid.Row="1" Margin="0,0,0,16">
@@ -4365,9 +4414,24 @@
                                                               Click="TokensRange_Click"/>
                                             </StackPanel>
                                             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                                                <TextBlock Text="View" FontSize="10" FontWeight="SemiBold"
+                                                <!-- Two separate questions, so two separate controls:
+                                                     WHAT is plotted (each bucket, or the running total)
+                                                     and HOW it is drawn. Cumulative is always a line,
+                                                     so the shape chips disable themselves there. -->
+                                                <TextBlock Text="Shape" FontSize="10" FontWeight="SemiBold"
                                                            Foreground="{StaticResource TextMutedBrush}"
                                                            VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                                <ToggleButton x:Name="TokensChartBars" Content="Bars" IsChecked="True"
+                                                              Style="{StaticResource TokensChip}"
+                                                              ToolTip="Each bucket as its own bar — reads discrete events."
+                                                              Click="TokensChartType_Click"/>
+                                                <ToggleButton x:Name="TokensChartLine" Content="Line"
+                                                              Style="{StaticResource TokensChip}"
+                                                              ToolTip="A glowing trace with a soft area beneath — reads the trend."
+                                                              Click="TokensChartType_Click"/>
+                                                <TextBlock Text="View" FontSize="10" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource TextMutedBrush}"
+                                                           VerticalAlignment="Center" Margin="14,0,8,0"/>
                                                 <ToggleButton x:Name="TokensViewBucket" Content="Per-bucket" IsChecked="True"
                                                               Style="{StaticResource TokensChip}"
                                                               Click="TokensViewMode_Click"/>

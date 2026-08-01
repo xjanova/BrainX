@@ -322,40 +322,65 @@ function renderSystem(d = {}) {
     pushLoad(_load.ram, d.ram);
     pushLoad(_load.vram, d.vram);
 
-    const rows = [];
-    // GPU and CPU carry a graph instead of a bar: same pixels, and the bar
-    // only ever said what the number beside it already said.
-    if (d.gpu != null) rows.push(['GPU', `${Math.round(d.gpu)}%`, null,
-        sparkline(_load.gpu, { id: 'spark-gpu', color: '#6cf0ff', max: 100, height: 16 })]);
-    if (d.cpu != null) rows.push(['CPU', `${Math.round(d.cpu)}%`, null,
-        sparkline(_load.cpu, { id: 'spark-cpu', color: '#a68bff', max: 100, height: 16 })]);
+    // Every live metric is a percentage of a real ceiling, so each one gets a
+    // real instrument: segmented bargraph, redline, and the history trace
+    // underneath. `redline` is where the reading stops being comfortable —
+    // 85 °C for a GPU, 90% for memory you can actually exhaust, none for load
+    // that is supposed to sit at 100% while work happens.
+    const gauges = [];
+    const G = (label, value, text, color, redline, spark) => {
+        if (value == null) return;
+        const pct = Math.max(0, Math.min(100, Number(value) || 0));
+        const hot = redline != null && pct >= redline;
+        gauges.push(
+            `<div class="hud-gauge${hot ? ' is-hot' : ''}" style="--g:${color}">
+               <div class="hud-gauge-head">
+                 <span class="hud-gauge-label">${esc(label)}</span>
+                 <span class="hud-gauge-val">${text}</span>
+               </div>
+               <div class="hud-gauge-track">
+                 <i class="hud-gauge-fill" style="width:${pct}%"></i>
+                 ${redline != null ? `<b class="hud-gauge-redline" style="left:${redline}%"></b>` : ''}
+               </div>
+               ${spark}
+             </div>`);
+    };
+
+    G('GPU', d.gpu, `${Math.round(d.gpu ?? 0)}<small>%</small>`, '#6cf0ff', null,
+        sparkline(_load.gpu, { id: 'spark-gpu', color: '#6cf0ff', max: 100, height: 14 }));
+    G('CPU', d.cpu, `${Math.round(d.cpu ?? 0)}<small>%</small>`, '#a68bff', null,
+        sparkline(_load.cpu, { id: 'spark-cpu', color: '#a68bff', max: 100, height: 14 }));
     // Temperature is the one that says whether the load above is SUSTAINABLE.
-    // Drawn against a fixed 100 °C ceiling so the line's height means the same
-    // thing every time you glance at it — autoscaling would make 45 °C idle
-    // look identical to 85 °C under load.
-    if (d.gpuTemp != null) rows.push(['GPU temp', `${Math.round(d.gpuTemp)}°C`, null,
-        sparkline(_load.temp, { id: 'spark-temp', color: '#ff9f4a', max: 100, height: 16 })]);
+    // Drawn against a fixed 100 °C ceiling so the bar means the same thing
+    // every time you glance at it — autoscaling would make 45 °C idle look
+    // identical to 85 °C under load.
+    G('GPU temp', d.gpuTemp, `${Math.round(d.gpuTemp ?? 0)}<small>°C</small>`, '#ff9f4a', 85,
+        sparkline(_load.temp, { id: 'spark-temp', color: '#ff9f4a', max: 100, height: 14 }));
     // VRAM before RAM: on this box the card is 8 GB and it is what runs out
     // first when a local model loads.
-    if (d.vram != null) rows.push(['VRAM', d.vramLabel || `${Math.round(d.vram)}%`, null,
-        sparkline(_load.vram, { id: 'spark-vram', color: '#5ce0a0', max: 100, height: 16 })]);
-    if (d.ram != null) rows.push(['RAM', d.ramLabel || `${Math.round(d.ram)}%`, null,
-        sparkline(_load.ram, { id: 'spark-ram', color: '#f07de0', max: 100, height: 16 })]);
+    G('VRAM', d.vram, esc(d.vramLabel || `${Math.round(d.vram ?? 0)}%`), '#5ce0a0', 90,
+        sparkline(_load.vram, { id: 'spark-vram', color: '#5ce0a0', max: 100, height: 14 }));
+    G('RAM', d.ram, esc(d.ramLabel || `${Math.round(d.ram ?? 0)}%`), '#f07de0', 90,
+        sparkline(_load.ram, { id: 'spark-ram', color: '#f07de0', max: 100, height: 14 }));
+
     // The old SYSTEM HEALTH card, verbatim — these are the lines the owner
-    // actually checks when something looks wrong.
-    if (d.vault) rows.push(['Vault', d.vault, null]);
-    if (d.db) rows.push(['DB', d.db, null]);
-    if (d.index) rows.push(['Index', d.index, null]);
-    if (d.ai) rows.push(['AI', d.ai, null]);
-    if (d.mesh) rows.push(['Mesh', d.mesh, null]);
+    // actually checks when something looks wrong. Text, not instruments:
+    // they have no ceiling to read against.
+    const rows = [];
+    if (d.vault) rows.push(['Vault', d.vault]);
+    if (d.db) rows.push(['DB', d.db]);
+    if (d.index) rows.push(['Index', d.index]);
+    if (d.ai) rows.push(['AI', d.ai]);
+    if (d.mesh) rows.push(['Mesh', d.mesh]);
     dotClass('hud-health-dot', d.healthy === false ? 'warn' : '');
 
-    setHTML('hud-system-body', rows.map(([l, v, bar, graph]) =>
+    const rowHtml = rows.map(([l, v]) =>
         `<div class="hud-row">
            <span class="hud-row-name">${esc(l)}</span>
            <span class="hud-row-val">${esc(v)}</span>
-           ${bar != null ? `<span class="hud-bar"><i style="width:${Math.max(0, Math.min(100, bar))}%"></i></span>` : ''}
-         </div>${graph || ''}`).join('') || emptyRow('no telemetry'));
+         </div>`).join('');
+
+    setHTML('hud-system-body', (gauges.join('') + rowHtml) || emptyRow('no telemetry'));
     markStep('system');
 }
 

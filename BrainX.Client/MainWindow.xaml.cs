@@ -10765,6 +10765,11 @@ public partial class MainWindow : Window
     /// independent). Default per-bucket so each event is visible.</summary>
     private bool _tokenChartCumulative;
 
+    /// <summary>Bars or a line for the per-bucket view. Bars read each bucket as
+    /// a discrete event; the line reads the trend across them. Same data, two
+    /// questions — so it is a choice, not a default.</summary>
+    private bool _tokenChartLine;
+
     /// <summary>One drawn point per bucket — populated at render time, consumed
     /// by MouseMove to find the nearest bucket and show its tooltip.</summary>
     private sealed class TokenChartPoint
@@ -10823,10 +10828,8 @@ public partial class MainWindow : Window
                 bucketMinutes: bucketMinutes);
 
             // Top-line stat cards (always reflect the visible range)
-            // The mode chip: the one setting that changes what everything on
-            // this page costs, so it belongs beside the numbers rather than
-            // buried in settings.
-            if (TokensModeText != null)
+            // Reflect whatever the vault config currently says — an agent may
+            // have changed it via brain_set_mode since this view last drew.
             {
                 var cfg = System.IO.Path.Combine(_vaultPath, ".obsidianx", "brain-config.json");
                 var modeName = "balanced";
@@ -10837,7 +10840,7 @@ public partial class MainWindow : Window
                             .Parse(System.IO.File.ReadAllText(cfg))["retrievalMode"]?.ToString() ?? modeName;
                 }
                 catch { /* unreadable config → show the documented default */ }
-                TokensModeText.Text = modeName;
+                SyncTokensModePills(modeName);
             }
 
             // Card 1 is MEASURED — Claude's own transcripts, via
@@ -10974,6 +10977,8 @@ public partial class MainWindow : Window
 
             if (_tokenChartCumulative)
                 DrawCumulative(points, maxY, padT, chartH);
+            else if (_tokenChartLine)
+                DrawPerBucketLine(points, maxY, padT, chartH);
             else
                 DrawPerBucket(points, maxY, padL, padR, padT, chartW, chartH, w, series.Buckets.Count);
 
@@ -11050,6 +11055,72 @@ public partial class MainWindow : Window
 
     /// <summary>Cumulative view — running-sum lines, savings band as fill.
     /// Shows long-term ROI but hides per-event behaviour.</summary>
+    /// <summary>
+    /// Per-bucket, drawn as a line instead of bars. Same numbers — bars answer
+    /// "how big was that hour", the line answers "which way is this going".
+    ///
+    /// Styled to match the galaxy it sits under: a soft filled area beneath the
+    /// trace, a blurred copy of the trace behind itself for the bloom the HUD
+    /// gets from its postprocessing pass, and no hard edges anywhere.
+    /// </summary>
+    private void DrawPerBucketLine(List<TokenChartPoint> points, long maxY,
+        double padT, double chartH)
+    {
+        if (points.Count < 2) return;
+
+        double Y(long v) => padT + chartH * (1 - Math.Clamp((double)v / maxY, 0, 1));
+        foreach (var p in points)
+        {
+            p.ActualY = Y(p.Bucket.ActualSpent);
+            p.ProjY   = Y(p.Bucket.ProjectionWithoutBrain);
+        }
+
+        var cyan = Color.FromRgb(0x6C, 0xF0, 0xFF);
+
+        // Area under the trace — a vertical fade rather than a flat wash, so
+        // the plot floor dissolves into the panel the way the galaxy does.
+        var area = new System.Windows.Shapes.Polygon
+        {
+            Fill = new LinearGradientBrush
+            {
+                StartPoint = new Point(0, 0), EndPoint = new Point(0, 1),
+                GradientStops =
+                {
+                    new GradientStop(Color.FromArgb(0x4A, cyan.R, cyan.G, cyan.B), 0),
+                    new GradientStop(Color.FromArgb(0x00, cyan.R, cyan.G, cyan.B), 1),
+                }
+            },
+            Stroke = null,
+        };
+        var pts = new System.Windows.Media.PointCollection();
+        pts.Add(new Point(points[0].X, padT + chartH));
+        foreach (var p in points) pts.Add(new Point(p.X, p.ActualY));
+        pts.Add(new Point(points[^1].X, padT + chartH));
+        area.Points = pts;
+        TokensCanvas.Children.Add(area);
+
+        // Bloom: the same trace, thicker and blurred, sitting behind the real
+        // one. Cheaper than a real glow effect and it reads identically.
+        var glow = new System.Windows.Shapes.Polyline
+        {
+            Stroke = new SolidColorBrush(Color.FromArgb(0x66, cyan.R, cyan.G, cyan.B)),
+            StrokeThickness = 6,
+            StrokeLineJoin = PenLineJoin.Round,
+            Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 7 },
+        };
+        foreach (var p in points) glow.Points.Add(new Point(p.X, p.ActualY));
+        TokensCanvas.Children.Add(glow);
+
+        var line = new System.Windows.Shapes.Polyline
+        {
+            Stroke = new SolidColorBrush(cyan),
+            StrokeThickness = 1.8,
+            StrokeLineJoin = PenLineJoin.Round,
+        };
+        foreach (var p in points) line.Points.Add(new Point(p.X, p.ActualY));
+        TokensCanvas.Children.Add(line);
+    }
+
     private void DrawCumulative(List<TokenChartPoint> points, long maxY,
         double padT, double chartH)
     {
@@ -11169,7 +11240,57 @@ public partial class MainWindow : Window
         TokensViewBucket.IsChecked = !cumulative;
         TokensViewCumulative.IsChecked = cumulative;
         _tokenChartCumulative = cumulative;
+        // Bars/line only describe the per-bucket view; cumulative is a running
+        // total and is always a line. Grey the choice out rather than leaving a
+        // control that silently does nothing.
+        if (TokensChartBars != null) TokensChartBars.IsEnabled = !cumulative;
+        if (TokensChartLine != null) TokensChartLine.IsEnabled = !cumulative;
         RenderTokenEconomyChart();
+    }
+
+    private void TokensChartType_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.Primitives.ToggleButton tb) return;
+        bool line = ReferenceEquals(tb, TokensChartLine);
+        TokensChartBars.IsChecked = !line;
+        TokensChartLine.IsChecked = line;
+        _tokenChartLine = line;
+        RenderTokenEconomyChart();
+    }
+
+    /// <summary>
+    /// The retrieval-mode pills. This writes the same vault config file that
+    /// brain_set_mode writes, because it is the same switch — the app and the
+    /// agents must not each keep their own idea of the current mode.
+    /// </summary>
+    private void TokensMode_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.Primitives.ToggleButton tb) return;
+        var mode = (tb.Tag as string) ?? "balanced";
+        try
+        {
+            var path = System.IO.Path.Combine(_vaultPath, ".obsidianx", "brain-config.json");
+            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
+            var cfg = System.IO.File.Exists(path)
+                ? Newtonsoft.Json.Linq.JObject.Parse(System.IO.File.ReadAllText(path))
+                : new Newtonsoft.Json.Linq.JObject();
+            cfg["retrievalMode"] = mode;
+            cfg["updatedAt"] = DateTime.UtcNow.ToString("O");
+            // UTF8 without BOM — a BOM breaks every downstream JSON reader.
+            System.IO.File.WriteAllText(path, cfg.ToString(Newtonsoft.Json.Formatting.Indented),
+                new System.Text.UTF8Encoding(false));
+        }
+        catch (Exception ex) { Debug.WriteLine($"TokensMode_Click: {ex.Message}"); }
+        SyncTokensModePills(mode);
+        RenderTokenEconomyChart();
+    }
+
+    private void SyncTokensModePills(string mode)
+    {
+        if (TokensModeEconomy == null) return;
+        TokensModeEconomy.IsChecked  = mode == "economy";
+        TokensModeBalanced.IsChecked = mode == "balanced";
+        TokensModeFull.IsChecked     = mode == "full";
     }
 
     // ── Hover crosshair + tooltip ──
