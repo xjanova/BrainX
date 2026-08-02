@@ -53,6 +53,26 @@ public class KnowledgeNode
     public string? CustomCategoryId { get; set; }
 
     /// <summary>
+    /// WHAT this note is — knowledge, rules to obey, a transferable procedure,
+    /// or a record of work. Categories answer "what subject"; this answers
+    /// "what sort of thing", which is the question retrieval needed and never
+    /// had. See <see cref="Services.NoteRouting"/>.
+    /// </summary>
+    public Services.NoteKind Kind { get; set; } = Services.NoteKind.Knowledge;
+
+    /// <summary>
+    /// WHICH project this belongs to, or null for "applies anywhere".
+    /// Rules are only rules inside their own scope: lotto's commit convention
+    /// is not a fact about this brain, and returning it as one is how an agent
+    /// ends up obeying another project's standards.
+    /// </summary>
+    public string? Scope { get; set; }
+
+    /// <summary>Which agent a rules file addresses ("claude", "codex"), when
+    /// its filename says so. null = any agent.</summary>
+    public string? Audience { get; set; }
+
+    /// <summary>
     /// All headings parsed from the note body. Used to resolve
     /// <c>[[Note#heading]]</c> wiki-links to specific sections so Claude
     /// can pull just the relevant chunk via <c>brain_get_section</c>

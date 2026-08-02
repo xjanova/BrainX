@@ -1457,6 +1457,24 @@ internal static partial class Program
             ["tags"] = new JArray(tags)
         };
         if (n.Tags.Count > TagCap) o["tagsTruncated"] = n.Tags.Count;
+
+        // WHAT this is and WHOSE it is — carried even in compact mode, because
+        // it is the field that stops a rule being read as a fact and it costs
+        // a few tokens. Searching "commit message convention" used to return
+        // lotto's CLAUDE.md at rank 1 with nothing saying those were lotto's
+        // rules; an agent working on a different repo would have obeyed them.
+        // Absent for ordinary unscoped knowledge, which is most of the vault —
+        // a badge on everything is a badge that says nothing.
+        var badge = BrainX.Core.Services.NoteRouting.Badge(ParseKind(n.Kind), n.Scope, n.Audience);
+        if (badge.Length > 0)
+        {
+            o["kind"] = n.Kind;
+            if (!string.IsNullOrEmpty(n.Scope)) o["scope"] = n.Scope;
+            if (!string.IsNullOrEmpty(n.Audience)) o["audience"] = n.Audience;
+            // One string the model reads without having to combine three fields.
+            o["appliesTo"] = badge;
+        }
+
         if (!compact)
         {
             o["category"] = n.PrimaryCategory;
@@ -1465,6 +1483,16 @@ internal static partial class Program
         }
         return o;
     }
+
+    /// <summary>
+    /// Export strings back to the enum. An export written before routing
+    /// existed has no kind at all, and must degrade to plain knowledge rather
+    /// than throwing — the whole vault would stop being searchable over a
+    /// field that is decoration.
+    /// </summary>
+    private static BrainX.Core.Services.NoteKind ParseKind(string? s) =>
+        Enum.TryParse<BrainX.Core.Services.NoteKind>(s, ignoreCase: true, out var k)
+            ? k : BrainX.Core.Services.NoteKind.Knowledge;
 
     private static string TruncatePreview(string? preview, int max)
     {

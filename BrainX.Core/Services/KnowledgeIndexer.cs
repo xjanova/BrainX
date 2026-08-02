@@ -281,6 +281,29 @@ public partial class KnowledgeIndexer
                 node.BacklinkIds = sources.ToList();
         }
 
+        // ── Routing dimensions ────────────────────────────────────────────
+        //
+        // WHAT a note is (kind) and WHO it belongs to (scope). Done here, after
+        // every node exists, because the set of projects is discovered FROM the
+        // vault — a tag only counts as a project when some folder under
+        // Imported/ carries that name. Otherwise "mcp" and "docs" would each
+        // become a project, and the importer's habit of scraping hex colours
+        // out of CSS into tags would invent a couple of hundred more.
+        var rels = graph.Nodes
+            .Select(n => Path.GetRelativePath(vaultPath, n.FilePath))
+            .ToList();
+        var projects = NoteRouting.DiscoverProjects(rels);
+        for (int i = 0; i < graph.Nodes.Count; i++)
+        {
+            var node = graph.Nodes[i];
+            var rel = rels[i];
+            node.Kind = NoteRouting.KindOf(rel, node.Tags);
+            node.Scope = NoteRouting.ScopeOf(rel, node.Tags, node.Kind, projects);
+            node.Audience = node.Kind == NoteKind.Instructions
+                ? NoteRouting.AudienceOf(Path.GetFileName(rel))
+                : null;
+        }
+
         // Build expertise map.
         //
         // Old formula was `Math.Min(1.0, sum / 10.0)` — `sum` of per-note

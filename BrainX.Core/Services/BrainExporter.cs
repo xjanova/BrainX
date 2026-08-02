@@ -110,6 +110,12 @@ public class BrainExporter
                 PrimaryCategory = node.PrimaryCategory.ToString(),
                 SecondaryCategories = node.SecondaryCategories.Select(c => c.ToString()).ToList(),
                 Tags = node.Tags,
+                // Routing dimensions travel with the export — the MCP reads
+                // this file, not the graph, so anything absent here is absent
+                // from every agent-facing answer.
+                Kind = node.Kind.ToString().ToLowerInvariant(),
+                Scope = node.Scope,
+                Audience = node.Audience,
                 WordCount = node.WordCount,
                 ModifiedAt = node.ModifiedAt,
                 Importance = Math.Round(node.Importance, 3),
@@ -365,6 +371,13 @@ public class NodeSummary
     public string Title { get; set; } = string.Empty;
     public string RelativePath { get; set; } = string.Empty;
     public string PrimaryCategory { get; set; } = string.Empty;
+
+    /// <summary>knowledge · instructions · playbook · session. See NoteRouting.</summary>
+    public string Kind { get; set; } = "knowledge";
+    /// <summary>Project this belongs to, or null for "applies anywhere".</summary>
+    public string? Scope { get; set; }
+    /// <summary>For instruction files: which agent they address.</summary>
+    public string? Audience { get; set; }
     public List<string> SecondaryCategories { get; set; } = [];
     public List<string> Tags { get; set; } = [];
     public int WordCount { get; set; }
