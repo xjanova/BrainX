@@ -106,6 +106,18 @@ public class SqliteBrainStorage : IBrainStorage
             CREATE INDEX IF NOT EXISTS ix_scopes_owner ON share_scopes(owner_address);
         """;
         cmd.ExecuteNonQuery();
+
+        // One event = one row, enforced by the engine. Kept OUT of the batch
+        // above: on a database that predates the fix the log still holds
+        // duplicates and this CREATE fails — which must not take the schema
+        // init down with it. RebuildAccessLog creates it after cleaning.
+        try
+        {
+            using var ix = _db.CreateCommand();
+            ix.CommandText = "CREATE UNIQUE INDEX IF NOT EXISTS ux_access_event ON access_log(ts, node_id, op)";
+            ix.ExecuteNonQuery();
+        }
+        catch (SqliteException) { /* legacy duplicates present — see RebuildAccessLog */ }
     }
 
     public void UpsertGraph(KnowledgeGraph graph)
@@ -243,18 +255,134 @@ public class SqliteBrainStorage : IBrainStorage
     }
 
     public void LogAccess(string nodeId, string op, string? context = null)
+        => LogAccess(nodeId, op, context, null);
+
+    public void LogAccess(string nodeId, string op, string? context, DateTime? eventTsUtc)
     {
         try
         {
             using var cmd = _db.CreateCommand();
-            cmd.CommandText = "INSERT INTO access_log(ts,node_id,op,context) VALUES(@ts,@n,@op,@ctx)";
-            cmd.Parameters.AddWithValue("@ts", DateTime.UtcNow.ToString("O"));
+            // OR IGNORE pairs with ux_access_event: replaying the same event
+            // (same 100ns timestamp, node, op) is a no-op instead of a new row.
+            // Real events can't collide — two distinct accesses to one node
+            // never share an identical O-format timestamp.
+            cmd.CommandText = "INSERT OR IGNORE INTO access_log(ts,node_id,op,context) VALUES(@ts,@n,@op,@ctx)";
+            cmd.Parameters.AddWithValue("@ts", (eventTsUtc ?? DateTime.UtcNow).ToString("O"));
             cmd.Parameters.AddWithValue("@n", nodeId);
             cmd.Parameters.AddWithValue("@op", op);
             cmd.Parameters.AddWithValue("@ctx", (object?)context ?? DBNull.Value);
             cmd.ExecuteNonQuery();
         }
         catch (SqliteException) { }
+    }
+
+    // ─────────── access-log maintenance ───────────
+    //
+    // The access log grew to 5.7 MILLION rows (97% of a 1.8 GB brain.db) for a
+    // vault whose real history is a few tens of thousands of events. Cause:
+    // the MCP trims its ndjson log to the last 2,000 lines whenever it passes
+    // 512 KB; the client's tail watcher saw the file shrink, reset its offset
+    // to zero, and re-ingested the whole window — stamping each replayed line
+    // with the CURRENT time, so nothing was ever recognisable as a duplicate.
+    // ~2,850 trim cycles later the table was 100x its truth, and "top
+    // accessed" measured trim survival, not access.
+    //
+    // The honest repair is not deduplication — the duplicates carry distinct
+    // timestamps, so there is nothing to dedupe BY. It is: this table is a
+    // CACHE of the ndjson event stream, and a cache that has diverged from its
+    // source gets rebuilt from it. History beyond the ndjson window is
+    // unrecoverable noise and goes; what remains is exactly what really
+    // happened, with its real timestamps.
+
+    /// <summary>Row count — the cheap health probe for the pathology above.</summary>
+    public long AccessLogRowCount()
+    {
+        try
+        {
+            using var cmd = _db.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM access_log";
+            return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L);
+        }
+        catch (SqliteException) { return 0; }
+    }
+
+    /// <summary>
+    /// Replace the whole access log with the given events (the current ndjson
+    /// window), then reclaim the file. Returns (rowsBefore, rowsAfter,
+    /// bytesReclaimed). VACUUM needs the writer lock — if another process
+    /// (an MCP session writing note_sha_history) holds it, the rebuild still
+    /// succeeds and only the shrink is deferred to the next successful run.
+    /// </summary>
+    public (long Before, long After, long Reclaimed) RebuildAccessLog(
+        IEnumerable<(DateTime TsUtc, string NodeId, string Op, string? Context)> events)
+    {
+        var before = AccessLogRowCount();
+        var sizeBefore = SafeDbSize();
+
+        // The ndjson itself carries literal duplicate lines — each MCP process
+        // trims the file under its own per-process lock, so a trim racing an
+        // append can rewrite ranges twice. INSERT OR IGNORE can't catch them
+        // here because on a legacy database the unique index doesn't exist yet
+        // (that's what this method is fixing), and CREATE UNIQUE INDEX over
+        // landed duplicates throws. Found by dry-running against a copy of the
+        // real vault, not by reasoning.
+        events = events
+            .GroupBy(e => (e.TsUtc, e.NodeId, e.Op))
+            .Select(g => g.First())
+            .ToList();
+
+        using (var tx = _db.BeginTransaction())
+        {
+            using (var clear = _db.CreateCommand())
+            {
+                clear.Transaction = tx;
+                clear.CommandText = "DELETE FROM access_log";
+                clear.ExecuteNonQuery();
+            }
+
+            using var ins = _db.CreateCommand();
+            ins.Transaction = tx;
+            ins.CommandText = "INSERT OR IGNORE INTO access_log(ts,node_id,op,context) VALUES(@ts,@n,@op,@ctx)";
+            var pTs = ins.Parameters.Add("@ts", SqliteType.Text);
+            var pN = ins.Parameters.Add("@n", SqliteType.Text);
+            var pOp = ins.Parameters.Add("@op", SqliteType.Text);
+            var pCtx = ins.Parameters.Add("@ctx", SqliteType.Text);
+            foreach (var (ts, node, op, ctx) in events)
+            {
+                pTs.Value = ts.ToString("O");
+                pN.Value = node;
+                pOp.Value = op;
+                pCtx.Value = (object?)ctx ?? DBNull.Value;
+                ins.ExecuteNonQuery();
+            }
+            tx.Commit();
+        }
+
+        // The guard that makes the pathology structurally unrepeatable — only
+        // creatable now that the duplicates are gone.
+        try
+        {
+            using var ix = _db.CreateCommand();
+            ix.CommandText = "CREATE UNIQUE INDEX IF NOT EXISTS ux_access_event ON access_log(ts, node_id, op)";
+            ix.ExecuteNonQuery();
+        }
+        catch (SqliteException) { /* next rebuild retries */ }
+
+        try
+        {
+            using var vac = _db.CreateCommand();
+            vac.CommandText = "VACUUM";
+            vac.ExecuteNonQuery();
+        }
+        catch (SqliteException) { /* another writer holds the db — space returns next run */ }
+
+        return (before, AccessLogRowCount(), Math.Max(0, sizeBefore - SafeDbSize()));
+    }
+
+    private long SafeDbSize()
+    {
+        try { return new FileInfo(_dbPath).Length; }
+        catch { return 0; }
     }
 
     public List<AccessSummary> TopAccessed(int limit = 10, TimeSpan? window = null)

@@ -30,6 +30,17 @@ public interface IBrainStorage : IDisposable
     /// <summary>Record that a node was accessed (MCP tool call, user click).</summary>
     void LogAccess(string nodeId, string op, string? context = null);
 
+    /// <summary>
+    /// Same, but stamped with the EVENT's own time rather than the insert
+    /// time. The distinction exists because the client mirrors events out of
+    /// the MCP's ndjson log — discarding the original timestamp there turned
+    /// every re-read into a brand-new event, which is how one 2,000-line file
+    /// became 5.7 million SQLite rows. Default forwards to the 3-arg form so
+    /// providers that don't care don't have to.
+    /// </summary>
+    void LogAccess(string nodeId, string op, string? context, DateTime? eventTsUtc)
+        => LogAccess(nodeId, op, context);
+
     /// <summary>Top N most-accessed nodes since the given time.</summary>
     List<AccessSummary> TopAccessed(int limit = 10, TimeSpan? window = null);
 

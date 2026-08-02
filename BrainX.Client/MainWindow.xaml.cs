@@ -106,6 +106,18 @@ public partial class MainWindow : Window
     private DispatcherTimer? _accessLogTimer;
     private int _recentAccessCount;   // for status bar counter
 
+    /// <summary>
+    /// Timestamp (O-format, lexically ordered) of the newest ndjson line
+    /// already processed. The MCP trims that file to its last 2,000 lines
+    /// whenever it crosses 512 KB; the tail watcher sees it shrink and resets
+    /// to offset 0 — and before this marker existed, it then re-ingested the
+    /// entire surviving window as brand-new events. ~2,850 trim cycles turned
+    /// 2,000 real lines into 5.7 MILLION SQLite rows (97% of a 1.8 GB
+    /// brain.db) and made "top accessed" measure trim survival, not access.
+    /// After a reset, only lines newer than this replay.
+    /// </summary>
+    private string _accessLogLastTs = "";
+
     // AutoLinker config
     private bool _autoLinkEnabled = true;
     private bool _showAutoEdges = true;
@@ -244,6 +256,11 @@ public partial class MainWindow : Window
         _vaultPath = @"G:\Obsidian";
         if (Environment.GetCommandLineArgs().Length > 1)
             _vaultPath = Environment.GetCommandLineArgs()[1];
+        // A vault moved via Settings ▸ Move vault is remembered in a pointer
+        // file OUTSIDE the vault — a pointer stored inside the thing it points
+        // at would have moved along with it. CLI argument still wins above.
+        else if (ReadVaultPointer() is string remembered)
+            _vaultPath = remembered;
         else if (!Directory.Exists(_vaultPath))
         {
             // Public install — G:\Obsidian is the dev machine's vault and won't
@@ -257,6 +274,9 @@ public partial class MainWindow : Window
             catch { /* IndexVault re-creates it later; never block startup */ }
         }
         _identityPath = Path.Combine(_vaultPath, ".obsidianx", "identity.json");
+        // Self-healing: whatever vault this launch actually uses becomes the
+        // remembered one, so a hand-typed CLI path sticks for next time too.
+        WriteVaultPointer(_vaultPath);
 
         // First-run / version-bump install of brain-save policy into the
         // user's Claude Code memory dir. Idempotent — silently skips if
@@ -9661,10 +9681,15 @@ public partial class MainWindow : Window
             Header = Path.GetFileName(_vaultPath),
             IsExpanded = true,
             Foreground = (SolidColorBrush)FindResource("NeonCyanBrush"),
-            FontWeight = FontWeights.SemiBold
+            FontWeight = FontWeights.SemiBold,
+            Tag = new VaultFolderTag(_vaultPath)
         };
         AddDirToTree(root, _vaultPath);
         VaultTree.Items.Add(root);
+        // The listing pane starts on the vault root rather than on its
+        // "select a folder" placeholder — an explorer that opens empty reads
+        // as an explorer that is broken, which is exactly how it was reported.
+        RenderVaultListing(_vaultPath);
     }
 
     private void AddDirToTree(TreeViewItem parent, string path)
@@ -9675,7 +9700,16 @@ public partial class MainWindow : Window
             {
                 var name = Path.GetFileName(dir);
                 if (name.StartsWith('.')) continue;
-                var item = new TreeViewItem { Header = $"\U0001F4C1 {name}", Foreground = (SolidColorBrush)FindResource("TextSecondaryBrush") };
+                // Folder tag is a VaultFolderTag, NOT a string: every existing
+                // handler (open/rename/delete/double-click) pattern-matches
+                // `Tag is string` to mean "a file", and a folder path satisfying
+                // that would make Delete happily File.Delete a directory.
+                var item = new TreeViewItem
+                {
+                    Header = $"\U0001F4C1 {name}",
+                    Foreground = (SolidColorBrush)FindResource("TextSecondaryBrush"),
+                    Tag = new VaultFolderTag(dir)
+                };
                 AddDirToTree(item, dir);
                 parent.Items.Add(item);
             }
@@ -12008,14 +12042,10 @@ public partial class MainWindow : Window
         StatusText.Text = $"Brain name updated to '{newName}'";
     }
 
-    private void ChangeVaultPath_Click(object s, RoutedEventArgs e)
-    {
-        MessageBox.Show(
-            "To change vault path, restart BrainX with:\n\n" +
-            "  BrainX.Client.exe \"C:\\path\\to\\vault\"\n\n" +
-            $"Current: {_vaultPath}",
-            "Change Vault Path", MessageBoxButton.OK, MessageBoxImage.Information);
-    }
+    // Was a MessageBox telling the owner to restart with a CLI argument —
+    // instructions where a feature should be. The real move lives in
+    // MainWindow.VaultMove.cs.
+    private void ChangeVaultPath_Click(object s, RoutedEventArgs e) => MoveVault_Click(s, e);
 
     private void SaveServerUrl_Click(object s, RoutedEventArgs e)
     {
@@ -13334,12 +13364,64 @@ public partial class MainWindow : Window
         }
         catch { _accessLogOffset = 0; }
 
+        RepairAccessLogIfBloated();
+
         _accessLogTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
             Interval = TimeSpan.FromMilliseconds(400)
         };
         _accessLogTimer.Tick += (_, _) => PollAccessLog();
         _accessLogTimer.Start();
+    }
+
+    /// <summary>
+    /// One-time repair for a database poisoned by the trim-replay loop (see
+    /// <see cref="_accessLogLastTs"/>). Rebuilds the SQLite access log from
+    /// the ndjson window — the actual source of truth, real timestamps intact
+    /// — and VACUUMs the reclaimed space. 200k is far above anything organic
+    /// (real usage is a few hundred events a day) and far below the 5.7M the
+    /// bug produced, so the trigger can't misfire on a healthy vault; a
+    /// healthy vault pays one COUNT(*) here and nothing else.
+    /// </summary>
+    private void RepairAccessLogIfBloated()
+    {
+        if (_storage is not SqliteBrainStorage sqlite) return;
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                var rows = sqlite.AccessLogRowCount();
+                if (rows < 200_000) return;
+
+                Dispatcher.BeginInvoke(() => StatusText.Text =
+                    $"🧹 Access log has {rows:N0} rows (trim-replay bug) — rebuilding from source…");
+
+                var events = new List<(DateTime, string, string, string?)>();
+                foreach (var line in File.ReadAllLines(AccessLogPath))
+                {
+                    if (string.IsNullOrWhiteSpace(line)) continue;
+                    try
+                    {
+                        var o = Newtonsoft.Json.Linq.JObject.Parse(line);
+                        var node = o["node_id"]?.ToString();
+                        if (string.IsNullOrEmpty(node)) continue;
+                        if (!DateTime.TryParse(o["ts"]?.ToString(), null,
+                                System.Globalization.DateTimeStyles.AdjustToUniversal |
+                                System.Globalization.DateTimeStyles.AssumeUniversal, out var ts)) continue;
+                        events.Add((ts, node, o["op"]?.ToString() ?? "mcp", o["context"]?.ToString()));
+                    }
+                    catch (Newtonsoft.Json.JsonException) { /* torn line mid-append */ }
+                }
+
+                var (before, after, reclaimed) = sqlite.RebuildAccessLog(events);
+                Dispatcher.BeginInvoke(() => StatusText.Text =
+                    $"🧹 Access log rebuilt: {before:N0} → {after:N0} rows · {reclaimed / (1024.0 * 1024):F0} MB reclaimed");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Access-log repair failed (non-fatal): {ex.Message}");
+            }
+        });
     }
 
     private bool _accessLogPollInFlight;
@@ -13364,6 +13446,19 @@ public partial class MainWindow : Window
             foreach (var line in result.Lines)
             {
                 if (string.IsNullOrWhiteSpace(line)) continue;
+                // After a trim-reset the window is almost entirely lines this
+                // session has already seen. Replaying them re-pulses the whole
+                // galaxy and re-logs every event — skip anything not strictly
+                // newer than the last processed timestamp. O-format compares
+                // correctly as a plain string. Applied only on reset: the
+                // normal path can't produce duplicates (the offset is the
+                // dedup), and real cross-process appends can interleave a few
+                // ms out of order, which must not cost events in normal flow.
+                if (result.WasReset)
+                {
+                    var ts = ExtractTs(line);
+                    if (ts != null && string.CompareOrdinal(ts, _accessLogLastTs) <= 0) continue;
+                }
                 HandleAccessLine(line);
                 newEvents++;
             }
@@ -13380,15 +13475,18 @@ public partial class MainWindow : Window
         finally { _accessLogPollInFlight = false; }
     }
 
-    private static (List<string>? Lines, long NewOffset) ReadAccessLogTail(string path, long offset)
+    private static (List<string>? Lines, long NewOffset, bool WasReset) ReadAccessLogTail(string path, long offset)
     {
         try
         {
-            if (!File.Exists(path)) return (null, offset);
+            if (!File.Exists(path)) return (null, offset, false);
             var fi = new FileInfo(path);
-            // File was truncated (e.g. trim in MCP) — reset offset
-            if (fi.Length < offset) offset = 0;
-            if (fi.Length == offset) return (null, offset);
+            // File shrank — the MCP's 512 KB trim rewrote it. The caller must
+            // know, because everything read from offset 0 is a REPLAY of a
+            // window it has mostly already processed, not new traffic.
+            bool reset = fi.Length < offset;
+            if (reset) offset = 0;
+            if (fi.Length == offset) return (null, offset, false);
 
             using var fs = new FileStream(path, FileMode.Open,
                 FileAccess.Read, FileShare.ReadWrite);
@@ -13398,10 +13496,21 @@ public partial class MainWindow : Window
             var lines = new List<string>();
             string? line;
             while ((line = sr.ReadLine()) != null) lines.Add(line);
-            return (lines, fs.Position);
+            return (lines, fs.Position, reset);
         }
-        catch (IOException) { return (null, offset); }
-        catch (UnauthorizedAccessException) { return (null, offset); }
+        catch (IOException) { return (null, offset, false); }
+        catch (UnauthorizedAccessException) { return (null, offset, false); }
+    }
+
+    /// <summary>The "ts" value of an ndjson line, without a full JSON parse —
+    /// this runs on every line of a reset window.</summary>
+    private static string? ExtractTs(string line)
+    {
+        var i = line.IndexOf("\"ts\":\"", StringComparison.Ordinal);
+        if (i < 0) return null;
+        i += 6;
+        var end = line.IndexOf('"', i);
+        return end > i ? line[i..end] : null;
     }
 
     private void HandleAccessLine(string json)
@@ -13418,6 +13527,12 @@ public partial class MainWindow : Window
             var obj = Newtonsoft.Json.Linq.JObject.Parse(json);
             var nodeId = obj["node_id"]?.ToString();
             var op = obj["op"]?.ToString() ?? "mcp";
+
+            // Remember the newest event time we've processed — the reset
+            // replay filter in PollAccessLog compares against this.
+            var tsStr = obj["ts"]?.ToString();
+            if (tsStr != null && string.CompareOrdinal(tsStr, _accessLogLastTs) > 0)
+                _accessLogLastTs = tsStr;
 
             // No specific node on this line (e.g. brain_stats / brain_list /
             // brain_create_note, or a search that pinned nothing). Per the
@@ -13458,12 +13573,20 @@ public partial class MainWindow : Window
                 }
             }
 
-            // Also persist into storage for "top accessed" queries
+            // Also persist into storage for "top accessed" queries — stamped
+            // with the EVENT's time, not now. Insert-time stamps are what made
+            // every trim-replay look like fresh traffic (nothing to dedupe by).
             try
             {
+                DateTime? eventTs = null;
+                if (DateTime.TryParse(tsStr, null,
+                        System.Globalization.DateTimeStyles.AdjustToUniversal |
+                        System.Globalization.DateTimeStyles.AssumeUniversal, out var parsed))
+                    eventTs = parsed;
                 _storage?.LogAccess(nodeId,
                     obj["op"]?.ToString() ?? "mcp",
-                    obj["context"]?.ToString());
+                    obj["context"]?.ToString(),
+                    eventTs);
             }
             catch { /* storage is best-effort */ }
         }
@@ -14374,8 +14497,20 @@ public partial class MainWindow : Window
         IndexVault();
         _dashPhysics.LoadFromGraphDiff(_graph);
         _graphPhysics.LoadFromGraphDiff(_graph);
+
+        // Re-index used to complete invisibly: the galaxy pages weren't on
+        // screen, the diff load barely moves settled nodes, and the only
+        // evidence was a status-bar line. Owner asked for the opposite —
+        // switch to where the stars ARE and let the layout visibly redo
+        // itself. Reheating the annealing temperature makes the simulation
+        // take large steps again, so the re-arrangement is something you
+        // watch, not something you take on faith.
+        _dashPhysics.Temperature = 1.5;
+        _graphPhysics.Temperature = 1.5;
+        Nav_Click(NavBrainGraph, new RoutedEventArgs());
+
         UpdateUI();
-        StatusText.Text = "Vault refreshed";
+        StatusText.Text = "Vault re-indexed — watching the graph settle";
     }
 
     /// <summary>Update all [[wiki-links]] in the vault when a note is renamed.</summary>
