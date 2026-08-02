@@ -65,6 +65,18 @@ public partial class MainWindow
             var codexPresent = FindCodexCli() is not null;
             var cluadexPresent = Directory.Exists(Path.GetDirectoryName(CluadeXMcpConfigPath())!);
 
+            // The MCP card's Uninstall / Remove-hook buttons used to be undone
+            // by the very next launch, because this ran unconditionally and no
+            // flag recorded that the owner had said no. Both dialogs even
+            // admitted it ("BrainX re-installs the hook automatically on next
+            // start") — which documents a bug rather than excusing it. An
+            // opt-out that expires in one restart is not an opt-out.
+            if (!_mcpAutoRegisterEnabled)
+            {
+                SetOnboardStatus("Auto-registration is OFF (Settings ▸ MCP). BrainX will not add itself to Claude/Codex configs.");
+                return;
+            }
+
             var desktopChanged = EnsureClaudeDesktopRegistered(exe);
             var cliChanged = await EnsureClaudeCliRegisteredAsync(exe);
             // Codex speaks the SAME stdio MCP protocol as Claude, so the exact
@@ -91,7 +103,7 @@ public partial class MainWindow
             try { cluadexChanged = EnsureCluadeXRegistered(exe); }
             catch { /* never block onboarding on a sibling app's config */ }
 
-            var hookChanged = EnsureAutoIngestHookInstalledSilent();
+            var hookChanged = _autoIngestHookEnabled && EnsureAutoIngestHookInstalledSilent();
 
             // Friendly, non-technical confirmation. The status-bar chips
             // (RefreshMcpStatusBar, polled every 3s) flip to green on their own —
@@ -167,6 +179,21 @@ public partial class MainWindow
                 var stable = Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                     "BrainX", "mcp", "brainx-mcp.exe");
+
+                // Spawn ONLY when the mirror is missing or stale.
+                //
+                // This ran unconditionally, and it is a synchronous
+                // WaitForExit(20_000) — on the UI thread, from
+                // PopulateMcpCommands during window construction AND from the
+                // 3-second status-bar timer. On an installed build that is a
+                // process spawn every three seconds with the dispatcher held,
+                // which is a frozen window pretending to be a slow one.
+                // The sync is idempotent, so the common case is: already done,
+                // nothing to do, return.
+                if (File.Exists(stable) &&
+                    File.GetLastWriteTimeUtc(stable) >= File.GetLastWriteTimeUtc(packaged))
+                    return stable;
+
                 var psi = new ProcessStartInfo
                 {
                     FileName = packaged,
@@ -934,7 +961,10 @@ public partial class MainWindow
 
             hooks["PostToolUse"] = postToolUse;
             root["hooks"] = hooks;
-            File.WriteAllText(path, root.ToString(Newtonsoft.Json.Formatting.Indented));
+            // Backup + atomic replace, same as the manual Install path. This
+            // one runs at EVERY startup and unattended, which makes it the
+            // more dangerous of the two, not the less.
+            WriteJsonSafely(path, root.ToString(Newtonsoft.Json.Formatting.Indented));
             return true;
         }
         catch

@@ -2336,6 +2336,11 @@ public partial class MainWindow : Window
         InitializeIdentity();
 
         LoadSettingsFromFile();
+        // The Software-update card was painted by UpdateAboutCard() above, i.e.
+        // BEFORE the persisted toggle was read — so a user who switched
+        // auto-update off came back to a ticked box claiming updates install
+        // themselves. Repaint now that the real value is in hand.
+        RefreshUpdatePanel();
 
         // Auto-update starts HERE, not before LoadSettingsFromFile — the whole
         // feature is gated on a persisted toggle, and reading it after acting
@@ -5444,7 +5449,38 @@ public partial class MainWindow : Window
         if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
 
         if (File.Exists(_identityPath))
-            _identity = BrainIdentity.LoadFromFile(_identityPath);
+        {
+            // The private key is DPAPI-wrapped to the CURRENT USER. Any vault
+            // that arrives from somewhere else — copied to a second machine,
+            // opened under another Windows account, restored from a backup, or
+            // moved by this app's own "Move vault" — cannot be unwrapped, and
+            // ProtectedData.Unprotect throws. This runs inside `async void
+            // Window_Loaded` with no DispatcherUnhandledException handler
+            // anywhere in the app, so an unreadable identity was a hard crash
+            // during startup with nothing on screen to explain it.
+            //
+            // A brain that cannot read its old identity still has all its
+            // notes; only the signing key is lost. So: keep the broken file
+            // (never silently delete something unrecoverable), mint a fresh
+            // identity so the app opens, and say so.
+            try
+            {
+                _identity = BrainIdentity.LoadFromFile(_identityPath);
+            }
+            catch (Exception ex)
+            {
+                var quarantine = _identityPath + ".unreadable";
+                try { File.Copy(_identityPath, quarantine, overwrite: true); } catch { }
+                Debug.WriteLine($"identity.json unreadable ({ex.Message}) — regenerating");
+
+                _identity = BrainIdentity.Generate(Environment.UserName + "'s Brain");
+                _identity.SaveToFile(_identityPath);
+                _identityRecoveryNotice =
+                    "This vault's identity could not be decrypted on this Windows account " +
+                    $"(kept as {Path.GetFileName(quarantine)}). A new brain address was generated — " +
+                    "your notes are untouched, but peers who knew the old address will need the new one.";
+            }
+        }
         else
         {
             _identity = BrainIdentity.Generate(Environment.UserName + "'s Brain");
@@ -5469,7 +5505,17 @@ public partial class MainWindow : Window
 
         UpdateBrainTitleLabel();
         FullAddressText.Text = _identity.Address;
+
+        // Said on the status bar rather than in a modal: the app is usable and
+        // a dialog at startup blocks the boot the user is waiting on.
+        if (_identityRecoveryNotice != null && StatusText != null)
+            StatusText.Text = "⚠ " + _identityRecoveryNotice;
     }
+
+    /// <summary>Set when a DPAPI-unwrappable identity forced a regeneration, so
+    /// the Identity card can explain it instead of silently showing a new
+    /// address the owner never asked for.</summary>
+    private string? _identityRecoveryNotice;
 
     /// <summary>Shows "(DisplayName · 0xBRAIN-abcd)" next to the app name in the title bar.</summary>
     private void UpdateBrainTitleLabel()
@@ -5569,7 +5615,12 @@ public partial class MainWindow : Window
                 // (e.g. "2.0.40-dev+7607ba0-dirty") so the dev-mode +
                 // commit + dirty tags stay accessible without cluttering
                 // the headline.
-                var detail = $"v{display} · assembly {ver}";
+                //
+                // "· assembly {ver}" is GONE. AssemblyVersion is pinned to
+                // 2.0.0.0 by the csproj and can never change, so it printed a
+                // constant next to the real version and read as version drift —
+                // a number that looks like information and carries none.
+                var detail = $"v{display}";
                 AboutBuildText.Text = string.IsNullOrEmpty(build)
                     ? detail
                     : $"{detail} · built {build}";
@@ -7902,6 +7953,19 @@ public partial class MainWindow : Window
         if (tag == "Dashboard") _ = InitializeDashUniverseAsync();
         if (tag == "Sharing") RefreshSharingScreen();
         if (tag == "Ssh") RefreshSshView();
+        // Settings was the one view with no refresh here, so every card on it
+        // showed whatever it happened to be painted with at startup — an
+        // update state from before the check ran, a storage status from before
+        // the provider was applied. The cards are cheap; repaint on arrival.
+        if (tag == "Settings")
+        {
+            RefreshUpdatePanel();
+            PopulateStorageSettings();
+            PopulateImportSettings();
+            PopulateSettings();
+            RefreshMcpCardForBuildKind();
+            RefreshGardenerCard();
+        }
     }
 
     // ═══════════════════════════════════════
@@ -8839,18 +8903,15 @@ public partial class MainWindow : Window
     // file is missing, and BrainExporter keeps the auto-managed section
     // fresh on every export.
 
-    private void ReindexVault_Click(object s, RoutedEventArgs e)
-    {
-        IndexVault();
-        _dashPhysics.LoadFromGraphDiff(_graph);
-        _graphPhysics.LoadFromGraphDiff(_graph);
-        // LoadFromGraph already auto-tunes + warmups — just a tiny kick
-        var kick = _graph.TotalNodes > 20 ? 0.05 : 0.3;
-        _dashPhysics.Disturb(kick);
-        _graphPhysics.Disturb(kick);
-        UpdateUI();
-        StatusText.Text = $"Re-indexed: {_graph.TotalNodes} nodes, {_graph.TotalEdges} edges";
-    }
+    /// <summary>
+    /// Every Re-index button in the app now takes the SAME cancellable path the
+    /// HUD uses. This one used to call the synchronous IndexVault() directly,
+    /// which walks the whole vault on the dispatcher thread: the window froze
+    /// for the duration and there was no way to stop it — while a cancellable
+    /// twin already existed a few thousand lines away and was wired to exactly
+    /// one caller.
+    /// </summary>
+    private void ReindexVault_Click(object s, RoutedEventArgs e) => _ = ToggleReindexAsync();
 
     private void OpenObsidian_Click(object s, RoutedEventArgs e)
     {
@@ -9376,6 +9437,18 @@ public partial class MainWindow : Window
             return;
         }
 
+        // The card promises these "never leave your machine". That promise is
+        // only true if the destination IS this machine — AiServerBase comes
+        // from a settings file, and a hub URL pasted into the wrong box would
+        // POST every API key to a stranger. Refuse rather than trust.
+        if (!IsLoopback(AiServerBase))
+        {
+            AiKeysStatus.Text =
+                $"❌ Refused: the AI server is set to {AiServerBase}, which is not this machine. " +
+                "Keys are only ever sent to localhost. Fix the local AI base in Settings ▸ Network.";
+            return;
+        }
+
         try
         {
             using var http = BuildLocalHttpClient();
@@ -9403,9 +9476,27 @@ public partial class MainWindow : Window
 
     private async void RefreshAfterKeys_Click(object s, RoutedEventArgs e)
     {
-        await LoadAiBackends();
-        await RefreshAiKeyStatus();
-        AiKeysStatus.Text = "Backends reloaded. Check the Backend dropdown in Claude view.";
+        // This used to announce success unconditionally, after up to ~48s of
+        // silence, even when the server was not running and nothing reloaded.
+        // Say what is happening, then say what actually happened.
+        var btn = s as Button;
+        if (btn != null) btn.IsEnabled = false;
+        AiKeysStatus.Text = "Reloading backends…";
+        try
+        {
+            await LoadAiBackends();
+            await RefreshAiKeyStatus();
+
+            var n = AiBackendCombo?.Items.Count ?? 0;
+            AiKeysStatus.Text = n > 0
+                ? $"✅ {n} backend(s) available. Pick one in the Claude view's Backend dropdown."
+                : $"⚠ No backends came back — is the local brain server running at {AiServerBase}?";
+        }
+        catch (Exception ex)
+        {
+            AiKeysStatus.Text = $"❌ Reload failed: {ex.Message}";
+        }
+        finally { if (btn != null) btn.IsEnabled = true; }
     }
 
     private async Task RefreshAiKeyStatus()
@@ -9426,7 +9517,20 @@ public partial class MainWindow : Window
             OpenRouterKeyStatus.Foreground = IsKeySet(root, "openrouter_api_key") ? greenBrush : mutedBrush;
             DeepSeekKeyStatus.Foreground = IsKeySet(root, "deepseek_api_key") ? greenBrush : mutedBrush;
         }
-        catch { /* server might not be up */ }
+        catch
+        {
+            // Swallowing this printed "(not set)" for all three — which is a
+            // CLAIM, and a wrong one: it says the keys are missing when what is
+            // really missing is the server that would know. "unknown" is the
+            // only honest word when nobody answered.
+            var mutedBrush = (SolidColorBrush)FindResource("TextMutedBrush");
+            foreach (var tb in new[] { NimKeyStatus, OpenRouterKeyStatus, DeepSeekKeyStatus })
+            {
+                if (tb == null) continue;
+                tb.Text = "(unknown — server not reachable)";
+                tb.Foreground = mutedBrush;
+            }
+        }
     }
 
     private static bool IsKeySet(Newtonsoft.Json.Linq.JObject root, string field) =>
@@ -12212,6 +12316,16 @@ public partial class MainWindow : Window
         SettingsBrainAddress.Text = _identity.Address;
         SettingsVaultPath.Text = _vaultPath;
         SettingsServerUrl.Text = _hubUrl;
+        if (SettingsLocalAiBase != null) SettingsLocalAiBase.Text = _localAiBase;
+
+        // A regenerated identity has to be explained where the address is
+        // shown, not only in a status line that the next message overwrites.
+        if (IdentityNotice != null)
+        {
+            IdentityNotice.Text = _identityRecoveryNotice ?? "";
+            IdentityNotice.Visibility = _identityRecoveryNotice == null
+                ? Visibility.Collapsed : Visibility.Visible;
+        }
     }
 
     private void PopulateMatchCategories()
@@ -12228,10 +12342,57 @@ public partial class MainWindow : Window
         MatchCategoryCombo.SelectedIndex = 0;
     }
 
+    /// <summary>
+    /// Copy identity.json somewhere the owner controls. Without this the ECDSA
+    /// key exists in exactly one place, wrapped to one Windows account, and
+    /// losing it loses the brain's address permanently — peers who knew it are
+    /// talking to a name that no longer answers.
+    /// </summary>
+    private void BackupIdentity_Click(object s, RoutedEventArgs e)
+    {
+        if (!File.Exists(_identityPath))
+        {
+            MessageBox.Show(this, "No identity.json to back up yet.", "Back up identity");
+            return;
+        }
+        var dlg = new Microsoft.Win32.SaveFileDialog
+        {
+            Title = "Save a copy of this brain's identity",
+            FileName = $"brainx-identity-{_identity.Address}.json",
+            Filter = "Identity file (*.json)|*.json",
+        };
+        if (dlg.ShowDialog() != true) return;
+        try
+        {
+            File.Copy(_identityPath, dlg.FileName, overwrite: true);
+            // Said plainly, because the copy is NOT portable and a backup the
+            // owner misunderstands is worse than none: they will believe they
+            // are covered on a machine where the file cannot be read.
+            MessageBox.Show(this,
+                $"Saved to {dlg.FileName}\n\n" +
+                "Keep this somewhere safe. The private key inside is encrypted to THIS Windows " +
+                "account — restoring it on another account or PC will not work, so treat it as " +
+                "protection against losing this vault, not as a way to move the identity.",
+                "Identity backed up", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Backup failed: {ex.Message}", "Back up identity",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
     private void SaveBrainName_Click(object s, RoutedEventArgs e)
     {
         var newName = SettingsBrainName.Text.Trim();
-        if (string.IsNullOrEmpty(newName)) return;
+        if (string.IsNullOrEmpty(newName))
+        {
+            // Silently doing nothing left the box empty and the old name in
+            // force — the user saw their edit "stick" and it had not.
+            StatusText.Text = "Brain name cannot be empty — restored the current name.";
+            SettingsBrainName.Text = _identity.DisplayName;
+            return;
+        }
         _identity.DisplayName = newName;
         _identity.SaveToFile(_identityPath);
         UpdateBrainTitleLabel();
@@ -12242,6 +12403,37 @@ public partial class MainWindow : Window
     // instructions where a feature should be. The real move lives in
     // MainWindow.VaultMove.cs.
     private void ChangeVaultPath_Click(object s, RoutedEventArgs e) => MoveVault_Click(s, e);
+
+    /// <summary>
+    /// Save the local brain-server base and immediately say whether anything
+    /// answers there. A field whose only feedback is "saved" teaches nothing:
+    /// the whole reason to change it is that the current value is wrong.
+    /// </summary>
+    private async void SaveLocalAiBase_Click(object s, RoutedEventArgs e)
+    {
+        var raw = SettingsLocalAiBase.Text.Trim();
+        if (string.IsNullOrEmpty(raw)) return;
+        _localAiBase = RemoteNodeConfig.RestBase(raw);
+        SettingsLocalAiBase.Text = _localAiBase;
+        SaveSettingsToFile();
+
+        if (!IsLoopback(_localAiBase))
+            LocalAiBaseStatus.Text = "⚠ saved, but this is not localhost — AI keys will not be sent there.";
+        else
+            LocalAiBaseStatus.Text = "saved · testing…";
+
+        try
+        {
+            using var http = BuildLocalHttpClient(5);
+            var json = await http.GetStringAsync(_localAiBase + "/api/ai/backends");
+            var n = Newtonsoft.Json.Linq.JToken.Parse(json) is Newtonsoft.Json.Linq.JArray a ? a.Count : 0;
+            LocalAiBaseStatus.Text = $"✅ answering · {n} backend(s)";
+        }
+        catch (Exception ex)
+        {
+            LocalAiBaseStatus.Text = $"❌ nothing answered ({ex.GetType().Name}) — is the brain server running?";
+        }
+    }
 
     private void SaveServerUrl_Click(object s, RoutedEventArgs e)
     {
@@ -12264,29 +12456,32 @@ public partial class MainWindow : Window
             var settings = new Dictionary<string, object>
             {
                 ["HubUrl"] = _hubUrl,
-                ["LocalAiBase"] = _localAiBase,
-                ["BrainName"] = _identity.DisplayName,
-                ["ScanPaths"] = _scanPaths,
-                ["ScanWholeMachine"] = _scanWholeMachine,
-                ["ScanPatterns"] = _scanPatterns,
-                ["AutoScanOnStartup"] = _autoScanOnStartup,
-                ["ImportMode"] = _importMode.ToString(),
+                // BrainName removed: it was written here and read by NOTHING —
+                // the display name lives in identity.json, which SaveBrainName_Click
+                // writes directly. Two copies where one drifted stale.
+                // ScanPaths / ScanWholeMachine / ScanPatterns / AutoScanOnStartup /
+                // ImportMode / StorageProvider / MySqlConnectionString /
+                // AutoUpdateEnabled / LocalAiBase are NOT here any more — they
+                // describe this machine, not this vault, and one of them was a
+                // password. See MainWindow.MachineSettings.cs.
                 ["AutoLinkEnabled"] = _autoLinkEnabled,
                 ["ShowAutoEdges"] = _showAutoEdges,
                 ["AutoLinkThreshold"] = _autoLinkThreshold,
-                ["StorageProvider"] = _storageProvider,
-                ["MySqlConnectionString"] = _mySqlConnString,
                 ["MaxVisibleNodes"] = _maxVisibleNodes,
                 ["CullDistance"] = _cullDistance,
                 ["UseClusterColors"] = _useClusterColors,
                 ["UiTheme"] = _uiTheme,
-                ["AutoUpdateEnabled"] = _autoUpdateEnabled,
                 ["GraphBgDim"] = _graphBgDim,
                 ["DashBgDim"] = _dashBgDim,
                 ["WindowBgDim"] = _windowBgDim
             };
             File.WriteAllText(SettingsFilePath,
                 Newtonsoft.Json.JsonConvert.SerializeObject(settings, Newtonsoft.Json.Formatting.Indented));
+
+            // Both stores, one call. There are 21 SaveSettingsToFile() call
+            // sites and several of them set machine-owned fields; making each
+            // remember a second call is how half of them would eventually not.
+            SaveMachineSettings();
         }
         catch (Exception ex) { Debug.WriteLine($"Settings save error: {ex.Message}"); }
     }
@@ -12295,45 +12490,31 @@ public partial class MainWindow : Window
     {
         try
         {
+            // Machine-owned settings first, and unconditionally — it also
+            // migrates them OUT of the vault file, so this has to run even when
+            // the vault has no settings.json at all.
+            LoadMachineSettings();
+
             if (!File.Exists(SettingsFilePath)) return;
             var json = File.ReadAllText(SettingsFilePath);
             var settings = Newtonsoft.Json.JsonConvert.DeserializeObject<Dictionary<string, object>>(json);
             if (settings == null) return;
-            //  • HubUrl      — the public mesh rendezvous (Join Brain).
-            //  • LocalAiBase — this client's OWN brain/AI base on localhost. Stays
-            //    local; a legacy single "ServerUrl" migrates into it. The server
-            //    that answers here runs separately (never launched by the client).
+            //  • HubUrl — the public mesh rendezvous (Join Brain). Vault-scoped
+            //    on purpose: which mesh a brain belongs to is a property of the
+            //    brain. LocalAiBase is NOT — it is a machine endpoint and lives
+            //    in machine-settings.json now (the legacy "ServerUrl" key is
+            //    migrated there too).
             if (settings.TryGetValue("HubUrl", out var hu) && hu != null)
                 _hubUrl = hu.ToString() ?? _hubUrl;
-            if (settings.TryGetValue("LocalAiBase", out var lab) && lab != null)
-                _localAiBase = RemoteNodeConfig.RestBase(lab.ToString() ?? _localAiBase);
-            else if (settings.TryGetValue("ServerUrl", out var legacy) && legacy != null)
+            if (settings.TryGetValue("ServerUrl", out var legacy) && legacy != null
+                && _localAiBase == RemoteNodeConfig.DefaultLocalAiBase)
                 _localAiBase = RemoteNodeConfig.RestBase(legacy.ToString() ?? _localAiBase);
-            if (settings.TryGetValue("ScanWholeMachine", out var swm) && swm != null)
-                bool.TryParse(swm.ToString(), out _scanWholeMachine);
-            if (settings.TryGetValue("ScanPatterns", out var sp) && sp != null)
-                _scanPatterns = sp.ToString() ?? _scanPatterns;
-            if (settings.TryGetValue("AutoScanOnStartup", out var asos) && asos != null)
-                bool.TryParse(asos.ToString(), out _autoScanOnStartup);
-            if (settings.TryGetValue("AutoUpdateEnabled", out var aue) && aue != null)
-                bool.TryParse(aue.ToString(), out _autoUpdateEnabled);
-            if (settings.TryGetValue("ImportMode", out var im) && im != null)
-                Enum.TryParse<VaultImporter.ImportMode>(im.ToString(), out _importMode);
-            if (settings.TryGetValue("ScanPaths", out var paths) && paths is Newtonsoft.Json.Linq.JArray arr)
-            {
-                _scanPaths.Clear();
-                foreach (var p in arr) if (p != null) _scanPaths.Add(p.ToString());
-            }
             if (settings.TryGetValue("AutoLinkEnabled", out var ale) && ale != null)
                 bool.TryParse(ale.ToString(), out _autoLinkEnabled);
             if (settings.TryGetValue("ShowAutoEdges", out var sae) && sae != null)
                 bool.TryParse(sae.ToString(), out _showAutoEdges);
             if (settings.TryGetValue("AutoLinkThreshold", out var alt) && alt != null)
                 double.TryParse(alt.ToString(), System.Globalization.CultureInfo.InvariantCulture, out _autoLinkThreshold);
-            if (settings.TryGetValue("StorageProvider", out var sp2) && sp2 != null)
-                _storageProvider = sp2.ToString() ?? _storageProvider;
-            if (settings.TryGetValue("MySqlConnectionString", out var mcs) && mcs != null)
-                _mySqlConnString = mcs.ToString() ?? _mySqlConnString;
             if (settings.TryGetValue("MaxVisibleNodes", out var mvn) && mvn != null)
                 int.TryParse(mvn.ToString(), out _maxVisibleNodes);
             if (settings.TryGetValue("CullDistance", out var cd) && cd != null)
@@ -12613,10 +12794,40 @@ public partial class MainWindow : Window
             : $"MCP server not built yet — click 'Build MCP Server' first. Expected at:\n{exe}";
     }
 
+    /// <summary>
+    /// Dev-only. This shells out to `dotnet build BrainX.Mcp/BrainX.Mcp.csproj`
+    /// relative to a solution root, which does not exist in an installed build —
+    /// so on a shipped app the button could only ever dump a raw MSBuild
+    /// "project file does not exist" into the card. A button that cannot
+    /// succeed should not be offered; the card hides it unless a checkout is
+    /// actually present (see RefreshMcpCardForBuildKind).
+    /// </summary>
     private void BuildMcpServer_Click(object s, RoutedEventArgs e)
     {
+        if (!HasSolutionCheckout())
+        {
+            McpStatusText.Text =
+                "Building is a developer action and needs the BrainX source checkout. " +
+                "An installed build already ships its matching MCP server — use “Install in Claude Code CLI”.";
+            return;
+        }
         McpStatusText.Text = "Building MCP server (Release)…";
         BuildMcpAsync();
+    }
+
+    /// <summary>True when a real BrainX.Mcp project sits under the resolved
+    /// solution root — i.e. this is a dev checkout, not an install.</summary>
+    private bool HasSolutionCheckout()
+    {
+        try { return File.Exists(Path.Combine(FindSolutionRoot(), "BrainX.Mcp", "BrainX.Mcp.csproj")); }
+        catch { return false; }
+    }
+
+    /// <summary>Hide developer-only affordances on an installed build.</summary>
+    private void RefreshMcpCardForBuildKind()
+    {
+        if (BuildMcpBtn != null)
+            BuildMcpBtn.Visibility = HasSolutionCheckout() ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private async void BuildMcpAsync()
@@ -12747,9 +12958,15 @@ public partial class MainWindow : Window
         var exe = McpServerExePath();
         if (!File.Exists(exe))
         {
-            McpStatusText.Text = "❌ MCP server not built yet. Click 'Build MCP Server' first.";
+            McpStatusText.Text = "❌ MCP server not found beside this build. " +
+                "Reinstall BrainX, or in a dev checkout build BrainX.Mcp first.";
             return;
         }
+
+        // Re-arms startup auto-registration — the counterpart to Uninstall
+        // recording the opt-out.
+        _mcpAutoRegisterEnabled = true;
+        SaveMachineSettings();
 
         var summary = new System.Text.StringBuilder();
 
@@ -13099,10 +13316,16 @@ public partial class MainWindow : Window
         // Destructive — Claude loses all brain access until reinstalled.
         if (MessageBox.Show(this,
                 "Remove BrainX from Claude Code CLI and Claude Desktop?\n\n" +
-                "Claude will lose access to your brain until you reconnect " +
-                "(it reconnects automatically the next time BrainX starts).",
+                "Claude will lose access to your brain until you reconnect. " +
+                "This choice is remembered — BrainX will stop re-registering itself on startup. " +
+                "Use \"Install in Claude Code CLI\" to turn it back on.",
                 "Uninstall MCP", MessageBoxButton.YesNo, MessageBoxImage.Warning)
             != MessageBoxResult.Yes) return;
+
+        // Recorded first: an uninstall that startup silently reverses is not an
+        // uninstall, and that is exactly what this did before.
+        _mcpAutoRegisterEnabled = false;
+        SaveMachineSettings();
 
         var sb = new System.Text.StringBuilder();
         try
@@ -13215,9 +13438,25 @@ public partial class MainWindow : Window
 
             hooks["PostToolUse"] = postToolUse;
             root["hooks"] = hooks;
-            File.WriteAllText(path, root.ToString(Newtonsoft.Json.Formatting.Indented));
 
-            ClaudeHookStatus.Text = $"✅ Installed at {path}\n" +
+            // This is the owner's GLOBAL Claude config — their hooks, their
+            // permissions, their env. Two guarantees before touching it:
+            //
+            // A backup of the file as it was, even when it parsed fine. The old
+            // code only kept a copy when the JSON was already corrupt, which is
+            // the one case where the copy is worthless.
+            //
+            // And a tmp-then-replace, because WriteAllText truncates first: a
+            // crash or a full disk between truncate and write left the user
+            // with an empty ~/.claude/settings.json and no way back.
+            WriteJsonSafely(path, root.ToString(Newtonsoft.Json.Formatting.Indented));
+
+            // Installing is also opting back IN — otherwise the button would
+            // work once and be undone by nothing at all on the next launch.
+            _autoIngestHookEnabled = true;
+            SaveMachineSettings();
+
+            ClaudeHookStatus.Text = $"✅ Installed at {path} (previous file kept as settings.json.bak)\n" +
                 "Claude Code will now fire /api/brain/auto-ingest after every Read/Edit/Write on a .md file. " +
                 "Start a new `claude` session to pick it up.";
         }
@@ -13228,10 +13467,16 @@ public partial class MainWindow : Window
     {
         if (MessageBox.Show(this,
                 "Remove the auto-learn hook from ~/.claude/settings.json?\n\n" +
-                "Claude will stop feeding notes it reads/edits into the brain " +
-                "(BrainX re-installs the hook automatically on next start).",
+                "Claude will stop feeding notes it reads/edits into the brain. " +
+                "This choice is remembered — BrainX will no longer re-install it on startup " +
+                "(a copy of the file is kept as settings.json.bak).",
                 "Remove hook", MessageBoxButton.YesNo, MessageBoxImage.Warning)
             != MessageBoxResult.Yes) return;
+
+        // Record the opt-out BEFORE doing it: if the edit fails half-way the
+        // owner has still said no, and startup must respect that.
+        _autoIngestHookEnabled = false;
+        SaveMachineSettings();
 
         try
         {
@@ -13327,8 +13572,32 @@ public partial class MainWindow : Window
     {
         if (StorageProviderCombo == null) return;
         StorageProviderCombo.SelectedIndex = _storageProvider.Equals("MySql", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
-        MySqlConnStringBox.Text = _mySqlConnString;
+        SetMySqlConnText(_mySqlConnString);
+        if (MySqlPanel != null)
+            MySqlPanel.Visibility = StorageProviderCombo.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
         UpdateStorageStatus();
+    }
+
+    /// <summary>The connection string, from whichever of the two boxes is
+    /// currently showing. One value, two presentations — never two values.</summary>
+    private string MySqlConnText =>
+        MySqlShowConn?.IsChecked == true ? MySqlConnStringBox.Text : MySqlConnStringMasked.Password;
+
+    private void SetMySqlConnText(string value)
+    {
+        if (MySqlConnStringBox != null) MySqlConnStringBox.Text = value;
+        if (MySqlConnStringMasked != null) MySqlConnStringMasked.Password = value;
+    }
+
+    private void MySqlShowConn_Click(object s, RoutedEventArgs e)
+    {
+        var show = MySqlShowConn.IsChecked == true;
+        // Carry the current text across before swapping, or revealing would
+        // show whatever was last loaded rather than what is being typed.
+        if (show) MySqlConnStringBox.Text = MySqlConnStringMasked.Password;
+        else MySqlConnStringMasked.Password = MySqlConnStringBox.Text;
+        MySqlConnStringBox.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        MySqlConnStringMasked.Visibility = show ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private void StorageProvider_Changed(object s, SelectionChangedEventArgs e)
@@ -13343,8 +13612,8 @@ public partial class MainWindow : Window
 
     private void SaveMySqlConn_Click(object s, RoutedEventArgs e)
     {
-        _mySqlConnString = MySqlConnStringBox.Text.Trim();
-        SaveSettingsToFile();
+        _mySqlConnString = MySqlConnText.Trim();
+        SaveSettingsToFile();   // → machine-settings.json, DPAPI-wrapped
         ApplyStorage();
     }
 
@@ -13358,11 +13627,29 @@ public partial class MainWindow : Window
             _storage = BrainStorageFactory.Create(_storageProvider, _vaultPath, _mySqlConnString);
             _storage.UpsertGraph(_graph);
             UpdateStorageStatus();
-            StatusText.Text = $"Storage switched to {_storage.ProviderName} · {_storage.NodeCount()} nodes persisted";
+
+            // The factory falls back to SQLite when MySQL cannot be reached, so
+            // "switched to Sqlite" while MySql was asked for is a FAILURE
+            // wearing a success message — and the catch below can never fire to
+            // say so, because nothing threw. Compare what was asked for with
+            // what answered, and report the gap.
+            var asked = _storageProvider;
+            var got = _storage.ProviderName;
+            if (!got.Equals(asked, StringComparison.OrdinalIgnoreCase))
+            {
+                StorageStatusText.Text =
+                    $"⚠ {asked} could not be opened — running on {got} instead. " +
+                    "Check the connection string, the server, and that the database exists.";
+                StatusText.Text = $"⚠ {asked} unavailable — still on {got}.";
+                return;
+            }
+
+            StatusText.Text = $"Storage switched to {got} · {_storage.NodeCount()} nodes persisted";
         }
         catch (Exception ex)
         {
             StorageStatusText.Text = $"Failed to open storage: {ex.Message}";
+            StatusText.Text = $"Storage failed: {ex.Message}";
         }
     }
 

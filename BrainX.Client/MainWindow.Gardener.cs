@@ -69,6 +69,67 @@ public partial class MainWindow
         return (Environment.TickCount - (int)info.dwTime) / 60000.0;
     }
 
+    /// <summary>Owner's switch for the unattended run. The manual button and
+    /// the HUD's 🌱 Garden always work — this only governs the timer.</summary>
+    private bool _gardenerAutoEnabled = true;
+
+    // ── Settings card ──────────────────────────────────────────────────
+
+    private void RefreshGardenerCard()
+    {
+        if (GardenerStatus == null) return;
+        GardenerAutoToggle.IsChecked = _gardenerAutoEnabled;
+        GardenerRunBtn.Content = _gardenRunning ? "■ Stop" : "Run now";
+
+        string when;
+        try
+        {
+            if (!File.Exists(LastAuditPath)) when = "never run on this vault";
+            else
+            {
+                var o = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(LastAuditPath));
+                var health = o["brainHealth"]?.ToString() ?? "?";
+                when = DateTime.TryParse(o["scannedAt"]?.ToString(), null,
+                        System.Globalization.DateTimeStyles.AdjustToUniversal |
+                        System.Globalization.DateTimeStyles.AssumeUniversal, out var at)
+                    ? $"last run {HumanizeAge(at)} · brainHealth {health}"
+                    : $"brainHealth {health}";
+            }
+        }
+        catch { when = "last run unknown (audit file unreadable)"; }
+
+        GardenerStatus.Text = _gardenRunning
+            ? "Running now — safe to stop; finished work is kept and nothing is left half-written."
+            : $"{when}. Writes: .obsidianx/bundles, .obsidianx/embeddings, .obsidianx/last-audit.json, Notes/Brain health.md.";
+    }
+
+    private void GardenerAutoToggle_Click(object s, RoutedEventArgs e)
+    {
+        _gardenerAutoEnabled = GardenerAutoToggle.IsChecked == true;
+        SaveSettingsToFile();
+        RefreshGardenerCard();
+        StatusText.Text = _gardenerAutoEnabled
+            ? "🌱 Gardener will run itself when you are away."
+            : "🌱 Gardener will only run when you press it.";
+    }
+
+    private void GardenerRun_Click(object s, RoutedEventArgs e)
+    {
+        _ = RunGardenerAsync(manual: true);
+        RefreshGardenerCard();
+    }
+
+    private void GardenerOpenReport_Click(object s, RoutedEventArgs e)
+    {
+        var report = Path.Combine(_vaultPath, "Notes", "Brain health.md");
+        if (!File.Exists(report))
+        {
+            StatusText.Text = "🌱 No report yet — run the gardener once.";
+            return;
+        }
+        OpenFileInEditor(report);
+    }
+
     private void StartGardenerTimer()
     {
         if (_gardenTimer != null) return;
@@ -77,7 +138,11 @@ public partial class MainWindow
         {
             Interval = TimeSpan.FromMinutes(GardenCheckMinutes)
         };
-        _gardenTimer.Tick += (_, _) => { if (GardenIsDue() && UserIdleMinutes() >= GardenIdleMinutes) _ = RunGardenerAsync(manual: false); };
+        _gardenTimer.Tick += (_, _) =>
+        {
+            if (!_gardenerAutoEnabled) return;
+            if (GardenIsDue() && UserIdleMinutes() >= GardenIdleMinutes) _ = RunGardenerAsync(manual: false);
+        };
         _gardenTimer.Start();
     }
 

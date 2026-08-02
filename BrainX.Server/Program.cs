@@ -937,10 +937,21 @@ app.MapPost("/v1/messages/count_tokens", async (HttpContext ctx) =>
 
 app.MapGet("/api/ai/keys/status", () =>
 {
-    string[] services = ["nim_api_key", "openrouter_api_key", "deepseek_api_key"];
+    // The env-var name per service must be the SAME one the backend reads at
+    // line ~542, not a name derived from the json key. Deriving it gave NIM
+    // "NIM_API_KEY" while the backend reads "NVIDIA_NIM_API_KEY", so a
+    // correctly-configured NIM reported "(not set)" in Settings, and a key
+    // placed under the derived name reported "✓ configured" while the backend
+    // never saw it. Wrong in both directions, from one .ToUpperInvariant().
+    (string Env, string File)[] services =
+    [
+        ("NVIDIA_NIM_API_KEY", "nim_api_key"),
+        ("OPENROUTER_API_KEY", "openrouter_api_key"),
+        ("DEEPSEEK_API_KEY",   "deepseek_api_key"),
+    ];
     var status = services.ToDictionary(
-        s => s,
-        s => !string.IsNullOrEmpty(ReadKey(s.ToUpperInvariant(), s)));
+        s => s.File,
+        s => !string.IsNullOrEmpty(ReadKey(s.Env, s.File)));
     return Results.Ok(status);
 });
 

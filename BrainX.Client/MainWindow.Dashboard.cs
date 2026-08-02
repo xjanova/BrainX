@@ -665,18 +665,19 @@ public partial class MainWindow
         var anchor = FindName(anchorName) as System.Windows.FrameworkElement;
         anchor?.BringIntoView();
 
-        // 2. Swap NavButton ↔ NavButtonActive style across the seven buttons
-        //    so the clicked one shows the violet pill state. Done inline so
-        //    we don't have to enumerate the buttons via a stored list.
+        // 2. Swap NavButton ↔ NavButtonActive so the clicked one shows the
+        //    violet pill state.
+        //
+        //    Walk the parent panel instead of a hardcoded name list. The list
+        //    enumerated exactly the seven buttons that existed when it was
+        //    written, so every nav entry added afterwards would latch active
+        //    and never reset — a maintenance trap that fires the first time
+        //    someone does the obvious thing.
         var navButton       = (System.Windows.Style)FindResource("NavButton");
         var navButtonActive = (System.Windows.Style)FindResource("NavButtonActive");
-        foreach (var name in new[] { "SettingsNavIdentity", "SettingsNavVault", "SettingsNavAiKeys",
-                                     "SettingsNavNetwork", "SettingsNavMcp", "SettingsNavStorage",
-                                     "SettingsNavAbout" })
-        {
-            if (FindName(name) is System.Windows.Controls.Button b)
-                b.Style = navButton;
-        }
+        if (btn.Parent is System.Windows.Controls.Panel nav)
+            foreach (var child in nav.Children)
+                if (child is System.Windows.Controls.Button b) b.Style = navButton;
         btn.Style = navButtonActive;
     }
 

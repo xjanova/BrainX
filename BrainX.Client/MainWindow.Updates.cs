@@ -80,6 +80,15 @@ public partial class MainWindow
                 UpdStatusText.Text = "⚠ " + history;
             else if (_vpkPending != null)
                 UpdStatusText.Text = $"✅ Update v{_vpkPending.TargetFullRelease.Version} downloaded — click “Restart & apply”.";
+            // Every earlier branch WROTE and none ever cleared, so a "Check
+            // failed: …" line survived every later successful repaint and sat
+            // under a card reading "up to date". The guard keeps the in-flight
+            // "Checking…" message alive: UpdCheckNow_Click re-enters this
+            // method through UpdateAboutCard while its own check is still
+            // running, and blanking there leaves the card silent for the whole
+            // wait.
+            else if (!_updCheckInFlight)
+                UpdStatusText.Text = "";
         }
         catch { /* presentation-only; never throw into the UI */ }
     }
@@ -107,6 +116,7 @@ public partial class MainWindow
         try
         {
             UpdCheckBtn.IsEnabled = false;
+            _updCheckInFlight = true;
             UpdStatusText.Text = "Checking for updates…";
 
             await CheckLatestReleaseAsync();              // refreshes _latestRemoteVersion (+ this card via UpdateAboutCard)
@@ -128,8 +138,17 @@ public partial class MainWindow
                 UpdStatusText.Text = "✅ You're on the latest version.";
         }
         catch (Exception ex) { UpdStatusText.Text = $"Check failed: {ex.Message}"; }
-        finally { if (UpdCheckBtn != null) UpdCheckBtn.IsEnabled = true; }
+        finally
+        {
+            _updCheckInFlight = false;
+            if (UpdCheckBtn != null) UpdCheckBtn.IsEnabled = true;
+        }
     }
+
+    /// <summary>True while UpdCheckNow_Click is awaiting. RefreshUpdatePanel is
+    /// re-entered during that await (via UpdateAboutCard) and must not blank the
+    /// "Checking…" line the user is reading.</summary>
+    private bool _updCheckInFlight;
 
     /// <summary>Apply a staged Velopack update and relaunch.</summary>
     private void UpdApply_Click(object sender, RoutedEventArgs e)

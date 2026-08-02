@@ -5590,8 +5590,19 @@
                                     </Grid.ColumnDefinitions>
                                     <!-- LEFT NAV — clicks jump the right scroller to anchor. -->
                                     <StackPanel Grid.Column="0" Margin="0,0,12,0">
-                                        <Button x:Name="SettingsNavIdentity" Content="Identity"
+                                        <!-- The nav indexed 7 of the 13 cards in the scroller. Updates
+                                             was the FIRST card and had no entry at all, so the pill said
+                                             "Identity" while the page was parked on Software update; and
+                                             Import, Export, Categories and Performance were buried inside
+                                             the Network card with no way to reach them. Every card that
+                                             has an anchor now has an entry, in scroll order. -->
+                                        <Button x:Name="SettingsNavUpdates" Content="Updates"
                                                 Style="{StaticResource NavButtonActive}"
+                                                Click="SettingsJump_Click" Tag="Updates"
+                                                HorizontalContentAlignment="Left" Padding="14,8"
+                                                Margin="0,0,0,2"/>
+                                        <Button x:Name="SettingsNavIdentity" Content="Identity"
+                                                Style="{StaticResource NavButton}"
                                                 Click="SettingsJump_Click" Tag="Identity"
                                                 HorizontalContentAlignment="Left" Padding="14,8"
                                                 Margin="0,0,0,2"/>
@@ -5618,6 +5629,31 @@
                                         <Button x:Name="SettingsNavStorage" Content="Storage"
                                                 Style="{StaticResource NavButton}"
                                                 Click="SettingsJump_Click" Tag="Storage"
+                                                HorizontalContentAlignment="Left" Padding="14,8"
+                                                Margin="0,0,0,2"/>
+                                        <Button x:Name="SettingsNavImport" Content="Import"
+                                                Style="{StaticResource NavButton}"
+                                                Click="SettingsJump_Click" Tag="Import"
+                                                HorizontalContentAlignment="Left" Padding="14,8"
+                                                Margin="0,0,0,2"/>
+                                        <Button x:Name="SettingsNavExport" Content="Export"
+                                                Style="{StaticResource NavButton}"
+                                                Click="SettingsJump_Click" Tag="Export"
+                                                HorizontalContentAlignment="Left" Padding="14,8"
+                                                Margin="0,0,0,2"/>
+                                        <Button x:Name="SettingsNavCategories" Content="Categories"
+                                                Style="{StaticResource NavButton}"
+                                                Click="SettingsJump_Click" Tag="Categories"
+                                                HorizontalContentAlignment="Left" Padding="14,8"
+                                                Margin="0,0,0,2"/>
+                                        <Button x:Name="SettingsNavPerformance" Content="Performance"
+                                                Style="{StaticResource NavButton}"
+                                                Click="SettingsJump_Click" Tag="Performance"
+                                                HorizontalContentAlignment="Left" Padding="14,8"
+                                                Margin="0,0,0,2"/>
+                                        <Button x:Name="SettingsNavGardener" Content="Gardener"
+                                                Style="{StaticResource NavButton}"
+                                                Click="SettingsJump_Click" Tag="Gardener"
                                                 HorizontalContentAlignment="Left" Padding="14,8"
                                                 Margin="0,0,0,2"/>
                                         <Button x:Name="SettingsNavAbout" Content="About"
@@ -5716,8 +5752,19 @@
                                                            FontWeight="SemiBold"/>
                                                 <TextBox x:Name="SettingsBrainAddress" Style="{StaticResource NeonTextBox}"
                                                          IsReadOnly="True" Opacity="0.6" Margin="0,0,0,12"/>
-                                                <Button Content="Save Name" Style="{StaticResource NeuralBtnPrimary}"
-                                                        Click="SaveBrainName_Click" HorizontalAlignment="Left" Padding="16,8"/>
+                                                <StackPanel Orientation="Horizontal">
+                                                    <Button Content="Save Name" Style="{StaticResource NeuralBtnPrimary}"
+                                                            Click="SaveBrainName_Click" Padding="16,8" Margin="0,0,8,0"/>
+                                                    <!-- The private key is DPAPI-wrapped to this Windows account.
+                                                         A vault opened elsewhere cannot decrypt it, and until now
+                                                         that crashed startup. Backing it up is the only defence
+                                                         the owner has, and there was no way to do it. -->
+                                                    <Button Content="Back up identity…" Style="{StaticResource NeuralBtnGhost}"
+                                                            Click="BackupIdentity_Click" Padding="16,8"/>
+                                                </StackPanel>
+                                                <TextBlock x:Name="IdentityNotice" Visibility="Collapsed"
+                                                           FontSize="11.5" TextWrapping="Wrap" Margin="0,12,0,0"
+                                                           Foreground="#FFC040"/>
                                             </StackPanel>
                                         </Border>
 
@@ -5738,10 +5785,17 @@
                                                            FontWeight="SemiBold"/>
                                                 <TextBox x:Name="SettingsVaultPath" Style="{StaticResource NeonTextBox}"
                                                          IsReadOnly="True" Opacity="0.6" Margin="0,0,0,12"/>
-                                                <Button Content="Change Vault Path" Style="{StaticResource NeuralBtnGhost}"
+                                                <!-- Renamed from "Change Vault Path". It no longer changes a
+                                                     path — it MOVES the data and restarts the app, and a
+                                                     button that migrates a knowledge base must say so before
+                                                     it is pressed, not in the dialog after. -->
+                                                <Button Content="Move vault…" Style="{StaticResource NeuralBtnGhost}"
                                                         Click="ChangeVaultPath_Click" HorizontalAlignment="Left" Padding="16,8"/>
+                                                <TextBlock Text="Moves every note and the brain database to a new folder, then restarts BrainX. Same drive: instant. Different drive: copied, and the original is kept as a backup. Close Claude first — a live brain.db cannot be moved safely."
+                                                           FontSize="11" Margin="0,10,0,0" TextWrapping="Wrap"
+                                                           Foreground="{StaticResource NeuralText3}"/>
                                                 <TextBlock Text="Auto-detects changes via FileSystemWatcher"
-                                                           FontSize="11" Margin="0,12,0,0"
+                                                           FontSize="11" Margin="0,10,0,0"
                                                            Foreground="{StaticResource NeuralText3}"/>
                                             </StackPanel>
                                         </Border>
@@ -5761,15 +5815,39 @@
                                                 <TextBlock Text="SERVER URL" FontSize="11"
                                                            Foreground="{StaticResource NeuralText3}" Margin="0,0,0,4"
                                                            FontWeight="SemiBold"/>
+                                                <!-- No hardcoded Text: the previous default was a private
+                                                     hostname that had been scrubbed from the code constants
+                                                     and survived only here, and it is overwritten by
+                                                     PopulateSettings on every load anyway — dead text that
+                                                     leaked a real host. -->
                                                 <TextBox x:Name="SettingsServerUrl" Style="{StaticResource NeonTextBox}"
-                                                         Text="https://serverbrain.xman4289.com/brain-hub" Margin="0,0,0,12"/>
+                                                         Margin="0,0,0,12"/>
                                                 <Button Content="Save Server URL" Style="{StaticResource NeuralBtnPrimary}"
                                                         Click="SaveServerUrl_Click" HorizontalAlignment="Left" Padding="16,8"/>
+
+                                                <!-- LocalAiBase had no control anywhere in the app, yet it is
+                                                     the destination of every AI call, the API-key POST and the
+                                                     hook command written into the user's Claude config. If the
+                                                     local server was not on :5142 the only repair was editing
+                                                     JSON by hand. -->
+                                                <TextBlock Text="LOCAL AI / BRAIN SERVER" FontSize="11" Margin="0,16,0,4"
+                                                           Foreground="{StaticResource NeuralText3}" FontWeight="SemiBold"/>
+                                                <TextBlock Text="This machine's own brain server. AI keys are only ever sent here, and only if it is localhost."
+                                                           FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4"
+                                                           Foreground="{StaticResource NeuralText3}"/>
+                                                <TextBox x:Name="SettingsLocalAiBase" Style="{StaticResource NeonTextBox}"
+                                                         Margin="0,0,0,8"/>
+                                                <StackPanel Orientation="Horizontal">
+                                                    <Button Content="Save + test" Style="{StaticResource NeuralBtnGhost}"
+                                                            Click="SaveLocalAiBase_Click" Padding="14,6" Margin="0,0,8,0"/>
+                                                    <TextBlock x:Name="LocalAiBaseStatus" FontSize="11" VerticalAlignment="Center"
+                                                               Foreground="{StaticResource NeuralText3}"/>
+                                                </StackPanel>
                                             </StackPanel>
                                         </Border>
 
                                         <!-- Auto-Import Scanner -->
-                                        <Border Style="{StaticResource NeuralCard}"
+                                        <Border x:Name="SettingsAnchorImport" Style="{StaticResource NeuralCard}"
                                                 Padding="22" Margin="0,0,0,14">
                                             <StackPanel>
                                                 <StackPanel Margin="0,0,0,16">
@@ -5842,7 +5920,7 @@
                                         </Border>
 
                                         <!-- Brain Export -->
-                                        <Border Style="{StaticResource NeuralCard}"
+                                        <Border x:Name="SettingsAnchorExport" Style="{StaticResource NeuralCard}"
                                                 Padding="22" Margin="0,0,0,14">
                                             <StackPanel>
                                                 <StackPanel Margin="0,0,0,16">
@@ -5880,7 +5958,7 @@
                                         </Border>
 
                                         <!-- Custom Knowledge Categories -->
-                                        <Border Style="{StaticResource NeuralCard}"
+                                        <Border x:Name="SettingsAnchorCategories" Style="{StaticResource NeuralCard}"
                                                 Padding="22" Margin="0,0,0,14">
                                             <StackPanel>
                                                 <StackPanel Margin="0,0,0,16">
@@ -5950,7 +6028,7 @@
                                         </Border>
 
                                         <!-- Graph Performance -->
-                                        <Border Style="{StaticResource NeuralCard}"
+                                        <Border x:Name="SettingsAnchorPerformance" Style="{StaticResource NeuralCard}"
                                                 Padding="22" Margin="0,0,0,14">
                                             <StackPanel>
                                                 <StackPanel Margin="0,0,0,16">
@@ -6096,10 +6174,34 @@
                                                 <StackPanel x:Name="MySqlPanel" Visibility="Collapsed">
                                                     <TextBlock Text="MySQL connection string" FontSize="11"
                                                                Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
-                                                    <TextBox x:Name="MySqlConnStringBox" Style="{StaticResource NeonTextBox}"
-                                                             FontFamily="{StaticResource MonoFont}" FontSize="11"
-                                                             Text="Server=localhost;Port=3306;Database=obsidianx;User=root;Password=;"
-                                                             Margin="0,0,0,8"/>
+                                                    <!-- The connection string carries a PASSWORD. It used to be
+                                                         typed into a visible TextBox and written verbatim into
+                                                         the vault's settings.json — the one directory this app
+                                                         copies wholesale, that people sync and share. It now
+                                                         lives DPAPI-wrapped in machine-settings.json outside the
+                                                         vault, and the box masks by default.
+                                                         The hardcoded Text is gone too: startup overwrote it with
+                                                         the empty stored value, so the "template" only ever
+                                                         existed for the split second before PopulateStorageSettings
+                                                         ran. A real watermark does the job it was pretending to. -->
+                                                    <Grid Margin="0,0,0,8">
+                                                        <TextBox x:Name="MySqlConnStringBox" Style="{StaticResource NeonTextBox}"
+                                                                 FontFamily="{StaticResource MonoFont}" FontSize="11"
+                                                                 Visibility="Collapsed"/>
+                                                        <PasswordBox x:Name="MySqlConnStringMasked" FontSize="11" Padding="8,6"
+                                                                     FontFamily="{StaticResource MonoFont}"
+                                                                     Background="{StaticResource DarkPanelBrush}"
+                                                                     Foreground="{StaticResource TextPrimaryBrush}"
+                                                                     BorderBrush="{StaticResource SurfaceLightBrush}"
+                                                                     CaretBrush="{StaticResource NeonCyanBrush}"/>
+                                                    </Grid>
+                                                    <TextBlock x:Name="MySqlConnHint" FontSize="10.5" Margin="0,0,0,8"
+                                                               TextWrapping="Wrap"
+                                                               Foreground="{StaticResource TextMutedBrush}"
+                                                               Text="Server=localhost;Port=3306;Database=obsidianx;User=root;Password=…  ·  stored encrypted outside the vault"/>
+                                                    <CheckBox x:Name="MySqlShowConn" Content="Show connection string"
+                                                              Click="MySqlShowConn_Click" FontSize="11" Margin="0,0,0,8"
+                                                              Foreground="{StaticResource TextSecondaryBrush}"/>
                                                     <Button Content="Save connection" Style="{StaticResource NeuralBtnGhost}"
                                                             Click="SaveMySqlConn_Click" Padding="12,6" HorizontalAlignment="Left"/>
                                                 </StackPanel>
@@ -6183,7 +6285,10 @@
                                                             Click="InstallMcp_Click" Padding="16,8" Margin="0,0,8,0"/>
                                                     <Button Content="Copy Command" Style="{StaticResource NeuralBtnGhost}"
                                                             Click="CopyMcpCommand_Click" Padding="16,8" Margin="0,0,8,0"/>
-                                                    <Button Content="Build MCP Server" Style="{StaticResource NeuralBtnGhost}"
+                                                    <!-- Dev-only; hidden on an installed build, where it could
+                                                         only ever fail (no solution, no csproj). -->
+                                                    <Button x:Name="BuildMcpBtn" Content="Build MCP Server"
+                                                            Style="{StaticResource NeuralBtnGhost}" Visibility="Collapsed"
                                                             Click="BuildMcpServer_Click" Padding="16,8" Margin="0,0,8,0"/>
                                                     <Button Content="Test" Style="{StaticResource NeuralBtnGhost}"
                                                             Click="TestMcp_Click" Padding="16,8" Margin="0,0,8,0"/>
@@ -6293,6 +6398,39 @@
                                         </Border>
 
                                         <!-- About — anchor. -->
+                                        <!-- GARDENER — the one unattended job in the app. It spawns a
+                                             process, drives the GPU through Ollama and writes a note into
+                                             the vault on its own schedule, and it had ZERO presence in
+                                             Settings: nothing to see it, pause it, or find out when it
+                                             last ran. Anything that acts on its own has to be visible
+                                             where settings live. -->
+                                        <Border x:Name="SettingsAnchorGardener"
+                                                Style="{StaticResource NeuralCard}"
+                                                Padding="22" Margin="0,0,0,14">
+                                            <StackPanel>
+                                                <StackPanel Margin="0,0,0,16">
+                                                    <TextBlock Text="Gardener" FontSize="16" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText}"/>
+                                                    <TextBlock Text="Tends the brain while you are away: re-bakes stale bundles, fills missing embeddings, audits health, and overwrites Notes/Brain health.md with the report."
+                                                               FontSize="12.5" FontWeight="Medium" TextWrapping="Wrap"
+                                                               Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0"/>
+                                                </StackPanel>
+                                                <CheckBox x:Name="GardenerAutoToggle" IsChecked="True"
+                                                          Click="GardenerAutoToggle_Click" FontSize="12" Margin="0,0,0,10"
+                                                          Foreground="{StaticResource NeuralText}"
+                                                          Content="Run by itself when the last audit is a day old and the keyboard has been idle 5 min"/>
+                                                <TextBlock x:Name="GardenerStatus" FontSize="11.5" TextWrapping="Wrap"
+                                                           Margin="0,0,0,12" Foreground="{StaticResource NeuralText3}"/>
+                                                <StackPanel Orientation="Horizontal">
+                                                    <Button x:Name="GardenerRunBtn" Content="Run now"
+                                                            Style="{StaticResource NeuralBtnPrimary}"
+                                                            Click="GardenerRun_Click" Padding="16,8" Margin="0,0,8,0"/>
+                                                    <Button Content="Open report" Style="{StaticResource NeuralBtnGhost}"
+                                                            Click="GardenerOpenReport_Click" Padding="16,8"/>
+                                                </StackPanel>
+                                            </StackPanel>
+                                        </Border>
+
                                         <Border x:Name="SettingsAnchorAbout"
                                                 Style="{StaticResource NeuralCard}"
                                                 Padding="22" Margin="0,0,0,14">
