@@ -574,7 +574,7 @@ internal static partial class Program
                         ["preview_chars"] = new JObject { ["type"] = "integer", ["description"] = "max chars per preview (default 200, set 0 for full preview)", ["default"] = 200 },
                         ["compact"] = new JObject { ["type"] = "boolean", ["description"] = "if true, drop preview/path/category; return id+title+score+tags only", ["default"] = false },
                         ["bypass_cache"] = new JObject { ["type"] = "boolean", ["description"] = "if true, skip the 10-min memo cache and always re-run", ["default"] = false },
-                        ["scope"] = new JObject { ["type"] = "string", ["description"] = "optional folder-prefix namespace, e.g. 'Notes/Claude-Sessions' or 'Programming/CSharp' — restricts results to notes whose path starts here. Use brain_scope_list to discover scopes." }
+                        ["scope"] = new JObject { ["type"] = "string", ["description"] = "optional scope filter. Accepts THREE forms: a PROJECT name from the vault's imported repos (e.g. 'lotto', 'netwix') which matches notes belonging to that project wherever they live; a KIND ('instructions' | 'playbook' | 'session' | 'knowledge') to ask e.g. only for rules; or a folder prefix (e.g. 'Notes/Claude-Sessions'). Use brain_scope_list to discover scopes. State it explicitly — the brain never guesses your project from what you read earlier." }
                     },
                     ["required"] = new JArray { "query" }
                 }),
@@ -1404,7 +1404,7 @@ internal static partial class Program
 
         var ql = query.ToLowerInvariant();
         var matches = export.Nodes
-            .Where(n => ScopeMatches(n.RelativePath, scope))
+            .Where(n => ScopeMatches(n, scope))
             .Select(n => new
             {
                 Node = n,
@@ -1630,7 +1630,7 @@ internal static partial class Program
         if (!string.IsNullOrEmpty(tag))
             q = q.Where(n => n.Tags.Any(t => t.Equals(tag, StringComparison.OrdinalIgnoreCase)));
         if (scope.Length > 0)
-            q = q.Where(n => ScopeMatches(n.RelativePath, scope));
+            q = q.Where(n => ScopeMatches(n, scope));
 
         return new JArray(q.Take(limit).Select(n => new JObject
         {
@@ -2803,7 +2803,7 @@ internal static partial class Program
         // also pass the scope filter — refusing the request loudly is
         // safer than silently returning {} when the user mistypes the
         // scope.
-        bool InScope(NodeSummary n) => scope.Length == 0 || ScopeMatches(n.RelativePath, scope);
+        bool InScope(NodeSummary n) => scope.Length == 0 || ScopeMatches(n, scope);
 
         var validSeeds = startIds
             .Where(id => byId.TryGetValue(id, out var sn) && InScope(sn))
@@ -2974,7 +2974,7 @@ internal static partial class Program
             candidates = candidates.Where(n =>
                 n.Tags.Any(t => t.Equals(tag, StringComparison.OrdinalIgnoreCase)));
         if (scope.Length > 0)
-            candidates = candidates.Where(n => ScopeMatches(n.RelativePath, scope));
+            candidates = candidates.Where(n => ScopeMatches(n, scope));
         var filtered = candidates.ToList();
 
         // Try Ollama embedding — non-blocking, swallow any error
@@ -3797,16 +3797,22 @@ internal static partial class Program
                 "Read verification.due, RUN each verifyCmd YOURSELF after reading it, then "
                 + "brain_mark_verified id=<id> ok=true|false. The brain never executes these."));
 
+        // Computed once and used twice: the persisted summary below and the
+        // returned audit object must never disagree about what was found.
+        var findability = BuildFindabilityAudit(export, perCategoryLimit);
+
         // Persist last-audit timestamp so the Stop hook can remind us when due.
         try
         {
             var auditDir = Path.Combine(export.VaultPath, ".obsidianx");
             Directory.CreateDirectory(auditDir);
-            var summary = new JObject
-            {
-                ["scannedAt"] = now.ToString("O"),
-                ["brainHealth"] = Math.Round(brainHealth, 3),
-                ["issueCounts"] = new JObject
+            // Findability counts are merged rather than listed by hand: this
+            // block was a hardcoded list of exactly the checks that existed
+            // when it was written, so a new check silently never reached
+            // last-audit.json — which is the file the dashboard and the Stop
+            // hook read. Adding a check and forgetting this list is a check
+            // that runs and is never seen.
+            var issueCounts = new JObject
                 {
                     ["stubs"] = stubs.Count,
                     ["untagged"] = untagged.Count,
@@ -3822,7 +3828,17 @@ internal static partial class Program
                     ["staleEmbeddings"] = staleEmb,
                     ["orphanEmbeddings"] = orphanEmb,
                     ["factsDueForVerification"] = verifyDue.Count
-                }
+                };
+            if (findability["counts"] is JObject fc)
+                foreach (var p in fc.Properties()) issueCounts[p.Name] = p.Value;
+            if (findability["unavailable"] != null)
+                issueCounts["findabilityUnavailable"] = findability["unavailable"];
+
+            var summary = new JObject
+            {
+                ["scannedAt"] = now.ToString("O"),
+                ["brainHealth"] = Math.Round(brainHealth, 3),
+                ["issueCounts"] = issueCounts,
             };
             AtomicWrite(Path.Combine(auditDir, "last-audit.json"),
                         summary.ToString(Formatting.Indented));
@@ -3905,6 +3921,7 @@ internal static partial class Program
                 ["stale"] = staleEmb,
                 ["orphanFiles"] = orphanEmb
             },
+            ["findability"] = findability,
             ["structural"] = new JObject
             {
                 ["sampledFromMostRecent"] = structuralChecked,
@@ -5232,7 +5249,7 @@ internal static partial class Program
         // note lists. Pull only the tallies — pasting the lists produced a
         // report with a hundred titles in it and no summary.
         var counts = new JObject();
-        foreach (var section in new[] { "contentQuality", "graphHealth", "structural" })
+        foreach (var section in new[] { "contentQuality", "graphHealth", "structural", "findability" })
             if (audit[section]?["counts"] is JObject c)
                 foreach (var p in c.Properties()) counts[p.Name] = p.Value;
         if (audit["embeddings"] is JObject emb)
@@ -5355,7 +5372,142 @@ internal static partial class Program
         return s.ToLowerInvariant();
     }
 
-    private static bool ScopeMatches(string relativePath, string normalisedScope)
+    /// <summary>
+    /// Does this note belong to the caller's scope?
+    ///
+    /// Historically a PATH PREFIX filter, which meant the caller had to know
+    /// the vault's folder layout — "Imported/lotto" worked, "lotto" did not,
+    /// and a hand-written note about lotto living under Notes/ could never be
+    /// reached by scope at all.
+    ///
+    /// It now also accepts a PROJECT NAME, matched against the routing scope
+    /// the indexer derives. Both forms are kept because they answer different
+    /// questions: a path says "this folder", a project says "this body of work
+    /// wherever it lives".
+    ///
+    /// Deliberately EXPLICIT. The alternative considered and rejected was
+    /// inferring the caller's project from what they had recently read: it
+    /// makes the same query return different answers depending on invisible
+    /// history, it feeds back on itself (read lotto, get more lotto), and the
+    /// signal comes from an access log that had 5.7M junk rows in it this
+    /// morning. An agent that states its scope is debuggable; a brain that
+    /// guesses it is not.
+    /// </summary>
+    /// <summary>
+    /// The gardener's blind spot, made visible.
+    ///
+    /// Every existing audit check asks "is this note WELL-FORMED?" — stubs,
+    /// orphans, wall-of-text, missing frontmatter, broken links. Not one asks
+    /// "can the right asker FIND it?", so the notes that are healthy and
+    /// unreachable were invisible to the one process whose job is tending the
+    /// vault.
+    ///
+    /// Reports only. It never assigns a scope by itself: a wrong scope is worse
+    /// than none, because none is visible here while a wrong one silently
+    /// answers somebody else's question. The lists are what a human acts on.
+    /// </summary>
+    private static JObject BuildFindabilityAudit(BrainExport export, int perCategoryLimit)
+    {
+        // Routing arrives with the EXPORT, and only the client writes that. An
+        // export produced before this feature has no kind on any node, and
+        // reporting "0 unroutable / 1,196 unscoped" against it would be a
+        // confident lie in both directions. Say what is actually true: we
+        // cannot tell yet.
+        if (!export.Nodes.Any(n => !string.IsNullOrEmpty(n.Kind)))
+            return new JObject
+            {
+                ["counts"] = new JObject(),
+                ["unavailable"] = "This brain-export.json predates note routing — no note carries a kind. "
+                                + "Re-index in BrainX (Settings ▸ Storage ▸ Re-index, or the HUD's Re-index) "
+                                + "to populate kind/scope, then this section fills in.",
+            };
+
+        var instructions = export.Nodes.Where(n =>
+            string.Equals(n.Kind, "instructions", StringComparison.OrdinalIgnoreCase)).ToList();
+
+        // Rules with no scope cannot be routed: they will surface for every
+        // project or none, and either way somebody obeys the wrong thing.
+        var unroutable = instructions.Where(n => string.IsNullOrEmpty(n.Scope)).ToList();
+
+        // Notes with no scope signal at all — neither an Imported/<project>
+        // folder nor a tag naming a known project. Not a defect on its own
+        // (most transferable knowledge belongs everywhere), but it is the pool
+        // a scope-filtered search can never reach.
+        var unscoped = export.Nodes.Where(n =>
+            string.IsNullOrEmpty(n.Scope) &&
+            !string.Equals(n.Kind, "playbook", StringComparison.OrdinalIgnoreCase)).ToList();
+
+        // A project with work but no rules, or rules older than the work they
+        // govern. The second is the sharper signal: standards that predate the
+        // last six months of a project are standards nobody checked against it.
+        var byProject = export.Nodes
+            .Where(n => !string.IsNullOrEmpty(n.Scope))
+            .GroupBy(n => n.Scope!, StringComparer.OrdinalIgnoreCase);
+
+        var noRules = new List<JObject>();
+        var staleRules = new List<JObject>();
+        foreach (var g in byProject)
+        {
+            var rules = g.Where(n => string.Equals(n.Kind, "instructions", StringComparison.OrdinalIgnoreCase)).ToList();
+            var work = g.Where(n => !string.Equals(n.Kind, "instructions", StringComparison.OrdinalIgnoreCase)).ToList();
+            if (work.Count == 0) continue;
+
+            if (rules.Count == 0)
+            {
+                if (work.Count >= 3)     // one stray note is not a project
+                    noRules.Add(new JObject { ["project"] = g.Key, ["notes"] = work.Count });
+                continue;
+            }
+            var newestRule = rules.Max(n => n.ModifiedAt);
+            var newestWork = work.Max(n => n.ModifiedAt);
+            var behind = (newestWork - newestRule).TotalDays;
+            if (behind > 90)
+                staleRules.Add(new JObject
+                {
+                    ["project"] = g.Key,
+                    ["rulesLastTouched"] = newestRule.ToString("yyyy-MM-dd"),
+                    ["workLastTouched"] = newestWork.ToString("yyyy-MM-dd"),
+                    ["daysBehind"] = (int)behind,
+                });
+        }
+
+        return new JObject
+        {
+            ["counts"] = new JObject
+            {
+                ["instructionsUnroutable"] = unroutable.Count,
+                ["notesWithoutScope"] = unscoped.Count,
+                ["projectsWithoutRules"] = noRules.Count,
+                ["projectsWithStaleRules"] = staleRules.Count,
+            },
+            ["instructionsUnroutable"] = new JArray(unroutable.Take(perCategoryLimit)
+                .Select(n => new JObject { ["id"] = n.Id, ["title"] = n.Title, ["path"] = n.RelativePath })),
+            ["projectsWithoutRules"] = new JArray(noRules
+                .OrderByDescending(o => (int)o["notes"]!).Take(perCategoryLimit)),
+            ["projectsWithStaleRules"] = new JArray(staleRules
+                .OrderByDescending(o => (int)o["daysBehind"]!).Take(perCategoryLimit)),
+            ["note"] = "Reported, never auto-fixed. A wrong scope answers someone else's question silently; "
+                     + "no scope is at least visible here.",
+        };
+    }
+
+    private static bool ScopeMatches(NodeSummary n, string normalisedScope)
+    {
+        if (normalisedScope.Length == 0) return true;
+
+        // Project scope: exact match on the derived slug.
+        if (!string.IsNullOrEmpty(n.Scope) &&
+            n.Scope.Equals(normalisedScope, StringComparison.OrdinalIgnoreCase)) return true;
+
+        // Kind scope: "instructions", "playbook", "session" — lets a caller ask
+        // "what rules apply here" without knowing a single filename.
+        if (!string.IsNullOrEmpty(n.Kind) &&
+            n.Kind.Equals(normalisedScope, StringComparison.OrdinalIgnoreCase)) return true;
+
+        return PathScopeMatches(n.RelativePath, normalisedScope);
+    }
+
+    private static bool PathScopeMatches(string relativePath, string normalisedScope)
     {
         if (normalisedScope.Length == 0) return true;
         if (string.IsNullOrEmpty(relativePath)) return false;
