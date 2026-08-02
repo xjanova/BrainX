@@ -79,7 +79,23 @@ public class VaultImporter
     private const double DepthDecay = 0.9;
     private const string ImportedFolderName = "Imported";
 
-    public ScanReport Scan(ImportOptions options)
+    /// <param name="ct">
+    /// Checked once per folder. "Scan whole machine" walks every fixed drive
+    /// with an adaptive threshold that WIDENS when it stops finding things, so
+    /// on a large disk it is both unbounded and self-prolonging — and until now
+    /// the only way out was killing the app. Cancelling is safe by
+    /// construction: the walk only READS, and everything it produces is
+    /// accumulated in this report, so an abandoned scan leaves the vault
+    /// byte-for-byte untouched. Nothing is written until Import is pressed.
+    /// </param>
+    /// <param name="progress">
+    /// Folders visited / files found so far. A button that greys out for
+    /// several minutes with no other sign is indistinguishable from one that
+    /// has hung.
+    /// </param>
+    public ScanReport Scan(ImportOptions options,
+                           CancellationToken ct = default,
+                           IProgress<ScanProgress>? progress = null)
     {
         var report = new ScanReport { Policy = options.Policy };
         var patterns = ParsePatterns(options.Patterns);
@@ -101,6 +117,12 @@ public class VaultImporter
 
         while (pq.Count > 0)
         {
+            ct.ThrowIfCancellationRequested();
+            // Throttled: a report per folder would post thousands of dispatcher
+            // callbacks and make the scan slower than the thing it is reporting.
+            if (report.VisitedFolders % 25 == 0)
+                progress?.Report(new ScanProgress(report.VisitedFolders, report.Hits.Count, pq.Count));
+
             // Adaptive threshold: if we're missing, widen the search
             if (consecutiveMisses >= MissesUntilWiden)
             {
@@ -596,6 +618,10 @@ public class ScanHit
     public double ResonanceScore { get; set; }
     public string SuggestedVaultPath { get; set; } = string.Empty;
 }
+
+/// <summary>Live progress from a running scan. Queued is what is still ahead —
+/// the number that tells the owner whether "several minutes" means one or ten.</summary>
+public readonly record struct ScanProgress(int VisitedFolders, int FilesFound, int Queued);
 
 public class ScanReport
 {

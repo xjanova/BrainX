@@ -12616,28 +12616,70 @@ public partial class MainWindow : Window
                 "Resonance Scan", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
-        ScanStatusText.Text = "Scanning (Resonance Scan running)…";
-        PreviewScanButton.IsEnabled = false;
-        ImportScanButton.IsEnabled = false;
-
-        var opts = BuildImportOptions();
-        var report = await Task.Run(() => _importer.Scan(opts));
-        _lastScanHits = report.Hits;
-
-        ScanResultsList.Items.Clear();
-        foreach (var hit in report.Hits.Take(500))
+        // Second press = stop. Same rule the HUD's Re-index and Garden buttons
+        // follow: whatever starts a long job is what stops it, or the owner is
+        // left with a greyed-out button and no way out but killing the app.
+        if (_scanCts is { } running)
         {
-            ScanResultsList.Items.Add(
-                $"[{hit.ResonanceScore,5:F2}]  {hit.FileName,-18}  {hit.SizeBytes,8:N0} B  {hit.SourcePath}");
+            ScanStatusText.Text = "Stopping scan…";
+            try { running.Cancel(); } catch { }
+            return;
         }
 
-        ScanStatusText.Text =
-            $"Found {report.Hits.Count} files · visited {report.VisitedFolders} folders · " +
-            $"pruned {report.PrunedFolders} · {report.ProjectRootsDetected} project roots · " +
-            $"skipped {report.NearDuplicatesSkipped} near-dups, {report.ExactDuplicatesSkipped} exact dups";
-        PreviewScanButton.IsEnabled = true;
-        ImportScanButton.IsEnabled = report.Hits.Count > 0;
+        var cts = new CancellationTokenSource();
+        _scanCts = cts;
+        PreviewScanButton.Content = "■ Stop scan";
+        ImportScanButton.IsEnabled = false;
+        ScanStatusText.Text = _scanWholeMachine
+            ? "Scanning every fixed drive — this can take minutes. Press again to stop."
+            : "Scanning…";
+
+        var opts = BuildImportOptions();
+        var progress = new Progress<ScanProgress>(p =>
+            ScanStatusText.Text = $"Scanning… {p.VisitedFolders:N0} folders · {p.FilesFound:N0} files found · {p.Queued:N0} queued  (press again to stop)");
+
+        try
+        {
+            var report = await Task.Run(() => _importer.Scan(opts, cts.Token, progress), cts.Token);
+            _lastScanHits = report.Hits;
+
+            ScanResultsList.Items.Clear();
+            foreach (var hit in report.Hits.Take(500))
+            {
+                ScanResultsList.Items.Add(
+                    $"[{hit.ResonanceScore,5:F2}]  {hit.FileName,-18}  {hit.SizeBytes,8:N0} B  {hit.SourcePath}");
+            }
+
+            ScanStatusText.Text =
+                $"Found {report.Hits.Count} files · visited {report.VisitedFolders} folders · " +
+                $"pruned {report.PrunedFolders} · {report.ProjectRootsDetected} project roots · " +
+                $"skipped {report.NearDuplicatesSkipped} near-dups, {report.ExactDuplicatesSkipped} exact dups";
+            ImportScanButton.IsEnabled = report.Hits.Count > 0;
+        }
+        catch (OperationCanceledException)
+        {
+            // The scan only READS, and nothing is written until Import is
+            // pressed — so an abandoned scan costs the results and nothing else.
+            ScanStatusText.Text = "Scan stopped. Nothing was read into the vault — press Preview Scan to start again.";
+            ImportScanButton.IsEnabled = false;
+        }
+        catch (Exception ex)
+        {
+            ScanStatusText.Text = $"Scan failed: {ex.Message}";
+        }
+        finally
+        {
+            _scanCts = null;
+            cts.Dispose();
+            PreviewScanButton.Content = "Preview Scan";
+            PreviewScanButton.IsEnabled = true;
+        }
     }
+
+    /// <summary>Live while a scan runs, so the button can become Stop and mean
+    /// it. Null otherwise — presence IS the busy flag, so the two cannot
+    /// disagree.</summary>
+    private CancellationTokenSource? _scanCts;
 
     private async void ImportScan_Click(object s, RoutedEventArgs e)
     {
