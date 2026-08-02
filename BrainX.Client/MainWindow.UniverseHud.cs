@@ -529,10 +529,16 @@ public partial class MainWindow
             return;
         }
 
+        // Deep enough that a card stretched taller has something to reveal.
+        // Five was the number of rows the panel showed at its old fixed size —
+        // the HUD can be re-sized by hand now, so a cap set by yesterday's
+        // layout would silently make "drag it taller" do nothing. These are
+        // three short strings each; forty of them is a rounding error on the
+        // payload, and the panel scrolls to whatever it cannot show at once.
         var items = _graph.Nodes
             .Where(n => n != null && !string.IsNullOrWhiteSpace(n.Title))
             .OrderByDescending(n => n.ModifiedAt)
-            .Take(5)
+            .Take(40)
             .Select(n => new
             {
                 when = HumanizeAge(n.ModifiedAt),

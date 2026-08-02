@@ -10,6 +10,8 @@
  * exactly as they were, so everything here is gated on body.hud-active.
  */
 
+import { initHudLayout } from './hudlayout.js';
+
 const QS = new URLSearchParams(location.search);
 const HUD_ON = QS.get('hud') === '1';
 
@@ -327,7 +329,12 @@ function renderAgents(d = {}) {
 // 4, not 7: the panel gives this list ~60px and seven rows need ~81px, so
 // the older ones were being sliced in half at the top edge. Measured in a
 // browser against the real panel, not guessed from the markup.
-const FLOW_KEEP = 5;
+/* How much traffic history the ticker holds. Five was the number of rows that
+   fit the old fixed 92px box — a cap on the DATA chosen from the size of the
+   window it was shown in. The box is elastic now, so a card dragged taller
+   reveals history instead of empty space, and this has to be deep enough that
+   there is history to reveal. Rows are text; 40 of them is nothing. */
+const FLOW_KEEP = 40;
 const _flow = [];
 
 function renderFlow(d = {}) {
@@ -350,6 +357,15 @@ function renderFlow(d = {}) {
     if (!el) return;
 
     const dropped = events.length - shown.length;
+
+    /* The ticker scrolls now (it holds FLOW_KEEP rows in a box the owner can
+       resize), and this rebuilds the list from scratch — which resets scrollTop
+       to 0, the OLDEST row. Every event would have yanked the reader to the top
+       of the history. So: stay pinned to the newest row, unless the reader has
+       deliberately scrolled back to read, in which case leave them there. Read
+       before the wipe, because an emptied list reports no scroll at all. */
+    const stick = el.scrollHeight - el.scrollTop - el.clientHeight < 12;
+
     el.innerHTML = '';
     for (const e of _flow) {
         const li = document.createElement('li');
@@ -378,6 +394,7 @@ function renderFlow(d = {}) {
         li.textContent = bits.join(' · ');
         el.appendChild(li);
     }
+    if (stick) el.scrollTop = el.scrollHeight;
 }
 
 /** Match the orbit colours exactly, so a name in the ticker and its planet
@@ -487,7 +504,11 @@ function renderSystem(d = {}) {
 function renderRecent(d = []) {
     const list = Array.isArray(d) ? d : (d.items || []);
     const total = Array.isArray(d) ? d.length : (d.totalCount ?? list.length);
-    setHTML('hud-recent-body', list.slice(0, 5).map(n =>
+    /* Everything the host sent, not a fixed five. The box decides how many are
+       visible and scrolls to the rest — so stretching the card taller shows
+       more notes, which a slice() here would have made impossible no matter
+       how much room the card was given. */
+    setHTML('hud-recent-body', list.map(n =>
         `<div class="hud-feed-line">
            <span class="hud-feed-time">${esc(n.when || '')}</span>
            <span class="hud-feed-tag">${esc(n.category || 'NOTE')}</span>
@@ -809,8 +830,14 @@ export function initHud() {
     wireNotice();
     wireWheelScroll();
     initBus();
+    // Grid first, then the owner's own arrangement on top of it: the layout
+    // module measures the panels where the grid put them, so it has to run
+    // after everything above has had its say about their size.
+    initHudLayout();
     // Content arrives in stages, so re-evaluate what is clipped as it lands
-    // and whenever the window changes shape.
+    // and whenever the window changes shape. Resizing a panel by hand goes
+    // through the same observer, so a shortened panel gets its fade the moment
+    // its own content stops fitting.
     const ro = new ResizeObserver(markScrollable);
     document.querySelectorAll('.hud-panel').forEach(p => ro.observe(p));
     addEventListener('resize', markScrollable);

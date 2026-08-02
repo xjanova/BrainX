@@ -254,11 +254,33 @@ export function createAgentBus3D(canvas) {
         });
     }
 
+    /* The scene is composed for ONE shape — a shallow tilt over an orbital
+     * plane, framed 16:9. Sizing the drawing buffer to the CSS box instead
+     * meant the composition became whatever rectangle the panel happened to
+     * be: since the HUD's cards can be resized by hand, a card dragged wide
+     * and short handed this a 6:1 slit, and the orbits were squeezed into a
+     * letterbox with the outermost ring cropped away.
+     *
+     * So the buffer keeps the scene's own ratio and CSS object-fit:contain
+     * places it inside the box. Resizing a card now changes how BIG the orbit
+     * is drawn, never what shape it is drawn in.
+     */
+    const SCENE_AR = 16 / 9;
+
     function resize() {
-        const w = canvas.clientWidth || 240, h = canvas.clientHeight || 150;
-        if (w < 4 || h < 4) return;
-        renderer.setSize(w, h, false);
-        camera.aspect = w / h;
+        const box = canvas.getBoundingClientRect();
+        const bw = box.width || canvas.clientWidth || 240;
+        const bh = box.height || canvas.clientHeight || 150;
+        if (bw < 4 || bh < 4) return;
+
+        // Largest 16:9 rectangle that fits the box — the same arithmetic
+        // object-fit is about to do, so the buffer matches the pixels the
+        // compositor will actually show and nothing is up- or down-sampled.
+        let w = bw, h = bw / SCENE_AR;
+        if (h > bh) { h = bh; w = bh * SCENE_AR; }
+
+        renderer.setSize(Math.round(w), Math.round(h), false);   // false: never touch CSS size
+        camera.aspect = SCENE_AR;
         camera.updateProjectionMatrix();
     }
 

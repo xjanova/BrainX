@@ -232,8 +232,16 @@
 
     <!-- bottom hint strip + controls reminder -->
     <div id="hud-bottom">
-        <span class="hint"><b>drag</b> orbit &middot; <b>wheel</b> zoom &middot; <b>right-drag</b> pan &middot; <b>click star</b> focus &middot; <b>right-click star</b> walk 2 hops &middot; <b>esc</b> reset</span>
+        <span class="hint"><b>drag</b> orbit &middot; <b>wheel</b> zoom &middot; <b>right-drag</b> pan &middot; <b>click star</b> focus &middot; <b>right-click star</b> walk 2 hops &middot; <b>esc</b> reset<!--
+             The panels are movable, and a capability nobody is told about is a
+             capability nobody has. Kept on the same line as the camera controls
+             because it answers the same question — how do I operate this view.
+        --><span class="hint-hud"> &nbsp;&#124;&nbsp; <b>drag a panel</b> move &middot; <b>its edge</b> resize &middot; <b>double-click</b> fit &middot; <b>alt</b> ignore snapping</span></span>
         <span id="size" class="size-badge"></span>
+        <!-- Says both halves of what it undoes. "Reset layout" was ambiguous
+             about whether a card that had been resized got its size back. -->
+        <button id="hud-layout-reset" type="button" hidden
+                title="Put every panel back at the position and size the HUD gives it.">Reset position &amp; size</button>
     </div>
 
     <!-- collapsible settings panel (bottom-right). Adjusts glow / brightness / motion. -->

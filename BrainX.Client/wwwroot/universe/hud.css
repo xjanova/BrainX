@@ -498,7 +498,14 @@ body.hud-active #settings-toggle {
    the text roster that used to sit under it is gone, because it repeated what
    the orbits already show and the names are one wheel-scroll away. */
 #hud-layer > .hud-panel.hud-bl { display: flex; flex-direction: column; }
-#hud-bus-canvas { flex: 1 1 auto; min-height: 84px; }
+/* NEVER flex-grow. A flex item that grows has its height decided by the flex
+   line, and a decided height outranks aspect-ratio — which is how a card
+   dragged wide and short turned the orbit into a 6:1 slit (measured: 1.91 →
+   5.96). It may still SHRINK, so it can never overflow a short card, and
+   object-fit below means shrinking costs framing, not proportion. The slack it
+   stops taking goes to the traffic ticker, which is the half of this panel
+   that actually has more to show. */
+#hud-bus-canvas { flex: 0 1 auto; min-height: 72px; }
 
 #hud-bus-canvas {
     display: block;
@@ -510,7 +517,15 @@ body.hud-active #settings-toggle {
     /* Wider than tall: orbits are viewed at a shallow tilt, so vertical pixels
        past this ratio are empty space above and below the orbital plane. */
     aspect-ratio: 16 / 9;
-    max-height: 26vh;
+    /* The scene is composed for ONE shape. agentbus3d keeps the drawing buffer
+       at that shape and this letterboxes it into whatever box a placed card
+       leaves — so a resized card makes the orbit bigger or smaller, never a
+       different shape. A canvas is a replaced element, so object-fit applies
+       to it exactly as it does to an image. */
+    object-fit: contain;
+    /* Share of the CARD, not of the window. 26vh meant stretching a card
+       taller stopped feeding the render at a size fixed by the monitor. */
+    max-height: 46%;
     margin: 2px 0 8px;
     /* No plate behind it. The renderer clears to transparent, so the agents
        orbit in the same space as the galaxy rather than inside a window cut
@@ -550,6 +565,9 @@ body.hud-active #settings-toggle {
 #hud-activity-body {
     flex: 1 1 auto;
     min-height: 54px;
+    /* Window-relative, and only correct while the GRID decides this panel's
+       height. Once a card is placed by hand the card is the authority — the
+       free-layout block at the end of this file lifts this cap. */
     max-height: clamp(80px, 16vh, 220px);
     overflow-y: auto;
     overscroll-behavior: contain;
@@ -865,30 +883,51 @@ body.hud-active.has-notice #hud-layer {
    panel spent its life animating traffic it could not identify,
    because every access-log row said the actor was "mcp".
 
-   Fixed height with the newest row at the bottom, so the eye rests
-   where the next line will appear instead of chasing a jumping list. */
+   Newest row at the bottom, so the eye rests where the next line will
+   appear instead of chasing a jumping list. */
 .hud-flow {
     list-style: none;
     margin: 6px 0 0;
     padding: 0 2px;
-    max-height: 92px;
-    overflow: hidden;
-    /* The panel is a flex column and the canvas is the elastic child
-       (flex:1 1 auto). Leaving this list shrinkable meant IT gave up the space
-       instead, and rows were sliced 5px short of their own height. The orbit
-       can afford a few pixels; a half-drawn line of text cannot. */
-    flex: 0 0 auto;
+    /* This is now the ELASTIC child, and the canvas is the fixed one — the
+       exact reverse of the original pairing. Dragging this card taller is a
+       request to see more traffic, and the ticker is the only thing in the
+       panel with more to give: the orbit at 92px told you the same story it
+       tells at 300. A fixed 92px cap meant every pixel of a stretched card
+       went to the render and none to the history. */
+    flex: 1 1 auto;
+    min-height: 44px;
+    /* Reachable, not lost: past the visible rows the wheel scrolls back
+       through the kept history (FLOW_KEEP in hud.js). */
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: none;
     display: flex;
     flex-direction: column;
-    justify-content: flex-end;
+    /* Newest-at-the-bottom is done with an auto margin on the first row (below)
+       and NOT with justify-content:flex-end. The two look identical until the
+       list overflows, and then they could not differ more: flex-end pushes the
+       excess off the START edge, which a scroll container's scrollHeight does
+       not cover, so the older rows are clipped with no way to reach them —
+       measured as 40 rows present, 9 shown, scrollHeight == clientHeight. An
+       auto margin resolves to zero as soon as free space goes negative, so the
+       list falls back to growing downward and scrolls normally. */
     gap: 1px;
     font-size: 10px;
-    /* Measured, not chosen by eye: the panel leaves this list 76px. At 1.35 the
-       five rows needed 80 and the oldest was cut 4px short of its own height.
-       1.15 puts five rows in 62 with room to spare. */
+    /* Measured, not chosen by eye: at 1.35 five rows needed 80px and the
+       oldest was cut 4px short of its own height. 1.15 puts five in 62. */
     line-height: 1.15;
     font-family: var(--mono, ui-monospace, "Cascadia Mono", Consolas, monospace);
 }
+.hud-flow::-webkit-scrollbar { width: 0; height: 0; }
+.hud-flow > li:first-child { margin-top: auto; }
+/* A row must keep its own height and let the LIST scroll. Flex items normally
+   refuse to shrink below their content, but that automatic floor is switched
+   off for any item whose overflow is not visible — and these rows clip their
+   own text (see .hud-flow li below). Without this, forty rows silently
+   compressed into a 108px box at 2.7px each instead of scrolling: forty rows
+   "visible", none of them readable. */
+.hud-flow > li { flex: 0 0 auto; }
 .hud-flow li {
     display: flex;
     align-items: baseline;
@@ -931,3 +970,112 @@ body.hud-active.has-notice #hud-layer {
 /* Never let a truncated count hide behind an ellipsis: if rows were
    dropped for lacking an actor, the panel says so out loud. */
 .hud-flow li.is-note { color: var(--muted, #7b8794); font-style: italic; }
+
+/* ── Free layout: a placed panel is no longer a grid item ─────────────
+   hudlayout.js pins each panel at its own rect the first time the owner
+   drags or resizes anything. Everything below exists to get the grid's
+   opinions out of the way once that has happened — see that file for why
+   all nine are frozen at once rather than one at a time.
+
+   Declared at the END of this file on purpose: the per-corner width caps
+   (#hud-layer > .hud-panel.hud-tl et al) and the .hud-mr height ceiling
+   carry the SAME specificity as these rules, so source order is what
+   decides. Moved earlier, every one of them would silently veto the size
+   the owner just dragged. */
+#hud-layer > .hud-panel.hud-free {
+    position: absolute;
+    /* An absolutely positioned child that still names a grid area is placed
+       against THAT area, not against the layer — left/top would be measured
+       from a corner instead of from the viewport. */
+    grid-area: auto;
+    max-width: none;
+    max-height: none;
+    min-width: 0;
+    min-height: 0;
+    margin: 0;
+    /* The entry animation belongs to arrival. Replaying it on a restored
+       layout would make eight panels fly in from nowhere on every launch. */
+    animation: none;
+    /* Nothing to select in a readout, and a drag that paints a blue selection
+       across four panels reads as a bug. */
+    user-select: none;
+}
+
+/* Stretching a card is a request to SEE MORE, and several readouts were capped
+   by the window instead of by the card they live in — so dragging one taller
+   grew the card and nothing inside it. Under a placed card the card is the
+   authority, and the inner scrollers take the height it was given.
+
+   Note what is NOT here: type scale. The fonts stay put, so a resized card
+   reflows to reveal more rows rather than magnifying the same ones — which is
+   the difference between a bigger card and a zoomed one. */
+#hud-layer > .hud-panel.hud-free #hud-activity-body,
+#hud-layer > .hud-panel.hud-free #hud-recent-body,
+#hud-layer > .hud-panel.hud-free .hud-flow { max-height: none; }
+
+/* Both feeds in the top-right card now share the slack instead of only the
+   activity one, and each keeps its own scrollback. Recently-edited is capped
+   at a share of the CARD so a long edit history can never push the activity
+   feed — the readout the owner is actually watching — off the bottom. */
+#hud-layer > .hud-panel.hud-free #hud-recent-body {
+    flex: 0 1 auto;
+    max-height: 50%;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: none;
+}
+#hud-layer > .hud-panel.hud-free #hud-recent-body::-webkit-scrollbar { width: 0; height: 0; }
+
+/* The affordance is the cursor, exactly as it is for any window: hudlayout.js
+   sets move / *-resize from the pointer's distance to each border. This is
+   the second half — a hairline that says the box under the pointer has edges
+   worth aiming at.
+
+   An INSET shadow, not an outline or a child element: .hud-panel scrolls its
+   own content, and anything drawn in the padding box scrolls away with it.
+   The border box does not scroll, which is also why the grips are hit-tested
+   against it rather than being real elements. */
+#hud-layer > .hud-panel.hud-free:hover,
+#hud-layer > .hud-panel.hud-free.is-holding {
+    border-radius: 12px;
+    box-shadow: inset 0 0 0 1px rgba(108, 240, 255, 0.16);
+}
+#hud-layer > .hud-panel.hud-free.is-holding {
+    box-shadow: inset 0 0 0 1px rgba(108, 240, 255, 0.42),
+                0 18px 44px -14px rgba(0, 0, 0, 0.85);
+    /* Semi-opaque only while it is in the hand: a panel being placed has to be
+       readable against whatever it is passing over, and it also has to be
+       obvious which one of nine is moving. */
+    background: rgba(8, 6, 24, 0.5);
+    backdrop-filter: blur(3px);
+    -webkit-backdrop-filter: blur(3px);
+}
+
+/* The way back. Sits in the controls strip because that strip is already the
+   answer to "how do I operate this view", and it is hidden until there is
+   something to undo — a permanent Reset on an untouched HUD is a button that
+   does nothing. #hud-bottom is pointer-events:none so its hint can never eat
+   a camera drag; this one child has to opt back in. */
+#hud-layout-reset {
+    pointer-events: auto;
+    font: inherit;
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    color: rgba(206, 202, 240, 0.86);
+    background: rgba(10, 8, 28, 0.62);
+    border: 1px solid rgba(108, 240, 255, 0.22);
+    border-radius: 999px;
+    padding: 3px 11px;
+    cursor: pointer;
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+}
+#hud-layout-reset:hover {
+    color: #fff;
+    border-color: rgba(108, 240, 255, 0.5);
+    background: rgba(16, 13, 40, 0.8);
+}
+/* The panel half of the controls hint. Only true under ?hud=1 — the wallpaper
+   and dashboard-embed modes render this same strip and have no HUD to place. */
+#hud-bottom .hint-hud { display: none; }
+body.hud-active #hud-bottom .hint-hud { display: inline; }
