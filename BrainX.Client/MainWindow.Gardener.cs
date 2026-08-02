@@ -41,6 +41,17 @@ public partial class MainWindow
     private System.Windows.Threading.DispatcherTimer? _gardenTimer;
     private bool _gardenRunning;
 
+    /// <summary>The running gardener, kept so the button can stop it. Null when
+    /// nothing is running — presence IS the busy flag, so the two cannot
+    /// disagree with each other.</summary>
+    private Process? _gardenProc;
+
+    /// <summary>Set when the owner pressed Stop, so the result line can say
+    /// "stopped" instead of reporting the kill as a failure.</summary>
+    private bool _gardenStopRequested;
+
+    internal bool GardenRunning => _gardenRunning;
+
     private string LastAuditPath => Path.Combine(_vaultPath, ".obsidianx", "last-audit.json");
 
     [DllImport("user32.dll")]
@@ -89,9 +100,31 @@ public partial class MainWindow
     /// report the outcome. Manual runs skip the due/idle gates — a button that
     /// answers "not yet" teaches people to stop pressing it.
     /// </summary>
+    /// <summary>
+    /// Stop a running gardener.
+    ///
+    /// Safe because of where the work lands, not because the kill is gentle.
+    /// Every artifact the gardener produces is written tmp-then-move — bundles,
+    /// last-audit.json, Brain health.md — and embeddings are one file per note,
+    /// each complete before the next begins. So the process can die at any
+    /// instant and every file on disk is either its previous version or its new
+    /// one, never half of either. Killing the tree matters: the CLI spawns
+    /// Ollama requests, and an orphaned child would keep the GPU busy after the
+    /// owner asked for it to stop.
+    /// </summary>
+    private void StopGardener()
+    {
+        var proc = _gardenProc;
+        if (proc == null) { StatusText.Text = "🌱 ไม่มีคนสวนทำงานอยู่"; return; }
+        _gardenStopRequested = true;
+        StatusText.Text = "🌱 กำลังหยุดคนสวน…";
+        try { proc.Kill(entireProcessTree: true); }
+        catch (Exception ex) { Debug.WriteLine($"StopGardener: {ex.Message}"); }
+    }
+
     private async Task RunGardenerAsync(bool manual)
     {
-        if (_gardenRunning) { if (manual) StatusText.Text = "🌱 คนสวนกำลังทำงานอยู่แล้ว"; return; }
+        if (_gardenRunning) { if (manual) StopGardener(); return; }
 
         var exe = ResolveBestMcpExe();
         if (exe == null)
@@ -101,6 +134,8 @@ public partial class MainWindow
         }
 
         _gardenRunning = true;
+        _gardenStopRequested = false;
+        PushHudBusy();
         StatusText.Text = manual ? "🌱 คนสวนเริ่มทำงาน…" : "🌱 คนสวนทำงานตอนเครื่องว่าง…";
         try
         {
@@ -122,6 +157,7 @@ public partial class MainWindow
                 using var p = Process.Start(psi);
                 if (p == null) return (false, "", 0.0);
                 try { p.PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
+                _gardenProc = p;   // the Stop button's only handle on this run
 
                 var sw = Stopwatch.StartNew();
                 // The audit's near-dupe pass is O(n²) over embeddings and can
@@ -147,9 +183,14 @@ public partial class MainWindow
                 return (p.ExitCode == 0, health, sw.Elapsed.TotalSeconds);
             });
 
-            StatusText.Text = ok
-                ? $"🌱 คนสวนเสร็จใน {seconds:0}s · brainHealth {health} · รายงานที่ Notes/Brain health.md"
-                : "🌱 คนสวนล้มเหลว — ดู export-error.log / รัน brainx-mcp garden ดูเองได้";
+            StatusText.Text = _gardenStopRequested
+                // Not a failure. Every artifact is written tmp-then-move, so
+                // whatever it had finished stands and whatever it had not was
+                // never on disk to begin with.
+                ? $"🌱 หยุดคนสวนแล้ว ({seconds:0}s) — งานที่เสร็จแล้วถูกเก็บไว้ ไม่มีไฟล์ไหนค้างครึ่งทาง"
+                : ok
+                    ? $"🌱 คนสวนเสร็จใน {seconds:0}s · brainHealth {health} · รายงานที่ Notes/Brain health.md"
+                    : "🌱 คนสวนล้มเหลว — ดู export-error.log / รัน brainx-mcp garden ดูเองได้";
 
             // The HUD's stats and recent-notes panels read artifacts the
             // gardener just rewrote (Brain health.md is a note like any other).
@@ -159,6 +200,11 @@ public partial class MainWindow
         {
             StatusText.Text = $"🌱 คนสวนล้มเหลว: {ex.Message}";
         }
-        finally { _gardenRunning = false; }
+        finally
+        {
+            _gardenRunning = false;
+            _gardenProc = null;
+            PushHudBusy();
+        }
     }
 }

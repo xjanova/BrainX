@@ -239,7 +239,14 @@ public class EmbeddingService
             if (vec == null) continue;
             try
             {
-                await File.WriteAllBytesAsync(sidecar, FloatsToBytes(vec), ct).ConfigureAwait(false);
+                // Write-then-move. A precompute pass touches ~1,200 of these and
+                // is now killable mid-run (the HUD's "Stop garden" button), so a
+                // sidecar caught half-written would be a silently WRONG vector —
+                // the wrong kind of wrong, because nothing downstream can tell a
+                // truncated embedding from a bad one.
+                var tmp = sidecar + "." + Environment.ProcessId + ".tmp";
+                await File.WriteAllBytesAsync(tmp, FloatsToBytes(vec), ct).ConfigureAwait(false);
+                File.Move(tmp, sidecar, overwrite: true);
             }
             // The client's VaultWatcher can be precomputing the same sidecar.
             // A full pass is ~30 minutes; losing all of it to one contended

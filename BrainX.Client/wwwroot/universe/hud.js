@@ -666,6 +666,7 @@ function onHudMessage(evt) {
         case 'hudExpertise': renderExpertise(m.payload); break;
         case 'hudActivity':  renderActivity(m.payload); break;
         case 'hudAgents':    renderAgents(m.payload); break;
+        case 'hudBusy':      renderBusy(m.payload); break;
         case 'hudFlow':      renderFlow(m.payload); break;
         case 'hudSystem':    renderSystem(m.payload); break;
         case 'hudRecent':    renderRecent(m.payload); break;
@@ -780,6 +781,24 @@ function wireActions() {
     });
 }
 
+/* A button that starts something long has to be the button that stops it.
+   Anything else means the owner starts a 15-second scan or a multi-minute
+   gardener run and then has nowhere to go — the strip's other option being to
+   close the app, which is the one way to stop it that is NOT safe.
+
+   Labels come from the markup (data-idle / data-busy), so the two states live
+   next to each other where a translator or a designer would look for them,
+   and this file never hardcodes a word of English. */
+function renderBusy(d = {}) {
+    for (const [action, busy] of Object.entries(d)) {
+        const btn = document.querySelector(`.hud-action[data-action="${action}"]`);
+        if (!btn) continue;
+        const label = busy ? btn.dataset.busy : btn.dataset.idle;
+        if (label) btn.innerHTML = label;
+        btn.classList.toggle('hud-action-busy', !!busy);
+    }
+}
+
 // ── Init ─────────────────────────────────────────────────────────
 
 export function initHud() {
@@ -821,6 +840,10 @@ export function initHud() {
     armBootDeadline();
 
     post({ type: 'hudReady' });
+    // Demo-only handle, same idea as __hudBus: lets the busy/idle button states
+    // be driven and checked from a browser console without waiting on the
+    // demo's timeline or starting a real 15-second scan.
+    if (HUD_DEMO) window.__hudBusy = renderBusy;
     if (HUD_DEMO) runDemo();
 }
 
@@ -912,6 +935,11 @@ function runDemo() {
         { name: 'unity',   kind: 'bridge', state: 'live',  online: true,  everSeen: true,  color: '#c9cfd6', detail: 'editor up · 47 tools' },
         { name: 'unreal',  kind: 'bridge', state: 'down',  online: false, everSeen: true,  color: '#4fb3e8', detail: 'editor closed' },
     ] }));
+    // Flip the two stoppable buttons into their running state and back, so the
+    // Stop label and its amber pulse can be seen without starting a real
+    // 15-second scan.
+    step(3200, () => renderBusy({ reindex: true, garden: true }));
+    step(9000, () => renderBusy({ reindex: false, garden: false }));
     // Keep the system busy so the orbit + traffic animation can be judged.
     setInterval(() => {
         const who = ['claude', 'codex', 'cluadex'][Math.floor(Math.random() * 3)];

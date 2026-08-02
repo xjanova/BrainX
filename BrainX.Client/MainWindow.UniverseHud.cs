@@ -185,6 +185,10 @@ public partial class MainWindow
             PostHudActivity();
             PostHudAgents();
             PostHudFlow();
+            // Re-sent with every full push so a HUD that reloaded (F5, a
+            // WebView2 restart) never comes back offering to Stop a job that
+            // ended while it was away.
+            PushHudBusy();
             PostHudRecent();
             PostHudNetwork();
             PostHudMcp();
@@ -911,12 +915,14 @@ public partial class MainWindow
             switch (action)
             {
                 case "reindex":
-                    ReindexVault_Click(this, new RoutedEventArgs());
-                    PushAllHudPayloads();       // the numbers just changed
+                    // Same button, both meanings — it starts a scan, or stops
+                    // the one that is running. See ToggleReindexAsync.
+                    _ = ToggleReindexAsync();
                     break;
                 case "garden":
                     // Fire-and-forget by design: the run takes minutes and
-                    // reports through the status bar when it lands.
+                    // reports through the status bar when it lands. Pressing it
+                    // again while running is Stop.
                     _ = RunGardenerAsync(manual: true);
                     break;
                 case "obsidian":
@@ -925,9 +931,9 @@ public partial class MainWindow
                 case "vault":
                     DashRevealVault_Click(this, new RoutedEventArgs());
                     break;
-                case "address":
-                    DashCopyAddress_Click(this, new RoutedEventArgs());
-                    break;
+                // "address" (Copy address) removed at the owner's request —
+                // the address is already on the HUD's top-left card, so the
+                // button spent a slot in a five-item strip restating it.
                 case "settings":
                     // Reuse the nav handler so the sidebar's active pill moves
                     // with the view, exactly as if the user had clicked it.
@@ -950,6 +956,18 @@ public partial class MainWindow
             if (StatusText != null) StatusText.Text = $"HUD action failed: {ex.Message}";
             System.Diagnostics.Debug.WriteLine($"HandleHudAction({action}): {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Tell the HUD which long jobs are running, so the buttons that can stop
+    /// them say Stop. Pushed on every transition rather than polled — the HUD
+    /// must never offer to stop something that already finished, and a poll
+    /// interval is exactly how long that lie would live.
+    /// </summary>
+    private void PushHudBusy()
+    {
+        if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(PushHudBusy); return; }
+        PostHud("hudBusy", new { reindex = IndexRunning, garden = GardenRunning });
     }
 
     private static string HexOf(Color c) => $"#{c.R:X2}{c.G:X2}{c.B:X2}";

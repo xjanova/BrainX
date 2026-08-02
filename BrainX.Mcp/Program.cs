@@ -3796,7 +3796,8 @@ internal static partial class Program
                     ["factsDueForVerification"] = verifyDue.Count
                 }
             };
-            File.WriteAllText(Path.Combine(auditDir, "last-audit.json"), summary.ToString(Formatting.Indented));
+            AtomicWrite(Path.Combine(auditDir, "last-audit.json"),
+                        summary.ToString(Formatting.Indented));
         }
         catch { /* best-effort persistence */ }
 
@@ -5263,8 +5264,25 @@ internal static partial class Program
 
         var path = Path.Combine(export.VaultPath, "Notes", "Brain health.md");
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        File.WriteAllText(path, sb.ToString(), new System.Text.UTF8Encoding(false));
+        AtomicWrite(path, sb.ToString());
         return path;
+    }
+
+    /// <summary>
+    /// Write so that a process killed at any instant leaves either the previous
+    /// file or the complete new one — never half of either.
+    ///
+    /// This is what makes the HUD's "Stop garden" button honest. The gardener
+    /// is now killable mid-run by design (whole process tree, because it drives
+    /// Ollama), so every artifact it produces has to be replaceable in one
+    /// step. Bundles already did this; the audit summary and this report were
+    /// the two that did not, and they are the ones the dashboard reads.
+    /// </summary>
+    private static void AtomicWrite(string path, string content)
+    {
+        var tmp = path + "." + Environment.ProcessId + ".tmp";
+        File.WriteAllText(tmp, content, new System.Text.UTF8Encoding(false));
+        File.Move(tmp, path, overwrite: true);
     }
 
     private static BrainExport? LoadExport()

@@ -35,7 +35,15 @@ public partial class KnowledgeIndexer
         [KnowledgeCategory.GameDev] = ["game", "unity", "unreal", "sprite", "shader", "physics engine", "gameplay", "level design", "multiplayer", "rendering"],
     };
 
-    public KnowledgeGraph IndexVault(string vaultPath)
+    /// <param name="ct">
+    /// Checked between files and between link passes. Both phases are purely
+    /// in-memory — nothing has touched the database or the export yet — so
+    /// abandoning here costs the caller the scan and nothing else. The callers
+    /// deliberately do NOT pass a live token past this point: once the graph
+    /// starts being written down, stopping half-way is the expensive kind of
+    /// stopping, and the write is the fast part anyway.
+    /// </param>
+    public KnowledgeGraph IndexVault(string vaultPath, CancellationToken ct = default)
     {
         var graph = new KnowledgeGraph();
         if (!Directory.Exists(vaultPath)) return graph;
@@ -58,6 +66,7 @@ public partial class KnowledgeIndexer
 
         foreach (var file in mdFiles)
         {
+            ct.ThrowIfCancellationRequested();
             var node = IndexFile(file, vaultPath);
             graph.Nodes.Add(node);
             nodeMap[node.Title.ToLowerInvariant()] = node;
@@ -99,6 +108,7 @@ public partial class KnowledgeIndexer
         // note still produce a single edge.
         foreach (var node in graph.Nodes)
         {
+            ct.ThrowIfCancellationRequested();
             var content = File.ReadAllText(node.FilePath);
             var seen = new HashSet<string>();
             foreach (Match link in WikiLinkPattern().Matches(content))

@@ -693,6 +693,19 @@ body.hud-active.has-notice #hud-layer {
     transform: translateY(-1px);
 }
 .hud-action:active { transform: none; }
+/* A running job's button is amber and breathing. Same colour language as the
+   bus's "derived / in progress" amber, and the pulse is what stops "Stop
+   index" reading as a label someone left there. */
+.hud-action-busy {
+    color: #ffd9a3;
+    background: rgba(70, 42, 10, 0.72);
+    border-color: rgba(255, 192, 64, 0.55);
+    animation: hud-action-breathe 1.6s ease-in-out infinite;
+}
+@keyframes hud-action-breathe {
+    0%, 100% { border-color: rgba(255, 192, 64, 0.30); }
+    50%      { border-color: rgba(255, 192, 64, 0.85); }
+}
 
 /* ── Boot sequence ────────────────────────────────────────────── */
 

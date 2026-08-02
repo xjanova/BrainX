@@ -6003,17 +6003,86 @@ public partial class MainWindow : Window
     /// already responsive, and making them async would change when their
     /// callers' following statements see the new graph.
     /// </summary>
-    private async Task IndexVaultAsync()
+    /// <summary>
+    /// Live while a re-index is running, so the HUD button can become Stop and
+    /// mean it. Null the rest of the time — the presence of a token IS the
+    /// "busy" flag, which keeps the two from ever disagreeing.
+    /// </summary>
+    private CancellationTokenSource? _indexCts;
+
+    private bool IndexRunning => _indexCts != null;
+
+    /// <param name="ct">
+    /// Honoured during the SCAN, which is the ~15 s and is purely in-memory.
+    /// It is deliberately not threaded into <see cref="FinishIndexOnWorker"/>:
+    /// that is where the database and the export get written, it is the fast
+    /// part, and a half-written brain is a worse outcome than a scan the owner
+    /// has to start again.
+    /// </param>
+    private async Task IndexVaultAsync(CancellationToken ct = default)
     {
         StatusText.Text = "Indexing vault...";
         PrepareIndexer();
         // _graph starts life as an empty KnowledgeGraph, so anything that runs
         // during this await (the render loop, a nav click) sees an empty brain
         // rather than a null one.
-        _graph = await Task.Run(() => _indexer.IndexVault(_vaultPath));
-        await Task.Run(FinishIndexOnWorker);
+        var scanned = await Task.Run(() => _indexer.IndexVault(_vaultPath, ct), ct);
+        // Past this line the run is committed. Assigning _graph first means a
+        // cancellation during the scan leaves the previous graph untouched
+        // rather than swapping in a partial one.
+        _graph = scanned;
+        await Task.Run(FinishIndexOnWorker, CancellationToken.None);
         ReportIndexResult();
         StartEmbeddingPrecompute();
+    }
+
+    /// <summary>
+    /// The HUD's Re-index / Stop button. Pressing it while a scan is running
+    /// cancels that scan; pressing it otherwise starts one.
+    ///
+    /// Stopping is safe by construction rather than by care: the token only
+    /// reaches the in-memory scan, so a cancelled run has written nothing —
+    /// no database rows, no export, no embeddings — and the brain the app is
+    /// showing is the one it was already showing.
+    /// </summary>
+    private async Task ToggleReindexAsync()
+    {
+        if (_indexCts is { } running)
+        {
+            StatusText.Text = "Stopping re-index…";
+            try { running.Cancel(); } catch { }
+            return;
+        }
+
+        var cts = new CancellationTokenSource();
+        _indexCts = cts;
+        PushHudBusy();
+        try
+        {
+            await IndexVaultAsync(cts.Token);
+            _dashPhysics.LoadFromGraphDiff(_graph);
+            _graphPhysics.LoadFromGraphDiff(_graph);
+            var kick = _graph.TotalNodes > 20 ? 0.05 : 0.3;
+            _dashPhysics.Disturb(kick);
+            _graphPhysics.Disturb(kick);
+            UpdateUI();
+            StatusText.Text = $"Re-indexed: {_graph.TotalNodes:N0} nodes, {_graph.TotalEdges:N0} edges";
+        }
+        catch (OperationCanceledException)
+        {
+            StatusText.Text = "Re-index stopped — nothing was written, the brain is unchanged.";
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = $"Re-index failed: {ex.Message}";
+        }
+        finally
+        {
+            _indexCts = null;
+            cts.Dispose();
+            PushHudBusy();
+            PushAllHudPayloads();
+        }
     }
 
     private void IndexVault()
