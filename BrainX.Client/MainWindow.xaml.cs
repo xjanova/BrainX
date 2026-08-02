@@ -2341,12 +2341,17 @@ public partial class MainWindow : Window
         // feature is gated on a persisted toggle, and reading it after acting
         // on it would have made "off" mean "off from the second launch".
         //
-        // Full auto-update on launch: find + download + apply + restart, itself,
-        // with no clicking (user spec). Applying is safe here — the editor is
-        // always clean at startup.
-        _ = VelopackCheckAndStageAsync(autoApply: _autoUpdateEnabled);
-        // ...and keep looking. A launch-only check leaves an app that stays open
-        // for days permanently on the version it started with.
+        // AWAITED, and placed above every expensive thing below it. As a
+        // fire-and-forget it raced the boot: the app indexed the whole vault,
+        // built a WebView2 galaxy and precomputed embeddings, and THEN — when a
+        // ~147 MB download happened to finish — threw all of it away and
+        // restarted. Worse than wasteful: by then the owner was often already
+        // typing, which is exactly the moment an update must not restart the
+        // app. Deciding while the splash is still up costs one HTTP call and
+        // removes both problems.
+        if (await TryUpdateBeforeBootAsync()) return;   // restarting — boot nothing
+
+        // ...and keep looking, for a release published while this stays open.
         StartUpdateRecheckTimer();
         ApplyUiTheme(_uiTheme);
         ApplyBgDim();
@@ -5716,8 +5721,9 @@ public partial class MainWindow : Window
     /// 2.0.203 without ever looking again. An app people leave open for days
     /// never learns anything after its first second.
     ///
-    /// Re-checks pass autoApply:false: mid-session we stage and arm the chip,
-    /// never yank the window away from someone using it.
+    /// Re-checks only STAGE. Applying mid-session is a separate decision with
+    /// its own guard (<see cref="TryApplyStagedWhenIdleAsync"/>) — the window is
+    /// never yanked away from someone using it.
     /// </summary>
     private void StartUpdateRecheckTimer()
     {
@@ -5739,12 +5745,90 @@ public partial class MainWindow : Window
                 await CheckLatestReleaseAsync();
                 // Stage only. Whether to APPLY mid-session is a different
                 // decision with a different guard, and it lives in one place.
-                await VelopackCheckAndStageAsync(autoApply: false);
+                await VelopackCheckAndStageAsync();
                 if (_vpkPending != null) await TryApplyStagedWhenIdleAsync();
             }
             catch (Exception ex) { Debug.WriteLine($"Update re-check: {ex.Message}"); }
         };
         _updateRecheckTimer.Start();
+    }
+
+    /// <summary>
+    /// Update on the splash, before the boot we would only throw away.
+    ///
+    /// Returns TRUE when the app is on its way out to apply — the caller must
+    /// then boot NOTHING, because everything it builds is about to be
+    /// discarded along with the process.
+    ///
+    /// Two timeouts, doing different jobs. The CHECK is bounded tightly: it
+    /// runs on every single launch, and a slow or captive network must never
+    /// hold the app hostage behind a question whose answer is usually "no".
+    /// The DOWNLOAD is bounded loosely, because ~147 MB over a domestic
+    /// connection legitimately takes minutes and the splash is showing
+    /// progress the whole time — a user watching a percentage climb is
+    /// informed, not blocked. Either timeout expiring means one thing: boot
+    /// normally, and let the idle path pick the update up later.
+    /// </summary>
+    private async System.Threading.Tasks.Task<bool> TryUpdateBeforeBootAsync()
+    {
+        if (!_autoUpdateEnabled) return false;
+
+        try
+        {
+            var mgr = new Velopack.UpdateManager(
+                new Velopack.Sources.GithubSource($"https://github.com/{GitHubRepo}", null, false));
+            if (!mgr.IsInstalled) return false;              // dev / portable — nothing to apply
+
+            Services.StartupProgress.Report("Checking for updates", 0.12, tag: "update");
+
+            var check = mgr.CheckForUpdatesAsync();
+            if (await System.Threading.Tasks.Task.WhenAny(
+                    check, System.Threading.Tasks.Task.Delay(TimeSpan.FromSeconds(6))) != check)
+                return false;                                // offline or slow — boot, don't stall
+
+            var info = await check;
+            if (info == null) return false;                  // already current, the common case
+
+            var target = info.TargetFullRelease.Version.ToString();
+            // A package that has already failed to apply repeatedly must not be
+            // retried on every launch — that WAS the 2026-08-01 restart loop.
+            if (UpdateLog.ShouldStopTrying(target)) return false;
+
+            Services.StartupProgress.Report($"Update v{target} — downloading", 0.14, tag: "update");
+            var download = mgr.DownloadUpdatesAsync(info, p =>
+                Services.StartupProgress.Report(
+                    $"Update v{target} — downloading {p}%",
+                    // Held inside this stage's slice of the bar: the download
+                    // owns 0.14→0.26 and the rest of the boot keeps its scale,
+                    // so a launch that updates doesn't look like a launch that
+                    // finished and then started over.
+                    0.14 + 0.12 * (p / 100.0), tag: "update"));
+
+            if (await System.Threading.Tasks.Task.WhenAny(
+                    download, System.Threading.Tasks.Task.Delay(TimeSpan.FromMinutes(10))) != download)
+                return false;                                // still crawling — boot; idle path retries
+            await download;
+
+            Services.StartupProgress.Report($"Update v{target} — restarting", 0.28, tag: "update");
+            _vpkMgr = mgr;
+            _vpkPending = info;
+            _autoUpdateFiring = true;
+
+            // Written BEFORE we hand over control: nothing of ours runs after
+            // this to record the attempt, and the next launch reads it back to
+            // decide whether it worked.
+            UpdateLog.RecordAttempt(target);
+            ApplyStagedUpdateAndQuit();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // Never let the updater cost a launch. Boot, and the idle path will
+            // try again from a running app.
+            Debug.WriteLine($"Pre-boot update skipped: {ex.Message}");
+            _autoUpdateFiring = false;
+            return false;
+        }
     }
 
     /// <summary>
@@ -5800,7 +5884,20 @@ public partial class MainWindow : Window
         }
     }
 
-    private async System.Threading.Tasks.Task VelopackCheckAndStageAsync(bool autoApply = false)
+    /// <summary>
+    /// Find, download and STAGE — never apply.
+    ///
+    /// Applying used to live here too, behind an autoApply flag. It has moved
+    /// out entirely, to the two places that own the decision and can actually
+    /// judge it: <see cref="TryUpdateBeforeBootAsync"/> (splash, nothing to
+    /// lose) and <see cref="TryApplyStagedWhenIdleAsync"/> (running app, only
+    /// into an empty chair). Every caller here passed autoApply:false once the
+    /// launch path moved to the splash, so the flag was a branch that read as
+    /// live and could no longer be reached. The parameter went with it — a
+    /// flag every caller still sets but nothing reads is the same lie one
+    /// refactor later.
+    /// </summary>
+    private async System.Threading.Tasks.Task VelopackCheckAndStageAsync()
     {
         try
         {
@@ -5813,21 +5910,8 @@ public partial class MainWindow : Window
             _vpkMgr = mgr;
             _vpkPending = info;
 
-            // ── Fully-automatic update (user spec 2026-07-12: "มันควรหาเอง
-            //    อัพเดท รีสตาร์ทเอง"). The old flow only STAGED the download and
-            //    waited for the user to click the version chip — which read as
-            //    "เจอ แต่ไม่อัพเดท". Now we apply + relaunch ourselves.
-            //
-            //    The ONE thing that must never be lost is an unsaved note, so we
-            //    self-apply only when the editor buffer is clean. On a normal
-            //    launch that's always true (the user hasn't typed yet), so the
-            //    app silently relaunches once onto the new build. If an update
-            //    lands mid-session while they're editing, we DON'T yank the app
-            //    away — we fall through to the click-to-apply chip instead.
-            // Has this exact version already failed to apply, repeatedly? If so
-            // stop trying by itself. An un-appliable package used to mean an app
-            // that relaunched every 18 seconds forever; it should mean one
-            // sentence on the update card and a button the user can press.
+            // A package that keeps failing gets said out loud, once, rather
+            // than becoming an app that relaunches every 18 seconds forever.
             var target = info.TargetFullRelease.Version.ToString();
             if (UpdateLog.ShouldStopTrying(target))
             {
@@ -5836,47 +5920,6 @@ public partial class MainWindow : Window
                     StatusText.Text = $"⚠ Update v{target} failed to apply {UpdateLog.Failures}× — automatic install paused. Use Settings ▸ Software update.";
                     RefreshUpdatePanel();
                 });
-                autoApply = false;
-            }
-
-            var safeToAutoApply = autoApply && await Dispatcher.InvokeAsync(() =>
-                !_autoUpdateFiring && (_mdEditor == null || !_mdEditor.IsDirty));
-
-            if (safeToAutoApply)
-            {
-                _autoUpdateFiring = true;
-                await Dispatcher.InvokeAsync(() =>
-                {
-                    StatusText.Text = $"Update v{info.TargetFullRelease.Version} downloaded — restarting BrainX to apply…";
-                    if (VersionText != null)
-                        VersionText.Text = $"updating → v{info.TargetFullRelease.Version}…";
-                });
-                // Let the status line paint so the restart doesn't look like the
-                // app just vanished, then re-check dirty in case they started
-                // typing during the download/paint window.
-                await System.Threading.Tasks.Task.Delay(1600).ConfigureAwait(false);
-                var stillSafe = await Dispatcher.InvokeAsync(() => _mdEditor == null || !_mdEditor.IsDirty);
-                if (stillSafe)
-                {
-                    try
-                    {
-                        // Written BEFORE we hand over control, because nothing
-                        // of ours runs after this point to record that we tried.
-                        // The next launch reads it back: still on the old
-                        // version means this attempt failed.
-                        UpdateLog.RecordAttempt(info.TargetFullRelease.Version.ToString());
-                        await Dispatcher.InvokeAsync(ApplyStagedUpdateAndQuit);
-                        return;
-                    }
-                    catch (Exception ex)
-                    {
-                        // Apply threw (locked files, permissions) — fall back to
-                        // the manual chip rather than leaving the user stuck.
-                        _autoUpdateFiring = false;
-                        Debug.WriteLine($"Velopack auto-apply failed, falling back to manual: {ex.Message}");
-                    }
-                }
-                else _autoUpdateFiring = false;   // user started editing — defer
             }
 
             await Dispatcher.InvokeAsync(() =>
