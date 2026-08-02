@@ -5657,11 +5657,22 @@
                                                     <TextBlock Grid.Column="1" x:Name="UpdLatestVersion" Text="checking…" FontSize="12"
                                                                FontFamily="{StaticResource MonoFont}" Foreground="{StaticResource NeuralText}"/>
                                                 </Grid>
+                                                <!-- A real switch. This row used to be a READOUT of whether
+                                                     Velopack was installed, labelled "Auto-update" — so the
+                                                     owner reasonably believed there was a toggle here and
+                                                     there never was one. -->
                                                 <Grid Margin="0,0,0,12">
                                                     <Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                                     <TextBlock Grid.Column="0" Text="Auto-update" FontSize="12" Foreground="{StaticResource NeuralText3}"/>
-                                                    <TextBlock Grid.Column="1" x:Name="UpdInstallMode" Text="—" FontSize="12"
-                                                               Foreground="{StaticResource NeuralText}" TextWrapping="Wrap"/>
+                                                    <StackPanel Grid.Column="1">
+                                                        <CheckBox x:Name="UpdAutoToggle" IsChecked="True"
+                                                                  Click="UpdAutoToggle_Click"
+                                                                  Foreground="{StaticResource NeuralText}" FontSize="12"
+                                                                  Content="Update by itself — including while the app is open"/>
+                                                        <TextBlock x:Name="UpdInstallMode" Text="—" FontSize="11.5"
+                                                                   Foreground="{StaticResource NeuralText2}" TextWrapping="Wrap"
+                                                                   Margin="0,4,0,0"/>
+                                                    </StackPanel>
                                                 </Grid>
 
                                                 <StackPanel Orientation="Horizontal" Margin="0,0,0,8">

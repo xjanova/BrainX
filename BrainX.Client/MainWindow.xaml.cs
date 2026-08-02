@@ -2331,18 +2331,23 @@ public partial class MainWindow : Window
         // (this IS the target version — clear the history) or it did not (the
         // count stands). Must happen before the check below reads that count.
         try { UpdateLog.NoteRunningVersion(GetLocalVersion().compareKey); } catch { }
-        // Full auto-update on launch: find + download + apply + restart, itself,
-        // with no clicking (user spec). autoApply:true is safe here — the editor
-        // is always clean at startup. Mid-session re-checks pass false.
-        _ = VelopackCheckAndStageAsync(autoApply: true);
-        // ...and keep looking. A launch-only check leaves an app that stays open
-        // for days permanently on the version it started with.
-        StartUpdateRecheckTimer();
 
         Services.StartupProgress.Report("Initializing brain identity", 0.22, tag: "identity");
         InitializeIdentity();
 
         LoadSettingsFromFile();
+
+        // Auto-update starts HERE, not before LoadSettingsFromFile — the whole
+        // feature is gated on a persisted toggle, and reading it after acting
+        // on it would have made "off" mean "off from the second launch".
+        //
+        // Full auto-update on launch: find + download + apply + restart, itself,
+        // with no clicking (user spec). Applying is safe here — the editor is
+        // always clean at startup.
+        _ = VelopackCheckAndStageAsync(autoApply: _autoUpdateEnabled);
+        // ...and keep looking. A launch-only check leaves an app that stays open
+        // for days permanently on the version it started with.
+        StartUpdateRecheckTimer();
         ApplyUiTheme(_uiTheme);
         ApplyBgDim();
         PopulateThemeList();
@@ -5681,6 +5686,20 @@ public partial class MainWindow : Window
     // RESTART lives in _updateLog.
     private bool _autoUpdateFiring;
 
+    /// <summary>The owner's switch, persisted. OFF means: still check, still
+    /// tell them on the update card — never restart the app by itself.</summary>
+    private bool _autoUpdateEnabled = true;
+
+    /// <summary>How often a running app looks for a new release. Was four
+    /// hours, which meant "we shipped a fix" and "your app has it" were half a
+    /// working day apart. Ticks cost nothing once something is staged.</summary>
+    private const int UpdatePollMinutes = 5;
+
+    /// <summary>Keyboard/mouse silence required before a mid-session update may
+    /// restart the app. Short enough to catch a coffee break, long enough that
+    /// reading a long note on screen is never mistaken for absence.</summary>
+    private const int UpdateIdleMinutes = 3;
+
     /// <summary>Consecutive-failure history, on disk, because an update attempt
     /// ends the process that would otherwise remember it.</summary>
     private BrainX.Core.Services.UpdateAttemptLog? _updateLog;
@@ -5705,18 +5724,80 @@ public partial class MainWindow : Window
         if (_updateRecheckTimer != null) return;
         _updateRecheckTimer = new System.Windows.Threading.DispatcherTimer
         {
-            Interval = TimeSpan.FromHours(4),
+            Interval = TimeSpan.FromMinutes(UpdatePollMinutes),
         };
         _updateRecheckTimer.Tick += async (_, _) =>
         {
             try
             {
+                // Already downloaded and waiting? Then the only open question is
+                // whether the owner has stepped away yet, and GitHub cannot
+                // answer that one. Costs no network on every tick after the
+                // release lands, which is what makes a 5-minute poll affordable.
+                if (_vpkPending != null) { await TryApplyStagedWhenIdleAsync(); return; }
+
                 await CheckLatestReleaseAsync();
+                // Stage only. Whether to APPLY mid-session is a different
+                // decision with a different guard, and it lives in one place.
                 await VelopackCheckAndStageAsync(autoApply: false);
+                if (_vpkPending != null) await TryApplyStagedWhenIdleAsync();
             }
             catch (Exception ex) { Debug.WriteLine($"Update re-check: {ex.Message}"); }
         };
         _updateRecheckTimer.Start();
+    }
+
+    /// <summary>
+    /// Apply a staged update mid-session — but only into an empty chair.
+    /// ...
+    /// The owner asked for a running app to take a new release immediately
+    /// rather than at the next launch. "Immediately" cannot mean "mid-sentence":
+    /// applying is a restart, and a restart that eats what someone was doing is
+    /// worse than an update that waits. So the trigger is a new release AND the
+    /// keyboard being untouched for <see cref="UpdateIdleMinutes"/> minutes —
+    /// the same GetLastInputInfo signal the gardener uses to pick its moment.
+    ///
+    /// Everything the 2026-08-01 restart-loop taught still applies on this path:
+    /// the on-disk failure counter is honoured, and the exit goes through WPF
+    /// shutdown so WebView2 lets go of the install directory before Velopack
+    /// tries to rename it.
+    /// </summary>
+    private async System.Threading.Tasks.Task TryApplyStagedWhenIdleAsync()
+    {
+        if (_vpkPending == null || _autoUpdateFiring || !_autoUpdateEnabled) return;
+
+        var target = _vpkPending.TargetFullRelease.Version.ToString();
+        if (UpdateLog.ShouldStopTrying(target)) return;      // this package is known bad
+        if (_mdEditor is { IsDirty: true }) return;          // unsaved note outranks any update
+        if (UserIdleMinutes() < UpdateIdleMinutes) return;   // they are still working
+
+        _autoUpdateFiring = true;
+        StatusText.Text = $"Update v{target} — applying while you're away…";
+        if (VersionText != null) VersionText.Text = $"updating → v{target}…";
+
+        // A beat, then look again: a returning owner types before they read, so
+        // the check that matters is the one AFTER the pause, not before it.
+        await System.Threading.Tasks.Task.Delay(1500);
+        if (UserIdleMinutes() < UpdateIdleMinutes || _mdEditor is { IsDirty: true })
+        {
+            _autoUpdateFiring = false;
+            StatusText.Text = $"Update v{target} ready — will apply next time you step away.";
+            RefreshUpdatePanel();
+            return;
+        }
+
+        try
+        {
+            // Written BEFORE handing over control: nothing of ours runs after
+            // this to record that we tried. The next launch reads it back.
+            UpdateLog.RecordAttempt(target);
+            ApplyStagedUpdateAndQuit();
+        }
+        catch (Exception ex)
+        {
+            _autoUpdateFiring = false;
+            Debug.WriteLine($"Idle auto-apply failed, leaving the chip armed: {ex.Message}");
+        }
     }
 
     private async System.Threading.Tasks.Task VelopackCheckAndStageAsync(bool autoApply = false)
@@ -12087,6 +12168,7 @@ public partial class MainWindow : Window
                 ["CullDistance"] = _cullDistance,
                 ["UseClusterColors"] = _useClusterColors,
                 ["UiTheme"] = _uiTheme,
+                ["AutoUpdateEnabled"] = _autoUpdateEnabled,
                 ["GraphBgDim"] = _graphBgDim,
                 ["DashBgDim"] = _dashBgDim,
                 ["WindowBgDim"] = _windowBgDim
@@ -12121,6 +12203,8 @@ public partial class MainWindow : Window
                 _scanPatterns = sp.ToString() ?? _scanPatterns;
             if (settings.TryGetValue("AutoScanOnStartup", out var asos) && asos != null)
                 bool.TryParse(asos.ToString(), out _autoScanOnStartup);
+            if (settings.TryGetValue("AutoUpdateEnabled", out var aue) && aue != null)
+                bool.TryParse(aue.ToString(), out _autoUpdateEnabled);
             if (settings.TryGetValue("ImportMode", out var im) && im != null)
                 Enum.TryParse<VaultImporter.ImportMode>(im.ToString(), out _importMode);
             if (settings.TryGetValue("ScanPaths", out var paths) && paths is Newtonsoft.Json.Linq.JArray arr)

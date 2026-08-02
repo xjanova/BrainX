@@ -49,9 +49,18 @@ public partial class MainWindow
             UpdCurrentVersion.Text = $"v{key}";
 
             var installed = VelopackInstalled();
-            UpdInstallMode.Text = installed
-                ? "ON — the installed build checks + updates automatically at startup."
-                : "OFF — this is a portable / dev build. Install via the Setup.exe once to turn auto-update on.";
+            if (UpdAutoToggle != null)
+            {
+                UpdAutoToggle.IsChecked = _autoUpdateEnabled;
+                // A switch that cannot do anything must not look armed.
+                UpdAutoToggle.IsEnabled = installed;
+            }
+            UpdInstallMode.Text = !installed
+                ? "Unavailable — this is a portable / dev build. Install via Setup.exe once to enable self-update."
+                : _autoUpdateEnabled
+                    ? $"Checks every {UpdatePollMinutes} min. A new release is downloaded straight away and applied "
+                      + $"as soon as you have been away from the keyboard for {UpdateIdleMinutes} min — never mid-edit."
+                    : "Off — new releases are still detected and offered here, but nothing restarts by itself.";
 
             var haveRemote = !string.IsNullOrEmpty(_latestRemoteVersion);
             var newer = haveRemote && CompareSemVerTriples(key, _latestRemoteVersion!) < 0;
@@ -73,6 +82,22 @@ public partial class MainWindow
                 UpdStatusText.Text = $"✅ Update v{_vpkPending.TargetFullRelease.Version} downloaded — click “Restart & apply”.";
         }
         catch { /* presentation-only; never throw into the UI */ }
+    }
+
+    /// <summary>
+    /// The auto-update switch. Turning it ON re-arms immediately: if a release
+    /// is already staged it will apply at the next idle window rather than
+    /// waiting for the poll to come round again.
+    /// </summary>
+    private void UpdAutoToggle_Click(object sender, RoutedEventArgs e)
+    {
+        _autoUpdateEnabled = UpdAutoToggle.IsChecked == true;
+        SaveSettingsToFile();
+        RefreshUpdatePanel();
+        StatusText.Text = _autoUpdateEnabled
+            ? "Auto-update ON — new releases install themselves while you're away."
+            : "Auto-update OFF — updates will be offered here, never applied on their own.";
+        if (_autoUpdateEnabled) _ = TryApplyStagedWhenIdleAsync();
     }
 
     /// <summary>Manual "Check for updates": refresh the GitHub latest tag, and on
