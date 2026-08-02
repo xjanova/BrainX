@@ -914,6 +914,11 @@ public partial class MainWindow
                     ReindexVault_Click(this, new RoutedEventArgs());
                     PushAllHudPayloads();       // the numbers just changed
                     break;
+                case "garden":
+                    // Fire-and-forget by design: the run takes minutes and
+                    // reports through the status bar when it lands.
+                    _ = RunGardenerAsync(manual: true);
+                    break;
                 case "obsidian":
                     OpenObsidian_Click(this, new RoutedEventArgs());
                     break;

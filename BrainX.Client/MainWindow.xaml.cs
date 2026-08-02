@@ -2452,6 +2452,9 @@ public partial class MainWindow : Window
         PopulateCustomCategories();
         StartAccessLogWatcher();
         StartMcpStatusWatcher();
+        // The gardener engine predates this call by months; this is the first
+        // thing that ever runs it unattended (idle + stale gated).
+        StartGardenerTimer();
 
         // The Universe was started at the TOP of this method, before the
         // indexing — it is the loading screen, so it has to exist while the
