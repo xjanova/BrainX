@@ -187,6 +187,14 @@ function buildStarfield() {
             transparent: true,
             opacity,
             depthWrite: false,
+            /* This shell sits 1100–1300 units out and scene.fog is FogExp2 at
+               density 0.0025, so every one of these stars was arriving with a
+               fog factor of 1 - e^-(3)^2 — erased to the fog colour, which is
+               very nearly black. The layer was being built, uploaded and drawn
+               every frame to contribute almost nothing. Background sky is not
+               something fog should reach: fog exists to sink DISTANT GRAPH
+               NODES into the void, and the sky is behind all of them. */
+            fog: false,
             blending: THREE.AdditiveBlending
         });
         return new THREE.Points(geom, mat);
@@ -194,6 +202,219 @@ function buildStarfield() {
 
     group.add(layer(2200, 0.7, 0.40, 0.18));   // dim carpet
     group.add(layer(340, 1.6, 0.65, 0.30));    // sparse bright accents
+    return group;
+}
+
+/* ── The Milky Way ────────────────────────────────────────────────
+ *
+ * The sky had stars but no galaxy: a uniform scatter on a sphere reads as
+ * "space" in the abstract, and the thing that makes a real night sky look
+ * photographed is the band — a great circle of unresolved starlight with dark
+ * dust cutting along it.
+ *
+ * Four features do the work, and leaving any one out is what makes a painted
+ * Milky Way look painted:
+ *   1. a BAND, brightest at the galactic equator and falling off with latitude
+ *   2. DUST LANES — the Great Rift. The single most recognisable feature, and
+ *      the one usually missing; without it the band is a fog bank
+ *   3. an off-centre BULGE, wider and warmer, so the band is not a uniform
+ *      stripe with the same cross-section everywhere
+ *   4. RESOLVED STARS crowding the plane, so the glow and the star layer agree
+ *      about where the galaxy is
+ *
+ * Drawn with canvas ops rather than a per-pixel loop: the page vendors its own
+ * three.js and ships no image assets (see the 2026-07-10 overhaul), so the sky
+ * has to be generated — and 2M pixels of JS at boot is a stall the compositor
+ * cannot hide, while blurred gradient blobs are hardware work.
+ */
+
+/** Shared tilt for the band. The dome and the band's stars both take it, or
+ *  the glow and the stars would describe two different galaxies. */
+const MW_TILT = { x: 0.36, y: 0.62, z: 0.17 };
+
+function milkyWayTexture() {
+    const W = 2048, H = 1024;
+    const c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    const ctx = c.getContext('2d');
+
+    // Additive blending: black IS transparent here, so the canvas starts as
+    // empty sky and every stroke only ever adds light.
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+
+    /* Fixed seed. The sky is scenery, not content — it must look the same on
+       every launch, or the app has a different night sky each time it opens
+       and the owner cannot tell a redraw from a bug. */
+    let seed = 0x5EED11;
+    const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+    const range = (a, b) => a + rnd() * (b - a);
+
+    const midY = H / 2;
+    // Galactic centre, off to one side. A band that is brightest dead centre
+    // reads as a lighting effect; a real one has its core somewhere.
+    const coreX = W * 0.3;
+
+    /** Distance from the core along the wrapped horizontal axis, 0..1. */
+    const fromCore = (x) => {
+        const d = Math.abs(x - coreX);
+        return Math.min(d, W - d) / (W / 2);
+    };
+
+    const blob = (x, y, rx, ry, color, blur) => {
+        ctx.save();
+        ctx.filter = `blur(${blur}px)`;
+        ctx.translate(x, y);
+        ctx.scale(1, ry / rx);
+        const g = ctx.createRadialGradient(0, 0, 0, 0, 0, rx);
+        g.addColorStop(0, color);
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(0, 0, rx, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    };
+
+    ctx.globalCompositeOperation = 'lighter';
+
+    // 1. The broad halo — very faint, very wide. This is what stops the band
+    //    from having a hard edge against empty sky.
+    blob(coreX, midY, W * 0.62, H * 0.30, 'rgba(70,86,140,0.30)', 90);
+    blob(W * 0.8, midY, W * 0.40, H * 0.20, 'rgba(58,72,120,0.22)', 90);
+
+    // 2. The band itself, as ~180 overlapping clumps along the equator. The
+    //    jitter is the point: an even stripe looks airbrushed, and real
+    //    unresolved starlight is lumpy at every scale.
+    for (let i = 0; i < 180; i++) {
+        const x = rnd() * W;
+        const t = fromCore(x);                      // 0 at the core, 1 opposite
+        const bulge = Math.exp(-t * t * 4.2);       // fat and bright near the core
+        const y = midY + range(-1, 1) * H * (0.028 + 0.045 * bulge);
+        const rx = range(W * 0.020, W * 0.075) * (0.65 + 0.7 * bulge);
+        const ry = rx * range(0.16, 0.34);
+        // Warm where the core's old stars dominate, cooler out along the arms.
+        const warm = Math.max(0, bulge - 0.15);
+        const r = Math.round(198 + 52 * warm);
+        const g = Math.round(196 + 26 * warm);
+        const b = Math.round(206 - 34 * warm);
+        const a = (0.05 + 0.10 * bulge) * range(0.6, 1.25);
+        blob(x, y, rx, ry, `rgba(${r},${g},${b},${a.toFixed(3)})`, range(14, 40));
+    }
+
+    // 3. The bulge — a single bright warm mass at the core, the anchor the eye
+    //    lands on. Drawn last of the light passes so it sits on top.
+    blob(coreX, midY, W * 0.115, H * 0.115, 'rgba(255,236,206,0.30)', 60);
+    blob(coreX, midY, W * 0.055, H * 0.062, 'rgba(255,244,224,0.34)', 40);
+
+    /* 4. Dust. Under additive blending a dark lane is not something you paint
+          ON — it is light you take AWAY, so this carves the glow with
+          destination-out. Painting grey over it would only make it brighter. */
+    ctx.globalCompositeOperation = 'destination-out';
+
+    // The Great Rift: a long, roughly continuous tear running along the plane,
+    // built from overlapping strokes so its edges stay ragged.
+    /* Blur has to stay well UNDER the lane's own thickness. The first cut of
+       this drew 6–17px-tall lanes and then blurred them by 10–26px, which is
+       not softening an edge, it is deleting the feature — measured at 3-6% of
+       peak brightness, invisible against a band that varies more than that on
+       its own. A real rift takes half the band out. */
+    let riftY = midY + H * 0.012;
+    for (let x = -W * 0.1; x < W * 1.1; x += W * 0.008) {
+        riftY += range(-1, 1) * H * 0.005;
+        riftY = Math.max(midY - H * 0.045, Math.min(midY + H * 0.055, riftY));
+        const t = fromCore(x);
+        // Most pronounced across the bright part; over faint sky there is
+        // nothing left to subtract.
+        const strength = 0.78 * Math.exp(-t * t * 2.6) + 0.14;
+        blob(x, riftY, range(W * 0.022, W * 0.048), range(H * 0.011, H * 0.026),
+             `rgba(0,0,0,${strength.toFixed(3)})`, range(5, 13));
+    }
+
+    // Finer mottling, above and below the rift, so the dust is not one lane.
+    for (let i = 0; i < 170; i++) {
+        const x = rnd() * W;
+        const t = fromCore(x);
+        const y = midY + range(-1, 1) * H * 0.055;
+        blob(x, y, range(W * 0.008, W * 0.030), range(H * 0.007, H * 0.018),
+             `rgba(0,0,0,${(0.42 * Math.exp(-t * t * 2.2) + 0.08).toFixed(3)})`,
+             range(4, 11));
+    }
+
+    ctx.globalCompositeOperation = 'source-over';
+
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    // Longitude wraps; latitude must not, or the poles smear across the seam.
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
+    return tex;
+}
+
+function buildMilkyWay() {
+    const group = new THREE.Group();
+
+    const dome = new THREE.Mesh(
+        new THREE.SphereGeometry(1600, 64, 32),
+        new THREE.MeshBasicMaterial({
+            map: milkyWayTexture(),
+            side: THREE.BackSide,          // we are inside it
+            transparent: true,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            depthTest: false,              // with renderOrder, always behind
+            /* MUST be false. scene.fog is FogExp2 at density 0.0025, and this
+               dome is 1600 units out: exp(-(0.0025*1600)^2) = e^-16. The sky
+               would be mathematically erased and the bug would look like "the
+               texture failed to load". */
+            fog: false,
+            opacity: 0.85,
+        })
+    );
+    dome.renderOrder = -10;
+    dome.rotation.set(MW_TILT.x, MW_TILT.y, MW_TILT.z);
+    group.add(dome);
+
+    /* Stars crowding the plane. Without these the glow floats over a sky whose
+       stars are spread evenly — two layers disagreeing about where the galaxy
+       is, which the eye reads immediately even if it cannot name the fault. */
+    const COUNT = 1500;
+    const positions = new Float32Array(COUNT * 3);
+    const colors = new Float32Array(COUNT * 3);
+    const col = new THREE.Color();
+    let s2 = 0xBA11D;
+    const r2 = () => ((s2 = (s2 * 1664525 + 1013904223) >>> 0) / 4294967296);
+    for (let i = 0; i < COUNT; i++) {
+        const theta = 2 * Math.PI * r2();
+        // Gaussian-ish latitude (sum of uniforms) so density falls off from the
+        // plane instead of stopping at a hard edge.
+        const lat = ((r2() + r2() + r2() - 1.5) / 1.5) * 0.30;
+        const r = 1150 + r2() * 220;
+        const cl = Math.cos(lat);
+        positions[3 * i + 0] = r * cl * Math.cos(theta);
+        positions[3 * i + 1] = r * Math.sin(lat);
+        positions[3 * i + 2] = r * cl * Math.sin(theta);
+        if (r2() < 0.26) col.setHSL(0.08 + r2() * 0.04, 0.45, 0.74);
+        else             col.setHSL(0.58 + r2() * 0.08, 0.22, 0.82);
+        colors[3 * i + 0] = col.r; colors[3 * i + 1] = col.g; colors[3 * i + 2] = col.b;
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    const bandStars = new THREE.Points(geom, new THREE.PointsMaterial({
+        map: softDotTexture(),
+        vertexColors: true,
+        size: 0.85,
+        sizeAttenuation: false,
+        transparent: true,
+        opacity: 0.55,
+        depthWrite: false,
+        fog: false,                       // same reason as the dome
+        blending: THREE.AdditiveBlending,
+    }));
+    bandStars.rotation.set(MW_TILT.x, MW_TILT.y, MW_TILT.z);
+    group.add(bandStars);
+
     return group;
 }
 
@@ -489,6 +710,11 @@ export function createScene(canvas, callbacks = {}) {
     // kept so setBackground('black') can hide it for the "deep void" look.
     const starfieldObj = buildStarfield();
     scene.add(starfieldObj);
+
+    // The galaxy the sky belongs to. Same lifetime as the starfield — built
+    // once, never rebuilt per brain, hidden together with it in 'black' mode.
+    const milkyWayObj = buildMilkyWay();
+    scene.add(milkyWayObj);
 
     // All "live" content (stars, edges, nebula) lives inside one universeGroup
     // so a single rotation pumps motion through everything coherently. Nebula
@@ -1977,6 +2203,7 @@ export function createScene(canvas, callbacks = {}) {
         renderer.setClearColor(isBlack ? 0x000000 : 0x02030a, 1);
         if (nebulaGroup) nebulaGroup.visible = !isBlack;
         if (starfieldObj) starfieldObj.visible = !isBlack;
+        if (milkyWayObj) milkyWayObj.visible = !isBlack;
         if (dustObj) dustObj.visible = !isBlack;
         scene.fog.density = isBlack ? 0.0040 : 0.0025;
     }
