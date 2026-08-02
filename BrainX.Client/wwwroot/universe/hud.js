@@ -329,6 +329,25 @@ function renderAgents(d = {}) {
 // 4, not 7: the panel gives this list ~60px and seven rows need ~81px, so
 // the older ones were being sliced in half at the top edge. Measured in a
 // browser against the real panel, not guessed from the markup.
+/* The traffic log is printed ON the orbit render now, so it is spending the
+ * card's best pixels the whole time it is up. A minute with no traffic means
+ * nothing in it has changed for a minute — nobody is reading it, and the
+ * picture behind it is what the card is for. It comes straight back on the
+ * next event, and pointing at the card brings it back early (hud.css).
+ */
+const FLOW_IDLE_MS = 60_000;
+let _flowIdleTimer = null;
+
+/** Restart the quiet clock. Called on real traffic, and once at init so a HUD
+ *  that never sees any settles down instead of holding the log up forever. */
+function noteFlowActivity() {
+    const panel = document.querySelector('.hud-panel-bus');
+    if (!panel) return;
+    panel.classList.remove('is-quiet');
+    clearTimeout(_flowIdleTimer);
+    _flowIdleTimer = setTimeout(() => panel.classList.add('is-quiet'), FLOW_IDLE_MS);
+}
+
 /* How much traffic history the ticker holds. Five was the number of rows that
    fit the old fixed 92px box — a cap on the DATA chosen from the size of the
    window it was shown in. The box is elastic now, so a card dragged taller
@@ -340,6 +359,11 @@ const _flow = [];
 function renderFlow(d = {}) {
     const events = d.events || [];
     const el = document.getElementById('hud-flow');
+
+    // Real traffic, not merely a tick that carried none: an empty poll must not
+    // count as movement or the log would never go quiet on a HUD being polled
+    // every two seconds.
+    if (events.length) noteFlowActivity();
 
     // Animate first — a mote per real event, direction carrying meaning:
     // a write is the agent pushing INTO the brain (mote in the agent's own
@@ -834,6 +858,9 @@ export function initHud() {
     // module measures the panels where the grid put them, so it has to run
     // after everything above has had its say about their size.
     initHudLayout();
+    // Arms the quiet clock from the start — a bus that has never carried
+    // anything should not hold its empty log over the render for the session.
+    noteFlowActivity();
     // Content arrives in stages, so re-evaluate what is clipped as it lands
     // and whenever the window changes shape. Resizing a panel by hand goes
     // through the same observer, so a shortened panel gets its fade the moment

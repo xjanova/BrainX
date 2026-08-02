@@ -52,17 +52,25 @@ export function createAgentBus3D(canvas) {
      * The default is the old fixed framing — low and tilted, so the orbits
      * read as ellipses instead of concentric circles, which is what makes it
      * look like a system and not a dartboard. */
-    /* Labels fade in between FAR and NEAR — see the tick loop. Declared here
-     * because the opening distance is derived from them: the panel should show
-     * the names when it opens, and a hard-coded default would drift away from
-     * these the first time either is tuned. */
-    const LABEL_FAR = 6.4, LABEL_NEAR = 4.2;
+    /* Labels fade in between FAR and NEAR — see the tick loop. These are
+     * RATIOS of the fitted distance, not absolute distances, because the fit
+     * now depends on the shape of the card (see fitDist). The rule they encode
+     * is "the panel shows the names when it opens", and the moment the opening
+     * distance became a computed value, two hard-coded numbers could only
+     * disagree with it: a squarish card fits at ~7.0 and the old fixed 6.4 had
+     * every name faded out before the card was even drawn.
+     *
+     * The pair reproduces the old hand-tuned framing exactly — at the old 16:9
+     * default they resolve to 6.4 and 4.2, giving alpha ≈ 0.55 at rest, which
+     * is legible without being right on top of the star. */
+    const LABEL_FAR_K = 1.231, LABEL_NEAR_K = 0.808;
 
-    /* Open just inside the fade, where the names are legible (alpha ≈ 0.55)
-     * without being right on top of the star. At FOV 38° and phi 0.43 the
-     * outer orbit's apparent height is ~1.5 against a ~1.8 half-frame here, so
-     * the whole system still fits — closer than about 4.6 starts clipping it. */
-    const DEFAULT_DIST = LABEL_FAR - 1.2;
+    /** Last distance fitDist() computed — the view's "home", which is what the
+     *  label fade is measured against even after the owner has zoomed away. */
+    let fitted = 5.2;
+
+    /* Only the opening frame, before the first resize computes a real fit. */
+    const DEFAULT_DIST = 5.2;
 
     const view = {
         theta: 0,                 // around the vertical axis
@@ -164,9 +172,11 @@ export function createAgentBus3D(canvas) {
     // Double-click puts it back — a view you can lose is a view you need a way
     // out of, and "drag until it looks right again" is not one.
     canvas.addEventListener('dblclick', (e) => {
-        view.theta = 0; view.phi = 0.43; view.dist = DEFAULT_DIST;
+        view.theta = 0; view.phi = 0.43;
+        // Clear the flag BEFORE re-framing: refit() declines to touch a view
+        // the owner is holding, and this gesture is the owner letting go.
         userMoved = false;
-        applyCamera();
+        refit();
         e.stopPropagation(); e.preventDefault();
     });
 
@@ -254,34 +264,73 @@ export function createAgentBus3D(canvas) {
         });
     }
 
-    /* The scene is composed for ONE shape — a shallow tilt over an orbital
-     * plane, framed 16:9. Sizing the drawing buffer to the CSS box instead
-     * meant the composition became whatever rectangle the panel happened to
-     * be: since the HUD's cards can be resized by hand, a card dragged wide
-     * and short handed this a 6:1 slit, and the orbits were squeezed into a
-     * letterbox with the outermost ring cropped away.
+    /** Half-extent of the whole system in world units: the outermost orbit,
+     *  plus enough for the planet riding it and its name tag. */
+    function systemRadius() {
+        let r = 1.5;
+        for (const p of planets.values()) if (!p.isMoon) r = Math.max(r, p.orbitR);
+        return r + 0.25;
+    }
+
+    /**
+     * Distance that frames the system for the card's CURRENT shape.
      *
-     * So the buffer keeps the scene's own ratio and CSS object-fit:contain
-     * places it inside the box. Resizing a card now changes how BIG the orbit
-     * is drawn, never what shape it is drawn in.
+     * The render fills the card now, so the projection has to answer for the
+     * card being any rectangle at all. Two constraints, and the camera has to
+     * satisfy the harder one:
+     *
+     *   vertical   — the orbit is a circle of radius R lying flat, seen from
+     *                elevation phi, so its apparent half-height is R·sin(phi).
+     *                This one is never allowed to overflow: a card that clips
+     *                the system top and bottom stops reading as a system.
+     *   horizontal — R across, which at the shape this panel shipped with is
+     *                already cropped by about a quarter. That crop is not a
+     *                bug; it is what makes the thing read as a system you are
+     *                inside rather than a diagram you are looking at. 0.72
+     *                keeps exactly that framing at the old 16:9 (it lands on
+     *                5.21 against the old hand-tuned 5.2) and only pulls the
+     *                camera back once a card is narrow enough that the crop
+     *                would start eating the orbits themselves.
+     *
+     * Not applied while the owner is holding the view: a camera that re-frames
+     * itself under a hand that just moved it is a camera fighting its user.
      */
-    const SCENE_AR = 16 / 9;
+    function fitDist() {
+        const t = Math.tan(camera.fov * Math.PI / 360);       // tan(half fov)
+        const R = systemRadius();
+        const vertical = (R * Math.sin(view.phi)) / t * 1.05;
+        const horizontal = R / (t * Math.max(0.2, camera.aspect)) * 0.72;
+        /* Backing off for a narrow card has to STOP somewhere. Satisfying the
+           horizontal constraint outright on a 300×600 card put the camera at
+           the 16-unit clamp and the whole system became a speck in the middle
+           of it — filling the card with emptiness. Past 1.45× the vertical fit
+           the card is simply the wrong shape for this scene, and cropping the
+           outer orbit is the better failure: the star and the inner planets
+           stay legible. */
+        fitted = clamp(Math.min(Math.max(vertical, horizontal), vertical * 1.45),
+                       DIST_MIN, DIST_MAX);
+        return fitted;
+    }
+
+    function refit() {
+        if (userMoved) return;
+        view.dist = fitDist();
+        applyCamera();
+    }
 
     function resize() {
         const box = canvas.getBoundingClientRect();
-        const bw = box.width || canvas.clientWidth || 240;
-        const bh = box.height || canvas.clientHeight || 150;
-        if (bw < 4 || bh < 4) return;
+        const w = box.width || canvas.clientWidth || 240;
+        const h = box.height || canvas.clientHeight || 150;
+        if (w < 4 || h < 4) return;
 
-        // Largest 16:9 rectangle that fits the box — the same arithmetic
-        // object-fit is about to do, so the buffer matches the pixels the
-        // compositor will actually show and nothing is up- or down-sampled.
-        let w = bw, h = bw / SCENE_AR;
-        if (h > bh) { h = bh; w = bh * SCENE_AR; }
-
-        renderer.setSize(Math.round(w), Math.round(h), false);   // false: never touch CSS size
-        camera.aspect = SCENE_AR;
+        // The buffer matches the CSS box exactly — no letterbox, no scaling by
+        // the compositor. `false` keeps setSize from writing a style width and
+        // height back onto a canvas whose size comes from `inset` in hud.css.
+        renderer.setSize(Math.round(w), Math.round(h), false);
+        camera.aspect = w / h;
         camera.updateProjectionMatrix();
+        refit();
     }
 
     function start() { if (!running) { running = true; lastT = performance.now(); raf = requestAnimationFrame(tick); } }
@@ -478,6 +527,9 @@ export function createAgentBus3D(canvas) {
             p.ring.geometry = ringGeometry(p.orbitR);
             i++;
         }
+        // The system just changed size — an agent joining pushes the outermost
+        // orbit outward. Re-frame, or the newcomer arrives outside the card.
+        refit();
     }
 
     function tick(now) {
@@ -491,8 +543,11 @@ export function createAgentBus3D(canvas) {
         corona.scale.setScalar(3.1 * pulse);
 
         // Name tags fade in as the camera closes. Computed once, not per
-        // planet — they all share the same distance from the star.
-        const labelAlpha = clamp((LABEL_FAR - view.dist) / (LABEL_FAR - LABEL_NEAR), 0, 1);
+        // planet — they all share the same distance from the star. Measured
+        // against the fitted "home" distance so the names read the same at
+        // every card shape instead of only at the one they were tuned on.
+        const far = fitted * LABEL_FAR_K, near = fitted * LABEL_NEAR_K;
+        const labelAlpha = clamp((far - view.dist) / (far - near), 0, 1);
 
         const advance = (p) => {
             p.phase += p.speed * dt * (p.online ? 1 : 0.35);

@@ -494,39 +494,56 @@ body.hud-active #settings-toggle {
    protects the render. */
 .hud-panel-bus { min-width: 0; }
 
-/* The render is now the only child, and the only representation of the bus —
-   the text roster that used to sit under it is gone, because it repeated what
-   the orbits already show and the names are one wheel-scroll away. */
-#hud-layer > .hud-panel.hud-bl { display: flex; flex-direction: column; }
-/* NEVER flex-grow. A flex item that grows has its height decided by the flex
-   line, and a decided height outranks aspect-ratio — which is how a card
-   dragged wide and short turned the orbit into a 6:1 slit (measured: 1.91 →
-   5.96). It may still SHRINK, so it can never overflow a short card, and
-   object-fit below means shrinking costs framing, not proportion. The slack it
-   stops taking goes to the traffic ticker, which is the half of this panel
-   that actually has more to show. */
-#hud-bus-canvas { flex: 0 1 auto; min-height: 72px; }
+/* The system IS the card. The render fills it corner to corner and the title
+   and the traffic log are printed ON the render rather than stacked above and
+   below it — which is what the panel was doing, spending most of a card on
+   layout so that a 16:9 stamp of orbit could sit in the middle of it.
+
+   Letterboxing is gone with it: the camera takes the card's real aspect, so a
+   resized card is a different WINDOW onto the same system, never a stretched
+   picture of it. Circles stay circles because the projection is corrected, not
+   because the box is held to a ratio. See fitDist() in agentbus3d.js. */
+#hud-layer > .hud-panel.hud-bl {
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    /* The log scrolls itself and the render is absolutely placed, so the card
+       has nothing left to scroll — and a scrolling card would drag the render
+       out of frame with it. */
+    overflow: hidden;
+    /* An absolutely positioned render contributes NO height, and this card is
+       the one panel whose height used to come entirely from it. Left on the
+       `align-self:end` every corner panel shares, it collapsed to the 102px of
+       its title and log — a solar system in a letterbox slit, which is the
+       opposite of the point. It takes its whole grid track instead, so the
+       system gets the room the layout already reserved for it. */
+    align-self: stretch;
+    /* And a floor, for the breakpoints where that track is short. */
+    min-height: 190px;
+}
 
 #hud-bus-canvas {
-    display: block;
-    width: 100%;
+    position: absolute;
+    /* Full bleed, MINUS the resize grip. hudlayout.js hit-tests the outer 9px
+       of a card as its border handle, and this canvas runs its own pointerdown
+       for orbiting — a canvas painted right up to the edge means one press
+       starting a resize and a rotation at the same time. 10px of bare card is
+       the arbitration, and it reads as intentional: these panels are frameless
+       glass and the galaxy shows through the margin. */
+    /* Explicit size, not `inset` alone. A <canvas> is a REPLACED element, and
+       an absolutely positioned replaced box with width:auto takes its
+       INTRINSIC width — the drawing buffer's — and quietly drops `right` as
+       over-constrained. Measured: a 900px card left the render at 296px with
+       594px of dead space beside it. */
+    left: 10px;
+    top: 10px;
+    width: calc(100% - 20px);
+    height: calc(100% - 20px);
+    z-index: 0;
     /* It is draggable now, so it has to look draggable. touch-action:none
        keeps a pen or touch drag from being stolen by the page's own panning. */
     cursor: grab;
     touch-action: none;
-    /* Wider than tall: orbits are viewed at a shallow tilt, so vertical pixels
-       past this ratio are empty space above and below the orbital plane. */
-    aspect-ratio: 16 / 9;
-    /* The scene is composed for ONE shape. agentbus3d keeps the drawing buffer
-       at that shape and this letterboxes it into whatever box a placed card
-       leaves — so a resized card makes the orbit bigger or smaller, never a
-       different shape. A canvas is a replaced element, so object-fit applies
-       to it exactly as it does to an image. */
-    object-fit: contain;
-    /* Share of the CARD, not of the window. 26vh meant stretching a card
-       taller stopped feeding the render at a size fixed by the monitor. */
-    max-height: 46%;
-    margin: 2px 0 8px;
     /* No plate behind it. The renderer clears to transparent, so the agents
        orbit in the same space as the galaxy rather than inside a window cut
        into it — which is the whole point of dropping the panels. */
@@ -535,11 +552,60 @@ body.hud-active #settings-toggle {
 
 #hud-bus-canvas:active { cursor: grabbing; }
 
+/* Everything else in this card floats over the render. */
+#hud-layer > .hud-panel.hud-bl > .hud-title,
+#hud-layer > .hud-panel.hud-bl > .hud-flow { position: relative; z-index: 1; }
+
+/* The title chip is this card's handle. Every other card can be dragged from
+   anywhere on its body; this one's body belongs to the orbit gesture, so the
+   chip has to say out loud that it is the part you grab. The 9px border still
+   resizes, as everywhere else. */
+#hud-layer > .hud-panel.hud-bl > .hud-title { cursor: move; }
+
+/* ── The traffic log, printed on the render ──────────────────────
+   Sits at the bottom of the card, over the orbits. Legibility comes from a
+   scrim rather than a panel: a gradient that is transparent where the rows
+   thin out and opaque under the newest ones, plus the two text-shadows every
+   glyph on this HUD already carries. A solid plate would put back exactly the
+   window this change just removed. */
+#hud-layer > .hud-panel.hud-bl > .hud-flow {
+    /* Bottom of the card regardless of how tall it is — the title is the only
+       thing above it and the render is behind both. It must NOT grow: an item
+       that fills the line leaves the auto margin no free space to absorb, and
+       the log would climb back over the whole card. */
+    flex: 0 1 auto;
+    margin-top: auto;
+    max-height: 58%;
+    padding: 26px 8px 4px;
+    background: linear-gradient(180deg,
+        rgba(6, 5, 18, 0) 0%,
+        rgba(6, 5, 18, 0.30) 26%,
+        rgba(6, 5, 18, 0.62) 62%,
+        rgba(6, 5, 18, 0.74) 100%);
+    /* The scrim must fade out at its own top edge too, or its leading edge is
+       a visible horizontal line drawn across the middle of the orbit. */
+    -webkit-mask-image: linear-gradient(180deg, transparent 0%, #000 22%);
+    mask-image: linear-gradient(180deg, transparent 0%, #000 22%);
+    transition: opacity 900ms ease;
+}
+
+/* Quiet for a minute: the words go, the system stays. A log that is not
+   changing is a log nobody is reading, and this card's whole point is the
+   picture behind it. hud.js sets .is-quiet — see FLOW_IDLE_MS. */
+.hud-panel-bus.is-quiet > .hud-flow { opacity: 0; pointer-events: none; }
+/* Hiding it is decluttering, NOT deleting: pointing at the card brings the
+   last rows back without waiting for the next event. */
+.hud-panel-bus.is-quiet:hover > .hud-flow { opacity: 1; pointer-events: auto; }
+
+@media (prefers-reduced-motion: reduce) {
+    #hud-layer > .hud-panel.hud-bl > .hud-flow { transition: none; }
+}
+
 /* On a short viewport the render shrinks — it must never be hidden. It used to
    be droppable because the roster underneath still named every agent; with the
    roster gone, hiding it would leave the panel showing nothing but its title. */
 @media (max-height: 620px) {
-    #hud-bus-canvas { min-height: 56px; }
+    #hud-layer > .hud-panel.hud-bl > .hud-flow { max-height: 50%; }
 }
 
 /* ── Feed ─────────────────────────────────────────────────────── */
@@ -1009,9 +1075,11 @@ body.hud-active.has-notice #hud-layer {
    Note what is NOT here: type scale. The fonts stay put, so a resized card
    reflows to reveal more rows rather than magnifying the same ones — which is
    the difference between a bigger card and a zoomed one. */
+   The traffic log is NOT in this list. It is capped at a share of its card
+   rather than by the window, so it already grows with one — and lifting its
+   cap here would win on source order and let it climb over the whole render. */
 #hud-layer > .hud-panel.hud-free #hud-activity-body,
-#hud-layer > .hud-panel.hud-free #hud-recent-body,
-#hud-layer > .hud-panel.hud-free .hud-flow { max-height: none; }
+#hud-layer > .hud-panel.hud-free #hud-recent-body { max-height: none; }
 
 /* Both feeds in the top-right card now share the slack instead of only the
    activity one, and each keeps its own scrollback. Recently-edited is capped
