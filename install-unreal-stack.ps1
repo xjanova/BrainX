@@ -109,15 +109,51 @@ function Find-UnrealEditor($root) {
             }
         } catch { }
     }
-    foreach ($r in @("C:\Program Files\Epic Games", "D:\Epic Games", "E:\Epic Games",
-                     "F:\Epic Games", "G:\Epic Games", "D:\UnrealEngine", "G:\UnrealEngine")) {
+    # The launcher lets you install anywhere, and the manifest above is empty on
+    # this machine even with 5.8 installed -- so the scan has to be broad. Found
+    # the hard way: a real install at D:\Unreal\UE_5.8 was missed because only
+    # "<drive>\Epic Games" and "<drive>\UnrealEngine" were listed.
+    $roots = @()
+    foreach ($d in @("C", "D", "E", "F", "G", "H")) {
+        foreach ($n in @("Epic Games", "UnrealEngine", "Unreal", "UE", "Program Files\Epic Games")) {
+            $roots += "${d}:\$n"
+        }
+    }
+    foreach ($r in $roots) {
         if (-not (Test-Path $r)) { continue }
+        # The root may BE an engine dir, or hold versioned ones (UE_5.8).
+        $self = Join-Path $r "Engine\Binaries\Win64\UnrealEditor.exe"
+        if (Test-Path $self) { return $self }
         $hit = Get-ChildItem $r -Directory -ErrorAction SilentlyContinue |
                ForEach-Object { Join-Path $_.FullName "Engine\Binaries\Win64\UnrealEditor.exe" } |
-               Where-Object { Test-Path $_ } | Select-Object -First 1
+               Where-Object { Test-Path $_ } | Sort-Object -Descending | Select-Object -First 1
         if ($hit) { return $hit }
     }
     return $null
+}
+
+<#
+    The engine's own version file -- the only trustworthy source.
+
+    UnrealEditor.exe's ProductVersion is "++UE5+Release-5.8-CL-56057345", which
+    no numeric comparison can parse, so a regex on it silently skips the check
+    rather than failing it. And the folder name proves nothing (the same lesson
+    a Unity Hub folder here taught, holding metadata and no editor at all).
+    Engine/Build/Build.version is JSON with real integers.
+#>
+function Get-EngineVersion($engineDir) {
+    $bv = Join-Path $engineDir "Engine\Build\Build.version"
+    if (-not (Test-Path $bv)) { return $null }
+    try {
+        $j = Read-JsonFile $bv
+        return [pscustomobject]@{
+            Major = [int]$j.MajorVersion
+            Minor = [int]$j.MinorVersion
+            Patch = [int]$j.PatchVersion
+            Text  = "$($j.MajorVersion).$($j.MinorVersion).$($j.PatchVersion)"
+            Assoc = "$($j.MajorVersion).$($j.MinorVersion)"
+        }
+    } catch { return $null }
 }
 
 function Get-FreePort($preferred) {
@@ -207,15 +243,16 @@ if (-not $editor) {
 }
 
 $engineDir = (Get-Item $editor).Directory.Parent.Parent.Parent.FullName   # ...\Engine\Binaries\Win64 -> root
-$ueVersion = (Get-Item $editor).VersionInfo.ProductVersion
 Ok "UnrealEditor.exe -> $editor"
-Ok "version $ueVersion"
 
-if ($ueVersion -match '^(\d+)\.(\d+)') {
-    $maj = [int]$Matches[1]; $min = [int]$Matches[2]
-    if ($maj -lt 5 -or ($maj -eq 5 -and $min -lt 8)) {
-        Bad "the built-in MCP plugin is 5.8+. This is $ueVersion -- nothing to bridge to."
+$ue = Get-EngineVersion $engineDir
+if ($ue) {
+    Ok "version $($ue.Text)  (Build.version)"
+    if ($ue.Major -lt 5 -or ($ue.Major -eq 5 -and $ue.Minor -lt 8)) {
+        Bad "the built-in MCP plugin is 5.8+. This is $($ue.Text) -- nothing to bridge to."
     }
+} else {
+    Warn "no Engine\Build\Build.version -- cannot confirm this is 5.8+; continuing"
 }
 
 # ------------------------------------------------- 3. engine-level plugin patch
@@ -331,7 +368,7 @@ if (-not $NoProject) {
         # editor generates everything else on first open. No template copy, no
         # engine invocation, nothing to go stale.
         New-Item -ItemType Directory -Force -Path (Join-Path $ProjectPath "Content") | Out-Null
-        $assoc = if ($ueVersion -match '^(\d+\.\d+)') { $Matches[1] } else { "5.8" }
+        $assoc = if ($ue) { $ue.Assoc } else { "5.8" }
         Write-JsonFile $uproject ([pscustomobject]@{
             FileVersion       = 3
             EngineAssociation = $assoc
