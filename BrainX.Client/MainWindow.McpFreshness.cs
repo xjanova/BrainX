@@ -11,10 +11,29 @@
 // status bar reads the version ON DISK and says the new number, while the
 // server answering Claude's calls is the old one. This file closes that gap.
 //
-// Detection is a timestamp comparison, not a protocol: a running MCP whose own
-// binary has been written since the process started is running code that no
-// longer exists on disk. That covers both update paths — Velopack (new file,
-// fresh timestamp) and deploy-mcp.ps1 (same file, overwritten).
+// Detection is TWO signals, because one of them is blind on its own:
+//
+//   BinaryRewritten — a running MCP whose own binary has been written since the
+//     process started is running code that no longer exists on disk. Covers
+//     both update paths: Velopack (new file, fresh timestamp) and
+//     deploy-mcp.ps1 (same file, overwritten).
+//
+//   VersionBehind — the agent's own heartbeat says which build is ANSWERING
+//     (Program.AgentBus.cs stamps ServerVersion into every presence file), and
+//     it is older than the binary a new session would spawn.
+//
+// The second exists because the first cannot see the case the owner actually
+// hit: two agents online at once, `claude` reporting 2.9.211 from a dev build
+// in bin\Release and `local-agent-mode-brainx-brain` reporting 2.9.231 from the
+// installed copy. Neither binary had been touched since its process started, so
+// the timestamp test called both fresh — while twenty versions of tools sat
+// between them. A timestamp answers "did the file under me change"; it can
+// never answer "am I the build a new session would get", and that second
+// question is the whole point of the feature. The launcher/worker skip below
+// widens the same hole: it drops every process in the modern topology.
+//
+// The version signal is also the only one that reaches a terminal-hosted or
+// Codex session, whose process tree this app cannot walk.
 //
 // It restarts the affected clients AUTOMATICALLY (owner, 2026-07-30: "ทำ auto
 // restart เลยเมื่อ brainx update ให้รีสตาร์ท cluade ide และอื่นๆด้วยเพื่อให้ตรงกัน"), which
@@ -36,13 +55,25 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows;
+using Newtonsoft.Json.Linq;
 
 namespace BrainX.Client;
 
 public partial class MainWindow
 {
+    /// <summary>Why we think a server is stale. It decides how hard we push:
+    /// a rewritten binary is unambiguous and keeps the automatic restart the
+    /// owner asked for, while a version gap can legitimately be the owner
+    /// running a dev build on purpose — that one gets told, not acted on.</summary>
+    private enum StaleReason { BinaryRewritten, VersionBehind }
+
     private sealed record McpProc(
-        int Pid, string Exe, DateTime Started, int ParentPid, string ParentName);
+        int Pid, string Exe, DateTime Started, int ParentPid, string ParentName,
+        StaleReason Reason = StaleReason.BinaryRewritten,
+        // Set only for VersionBehind: which bus agent reported it, and the
+        // build it says it is answering with. The timestamp path knows a
+        // process but not who is talking to it; this path is the reverse.
+        string? Agent = null, string? Version = null);
 
     /// <summary>Stale MCP servers found on the last check, newest first.</summary>
     private List<McpProc> _staleMcp = new();
@@ -73,18 +104,136 @@ public partial class MainWindow
         _lastMcpFreshnessCheck = DateTime.UtcNow;
 
         List<McpProc> stale;
-        try { stale = FindStaleMcp(); }
+        try
+        {
+            stale = FindStaleMcp();
+            // Second signal, merged into one list so there is one banner, one
+            // tooltip and one Restart button rather than two competing ones.
+            // Dedup by pid with the timestamp entry winning: it is the stronger
+            // claim (the file really did change) and it is the one allowed to
+            // arm the automatic restart.
+            var byPid = stale.Select(s => s.Pid).ToHashSet();
+            stale.AddRange(FindOutdatedAgents().Where(o => !byPid.Contains(o.Pid)));
+        }
         catch (Exception ex)
         {
             Debug.WriteLine($"CheckMcpFreshness: {ex.Message}");
             return;
         }
 
-        bool changed = stale.Count != _staleMcp.Count ||
-                       !stale.Select(s => s.Pid).OrderBy(p => p)
-                             .SequenceEqual(_staleMcp.Select(s => s.Pid).OrderBy(p => p));
+        // Signature, not just pids: an agent that restarts into a build which is
+        // STILL behind keeps its pid out of the set but changes what the banner
+        // has to say, and a set compared only by pid would leave the old text up.
+        static string Sig(IEnumerable<McpProc> l) => string.Join("|",
+            l.Select(s => $"{s.Pid}:{s.Reason}:{s.Version}").OrderBy(s => s, StringComparer.Ordinal));
+
+        bool changed = !string.Equals(Sig(stale), Sig(_staleMcp), StringComparison.Ordinal);
         _staleMcp = stale;
         if (changed) ApplyMcpFreshnessToUi();
+    }
+
+    /// <summary>
+    /// Connected agents whose own heartbeat reports an older MCP than the
+    /// binary a new session would spawn.
+    ///
+    /// Ground truth, not inference: the server itself wrote that version string
+    /// while serving that session (Program.AgentBus.cs · WritePresence). It
+    /// needs no process tree, so it sees terminal-hosted and Codex sessions
+    /// that <see cref="FindStaleMcp"/> structurally cannot.
+    ///
+    /// Two deliberate exclusions:
+    ///   • Agents past the presence TTL. The owner asked about programs that are
+    ///     CONNECTED; a CluadeX heartbeat from three days ago names a process
+    ///     that no longer exists, and telling someone to restart it is noise.
+    ///   • Agents running AHEAD of the installed build. That is a dev build
+    ///     under test, which is a normal state in this repo — flagging it would
+    ///     train the owner to ignore the banner that matters.
+    ///
+    /// No allowlist here, unlike ReadBusAgents. That list exists to stop the
+    /// MAP growing bodies on its own; this is a sentence naming what to
+    /// restart, and filtering it would hide the one case the owner has no other
+    /// way to find — an agent nobody remembered to add. Anything heartbeating
+    /// inside the TTL is by definition connected. The name is escaped at the
+    /// other end (hud.js setText writes textContent) and bounded by
+    /// BusDisplayName's 14-char ellipsis, so an unexpected slug costs a clipped
+    /// label, not markup in the banner.
+    /// </summary>
+    private List<McpProc> FindOutdatedAgents()
+    {
+        var found = new List<McpProc>();
+        if (!TryParseMcpVersion(ReadMcpFileVersion().label, out var onDisk)) return found;
+
+        var presenceDir = Path.Combine(BusRootDir, "presence");
+        if (!Directory.Exists(presenceDir)) return found;
+
+        Dictionary<int, int>? parents = null;
+        foreach (var f in Directory.GetFiles(presenceDir, "*.json"))
+        {
+            try
+            {
+                var o = JObject.Parse(File.ReadAllText(f));
+
+                var seenRaw = o["lastSeenUtc"]?.ToString();
+                if (!DateTime.TryParse(seenRaw, null,
+                        System.Globalization.DateTimeStyles.RoundtripKind, out var seen)) continue;
+                if ((DateTime.UtcNow - seen).TotalSeconds > BusPresenceTtlSeconds) continue;
+
+                if (!TryParseMcpVersion(o["version"]?.ToString(), out var running)) continue;
+                if (running >= onDisk) continue;
+
+                var agent = o["agent"]?.ToString() ?? Path.GetFileNameWithoutExtension(f);
+                var pid = o["pid"]?.ToObject<int>() ?? 0;
+
+                // Fill in what the live process can still tell us, so this entry
+                // feeds the SAME restart path as a timestamp one. A dead pid is
+                // not a reason to stay quiet — the agent is behind either way,
+                // and with no window-owning parent it lands in the "restart
+                // these yourself" list, which is the honest answer.
+                string exe = ""; var started = DateTime.MinValue; var parentPid = 0;
+                try
+                {
+                    using var p = Process.GetProcessById(pid);
+                    exe = p.MainModule?.FileName ?? "";
+                    started = p.StartTime;
+                    parents ??= ParentMap();
+                    parents.TryGetValue(pid, out parentPid);
+                }
+                catch { /* session ended between heartbeat and now */ }
+
+                found.Add(new McpProc(pid, exe, started, parentPid, ProcessNameOrEmpty(parentPid),
+                                      StaleReason.VersionBehind, BusDisplayName(agent),
+                                      running.ToString()));
+            }
+            catch (Exception ex)
+            {
+                // Half-written heartbeat, mostly — the next sweep catches up.
+                Debug.WriteLine($"FindOutdatedAgents({Path.GetFileName(f)}): {ex.Message}");
+            }
+        }
+        return found;
+    }
+
+    /// <summary>
+    /// Parse an MCP version for COMPARISON. Tolerates the shapes this codebase
+    /// actually produces: "MCP v2.9.231" from the chip label, "2.9.211" from a
+    /// heartbeat, and SemVer metadata like "2.9.231+abc123" or "-beta".
+    ///
+    /// Numeric, never string: "2.9.9" sorts after "2.9.10" lexically, which
+    /// would call an up-to-date agent stale for the whole of a two-digit patch
+    /// series and then go quiet exactly when a real gap opened.
+    /// </summary>
+    private static bool TryParseMcpVersion(string? raw, out Version version)
+    {
+        version = new Version(0, 0);
+        if (string.IsNullOrWhiteSpace(raw)) return false;
+        var s = raw.Trim();
+        if (s.StartsWith("MCP ", StringComparison.OrdinalIgnoreCase)) s = s[4..].Trim();
+        if (s.StartsWith("v", StringComparison.OrdinalIgnoreCase)) s = s[1..];
+        var cut = s.IndexOfAny(new[] { '+', '-', ' ' });
+        if (cut >= 0) s = s[..cut];
+        if (!Version.TryParse(s, out var parsed)) return false;
+        version = parsed;
+        return true;
     }
 
     private List<McpProc> FindStaleMcp()
@@ -188,10 +337,15 @@ public partial class MainWindow
             return;
         }
 
-        // "an MCP client" when the parent is gone or unreadable. Saying
-        // "Claude" there would be a guess wearing the clothes of a fact.
+        // Prefer the bus agent's own name: it is what the heartbeat said about
+        // itself, and it is the label the user sees on the planet in the HUD.
+        // Fall back to the parent process, and to "an MCP client" when even
+        // that is gone — saying "Claude" there would be a guess wearing the
+        // clothes of a fact.
         var clients = _staleMcp
-            .Select(s => string.IsNullOrEmpty(s.ParentName) ? "an MCP client" : PrettyClient(s.ParentName))
+            .Select(s => s.Agent is { Length: > 0 } a
+                ? (s.Version is { Length: > 0 } v ? $"{a} ({v})" : a)
+                : string.IsNullOrEmpty(s.ParentName) ? "an MCP client" : PrettyClient(s.ParentName))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
         var who = string.Join(" · ", clients);
@@ -208,8 +362,12 @@ public partial class MainWindow
             McpVersionText.ToolTip =
                 $"BrainX updated the MCP server to {onDisk}, but {who} is still running the copy it " +
                 $"started with — a stdio MCP server is spawned once per session and never reloaded.\n\n" +
-                string.Join("\n", _staleMcp.Select(s =>
-                    $"  pid {s.Pid} · started {s.Started:HH:mm:ss} · {s.Exe}")) +
+                string.Join("\n", _staleMcp.Select(s => s.Reason == StaleReason.VersionBehind
+                    // The version line leads with what it KNOWS (the agent said
+                    // this) and only then with the process, which may be gone.
+                    ? $"  {s.Agent} · reports v{s.Version} · pid {s.Pid}"
+                          + (string.IsNullOrEmpty(s.Exe) ? "" : $" · {s.Exe}")
+                    : $"  pid {s.Pid} · started {s.Started:HH:mm:ss} · {s.Exe}")) +
                 "\n\nRestart Claude to pick up the new tools.";
         }
 
@@ -221,7 +379,15 @@ public partial class MainWindow
         var any = canRestart.Count > 0;
         foreach (var p in canRestart) p.Dispose();
 
-        if (!_autoRestartSpent && _autoRestartTimer == null && any)
+        // A version gap alone never closes anyone's editor. The owner develops
+        // this repo, so "older than the installed build" is routinely a dev
+        // build they are deliberately pointing an agent at — killing Claude
+        // over it would be the app overruling a choice it cannot see. The
+        // automatic restart stays tied to the signal it was asked for: a binary
+        // that was overwritten under a live process.
+        var rewritten = _staleMcp.Any(s => s.Reason == StaleReason.BinaryRewritten);
+
+        if (!_autoRestartSpent && _autoRestartTimer == null && any && rewritten)
             StartAutoRestartCountdown();
         else
             PostStaleNotice(onDisk, who, null);
@@ -243,12 +409,17 @@ public partial class MainWindow
             });
             return;
         }
+        // Imperative, and it leads with the programs. The owner's ask was for a
+        // message that says WHICH connected things to restart — a bare "MCP
+        // updated" is a fact with no instruction in it. Phrased without a verb
+        // that has to agree in number, because `who` is one name or five.
         PostHud("hudNotice", new
         {
-            text = $"MCP updated to {onDisk} — {who} is still on the previous build",
-            detail = "A stdio MCP server is spawned once per session, so the new tools arrive when Claude restarts.",
+            text = $"Restart {who} — still on an older MCP than {onDisk}",
+            detail = "A stdio MCP server is spawned once per session and never reloaded, and the client "
+                   + "caches the tool list from its handshake — so new tools only arrive on restart.",
             action = "restartClaude",
-            actionLabel = "Restart Claude",
+            actionLabel = "Restart now",
         });
     }
 
