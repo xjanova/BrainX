@@ -260,6 +260,8 @@ public static class McpBridgeHub
     {
         if (result["content"] is not JArray content) return result;
 
+        HoistImages(content);
+
         var budget = MaxResultChars;
         foreach (var block in content.OfType<JObject>())
         {
@@ -274,6 +276,64 @@ public static class McpBridgeHub
             budget = 0;
         }
         return result;
+    }
+
+    /// <summary>
+    /// Pull a base64 image out of a JSON *text* block and re-emit it as a real
+    /// MCP image content block.
+    ///
+    /// WHY. Unreal's CaptureViewport returns its PNG as
+    /// <c>{"returnValue":{"image":{"mimeType":"image/png","data":"iVBOR…"}}}</c>
+    /// — a text block, not an image block. The cap below deliberately skips
+    /// image blocks, so it did not skip this: a 1-2 MB screenshot was cut at
+    /// exactly 256 KB, mid-base64, leaving JSON that no longer parsed. The
+    /// agent got neither the picture nor the metadata, and "narrow the request"
+    /// is advice that cannot be followed for a screenshot.
+    ///
+    /// Found by taking one, not by any test — the mock returned images the
+    /// correct way, so it could never have reproduced this.
+    ///
+    /// The base64 is replaced in-place with a short marker so the surrounding
+    /// metadata (camera pose, labelled actors) still reads as JSON, and the
+    /// picture rides alongside it where the cap will leave it alone.
+    /// </summary>
+    private static void HoistImages(JArray content)
+    {
+        // Snapshot: we append to `content` while walking it.
+        foreach (var block in content.OfType<JObject>().ToList())
+        {
+            if (block["type"]?.ToString() != "text") continue;
+            var text = block["text"]?.ToString();
+            // Cheap reject first — parsing every large text result would cost
+            // more than the case is worth.
+            if (string.IsNullOrEmpty(text) || text.Length < 1024) continue;
+            if (!text.Contains("\"mimeType\"", StringComparison.Ordinal)) continue;
+            if (text.Length > 64 * 1024 * 1024) continue;          // absurd; leave it to the cap
+
+            JToken root;
+            try { root = JToken.Parse(text); } catch { continue; }  // not JSON — nothing to hoist
+
+            var moved = 0;
+            foreach (var node in root.SelectTokens("$..*").OfType<JObject>().ToList())
+            {
+                var mime = node["mimeType"]?.ToString();
+                var data = node["data"]?.ToString();
+                if (mime == null || data == null) continue;
+                if (!mime.StartsWith("image/", StringComparison.OrdinalIgnoreCase)) continue;
+                if (data.Length < 1024) continue;                   // an icon, not a payload
+
+                content.Add(new JObject
+                {
+                    ["type"] = "image",
+                    ["data"] = data,
+                    ["mimeType"] = mime,
+                });
+                node["data"] = $"(hoisted to an image block — {data.Length / 1024} KB of base64)";
+                moved++;
+            }
+
+            if (moved > 0) block["text"] = root.ToString(Formatting.None);
+        }
     }
 
     // ───────────── connection lifecycle ─────────────
