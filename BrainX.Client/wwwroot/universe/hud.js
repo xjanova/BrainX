@@ -330,12 +330,19 @@ function renderAgents(d = {}) {
 // the older ones were being sliced in half at the top edge. Measured in a
 // browser against the real panel, not guessed from the markup.
 /* The traffic log is printed ON the orbit render now, so it is spending the
- * card's best pixels the whole time it is up. A minute with no traffic means
- * nothing in it has changed for a minute — nobody is reading it, and the
- * picture behind it is what the card is for. It comes straight back on the
- * next event, and pointing at the card brings it back early (hud.css).
+ * card's best pixels the whole time it is up. A minute of that was far too
+ * generous: a log that has not changed in ten seconds is one nobody is still
+ * reading, and the picture behind it is what the card is for. It comes
+ * straight back on the next event, and pointing at the card brings it back
+ * early (hud.css).
+ *
+ * 9s, not 10, ON PURPOSE. The requirement is "gone within ten seconds", and
+ * what the eye calls gone is the END of the fade, not the start of it — the
+ * opacity transition in hud.css runs 900ms after this fires. 9000 + 900 lands
+ * at 9.9s; a flat 10_000 would finish at 10.9s and miss by the width of the
+ * thing being asked for. Keep the two in step if either moves.
  */
-const FLOW_IDLE_MS = 60_000;
+const FLOW_IDLE_MS = 9_000;
 let _flowIdleTimer = null;
 
 /** Restart the quiet clock. Called on real traffic, and once at init so a HUD

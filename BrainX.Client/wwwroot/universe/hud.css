@@ -575,8 +575,27 @@ body.hud-active #settings-toggle {
        the log would climb back over the whole card. */
     flex: 0 1 auto;
     margin-top: auto;
-    max-height: 58%;
-    padding: 26px 8px 4px;
+    /* A THIRD of the card, hard ceiling. At 58% the log was the card and the
+       system was the thing behind it — the exact inversion of what this panel
+       is for. The history is not lost at 30%: the list scrolls, so a card
+       dragged taller still reveals more of it, just never more than a third
+       of the picture at a time.
+       min-height:0 because the shared .hud-flow rule floors every ticker at
+       44px, and a floor beats a ceiling in CSS — on a short card that floor
+       would quietly hand the log back the half of the render it just gave up. */
+    max-height: 30%;
+    min-height: 0;
+    /* The cap has to mean the PAINTED box, scrim and all — that dark band is
+       the thing covering the orbits, and the eye does not deduct padding from
+       it. `box-sizing: border-box` is set on #hud-layer only, not globally, so
+       this element was content-box: 30% capped the rows and then the 16px of
+       padding was added OUTSIDE it. Measured 36.9% of the card against a 30%
+       rule — the cap was quietly a fifth looser than it read. */
+    box-sizing: border-box;
+    /* 26px of lead-in was most of a 30% box. 12px still covers the mask's own
+       fade region (0→22%), so the scrim keeps its soft top edge and the rows
+       get the rest. */
+    padding: 12px 8px 4px;
     background: linear-gradient(180deg,
         rgba(6, 5, 18, 0) 0%,
         rgba(6, 5, 18, 0.30) 26%,
@@ -589,7 +608,14 @@ body.hud-active #settings-toggle {
     transition: opacity 900ms ease;
 }
 
-/* Quiet for a minute: the words go, the system stays. A log that is not
+/* No rows, no scrim. With the 44px floor gone the empty log collapses to its
+   own padding — but that is still a dark band laid across the bottom of the
+   render saying nothing, and it is what a HUD looks like for the first seconds
+   of every session, before any traffic has happened. The markup ships the <ol>
+   genuinely empty and renderFlow() wipes it the same way, so :empty is exact. */
+#hud-layer > .hud-panel.hud-bl > .hud-flow:empty { display: none; }
+
+/* Quiet after ten seconds: the words go, the system stays. A log that is not
    changing is a log nobody is reading, and this card's whole point is the
    picture behind it. hud.js sets .is-quiet — see FLOW_IDLE_MS. */
 .hud-panel-bus.is-quiet > .hud-flow { opacity: 0; pointer-events: none; }
@@ -603,10 +629,10 @@ body.hud-active #settings-toggle {
 
 /* On a short viewport the render shrinks — it must never be hidden. It used to
    be droppable because the roster underneath still named every agent; with the
-   roster gone, hiding it would leave the panel showing nothing but its title. */
-@media (max-height: 620px) {
-    #hud-layer > .hud-panel.hud-bl > .hud-flow { max-height: 50%; }
-}
+   roster gone, hiding it would leave the panel showing nothing but its title.
+   No override here any more: this used to RELAX 58% down to 50%, and against
+   a 30% base the same rule would be a licence to grow — the one shape where
+   the render can least afford it. */
 
 /* ── Feed ─────────────────────────────────────────────────────── */
 
