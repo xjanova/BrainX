@@ -274,7 +274,16 @@ if (-not (Test-Path $baseIni)) {
                 $section,
                 "bAutoStartServer=True",
                 "ServerPortNumber=$Port",
-                "ServerUrlPath=$UrlPath"
+                "ServerUrlPath=$UrlPath",
+                # PINNED, not left to the default. Tool Search makes the list
+                # endpoint return just three meta-tools (list_toolsets,
+                # describe_toolset, call_tool) and dispatch the rest. Unreal 5.8
+                # exposes on the order of 830 tools across 52 toolsets; with this
+                # off, ALL of them arrive as unreal__* and are merged into the
+                # brain's own tool list, drowning it in every agent session.
+                # It defaults to true today -- that is exactly why a silent flip
+                # would be so expensive, so state it.
+                "bEnableToolSearch=True"
             ) -join "`r`n"
 
             if ($text -match [regex]::Escape($section)) {
