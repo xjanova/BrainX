@@ -17,10 +17,13 @@
 #  * ABSOLUTE paths in the bridge config. ~\.local\bin is NOT on PATH here, and
 #    the brain's MCP host inherited its PATH when it launched -- it will not see
 #    anything added afterwards. A bare "uv" in the config resolves to nothing.
-#  * Stdio transport, not HTTP. The brain's bridge spawns a child process; the
-#    config has command+args and no URL field. Stdio means Unity listens on 6400
-#    and the Python server connects IN to it. The package defaults to HTTP,
-#    which the brain cannot reach at all.
+#  * Stdio transport, not HTTP -- for THIS bridge. Stdio means Unity listens on
+#    6400 and the Python server connects IN to it, which is the shape unity-mcp
+#    is actually tested in. The package defaults to HTTP.
+#    (The hub itself gained an HTTP transport later, for Unreal 5.8's in-editor
+#    server -- see the `url` field in mcp-bridges.json. That does not make HTTP
+#    the right choice here: unity-mcp still ships a real stdio server, and a
+#    spawned child is one less moving part than a port that must already be up.)
 #  * Auto-register OFF. Left on, the package rewrites the owner's Claude Code and
 #    Claude Desktop configs on every Editor start, wiring Unity DIRECTLY into
 #    those clients. That bypasses the brain, which is the one thing this bridge

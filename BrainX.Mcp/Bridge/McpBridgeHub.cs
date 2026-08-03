@@ -43,7 +43,7 @@ public static class McpBridgeHub
     private const int StatusReapMinutes = 10;
 
     private static readonly object Gate = new();
-    private static readonly Dictionary<string, McpBridgeConnection> Live = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, IMcpBridgeConnection> Live = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, BridgeState> States = new(StringComparer.OrdinalIgnoreCase);
 
     private static List<McpBridgeDef> _defs = new();
@@ -278,7 +278,7 @@ public static class McpBridgeHub
 
     // ───────────── connection lifecycle ─────────────
 
-    private static McpBridgeConnection Connect(McpBridgeDef def)
+    private static IMcpBridgeConnection Connect(McpBridgeDef def)
     {
         lock (Gate)
         {
@@ -289,7 +289,13 @@ public static class McpBridgeHub
                 Live.Remove(def.Id);
             }
 
-            var conn = McpBridgeConnection.Start(def, _log);
+            // Where the server lives decides the transport, and the config says
+            // which: a `url` means it is inside the editor (nothing to spawn),
+            // a `command` means the brain spawns it. Validate() has already
+            // refused an entry that claims both or neither.
+            IMcpBridgeConnection conn = def.IsHttp
+                ? McpBridgeHttpConnection.Start(def, _log)
+                : McpBridgeConnection.Start(def, _log);
             Live[def.Id] = conn;
             _log($"bridge '{def.Id}' connected → {conn.ServerName ?? "?"} {conn.ServerVersion ?? ""}".TrimEnd());
             return conn;
@@ -424,7 +430,12 @@ public static class McpBridgeHub
                 ["tools"] = s.Tools?.Count ?? 0,
                 ["hiddenLongNames"] = s.Dropped.Count,
                 ["allowlist"] = def.ToolAllowlist.Count == 0 ? "(all)" : string.Join(", ", def.ToolAllowlist),
-                ["command"] = def.Command + (def.Args.Count > 0 ? " " + string.Join(" ", def.Args) : ""),
+                ["transport"] = def.IsHttp ? "http" : "stdio",
+                // An HTTP bridge has no command to show, and printing an empty
+                // string here read as "misconfigured" for a bridge that was fine.
+                ["command"] = def.IsHttp
+                    ? def.Url
+                    : def.Command + (def.Args.Count > 0 ? " " + string.Join(" ", def.Args) : ""),
                 ["lastFetchedUtc"] = s.FetchedUtc?.ToString("u"),
                 ["lastError"] = s.LastError,
                 ["docs"] = def.Docs,

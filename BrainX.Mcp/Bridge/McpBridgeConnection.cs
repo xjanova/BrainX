@@ -28,7 +28,7 @@ namespace BrainX.Mcp.Bridge;
 ///    therefore read *until the matching id* rather than assuming the next line
 ///    is the answer, and drop anything unparseable.
 /// </summary>
-public sealed class McpBridgeConnection : IDisposable
+public sealed class McpBridgeConnection : IMcpBridgeConnection
 {
     private readonly McpBridgeDef _def;
     private readonly Action<string> _log;

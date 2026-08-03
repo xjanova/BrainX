@@ -47,6 +47,10 @@ public static class EngineProbe
     /// that one is taken, which is why the status file decides, not this.</summary>
     private const int UnityDefaultPort = 6400;
 
+    /// <summary>The <c>Server Port Number</c> default in Unreal 5.8's
+    /// Editor Preferences ▸ Model Context Protocol.</summary>
+    private const int UnrealDefaultPort = 8000;
+
     /// <summary>How long a script recompile may keep the socket shut before the
     /// editor is called down. Its own client allows ~10s of reload retries.</summary>
     private const int ReloadGraceSeconds = 60;
@@ -71,6 +75,14 @@ public static class EngineProbe
             client.ReceiveTimeout = BudgetMs;
             client.SendTimeout = BudgetMs;
             using var stream = client.GetStream();
+
+            // Unreal 5.8 embeds its MCP server in the editor and exposes no
+            // ping, so ask the only question it answers: speak HTTP and see
+            // whether an HTTP server replies. A 405 or 400 counts — it proves a
+            // request router in the editor process handled the bytes, which is
+            // strictly more than "a port is bound". It is still weaker than
+            // Unity's pong, because it does not prove the game thread is free.
+            if (probe.IsHttp) return SpeaksHttp(stream, probe, port);
 
             // A TCP-only probe stops here on purpose: some engines have no
             // application-level ping, and "the port answered" is still more
@@ -103,12 +115,46 @@ public static class EngineProbe
     private static int ResolvePort(McpBridgeProbe probe)
     {
         if (probe.Port > 0) return probe.Port;
+        if (probe.IsHttp) return UnrealDefaultPort;
         if (!probe.IsFramed) return 0;                      // nothing to discover
         return ReadStatus()?.Port ?? UnityDefaultPort;
     }
 
+    /// <summary>
+    /// One HEAD request, and we only care that the status line comes back. HEAD
+    /// rather than GET because GET on a Streamable-HTTP endpoint may open a
+    /// long-lived SSE stream, and a dashboard probe must not hold one open.
+    ///
+    /// Origin is loopback because Unreal rejects anything else as its
+    /// DNS-rebinding defence — an omitted Origin would risk a refusal that
+    /// looked like a dead editor.
+    /// </summary>
+    private static bool SpeaksHttp(NetworkStream stream, McpBridgeProbe probe, int port)
+    {
+        var path = string.IsNullOrWhiteSpace(probe.Path) ? "/mcp" : probe.Path;
+        var request =
+            $"HEAD {path} HTTP/1.1\r\n" +
+            $"Host: {probe.Host}:{port}\r\n" +
+            $"Origin: http://{probe.Host}:{port}\r\n" +
+            "Accept: text/event-stream\r\n" +
+            "Connection: close\r\n\r\n";
+
+        var bytes = Encoding.ASCII.GetBytes(request);
+        stream.Write(bytes, 0, bytes.Length);
+        stream.Flush();
+
+        // Any HTTP status line is proof of an HTTP server. We are not asking
+        // whether the route exists — a 404 from Unreal's router still means
+        // Unreal answered.
+        return ReadWelcome(stream).StartsWith("HTTP/", StringComparison.Ordinal);
+    }
+
     private static bool IsReloading(McpBridgeProbe probe)
     {
+        // The grace below reads UNITY's status file. An http probe reaching it
+        // would let a Unity domain reload vouch for Unreal — a bridge to one
+        // engine reporting healthy because a different engine is busy.
+        if (probe.IsHttp) return false;
         if (probe.Port > 0 && !probe.IsFramed) return false;
         var s = ReadStatus();
         return s is { Reloading: true } &&

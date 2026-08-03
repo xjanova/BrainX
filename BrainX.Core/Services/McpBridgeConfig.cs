@@ -39,6 +39,30 @@ public sealed class McpBridgeDef
     public string? Cwd { get; set; }
 
     /// <summary>
+    /// Streamable-HTTP endpoint, e.g. <c>http://127.0.0.1:8000/mcp</c>. Set this
+    /// INSTEAD of <see cref="Command"/> for a server that lives inside the editor
+    /// process rather than in a child the brain spawns.
+    ///
+    /// Unreal Engine 5.8's first-party <c>ModelContextProtocol</c> plugin is the
+    /// reason this exists: it embeds the MCP server in the editor and speaks HTTP
+    /// and SSE only. There is no command to spawn, so a stdio-only hub could
+    /// never reach it — the owner's only remaining option would have been Epic's
+    /// <c>GenerateClientConfig</c>, which registers the editor directly into each
+    /// agent and leaves the brain blind to every call, the one outcome this whole
+    /// hub exists to avoid.
+    ///
+    /// LOOPBACK ONLY, enforced in <see cref="Validate"/>. A bridge forwards the
+    /// owner's tool calls verbatim; pointing one at an off-box host would export
+    /// their editor session to whoever answers. Epic's server binds loopback and
+    /// rejects non-loopback Origins anyway, so this forbids nothing real.
+    /// </summary>
+    public string? Url { get; set; }
+
+    /// <summary>True when this bridge talks HTTP to an in-editor server rather
+    /// than stdio to a child process.</summary>
+    public bool IsHttp => !string.IsNullOrWhiteSpace(Url);
+
+    /// <summary>
     /// Per-call ceiling. Engine work is genuinely slow — compiling a Unity
     /// domain reload or building UE lighting can outlast any HTTP-ish default —
     /// so this is minutes, not seconds.
@@ -78,6 +102,10 @@ public sealed class McpBridgeDef
         sb.Append('\u0001').Append(Cwd ?? "");
         sb.Append('\u0001');
         foreach (var t in ToolAllowlist.OrderBy(x => x, StringComparer.Ordinal)) sb.Append(t).Append('\u0002');
+        // Retargeting an HTTP bridge at another port is the same class of change
+        // as repointing a stdio one at another checkout: the cached tool schemas
+        // describe a different server and must not be served for it.
+        sb.Append(Url ?? "");
         return Convert.ToHexString(
             System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString())))[..16];
     }
@@ -93,7 +121,25 @@ public sealed class McpBridgeDef
         if (Id.Contains("__", StringComparison.Ordinal)) return "id must not contain '__' (that's the namespace separator)";
         if (!Id.All(c => char.IsAsciiLetterOrDigit(c) || c == '-' || c == '.')) return "id must be [a-z0-9.-]";
         if (Id.Length > 16) return "id must be ≤ 16 chars (it prefixes every tool name)";
-        if (string.IsNullOrWhiteSpace(Command)) return "command is empty";
+        if (IsHttp)
+        {
+            if (!string.IsNullOrWhiteSpace(Command))
+                return "set either 'command' (stdio child) or 'url' (in-editor HTTP server), not both";
+            if (!Uri.TryCreate(Url, UriKind.Absolute, out var uri))
+                return $"url is not a valid absolute URL: {Url}";
+            if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
+                return $"url must be http or https, got '{uri.Scheme}'";
+            // See the Url remarks: a bridge forwards the owner's tool calls, so
+            // the far end has to be their own machine. IsLoopback covers
+            // 127.0.0.0/8, ::1 and the literal "localhost".
+            if (!uri.IsLoopback)
+                return $"url must be loopback (127.0.0.1 / localhost) — refusing to bridge to '{uri.Host}'";
+        }
+        else if (string.IsNullOrWhiteSpace(Command))
+        {
+            return "command is empty (or set 'url' for an in-editor HTTP server)";
+        }
+
         if (TimeoutSeconds is < 5 or > 3600) return "timeoutSeconds must be 5..3600";
         return null;
     }
@@ -120,10 +166,20 @@ public sealed class McpBridgeProbe
     /// <c>unity</c> — the framed WELCOME / ping / pong exchange, which proves
     /// the editor's MAIN THREAD is serving. <c>tcp</c> — connect only, which
     /// proves a process bound the port and nothing beyond that.
+    /// <c>http</c> — a one-line HTTP request whose status line proves an HTTP
+    /// server inside the editor answered: strictly more than a bound port, and
+    /// strictly less than Unity's pong, because Unreal exposes no ping and a
+    /// 4xx from its router is still a real answer from a real server.
     /// </summary>
     public string Kind { get; set; } = "unity";
 
+    /// <summary>URL path for <c>http</c> probes. Matches the plugin's
+    /// <c>Server URL Path</c> setting; Epic's default is <c>/mcp</c>.</summary>
+    public string Path { get; set; } = "/mcp";
+
     public bool IsFramed => Kind.Equals("unity", StringComparison.OrdinalIgnoreCase);
+
+    public bool IsHttp => Kind.Equals("http", StringComparison.OrdinalIgnoreCase);
 }
 
 /// <summary>
@@ -185,6 +241,22 @@ public static class McpBridgeConfig
                 // the port, which means "discover it".
                 if (def.Probe == null && def.Id.Equals("unity", StringComparison.OrdinalIgnoreCase))
                     def.Probe = new McpBridgeProbe { Kind = "unity" };
+
+                // An HTTP bridge already states where its server is, so it can
+                // always be probed — deriving it here means an owner who hand-adds
+                // a `url` entry gets a truthful engineReachable without having to
+                // know the probe block exists.
+                if (def.Probe == null && def.IsHttp &&
+                    Uri.TryCreate(def.Url, UriKind.Absolute, out var u))
+                {
+                    def.Probe = new McpBridgeProbe
+                    {
+                        Kind = "http",
+                        Host = u.Host,
+                        Port = u.Port,
+                        Path = string.IsNullOrEmpty(u.AbsolutePath) ? "/mcp" : u.AbsolutePath,
+                    };
+                }
 
                 list.Add(def);
             }
@@ -249,6 +321,11 @@ public static class McpBridgeConfig
                     "To enable one: install its server (see 'docs'/'setup'), point 'args'",
                     "at YOUR checkout, set enabled:true, then restart the agent.",
                     "",
+                    "Two transports. 'command' + 'args' spawns a child that speaks stdio",
+                    "(Unity). 'url' talks HTTP to a server living inside the editor itself",
+                    "(Unreal 5.8's built-in MCP plugin) — set one or the other, never both.",
+                    "A 'url' must be loopback: a bridge forwards your tool calls verbatim.",
+                    "",
                     "Bridges are local-only: they are disabled entirely when the MCP runs",
                     "headless behind the remote /mcp endpoint, and remote callers can",
                     "never reach them.",
@@ -276,13 +353,25 @@ public static class McpBridgeConfig
                     {
                         ["id"] = "unreal",
                         ["enabled"] = false,
-                        ["command"] = "uv",
-                        ["args"] = new JArray { "--directory", "C:/path/to/unreal-mcp/Python", "run", "unreal_mcp_server.py" },
+                        // Unreal 5.8 ships its own MCP server INSIDE the editor
+                        // (the first-party ModelContextProtocol plugin), and it
+                        // speaks HTTP/SSE only. There is no child to spawn, so
+                        // this entry carries a url instead of a command.
+                        //
+                        // The community server this used to point at
+                        // (chongdashu/unreal-mcp) targets UE 5.5, calls itself
+                        // EXPERIMENTAL, and has not been touched since April
+                        // 2025 — it is not a sane default against 5.8.
+                        ["url"] = "http://127.0.0.1:8000/mcp",
                         ["env"] = new JObject(),
                         ["timeoutSeconds"] = 180,
                         ["toolAllowlist"] = new JArray(),
-                        ["docs"] = "https://github.com/chongdashu/unreal-mcp",
-                        ["setup"] = "Install uv, clone chongdashu/unreal-mcp, copy its UnrealMCP plugin into <YourProject>/Plugins, then enable UnrealMCP + Python Editor Script Plugin in Edit ▸ Plugins and restart. The UE editor must be OPEN.",
+                        ["probe"] = new JObject
+                        {
+                            ["kind"] = "http", ["host"] = "127.0.0.1", ["port"] = 8000, ["path"] = "/mcp",
+                        },
+                        ["docs"] = "https://dev.epicgames.com/documentation/unreal-engine/unreal-mcp-in-unreal-editor",
+                        ["setup"] = "Unreal 5.8+. Edit ▸ Plugins ▸ enable \"Unreal MCP\" and \"All Toolsets\", restart. Then Edit ▸ Editor Preferences ▸ General ▸ Model Context Protocol ▸ tick Auto Start Server (it ships OFF, so a correctly installed plugin still listens on nothing). Port 8000 and path /mcp are the defaults — change both here if you change them there. The UE editor must be OPEN. Do NOT run ModelContextProtocol.GenerateClientConfig: it registers the editor directly into each agent and bypasses the brain.",
                     },
                 },
             };
