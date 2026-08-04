@@ -236,9 +236,52 @@ public partial class MainWindow
         return true;
     }
 
+    /// <summary>
+    /// Server pids with a FRESH heartbeat, mapped to the agent that wrote it.
+    ///
+    /// This is both the gate and the name source for <see cref="FindStaleMcp"/>
+    /// (owner, 2026-08-04: *"เน้นที่เชื่อมต่อกับ agent bus เท่านั้นที่จะแจ้งให้รีสตาร์ทโปรแกรมนั้นๆ"*).
+    /// A brainx-mcp with no heartbeat inside the TTL is serving nobody — telling
+    /// someone to restart its host is an instruction with no payoff, and it is
+    /// exactly how the banner ended up saying "an MCP client", which names no
+    /// program and therefore cannot be acted on.
+    ///
+    /// Matched on the pid EXACTLY, never up a parent chain: presence carries the
+    /// serving process's own id, and walking ancestors would eventually reach
+    /// explorer.exe and mark every process on the machine as bus-connected.
+    /// </summary>
+    private Dictionary<int, string> FreshPresenceByPid()
+    {
+        var map = new Dictionary<int, string>();
+        var presenceDir = Path.Combine(BusRootDir, "presence");
+        if (!Directory.Exists(presenceDir)) return map;
+
+        foreach (var f in Directory.GetFiles(presenceDir, "*.json"))
+        {
+            try
+            {
+                var o = JObject.Parse(File.ReadAllText(f));
+                if (!DateTime.TryParse(o["lastSeenUtc"]?.ToString(), null,
+                        System.Globalization.DateTimeStyles.RoundtripKind, out var seen)) continue;
+                if ((DateTime.UtcNow - seen).TotalSeconds > BusPresenceTtlSeconds) continue;
+
+                var pid = o["pid"]?.ToObject<int>() ?? 0;
+                if (pid <= 0) continue;
+                map[pid] = BusDisplayName(o["agent"]?.ToString()
+                                          ?? Path.GetFileNameWithoutExtension(f));
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"FreshPresenceByPid({Path.GetFileName(f)}): {ex.Message}");
+            }
+        }
+        return map;
+    }
+
     private List<McpProc> FindStaleMcp()
     {
         var parents = ParentMap();
+        var connected = FreshPresenceByPid();
         var found = new List<McpProc>();
 
         // Launcher-era topology (BrainX.Mcp/Launcher.cs): the client spawns a
@@ -280,8 +323,15 @@ public partial class MainWindow
                 var written = File.GetLastWriteTime(target);
                 if (written <= p.StartTime.AddSeconds(1)) continue;
 
+                // Bus gate: only a server someone is actually talking to earns a
+                // "restart X" instruction, and the heartbeat is what tells us WHICH
+                // X. No heartbeat inside the TTL ⇒ nothing is being served by this
+                // process, so there is no stale tool list to fix by restarting.
+                if (!connected.TryGetValue(p.Id, out var agent)) continue;
+
                 parents.TryGetValue(p.Id, out var parentPid);
-                found.Add(new McpProc(p.Id, exe, p.StartTime, parentPid, ProcessNameOrEmpty(parentPid)));
+                found.Add(new McpProc(p.Id, exe, p.StartTime, parentPid, ProcessNameOrEmpty(parentPid),
+                                      StaleReason.BinaryRewritten, agent));
             }
             catch (Exception ex)
             {
@@ -342,6 +392,7 @@ public partial class MainWindow
         // Fall back to the parent process, and to "an MCP client" when even
         // that is gone — saying "Claude" there would be a guess wearing the
         // clothes of a fact.
+        var names = StaleClientNames();
         var clients = _staleMcp
             .Select(s => s.Agent is { Length: > 0 } a
                 ? (s.Version is { Length: > 0 } v ? $"{a} ({v})" : a)
@@ -356,7 +407,12 @@ public partial class MainWindow
             // Remember what it looked like before the first override, so the
             // way back is a restore rather than a guess.
             _mcpChipBrush ??= McpVersionText.Foreground;
-            McpVersionText.Text = "MCP ↻ restart Claude";
+            // Name the program. The chip said "restart Claude" no matter which
+            // agent was behind, so on the day it was CluadeX that needed the
+            // restart the chip pointed at the one app that did not.
+            McpVersionText.Text = names.Count == 1
+                ? $"MCP ↻ restart {names[0]}"
+                : $"MCP ↻ restart {names.Count} apps";
             McpVersionText.Foreground = (System.Windows.Media.Brush)(
                 TryFindResource("NeuralAmber") ?? System.Windows.Media.Brushes.Orange);
             McpVersionText.ToolTip =
@@ -367,8 +423,8 @@ public partial class MainWindow
                     // this) and only then with the process, which may be gone.
                     ? $"  {s.Agent} · reports v{s.Version} · pid {s.Pid}"
                           + (string.IsNullOrEmpty(s.Exe) ? "" : $" · {s.Exe}")
-                    : $"  pid {s.Pid} · started {s.Started:HH:mm:ss} · {s.Exe}")) +
-                "\n\nRestart Claude to pick up the new tools.";
+                    : $"  {s.Agent} · pid {s.Pid} · started {s.Started:HH:mm:ss} · {s.Exe}")) +
+                $"\n\nRestart {who} to pick up the new tools.";
         }
 
         // Arm the automatic restart the first time we see this, but only if
@@ -450,7 +506,10 @@ public partial class MainWindow
             .Select(p => PrettyClient(p.ProcessName))
             .Distinct(StringComparer.OrdinalIgnoreCase));
         foreach (var p in clients) p.Dispose();
-        if (string.IsNullOrEmpty(who)) who = "Claude";
+        // Fall back to what the bus said, never to the literal string "Claude" —
+        // a countdown that names the wrong app is worse than one that names none.
+        if (string.IsNullOrEmpty(who)) who = string.Join(" · ", StaleClientNames());
+        if (string.IsNullOrEmpty(who)) return;   // nothing identifiable to restart
         PostStaleNotice(ReadMcpFileVersion().label.Replace("MCP ", ""), who, _autoRestartLeft);
         if (StatusText != null)
             StatusText.Text = $"MCP updated — restarting {who} in {_autoRestartLeft}s (Cancel on the notice bar)";
@@ -472,6 +531,20 @@ public partial class MainWindow
         if (StatusText != null) StatusText.Text = "Automatic restart cancelled — restart Claude when convenient";
         ApplyMcpFreshnessToUi();
     }
+
+    /// <summary>
+    /// The programs to restart, by name, deduped — bus agent name first because
+    /// that is what the heartbeat said about ITSELF and what the HUD planet is
+    /// labelled with; the parent process name only when there is no heartbeat to
+    /// go on. Used by every compact surface (chip, countdown, status bar) so they
+    /// cannot name different apps for the same fact.
+    /// </summary>
+    private List<string> StaleClientNames() => _staleMcp
+        .Select(s => s.Agent is { Length: > 0 } a
+            ? a
+            : string.IsNullOrEmpty(s.ParentName) ? "an MCP client" : PrettyClient(s.ParentName))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToList();
 
     private static string PrettyClient(string processName) => processName.ToLowerInvariant() switch
     {
@@ -564,9 +637,14 @@ public partial class MainWindow
         {
             var owner = WindowOwningClient(s.ParentPid, parents);
             if (owner != null) { owner.Dispose(); continue; }
-            list.Add(s.ParentPid <= 0 || string.IsNullOrEmpty(s.ParentName)
-                ? $"pid {s.Pid} (parent unknown)"
-                : $"{PrettyClient(s.ParentName)} (pid {s.ParentPid})");
+            // Lead with the bus agent name: for a terminal-hosted or Codex session
+            // the parent process is a shell, so "WindowsTerminal (pid 1234)" tells
+            // the user nothing about which agent to restart.
+            list.Add(s.Agent is { Length: > 0 } a
+                ? $"{a} (pid {s.Pid})"
+                : s.ParentPid <= 0 || string.IsNullOrEmpty(s.ParentName)
+                    ? $"pid {s.Pid} (parent unknown)"
+                    : $"{PrettyClient(s.ParentName)} (pid {s.ParentPid})");
         }
         return list.Distinct().ToList();
     }
@@ -652,7 +730,7 @@ public partial class MainWindow
             if (StatusText != null)
                 StatusText.Text = _staleMcp.Count == 0
                     ? "MCP up to date — every client is on the current build"
-                    : $"{_staleMcp.Count} MCP server(s) still on the old build — restart those clients yourself";
+                    : $"Still on the old MCP: {string.Join(" · ", StaleClientNames())} — restart {(StaleClientNames().Count == 1 ? "it" : "them")} yourself";
         };
         settle.Start();
     }
