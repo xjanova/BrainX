@@ -79,6 +79,10 @@ public partial class MainWindow
 
             var desktopChanged = EnsureClaudeDesktopRegistered(exe);
             var cliChanged = await EnsureClaudeCliRegisteredAsync(exe);
+            // Registering the right build is not enough while a per-directory
+            // override can quietly outrank it. See below for why this is a
+            // removal rather than a second thing to keep pointed correctly.
+            cliChanged |= await EnsureNoStaleProjectScopesAsync(exe);
             // Codex speaks the SAME stdio MCP protocol as Claude, so the exact
             // same brainx-mcp.exe registers with zero server changes — see
             // [[BrainX MCP → third-party agents (Codex/Chrome/ChatGPT) — two-track exposure design]].
@@ -239,12 +243,19 @@ public partial class MainWindow
             Path.Combine(root, "BrainX.Mcp", "bin", "Release", "net9.0", "brainx-mcp.exe"),
             Path.Combine(root, "BrainX.Mcp", "bin", "Debug",   "net9.0", "brainx-mcp.exe"),
         };
-        return candidates
+        var best = candidates
             .Where(File.Exists)
             .Select(p => (path: p, ver: McpProductVersionOf(p) ?? new Version(0, 0)))
             .OrderByDescending(t => t.ver)
             .Select(t => t.path)
             .FirstOrDefault();
+        // Same rule as the packaged branch: never hand out a path inside
+        // Velopack's `current`. This branch was the one asymmetry left in the
+        // resolver — a DEV client that (correctly) picked the installed build
+        // registered the exact path that blocks the updater, which is how a
+        // machine ended up with the packaged path naming the mirror and the
+        // user scope naming current\mcp at the same time.
+        return best is null ? null : RelocateOutOfCurrent(best);
     }
 
     /// <summary>
@@ -544,6 +555,75 @@ public partial class MainWindow
         }
     }
 
+    /// <summary>
+    /// Drop project-scoped brainx-brain registrations that are OLDER than the
+    /// build this client resolves, so the machine converges on ONE MCP that
+    /// auto-update keeps fresh.
+    ///
+    /// Owner, 2026-08-04, after a stale-MCP banner no restart could clear:
+    /// "ต้องแก้ไขให้มันชี้ไปใช้ ไฟล์ที่ติดตั้งเท่านั้นดีกว่าไหม จะได้ไม่ต้องกังวลมาบิ้ว".
+    ///
+    /// `~/.claude.json` carries per-directory servers under
+    /// `projects[&lt;cwd&gt;].mcpServers`, and they OVERRIDE the user entry for any
+    /// session opened in that folder. One left pointing at a dev `bin\Release`
+    /// respawns the same old binary on every restart — so the freshness banner
+    /// was correct, permanent, and unfixable by the button it offered. Every
+    /// check that existed before this read only the user scope
+    /// (<c>ReadCliRegisteredCommand</c>), which is precisely how a pin can sit
+    /// there for weeks while every surface reports "already connected".
+    ///
+    /// REMOVED, not repointed. One registration per machine is the whole point:
+    /// the user-scope entry already names the stable mirror outside Velopack's
+    /// `current`, which auto-update swaps in place, so deleting the override IS
+    /// the fix and leaves nothing new to keep in sync. Repointing would just
+    /// create a second copy of the same fact to drift.
+    ///
+    /// Only when strictly OLDER, never merely different: a project deliberately
+    /// aimed at a NEWER local build is someone testing the MCP, and pulling it
+    /// out from under them would be the app overruling a choice it cannot see.
+    /// Same rule <see cref="IsMcpOutdated"/> already applies to the user scope.
+    /// </summary>
+    private async Task<bool> EnsureNoStaleProjectScopesAsync(string exe)
+    {
+        if (FindClaudeCli() is null) return false;
+
+        var changed = false;
+        try
+        {
+            var path = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude.json");
+            if (!File.Exists(path)) return false;
+            if (Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(path))["projects"]
+                    is not Newtonsoft.Json.Linq.JObject projects) return false;
+
+            foreach (var project in projects.Properties())
+            {
+                var registered = project.Value["mcpServers"]?["brainx-brain"]?["command"]?.ToString();
+                if (string.IsNullOrWhiteSpace(registered)) continue;
+                if (!IsMcpOutdated(registered!, exe)) continue;
+
+                // `-s local` is keyed by the working directory, so the removal
+                // has to run from the folder it belongs to. A folder that no
+                // longer exists cannot be stood in — and its entry cannot spawn
+                // anything either, so leaving that one costs nothing.
+                if (!Directory.Exists(project.Name)) continue;
+
+                var (code, _, _) = await RunClaudeCliInAsync(
+                    project.Name, "mcp", "remove", "brainx-brain", "-s", "local");
+                if (code != 0) continue;
+
+                changed = true;
+                SetOnboardStatus($"Unpinned {project.Name} from an outdated MCP — sessions there now use the installed build.");
+            }
+        }
+        catch (Exception ex)
+        {
+            // Never block onboarding on a config we do not own.
+            Debug.WriteLine($"EnsureNoStaleProjectScopesAsync: {ex.Message}");
+        }
+        return changed;
+    }
+
     // ── OpenAI Codex CLI ─────────────────────────────────────────────────
     //
     // Codex consumes stdio MCP servers exactly like Claude Code, so the same
@@ -558,9 +638,10 @@ public partial class MainWindow
     /// Register brainx-brain with the OpenAI Codex CLI when it isn't already
     /// listed. Gentle + idempotent: adds ONLY when missing, so a normal
     /// re-launch is a no-op and never disturbs a live Codex session. The exe we
-    /// register is ResolveBestMcpExe()'s STABLE installed path
-    /// (current\mcp\brainx-mcp.exe, which auto-update swaps in place), so
-    /// version bumps reach Codex automatically without re-registration.
+    /// register is ResolveBestMcpExe()'s STABLE path — the mirror BESIDE
+    /// Velopack's `current`, which sync-runtime refreshes from each new install
+    /// and which no agent can lock the updater out of — so version bumps reach
+    /// Codex automatically without re-registration.
     /// No-ops silently when Codex isn't installed or its CLI flakes.
     /// </summary>
     private async Task<bool> EnsureCodexCliRegisteredAsync(string exe)

@@ -12942,7 +12942,19 @@ public partial class MainWindow : Window
         return null;
     }
 
-    private static async Task<(int code, string stdout, string stderr)> RunClaudeCliAsync(params string[] args)
+    private static Task<(int code, string stdout, string stderr)> RunClaudeCliAsync(params string[] args)
+        => RunClaudeCliInAsync(null, args);
+
+    /// <summary>
+    /// Same as <see cref="RunClaudeCliAsync"/>, run FROM a given directory.
+    ///
+    /// Claude Code's `local` scope is keyed by the working directory — `mcp
+    /// remove -s local` edits projects[&lt;cwd&gt;] in ~/.claude.json and nothing
+    /// else — so touching one means standing in it. Null keeps the old
+    /// behaviour (whatever this process inherited).
+    /// </summary>
+    private static async Task<(int code, string stdout, string stderr)> RunClaudeCliInAsync(
+        string? workingDirectory, params string[] args)
     {
         var cli = FindClaudeCli();
         if (cli == null) throw new FileNotFoundException("claude CLI not found on PATH or in %APPDATA%\\npm");
@@ -12974,6 +12986,7 @@ public partial class MainWindow : Window
             };
             foreach (var a in args) psi.ArgumentList.Add(a);
         }
+        if (!string.IsNullOrEmpty(workingDirectory)) psi.WorkingDirectory = workingDirectory;
 
         using var proc = Process.Start(psi)!;
         // Read streams as tasks + bounded wait: `claude mcp list` spawns node
