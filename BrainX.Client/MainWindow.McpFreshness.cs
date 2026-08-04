@@ -35,6 +35,23 @@
 // The version signal is also the only one that reaches a terminal-hosted or
 // Codex session, whose process tree this app cannot walk.
 //
+// Both signals answer "is this agent behind". Neither answers the question the
+// owner asks next, which is "then why is it not running the new one" — and the
+// answer is not always "because it has not been restarted". A registration can
+// point at a DIFFERENT FILE that nobody rebuilt: `~/.claude.json` carries
+// project-scoped servers under `projects[<cwd>].mcpServers` which override the
+// user entry, and one pinned to `bin\Release` respawns the same old binary
+// forever. That is a banner that survives every restart, which reads as a lie
+// even while every number in it is true.
+//
+// So a third fact is read for each stale server: the version of the file it is
+// running FROM, right now. Whatever config sent it there will send it there
+// again, so that file IS the restart preview. When it is still behind, the
+// staleness is in the file, not the process — the notice says "rebuild or
+// repoint" instead of "restart", names the file and the registration that
+// chose it, and the Restart button leaves that client alone rather than
+// closing an editor to respawn the identical build.
+//
 // It restarts the affected clients AUTOMATICALLY (owner, 2026-07-30: "ทำ auto
 // restart เลยเมื่อ brainx update ให้รีสตาร์ท cluade ide และอื่นๆด้วยเพื่อให้ตรงกัน"), which
 // matches how the rest of this app treats Claude integration — registration
@@ -73,11 +90,23 @@ public partial class MainWindow
         // Set only for VersionBehind: which bus agent reported it, and the
         // build it says it is answering with. The timestamp path knows a
         // process but not who is talking to it; this path is the reverse.
-        string? Agent = null, string? Version = null);
+        string? Agent = null, string? Version = null,
+        // What a RESTART of this agent would actually spawn: the version of
+        // the file it is running from, read now. When that is still behind,
+        // no restart can move it and the advice has to change.
+        string? Respawn = null,
+        // Which registration points at that file, so the advice can name the
+        // thing to edit instead of leaving the owner to grep their configs.
+        string? Scope = null);
 
     /// <summary>Stale MCP servers found on the last check, newest first.</summary>
     private List<McpProc> _staleMcp = new();
     private DateTime _lastMcpFreshnessCheck = DateTime.MinValue;
+
+    /// <summary>The build a NEW session would spawn, as of the last sweep.
+    /// Held so the UI can ask "would a restart change anything" per entry
+    /// without re-reading file metadata for each one.</summary>
+    private Version? _mcpOnDiskVersion;
 
     /// <summary>How often to walk the process list. Cheap, but not free, and
     /// nothing here changes between one HUD tick and the next.</summary>
@@ -106,6 +135,8 @@ public partial class MainWindow
         List<McpProc> stale;
         try
         {
+            _mcpOnDiskVersion = TryParseMcpVersion(ReadMcpFileVersion().label, out var best) ? best : null;
+
             stale = FindStaleMcp();
             // Second signal, merged into one list so there is one banner, one
             // tooltip and one Restart button rather than two competing ones.
@@ -114,6 +145,13 @@ public partial class MainWindow
             // arm the automatic restart.
             var byPid = stale.Select(s => s.Pid).ToHashSet();
             stale.AddRange(FindOutdatedAgents().Where(o => !byPid.Contains(o.Pid)));
+
+            // "Would restarting this actually change anything" — answered once,
+            // here, so both signals answer it the same way and no UI path has to
+            // re-read file metadata per entry. The registration list is read
+            // once for the whole sweep rather than once per stale server.
+            var registrations = ReadMcpRegistrations();
+            stale = stale.Select(s => WithRespawn(s, registrations)).ToList();
         }
         catch (Exception ex)
         {
@@ -124,8 +162,11 @@ public partial class MainWindow
         // Signature, not just pids: an agent that restarts into a build which is
         // STILL behind keeps its pid out of the set but changes what the banner
         // has to say, and a set compared only by pid would leave the old text up.
+        // Respawn is in it for the same reason from the other direction — the
+        // moment deploy-mcp.ps1 rewrites the file an agent is pinned to, the
+        // advice flips from "rebuild" to "restart" with no pid changing at all.
         static string Sig(IEnumerable<McpProc> l) => string.Join("|",
-            l.Select(s => $"{s.Pid}:{s.Reason}:{s.Version}").OrderBy(s => s, StringComparer.Ordinal));
+            l.Select(s => $"{s.Pid}:{s.Reason}:{s.Version}:{s.Respawn}").OrderBy(s => s, StringComparer.Ordinal));
 
         bool changed = !string.Equals(Sig(stale), Sig(_staleMcp), StringComparison.Ordinal);
         _staleMcp = stale;
@@ -212,6 +253,115 @@ public partial class MainWindow
         }
         return found;
     }
+
+    /// <summary>
+    /// Fill in what a restart of this server would actually get, and who
+    /// decided that.
+    ///
+    /// The version is read off the file the process is running FROM — not the
+    /// best file on the machine. That path is the restart preview: whatever
+    /// config spawned it there will spawn it there again. If the file has been
+    /// rewritten since (deploy-mcp.ps1, an update) the respawn is new and a
+    /// restart is exactly the right advice; if it has not, the restart is a
+    /// closed editor and the same binary back.
+    /// </summary>
+    private static McpProc WithRespawn(McpProc s, List<(string Exe, string Scope)> registrations)
+    {
+        if (string.IsNullOrEmpty(s.Exe)) return s;
+        try
+        {
+            var version = McpProductVersionOf(s.Exe)?.ToString();
+            var self = Path.GetFullPath(s.Exe);
+            // Several scopes can name the same exe (user + a project that
+            // agrees with it). Naming all of them is noise in a one-line
+            // notice, and the first is the one the owner has to look at.
+            var scope = registrations.FirstOrDefault(r =>
+                string.Equals(SafeFullPath(r.Exe), self, StringComparison.OrdinalIgnoreCase)).Scope;
+            return s with { Respawn = version, Scope = scope };
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"WithRespawn({s.Pid}): {ex.Message}");
+            return s;
+        }
+    }
+
+    private static string SafeFullPath(string p)
+    {
+        try { return Path.GetFullPath(p); } catch { return p; }
+    }
+
+    /// <summary>
+    /// Every brainx-mcp registration on this machine, as (exe → where it is
+    /// written). READ ONLY — nothing here is rewritten, because a registration
+    /// pointing at a dev build is routinely deliberate and healing it silently
+    /// would overrule a choice the app cannot see.
+    ///
+    /// The project-scoped entries are the reason this exists. `~/.claude.json`
+    /// carries servers under `projects[&lt;cwd&gt;].mcpServers`, they OVERRIDE the
+    /// user entry for any session opened in that folder, and the onboarding
+    /// self-heal (<c>ReadCliRegisteredCommand</c>) reads only the user one — so
+    /// a project pinned to a stale binary is invisible to every existing check
+    /// and stays pinned across every restart. Naming it is the whole fix: the
+    /// owner cannot repoint a config nobody told them about.
+    /// </summary>
+    private static List<(string Exe, string Scope)> ReadMcpRegistrations()
+    {
+        var found = new List<(string, string)>();
+
+        try
+        {
+            var claudeJson = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude.json");
+            if (File.Exists(claudeJson))
+            {
+                var root = JObject.Parse(File.ReadAllText(claudeJson));
+                var user = root["mcpServers"]?["brainx-brain"]?["command"]?.ToString();
+                if (!string.IsNullOrWhiteSpace(user))
+                    found.Add((user!, "Claude Code · user scope"));
+
+                if (root["projects"] is JObject projects)
+                    foreach (var project in projects.Properties())
+                    {
+                        var cmd = project.Value["mcpServers"]?["brainx-brain"]?["command"]?.ToString();
+                        if (!string.IsNullOrWhiteSpace(cmd))
+                            found.Add((cmd!, $"Claude Code · project {project.Name}"));
+                    }
+            }
+        }
+        catch (Exception ex) { Debug.WriteLine($"ReadMcpRegistrations(.claude.json): {ex.Message}"); }
+
+        try
+        {
+            var desktop = ClaudeDesktopConfigPath();
+            if (File.Exists(desktop) && JObject.Parse(File.ReadAllText(desktop))["mcpServers"] is JObject servers)
+                foreach (var server in servers.Properties())
+                {
+                    if (!server.Name.StartsWith("brainx-brain", StringComparison.OrdinalIgnoreCase)) continue;
+                    var cmd = server.Value["command"]?.ToString();
+                    if (!string.IsNullOrWhiteSpace(cmd))
+                        found.Add((cmd!, "Claude Desktop"));
+                }
+        }
+        catch (Exception ex) { Debug.WriteLine($"ReadMcpRegistrations(desktop): {ex.Message}"); }
+
+        return found;
+    }
+
+    /// <summary>
+    /// True when restarting this agent would spawn the SAME stale build.
+    ///
+    /// This is the line between "you have an old session open" and "this
+    /// registration points at a copy nobody rebuilt". Only the first is fixed
+    /// by the button next to the message, and offering that button for the
+    /// second is what makes a correct banner look like a false positive: the
+    /// owner restarts, it comes straight back, and the feature loses its
+    /// credibility for the day it is actually right.
+    /// </summary>
+    private bool IsPinnedStale(McpProc s) =>
+        _mcpOnDiskVersion is { } best
+        && TryParseMcpVersion(s.Respawn, out var respawn)
+        && respawn < best;
 
     /// <summary>
     /// Parse an MCP version for COMPARISON. Tolerates the shapes this codebase
@@ -356,19 +506,10 @@ public partial class MainWindow
             // Remember what it looked like before the first override, so the
             // way back is a restore rather than a guess.
             _mcpChipBrush ??= McpVersionText.Foreground;
-            McpVersionText.Text = "MCP ↻ restart Claude";
+            McpVersionText.Text = StaleChipLabel(onDisk);
             McpVersionText.Foreground = (System.Windows.Media.Brush)(
                 TryFindResource("NeuralAmber") ?? System.Windows.Media.Brushes.Orange);
-            McpVersionText.ToolTip =
-                $"BrainX updated the MCP server to {onDisk}, but {who} is still running the copy it " +
-                $"started with — a stdio MCP server is spawned once per session and never reloaded.\n\n" +
-                string.Join("\n", _staleMcp.Select(s => s.Reason == StaleReason.VersionBehind
-                    // The version line leads with what it KNOWS (the agent said
-                    // this) and only then with the process, which may be gone.
-                    ? $"  {s.Agent} · reports v{s.Version} · pid {s.Pid}"
-                          + (string.IsNullOrEmpty(s.Exe) ? "" : $" · {s.Exe}")
-                    : $"  pid {s.Pid} · started {s.Started:HH:mm:ss} · {s.Exe}")) +
-                "\n\nRestart Claude to pick up the new tools.";
+            McpVersionText.ToolTip = StaleTooltip(onDisk, who);
         }
 
         // Arm the automatic restart the first time we see this, but only if
@@ -384,13 +525,81 @@ public partial class MainWindow
         // build they are deliberately pointing an agent at — killing Claude
         // over it would be the app overruling a choice it cannot see. The
         // automatic restart stays tied to the signal it was asked for: a binary
-        // that was overwritten under a live process.
-        var rewritten = _staleMcp.Any(s => s.Reason == StaleReason.BinaryRewritten);
+        // that was overwritten under a live process, and only where a restart
+        // would actually land on something new.
+        var rewritten = _staleMcp.Any(s => s.Reason == StaleReason.BinaryRewritten && !IsPinnedStale(s));
 
         if (!_autoRestartSpent && _autoRestartTimer == null && any && rewritten)
             StartAutoRestartCountdown();
         else
             PostStaleNotice(onDisk, who, null);
+    }
+
+    /// <summary>
+    /// The chip while something is stale.
+    ///
+    /// It leads with the version that is RUNNING, because that is the number
+    /// the owner cannot read anywhere else. Claude's own developer panel shows
+    /// what its server says about itself — `serverInfo.version` from the
+    /// handshake, and a BRAINX_MCP_VERSION the server rewrites to its own value
+    /// on boot — so it agrees with itself by construction and can never show a
+    /// gap. "MCP 2.9.235 → 2.9.236" is the entire finding in one line: what is
+    /// answering, and what a new session would get instead.
+    ///
+    /// Falls back to the old imperative when only the timestamp signal fired:
+    /// that path knows a process but never what it reports, and inventing a
+    /// number there would be a guess wearing the clothes of a fact.
+    /// </summary>
+    private string StaleChipLabel(string onDisk)
+    {
+        var running = RunningVersions();
+        if (running.Count == 0) return "MCP ↻ restart Claude";
+        return running.Count == 1
+            ? $"MCP {running[0]} → {onDisk}"
+            : $"MCP {running[0]} +{running.Count - 1} → {onDisk}";
+    }
+
+    /// <summary>Distinct versions the stale agents report, oldest first — the
+    /// oldest leads because it is the widest gap the owner is living with.</summary>
+    private List<Version> RunningVersions() => _staleMcp
+        .Select(s => TryParseMcpVersion(s.Version, out var v) ? v : null)
+        .Where(v => v is not null).Select(v => v!)
+        .Distinct().OrderBy(v => v).ToList();
+
+    /// <summary>
+    /// The full account, one line per stale server: who is talking, what it
+    /// reports, which FILE it runs from, and — when a restart cannot help —
+    /// what that file's version is and which registration chose it. The path
+    /// is the part that answers "so why is it not running the new one", and it
+    /// was previously buried at the end of a line nobody read to the end of.
+    /// </summary>
+    private string StaleTooltip(string onDisk, string who)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append($"BrainX updated the MCP server to {onDisk}, but {who} is still running the copy it ")
+          .Append("started with — a stdio MCP server is spawned once per session and never reloaded.\n\n");
+
+        foreach (var s in _staleMcp)
+        {
+            // The version line leads with what it KNOWS (the agent said this)
+            // and only then with the process, which may be gone.
+            sb.Append(s.Reason == StaleReason.VersionBehind
+                ? $"  {s.Agent} · reports v{s.Version} · pid {s.Pid}"
+                : $"  pid {s.Pid} · started {s.Started:HH:mm:ss}");
+            if (!string.IsNullOrEmpty(s.Exe)) sb.Append($"\n      from {s.Exe}");
+            if (IsPinnedStale(s))
+            {
+                sb.Append($"\n      that file is still v{s.Respawn} — a restart spawns the SAME build");
+                if (!string.IsNullOrEmpty(s.Scope)) sb.Append($"\n      registered by {s.Scope}");
+            }
+            sb.Append('\n');
+        }
+
+        sb.Append(_staleMcp.All(IsPinnedStale)
+            ? "\nRestarting will not help. Rebuild that copy — deploy-mcp.ps1 writes both the dev\n"
+              + "Release dir and the installed app — or repoint the registration above."
+            : "\nRestart Claude to pick up the new tools.");
+        return sb.ToString();
     }
 
     /// <summary>The stale-MCP bar. `secondsLeft` turns it into a countdown.</summary>
@@ -409,6 +618,29 @@ public partial class MainWindow
             });
             return;
         }
+        // Everything stale respawns from a file that is itself behind. A
+        // restart re-runs the same binary, so "Restart now" would be a button
+        // that closes the owner's editor and changes nothing — the notice
+        // names the file and the config that chose it, and offers no action at
+        // all. renderNotice hides the button when `action` is absent.
+        var pinned = _staleMcp.Where(IsPinnedStale).ToList();
+        if (pinned.Count > 0 && pinned.Count == _staleMcp.Count)
+        {
+            var first = pinned[0];
+            var others = pinned.Select(p => p.Exe).Distinct(StringComparer.OrdinalIgnoreCase).Count() - 1;
+            var also = others > 0 ? $" (+{others} more)" : "";
+            var by = string.IsNullOrEmpty(first.Scope) ? "" : $", registered by {first.Scope}";
+            PostHud("hudNotice", new
+            {
+                text = $"{who} is pinned to MCP v{first.Respawn} — restarting will not help",
+                detail = $"It respawns from {first.Exe}{also}{by}, and that copy is still "
+                       + $"v{first.Respawn} while the current build is {onDisk}. Rebuild it — "
+                       + "deploy-mcp.ps1 writes both the dev Release dir and the installed app — "
+                       + "or repoint that registration.",
+            });
+            return;
+        }
+
         // Imperative, and it leads with the programs. The owner's ask was for a
         // message that says WHICH connected things to restart — a bare "MCP
         // updated" is a fact with no instruction in it. Phrased without a verb
@@ -523,6 +755,11 @@ public partial class MainWindow
 
         foreach (var s in _staleMcp)
         {
+            // Never on this list: a client that respawns the same stale binary.
+            // Closing an editor to get the identical build back is the worst
+            // trade this feature can make, and it is the one that taught the
+            // owner the banner could be ignored.
+            if (IsPinnedStale(s)) continue;
             var owner = WindowOwningClient(s.ParentPid, parents);
             if (owner == null) continue;
             if (!byPid.TryAdd(owner.Id, owner)) owner.Dispose();
@@ -562,6 +799,10 @@ public partial class MainWindow
         var list = new List<string>();
         foreach (var s in _staleMcp)
         {
+            // Pinned servers are not "restart these yourself" either — that
+            // would just move bad advice from a button to a bullet point.
+            // They get their own list.
+            if (IsPinnedStale(s)) continue;
             var owner = WindowOwningClient(s.ParentPid, parents);
             if (owner != null) { owner.Dispose(); continue; }
             list.Add(s.ParentPid <= 0 || string.IsNullOrEmpty(s.ParentName)
@@ -570,6 +811,16 @@ public partial class MainWindow
         }
         return list.Distinct().ToList();
     }
+
+    /// <summary>Stale servers no restart can fix, described so the owner can
+    /// go and fix the actual thing: the file, and who points at it.</summary>
+    private List<string> PinnedStaleClients() => _staleMcp
+        .Where(IsPinnedStale)
+        .Select(s => $"{(string.IsNullOrEmpty(s.Agent) ? PrettyClient(s.ParentName) : s.Agent)} — "
+                   + $"{s.Exe} is still v{s.Respawn}"
+                   + (string.IsNullOrEmpty(s.Scope) ? "" : $" ({s.Scope})"))
+        .Distinct()
+        .ToList();
 
     private void RestartStaleMcpClients(bool auto = false)
     {
@@ -584,13 +835,23 @@ public partial class MainWindow
 
         var restartable = RestartableClients();
         var manual = ManualRestartClients();
+        var pinned = PinnedStaleClients();
+
+        // The rebuild advice, phrased once and reused by both message paths.
+        var pinnedBlock = pinned.Count == 0 ? "" :
+            "A restart cannot fix these — they respawn from a binary that is itself behind:\n"
+            + string.Join("\n", pinned.Select(m => "  • " + m))
+            + "\n\nRebuild that copy (deploy-mcp.ps1 writes both targets) or repoint the registration.";
 
         if (restartable.Count == 0)
         {
-            var none = "No client here can be restarted automatically." +
-                       (manual.Count > 0
-                           ? "\n\nRestart these yourself:\n" + string.Join("\n", manual.Select(m => "  • " + m))
-                           : "");
+            var parts = new List<string>();
+            if (pinnedBlock.Length > 0) parts.Add(pinnedBlock);
+            if (manual.Count > 0)
+                parts.Add("Restart these yourself:\n" + string.Join("\n", manual.Select(m => "  • " + m)));
+            if (parts.Count == 0) parts.Add("No client here can be restarted automatically.");
+            var none = string.Join("\n\n", parts);
+
             if (auto) { if (StatusText != null) StatusText.Text = none.Replace("\n", " "); }
             else MessageBox.Show(this, none, "Restart for the new MCP",
                      MessageBoxButton.OK, MessageBoxImage.Information);
@@ -607,6 +868,7 @@ public partial class MainWindow
                       "\n\nAnything open in them will be closed.";
             if (manual.Count > 0)
                 msg += "\n\nRestart these yourself:\n" + string.Join("\n", manual.Select(m => "  • " + m));
+            if (pinnedBlock.Length > 0) msg += "\n\n" + pinnedBlock;
             if (MessageBox.Show(this, msg, "Restart for the new MCP",
                     MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
         }
@@ -652,7 +914,11 @@ public partial class MainWindow
             if (StatusText != null)
                 StatusText.Text = _staleMcp.Count == 0
                     ? "MCP up to date — every client is on the current build"
-                    : $"{_staleMcp.Count} MCP server(s) still on the old build — restart those clients yourself";
+                    // Do not repeat "restart those yourself" at a client that
+                    // just proved a restart does nothing for it.
+                    : _staleMcp.All(IsPinnedStale)
+                        ? $"{_staleMcp.Count} MCP server(s) pinned to an older binary — rebuild it (deploy-mcp.ps1) or repoint the registration"
+                        : $"{_staleMcp.Count} MCP server(s) still on the old build — restart those clients yourself";
         };
         settle.Start();
     }
