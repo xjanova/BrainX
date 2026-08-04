@@ -241,7 +241,23 @@ body.hud-active #settings-toggle {
    which is how film HUDs stay readable over bright imagery. */
 .hud-panel {
     position: relative;
-    padding: 0;
+    /* Two pixels of dead space inside every card edge (owner, 2026-08-04).
+       These readouts are frameless, so a glyph that starts at x=0 has nothing
+       at all between it and the galaxy — and once a card is placed by hand
+       that same edge is the resize grip hudlayout.js hit-tests. Two pixels
+       keeps text off the hairline that appears on hover without putting back
+       a frame.
+
+       border-box comes WITH it, not as tidiness: box-sizing is set on
+       #hud-layer only, never globally (see the note under .hud-flow), so a
+       bare `padding` would have grown every card by 4px in each axis —
+       including placed cards, which render against a rect hudlayout.js stored
+       before the padding existed. It also keeps #hud-bus-canvas honest: an
+       absolutely positioned child measures 100% against the PADDING box, and
+       under border-box that box is still the full card, so the render keeps
+       the exact 10px grip inset it was given. */
+    box-sizing: border-box;
+    padding: 2px;
     max-width: min(30vw, 420px);
     max-height: calc(50vh - var(--hud-gap) * 2);
     /* Clipped content is REACHABLE, not lost: the wheel scrolls the panel
@@ -1100,7 +1116,8 @@ body.hud-active.has-notice #hud-layer {
 
    Note what is NOT here: type scale. The fonts stay put, so a resized card
    reflows to reveal more rows rather than magnifying the same ones — which is
-   the difference between a bigger card and a zoomed one. */
+   the difference between a bigger card and a zoomed one.
+
    The traffic log is NOT in this list. It is capped at a share of its card
    rather than by the window, so it already grows with one — and lifting its
    cap here would win on source order and let it climb over the whole render. */
