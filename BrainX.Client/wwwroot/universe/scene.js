@@ -790,6 +790,36 @@ export function createScene(canvas, callbacks = {}) {
     let idToIndex = null;
     let activePulses = new Map();   // starIdx → t0_ms (performance.now())
 
+    // ── Convergence flash ──────────────────────────────────────────────
+    //
+    // The one moment this universe actually has: every galaxy's d3-force sim
+    // starts hot, the stars visibly stream inward for ~3.5 s, and then they
+    // stop. Until now that ending was silent — the motion simply ceased, and
+    // the frame the brain finished forming looked exactly like the frame
+    // after it. This marks it.
+    //
+    // Two layers, both riding machinery that already exists:
+    //
+    //   • a WAVE of per-star lightning, seeded from the rim inward, so the
+    //     light travels the way the stars just travelled and arrives at the
+    //     core last. Outward would read as an explosion; inward reads as
+    //     gathering, which is what actually happened.
+    //   • a bloom surge over the whole scene, cresting just after the wave
+    //     lands. The bloom is what makes it a flash of LIGHT rather than a
+    //     thousand stars each getting brighter on their own.
+    //
+    // The wave cannot be scheduled by writing future timestamps into
+    // activePulses: lightningAmpStar returns 0 for a negative elapsed time
+    // and stepPulses detaches anything reading 0, so a star scheduled for
+    // later would be dropped on the very next frame. Hence its own queue,
+    // pre-sorted, drained by a cursor.
+    const CONVERGE_WAVE_MS   = 620;    // rim → core travel time
+    const CONVERGE_GLOW_MS   = 1150;   // bloom surge, outlasts the wave
+    const CONVERGE_GLOW_PEAK = 0.55;   // added on top of settings.glow at the crest
+    const CONVERGE_CREST     = 0.38;   // fraction of the surge spent rising
+    let converge = null;        // { t0, order: Int32Array, at: Float32Array, cursor }
+    let simsWereHot = false;    // edge detector for "the last galaxy just stopped"
+
     // Edge alpha pipeline (fixes B1 + B2 from the review).
     //
     // Three independent inputs drive each edge's rendered alpha:
@@ -906,6 +936,12 @@ export function createScene(canvas, callbacks = {}) {
         }
         activePulses.clear();
         activeEdgeBoosts.clear();
+        // A new payload builds new sims, hot. Clearing the edge detector here
+        // is what lets the next settle be recognised as a settle — left true
+        // from a previous universe, the very first frame of this one would
+        // look like an arrival that had already happened.
+        converge = null;
+        simsWereHot = false;
 
         // fit camera: aim at centroid of all galaxy centers; back off enough
         // that all galaxies fit comfortably in the frustum.
@@ -949,6 +985,12 @@ export function createScene(canvas, callbacks = {}) {
         pulseEdgeBoost = null;
         activeEdgeBoosts.clear();
         activePulses.clear();
+        // Disposing mid-flash must not strand the bloom at its crest — the
+        // next thing mounted would inherit a scene lit 2× brighter than the
+        // owner's slider says.
+        converge = null;
+        simsWereHot = false;
+        bloom.strength = settings.glow;
         // Drop component analysis — a new brain payload may have a totally
         // different graph topology, so the snapshot and component map
         // would be wrong. Recomputed lazily on next toggleIslands().
@@ -1114,6 +1156,14 @@ export function createScene(canvas, callbacks = {}) {
             anyHot = true;
         }
         if (anyHot) projectAndUpload();
+
+        // An EDGE, not a level: the flash belongs to the instant the last
+        // galaxy stops moving, not to every one of the thousands of frames
+        // it sits still afterwards. With drift > 0 the sims are never allowed
+        // to cool, so this never fires — which is correct, because nothing
+        // ever finishes arriving.
+        if (simsWereHot && !anyHot) startConvergenceFlash();
+        simsWereHot = anyHot;
     }
 
     function applySettings() {
@@ -1429,6 +1479,11 @@ export function createScene(canvas, callbacks = {}) {
 
         // Settle the per-galaxy d3-force sims (no-op after they cool down).
         stepPhysics();
+
+        // The arrival flash, if the sims just finished. Must sit between
+        // these two: it seeds into activePulses, and stepPulses is what
+        // writes them to the GPU.
+        stepConvergence(now * 1000);
 
         // Decay live MCP pulses + edge arcs (no-op when none active).
         stepPulses(dt);
@@ -1953,6 +2008,78 @@ export function createScene(canvas, callbacks = {}) {
         // 3) recompose final edge alpha. The function early-outs when both
         //    no pulses are live AND selection hasn't moved since last write.
         recomputeEdgeAlphas(false);
+    }
+
+    /**
+     * Build the rim→core wave and start the bloom surge. Called once, from
+     * the frame the last simulation cools.
+     *
+     * Scheduling is done in DISK-LOCAL coordinates, not world ones: each
+     * particle's (x, y) is already its offset from its own galaxy's centre,
+     * and dividing by that galaxy's radius normalises every galaxy to the
+     * same 0..1 rim→core axis. So a dense 400-star galaxy and a sparse
+     * 20-star one crest together instead of the big one finishing while the
+     * small one is still lighting up — which would read as a stutter rather
+     * than one event.
+     */
+    function startConvergenceFlash() {
+        // settings.lightning is the owner's existing "how loud are flashes"
+        // control, including 0 = off. A new effect does not get to ignore it.
+        if (!pulseAttr || !universe || !sims.length || settings.lightning <= 0) return;
+
+        const pairs = [];
+        for (const ps of sims) {
+            const r = Math.max(1e-3, ps.radius);
+            for (let k = 0; k < ps.particles.length; k++) {
+                const p = ps.particles[k];
+                const d = Math.min(1, Math.hypot(p.x, p.y) / r);   // 0 = core, 1 = rim
+                pairs.push([ps.localToGlobalIdx[k], (1 - d) * CONVERGE_WAVE_MS]);
+            }
+        }
+        if (!pairs.length) return;
+
+        // Sorted once so the per-frame drain is a cursor advance rather than
+        // a scan of every star on every frame of the wave.
+        pairs.sort((a, b) => a[1] - b[1]);
+        const order = new Int32Array(pairs.length);
+        const at    = new Float32Array(pairs.length);
+        for (let i = 0; i < pairs.length; i++) { order[i] = pairs[i][0]; at[i] = pairs[i][1]; }
+
+        converge = { t0: performance.now(), order, at, cursor: 0 };
+    }
+
+    /**
+     * Per-frame: release the stars whose turn has come, and drive the bloom.
+     *
+     * Runs BETWEEN stepPhysics and stepPulses in tick() — stars seeded here
+     * are picked up by the same stepPulses pass on the same frame, so a star
+     * never spends a frame flagged-but-dark.
+     */
+    function stepConvergence(now) {
+        if (!converge) return;
+        const elapsed = now - converge.t0;
+
+        while (converge.cursor < converge.order.length && converge.at[converge.cursor] <= elapsed) {
+            // t0 = now, not the scheduled time: a frame that arrives late
+            // should start the envelope late, not start it already half
+            // burnt down. Dropped frames cost smoothness, never brightness.
+            activePulses.set(converge.order[converge.cursor], now);
+            converge.cursor++;
+        }
+
+        const g = elapsed / CONVERGE_GLOW_MS;
+        if (g >= 1) {
+            converge = null;
+            bloom.strength = settings.glow;   // hand the bloom back untouched
+            return;
+        }
+        // Fast rise, slow fall — light decays, it does not ramp down. Squared
+        // so the shoulders stay near the baseline and the crest is the only
+        // part the eye registers as an event.
+        const k = g < CONVERGE_CREST
+            ? g / CONVERGE_CREST
+            : 1 - (g - CONVERGE_CREST) / (1 - CONVERGE_CREST);
+        bloom.strength = settings.glow + CONVERGE_GLOW_PEAK * k * k * settings.lightning;
     }
 
     function setMotion(v) {
