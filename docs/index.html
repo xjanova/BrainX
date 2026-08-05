@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ObsidianX — your second brain, made of Markdown</title>
-<meta name="description" content="ObsidianX turns a Markdown vault into a living 3D brain. MCP-native for Claude Code. Local-first. Brain-first protocol enforced from the moment of install.">
+<title>BrainX — your second brain, made of Markdown</title>
+<meta name="description" content="BrainX turns a Markdown vault into a living 3D brain. MCP-native for Claude Code. Local-first. Brain-first protocol enforced from the moment of install.">
 <meta name="theme-color" content="#0a0a13">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -272,6 +272,96 @@ footer .container { display: flex; flex-direction: column; gap: 8px; }
 }
 .tag-line { color: var(--ink-3); }
 .tag-line a { color: var(--ink-2); }
+
+/* ── comparison matrix + coverage chart ────────────── */
+/* Status trio, contrast-checked against this page's surfaces:
+   teal 10.2:1 · amber 12.6:1 · slate 6.2:1 (WCAG AA text, both bg and bg-2).
+   --ink-3 was the obvious pick for "no" and fails at 2.9:1, so it isn't used
+   here. Every cell carries a glyph AND a word — never colour alone. */
+:root {
+  --yes: #00d4b4;
+  --partly: #ffc94d;
+  --no: #8f8fb0;
+}
+.cmp-wrap {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0));
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+table.cmp {
+  border-collapse: collapse;
+  width: 100%;
+  min-width: 880px;
+  font-size: 14px;
+}
+table.cmp th, table.cmp td {
+  padding: 13px 14px;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+table.cmp tr:last-child td { border-bottom: 0; }
+/* Not sticky: the site header is already sticky at top:0, so a sticky
+   thead would tuck underneath it. Twelve rows don't need one. */
+table.cmp thead th {
+  background: var(--bg-2);
+  font-size: 12px; font-weight: 600;
+  letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+table.cmp thead th .sub {
+  display: block; text-transform: none; letter-spacing: 0;
+  font-weight: 400; font-size: 11px; color: var(--ink-3); margin-top: 2px;
+}
+table.cmp td.cap { color: var(--ink); font-weight: 500; min-width: 300px; }
+table.cmp td.cap .hint { display: block; color: var(--ink-3); font-size: 12px; font-weight: 400; margin-top: 2px; }
+table.cmp .mine { background: rgba(0,212,180,0.05); }
+table.cmp thead th.mine { color: var(--accent-2); background: linear-gradient(180deg, var(--bg-2), rgba(0,212,180,0.08)); }
+table.cmp tbody tr:hover td { background: rgba(255,255,255,0.025); }
+table.cmp tbody tr:hover td.mine { background: rgba(0,212,180,0.09); }
+
+.chip { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; font-size: 13px; }
+.chip .dot { font-size: 13px; line-height: 1; }
+.chip.yes    { color: var(--yes); }
+.chip.partly { color: var(--partly); }
+.chip.no     { color: var(--no); }
+.chip .txt { color: var(--ink-2); }
+.chip.yes .txt { color: var(--ink); }
+
+.cmp-legend { display: flex; flex-wrap: wrap; gap: 22px; margin: 16px 2px 0; font-size: 13px; color: var(--ink-3); }
+
+/* Coverage bars — one hue for the subject, neutral for context (emphasis
+   form). Every bar is direct-labelled, so the values never depend on hover. */
+.cov { margin-top: 14px; }
+.cov .row {
+  display: grid; grid-template-columns: 168px 1fr 74px;
+  align-items: center; gap: 16px; padding: 9px 0;
+}
+.cov .row:hover .track { background: rgba(255,255,255,0.06); }
+.cov .name { font-size: 14px; color: var(--ink-2); text-align: right; }
+.cov .row.mine .name { color: var(--ink); font-weight: 600; }
+.cov .track { height: 12px; border-radius: 999px; background: rgba(255,255,255,0.04); overflow: hidden; }
+.cov .fill { height: 100%; border-radius: 999px; background: var(--no); transition: width .4s ease; }
+.cov .row.mine .fill { background: linear-gradient(90deg, var(--accent-2), var(--accent-5)); }
+.cov .val { font-size: 13px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.cov .row.mine .val { color: var(--accent-2); font-weight: 600; }
+.cov-note { font-size: 12.5px; color: var(--ink-3); margin: 12px 0 0; }
+
+.src-note {
+  margin-top: 26px; padding: 16px 20px;
+  border: 1px solid var(--line); border-left: 3px solid var(--accent-4);
+  border-radius: 10px; background: rgba(255,201,77,0.04);
+  font-size: 13px; color: var(--ink-2);
+}
+.src-note strong { color: var(--ink); }
+
+@media (max-width: 720px) {
+  .cov .row { grid-template-columns: 118px 1fr 62px; gap: 10px; }
+  .cov .name { font-size: 13px; }
+}
 </style>
 </head>
 <body>
@@ -280,26 +370,27 @@ footer .container { display: flex; flex-direction: column; gap: 8px; }
   <div class="container">
     <a href="#top" class="brand">
       <span class="brand-dot"></span>
-      <span>ObsidianX</span>
+      <span>BrainX</span>
     </a>
     <nav>
       <a href="#what">What</a>
       <a href="#features">Features</a>
+      <a href="#compare">Compare</a>
       <a href="#install">Install</a>
       <a href="#enforce">Brain-first</a>
       <a href="#audit">Audit</a>
     </nav>
-    <a class="cta-secondary" href="https://github.com/xjanova/ObsidianX">GitHub →</a>
+    <a class="cta-secondary" href="https://github.com/xjanova/BrainX">GitHub →</a>
   </div>
 </header>
 
 <a id="top"></a>
 <section class="hero">
   <div class="container">
-    <span class="eyebrow">v1.1 · MCP-native · local-first</span>
+    <span class="eyebrow">v2.9 · MCP-native · local-first</span>
     <h1>Your second brain,<br>made of Markdown.</h1>
     <p class="lede">
-      ObsidianX turns a Markdown vault into a living, physics-driven 3D graph and a
+      BrainX turns a Markdown vault into a living, physics-driven 3D graph and a
       first-class memory surface for Claude Code. <strong>The brain reads, writes,
       and audits itself</strong> — search before answering, save proactively, surface
       contradictions, and report honestly when the smart path can't run.
@@ -307,19 +398,19 @@ footer .container { display: flex; flex-direction: column; gap: 8px; }
 
     <div class="hero-actions">
       <a class="cta" href="#install">Install in 1 command →</a>
-      <a class="cta-secondary" href="https://github.com/xjanova/ObsidianX">View on GitHub</a>
+      <a class="cta-secondary" href="https://github.com/xjanova/BrainX">View on GitHub</a>
     </div>
 
     <div class="hero-stats">
-      <div class="stat"><div class="v">611</div><div class="k">notes embedded</div></div>
-      <div class="stat"><div class="v">1.05M</div><div class="k">words indexed</div></div>
-      <div class="stat"><div class="v">3,665</div><div class="k">wiki-links</div></div>
-      <div class="stat"><div class="v">17</div><div class="k">MCP tools</div></div>
+      <div class="stat"><div class="v">1,233</div><div class="k">notes embedded</div></div>
+      <div class="stat"><div class="v">1.53M</div><div class="k">words indexed</div></div>
+      <div class="stat"><div class="v">8,718</div><div class="k">wiki-links</div></div>
+      <div class="stat"><div class="v">34</div><div class="k">MCP tools</div></div>
       <div class="stat"><div class="v">100%</div><div class="k">local · no cloud</div></div>
     </div>
 
     <div class="hero-shot">
-      <img src="screenshots/dashboard-3d.png" alt="ObsidianX dashboard with 3D physics-driven knowledge graph">
+      <img src="screenshots/dashboard-3d.png" alt="BrainX dashboard with 3D physics-driven knowledge graph">
     </div>
   </div>
 </section>
@@ -327,7 +418,7 @@ footer .container { display: flex; flex-direction: column; gap: 8px; }
 <a id="what"></a>
 <section>
   <div class="container">
-    <h2>What ObsidianX actually is</h2>
+    <h2>What BrainX actually is</h2>
     <p>
       It's not a wrapper around a vector database. It's not a cloud-managed memory
       service. It's a <strong>three-process system</strong> that runs entirely on
@@ -462,19 +553,202 @@ footer .container { display: flex; flex-direction: column; gap: 8px; }
 
 <hr>
 
-<a id="install"></a>
+<a id="compare"></a>
 <section>
+  <div class="container">
+    <h2>How it compares</h2>
+    <p>
+      Agent memory is a crowded shelf. Most of it is a <strong>service you send your
+      knowledge to</strong>. BrainX is a <strong>folder of Markdown you already own</strong>,
+      with a graph, a visualiser and an MCP server wrapped around it. Here is where that
+      choice pays — and the three rows where it costs you.
+    </p>
+
+    <div class="cmp-wrap">
+      <table class="cmp">
+        <thead>
+          <tr>
+            <th>Capability</th>
+            <th class="mine">BrainX<span class="sub">this project</span></th>
+            <th>Basic Memory<span class="sub">Markdown + MCP</span></th>
+            <th>Graft<span class="sub">local semantic cache</span></th>
+            <th>Mem0<span class="sub">memory layer</span></th>
+            <th>Zep / Graphiti<span class="sub">temporal graph</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="cap">Memory is Markdown you can open and edit<span class="hint">delete the index and it rebuilds from the files</span></td>
+            <td class="mine"><span class="chip yes"><span class="dot">●</span><span class="txt">Yes</span></span></td>
+            <td><span class="chip yes"><span class="dot">●</span><span class="txt">Yes</span></span></td>
+            <td><span class="chip no"><span class="dot">○</span><span class="txt">SQLite</span></span></td>
+            <td><span class="chip no"><span class="dot">○</span><span class="txt">Vector store</span></span></td>
+            <td><span class="chip no"><span class="dot">○</span><span class="txt">Graph DB</span></span></td>
+          </tr>
+          <tr>
+            <td class="cap">Runs fully local — no account, no API key<span class="hint">embeddings included</span></td>
+            <td class="mine"><span class="chip yes"><span class="dot">●</span><span class="txt">Yes</span></span></td>
+            <td><span class="chip yes"><span class="dot">●</span><span class="txt">Yes</span></span></td>
+            <td><span class="chip yes"><span class="dot">●</span><span class="txt">Yes</span></span></td>
+            <td><span class="chip partly"><span class="dot">◐</span><span class="txt">Self-host or cloud</span></span></td>
+            <td><span class="chip partly"><span class="dot">◐</span><span class="txt">Graphiti only</span></span></td>
+          </tr>
+          <tr>
+            <td class="cap">Human-authored wiki-link graph, multi-hop walk<span class="hint">links you wrote, not similarity guesses</span></td>
+            <td class="mine"><span class="chip yes"><span class="dot">●</span><span class="txt">Yes</span></span></td>
+            <td><span class="chip yes"><span class="dot">●</span><span class="txt">Yes</span></span></td>
+            <td><span class="chip partly"><span class="dot">◐</span><span class="txt">Derived edges</span></span></td>
+            <td><span class="chip partly"><span class="dot">◐</span><span class="txt">Optional layer</span></span></td>
+            <td><span class="chip yes"><span class="dot">●</span><span class="txt">Yes</span></span></td>
+          </tr>
+          <tr>
+            <td class="cap">Recall answers with a verdict, not a hit list<span class="hint">STRONG / WEAK / MISS — the agent knows whether to think</span></td>
+            <td class="mine"><span class="chip yes"><span class="dot">●</span><span class="txt">Yes</span></span></td>
+            <td><span class="chip no"><span class="dot">○</span><span class="txt">Ranked hits</span></span></td>
+            <td><span class="chip yes"><span class="dot">●</span><span class="txt">Yes</span></span></td>
+            <td><span class="chip no"><span class="dot">○</span><span class="txt">Ranked hits</span></span></td>
+            <td><span class="chip no"><span class="dot">○</span><span class="txt">Ranked hits</span></span></td>
+          </tr>
+          <tr>
+            <td class="cap">Retires knowledge a newer note replaces<span class="hint">the old note stays readable, stops outranking its replacement</span></td>
+            <td class="mine"><span class="chip yes"><span class="dot">●</span><span class="txt">Yes</span></span></td>
+            <td><span class="chip no"><span class="dot">○</span><span class="txt">No</span></span></td>
+            <td><span class="chip yes"><span class="dot">●</span><span class="txt">Yes</span></span></td>
+            <td><span class="chip partly"><span class="dot">◐</span><span class="txt">Update / delete</span></span></td>
+            <td><span class="chip yes"><span class="dot">●</span><span class="txt">Invalidation</span></span></td>
+          </tr>
+          <tr>
+            <td class="cap">Knowledge hygiene: contradiction scan + staleness audit<span class="hint">tells you your notes disagree before an agent quotes the wrong one</span></td>
+            <td class="mine"><span class="chip yes"><span class="dot">●</span><span class="txt">Yes</span></span></td>
+            <td><span class="chip no"><span class="dot">○</span><span class="txt">No</span></span></td>
+            <td><span class="chip no"><span class="dot">○</span><span class="txt">On roadmap</span></span></td>
+            <td><span class="chip partly"><span class="dot">◐</span><span class="txt">Conflict resolve</span></span></td>
+            <td><span class="chip partly"><span class="dot">◐</span><span class="txt">Temporal only</span></span></td>
+          </tr>
+          <tr>
+            <td class="cap">Graph visualiser in the box<span class="hint">BrainX ships a 3D physics universe of the vault</span></td>
+            <td class="mine"><span class="chip yes"><span class="dot">●</span><span class="txt">3D, built in</span></span></td>
+            <td><span class="chip partly"><span class="dot">◐</span><span class="txt">Via Obsidian</span></span></td>
+            <td><span class="chip partly"><span class="dot">◐</span><span class="txt">Experimental</span></span></td>
+            <td><span class="chip partly"><span class="dot">◐</span><span class="txt">Cloud dashboard</span></span></td>
+            <td><span class="chip partly"><span class="dot">◐</span><span class="txt">Graph DB browser</span></span></td>
+          </tr>
+          <tr>
+            <td class="cap">Agents talk to each other through the memory<span class="hint">Claude ⇄ Codex mailbox inside the vault</span></td>
+            <td class="mine"><span class="chip yes"><span class="dot">●</span><span class="txt">Agent bus</span></span></td>
+            <td><span class="chip no"><span class="dot">○</span><span class="txt">No</span></span></td>
+            <td><span class="chip no"><span class="dot">○</span><span class="txt">No</span></span></td>
+            <td><span class="chip no"><span class="dot">○</span><span class="txt">No</span></span></td>
+            <td><span class="chip no"><span class="dot">○</span><span class="txt">No</span></span></td>
+          </tr>
+          <tr>
+            <td class="cap">Non-Latin retrieval tuned in the ranker<span class="hint">Thai has no spaces — character n-grams in the scorer, not just a multilingual model</span></td>
+            <td class="mine"><span class="chip yes"><span class="dot">●</span><span class="txt">Yes</span></span></td>
+            <td><span class="chip partly"><span class="dot">◐</span><span class="txt">Model-dependent</span></span></td>
+            <td><span class="chip partly"><span class="dot">◐</span><span class="txt">Model-dependent</span></span></td>
+            <td><span class="chip partly"><span class="dot">◐</span><span class="txt">Model-dependent</span></span></td>
+            <td><span class="chip partly"><span class="dot">◐</span><span class="txt">Model-dependent</span></span></td>
+          </tr>
+          <tr>
+            <td class="cap">Shared memory across machines or a team<span class="hint">BrainX is single-machine today; sync is your vault's job (git, iCloud)</span></td>
+            <td class="mine"><span class="chip no"><span class="dot">○</span><span class="txt">Not yet</span></span></td>
+            <td><span class="chip partly"><span class="dot">◐</span><span class="txt">File sync</span></span></td>
+            <td><span class="chip no"><span class="dot">○</span><span class="txt">Export / import</span></span></td>
+            <td><span class="chip yes"><span class="dot">●</span><span class="txt">Yes</span></span></td>
+            <td><span class="chip yes"><span class="dot">●</span><span class="txt">Yes</span></span></td>
+          </tr>
+          <tr>
+            <td class="cap">Bi-temporal validity windows on every fact<span class="hint">"true between these dates" as a first-class query</span></td>
+            <td class="mine"><span class="chip partly"><span class="dot">◐</span><span class="txt">Supersede + TTL</span></span></td>
+            <td><span class="chip no"><span class="dot">○</span><span class="txt">No</span></span></td>
+            <td><span class="chip no"><span class="dot">○</span><span class="txt">No</span></span></td>
+            <td><span class="chip no"><span class="dot">○</span><span class="txt">No</span></span></td>
+            <td><span class="chip yes"><span class="dot">●</span><span class="txt">Yes</span></span></td>
+          </tr>
+          <tr>
+            <td class="cap">Embeddable SDK for your own app<span class="hint">BrainX exposes MCP + REST, not a Python/TS library</span></td>
+            <td class="mine"><span class="chip no"><span class="dot">○</span><span class="txt">MCP + REST</span></span></td>
+            <td><span class="chip partly"><span class="dot">◐</span><span class="txt">Python CLI</span></span></td>
+            <td><span class="chip partly"><span class="dot">◐</span><span class="txt">C / CLI</span></span></td>
+            <td><span class="chip yes"><span class="dot">●</span><span class="txt">Python / TS</span></span></td>
+            <td><span class="chip yes"><span class="dot">●</span><span class="txt">Python / TS</span></span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="cmp-legend">
+      <span class="chip yes"><span class="dot">●</span><span class="txt">Full — shipped and documented</span></span>
+      <span class="chip partly"><span class="dot">◐</span><span class="txt">Partial — conditional, or via another tool</span></span>
+      <span class="chip no"><span class="dot">○</span><span class="txt">Not offered</span></span>
+    </div>
+
+    <h3>Full-support count, straight off that table</h3>
+    <p style="font-size:15px;max-width:680px;">
+      Twelve rows, three of which BrainX does not win outright. Counting only the ● cells — no weighting,
+      no scoring, nothing you can't verify by scrolling up.
+    </p>
+    <div class="cov">
+      <div class="row mine" title="BrainX: 9 full, 1 partial, 2 not offered">
+        <span class="name">BrainX</span>
+        <span class="track"><span class="fill" style="width:75%"></span></span>
+        <span class="val">9 / 12</span>
+      </div>
+      <div class="row" title="Zep / Graphiti: 5 full, 4 partial, 3 not offered">
+        <span class="name">Zep / Graphiti</span>
+        <span class="track"><span class="fill" style="width:41.7%"></span></span>
+        <span class="val">5 / 12</span>
+      </div>
+      <div class="row" title="Basic Memory: 3 full, 4 partial, 5 not offered">
+        <span class="name">Basic Memory</span>
+        <span class="track"><span class="fill" style="width:25%"></span></span>
+        <span class="val">3 / 12</span>
+      </div>
+      <div class="row" title="Graft: 3 full, 4 partial, 5 not offered">
+        <span class="name">Graft</span>
+        <span class="track"><span class="fill" style="width:25%"></span></span>
+        <span class="val">3 / 12</span>
+      </div>
+      <div class="row" title="Mem0: 2 full, 6 partial, 4 not offered">
+        <span class="name">Mem0</span>
+        <span class="track"><span class="fill" style="width:16.7%"></span></span>
+        <span class="val">2 / 12</span>
+      </div>
+    </div>
+    <p class="cov-note">
+      A count of rows is not a verdict on a product — the rows were chosen to describe
+      what a <em>local Markdown brain</em> is for. Pick the rows that matter to you and
+      the ranking will move.
+    </p>
+
+    <div class="src-note">
+      <strong>Where these came from.</strong> Each cell reflects the project's public
+      documentation and README as of August 2026 — Graft
+      (<code>AEndrix03/Graft</code>), Basic Memory (<code>basicmachines-co/basic-memory</code>),
+      Mem0, and Zep / Graphiti. Hosted-only memory APIs whose self-hosting sits behind an
+      enterprise agreement are left out rather than guessed at. These projects move fast;
+      check their docs before you decide, and
+      <a href="https://github.com/xjanova/BrainX/issues">open an issue</a> if a row is
+      wrong — it will be corrected.
+    </div>
+  </div>
+</section>
+
+<hr>
+
+<a id="install"></a>
+<section class="alt">
   <div class="container">
     <h2>Install — one command, four ways</h2>
     <p>
       All four install surfaces hit the same shared installer in
-      <code>ObsidianX.Core.Services.ClaudeBrainRulesInstaller</code>, so memory
+      <code>BrainX.Core.Services.ClaudeBrainRulesInstaller</code>, so memory
       rules, MCP registration, Ollama setup, and embedding precompute all use
       one code path. No drift.
     </p>
 
     <h3>Option A — CLI (recommended)</h3>
-<pre><code>obsidianx-mcp install --vault G:\Obsidian --pull-models --precompute</code></pre>
+<pre><code>brainx-mcp install --vault G:\Obsidian --pull-models --precompute</code></pre>
     <p>
       Single command does: seed/upgrade memory rules → print MCP registration
       command → probe Ollama → pull <code>nomic-embed-text</code> +
@@ -483,16 +757,16 @@ footer .container { display: flex; flex-direction: column; gap: 8px; }
     </p>
 
     <h3>Option B — npm wrapper</h3>
-<pre><code>npm install -g obsidianx-mcp
-obsidianx-mcp install --vault ~/Obsidian</code></pre>
+<pre><code>npm install -g brainx-mcp
+brainx-mcp install --vault ~/Obsidian</code></pre>
     <p>The npm package is a thin Node.js wrapper that locates a co-shipped
-    binary, falls back to a system-installed <code>obsidianx-mcp</code>, and
+    binary, falls back to a system-installed <code>brainx-mcp</code>, and
     finally falls back to <code>dotnet &lt;dll&gt;</code> if a build is
     available. <code>postinstall</code> tells you which path it took.</p>
 
     <h3>Option C — Desktop UI</h3>
     <p>
-      Launch <code>ObsidianX.Client.exe</code> once. The constructor calls
+      Launch <code>BrainX.Client.exe</code> once. The constructor calls
       <code>ClaudeBrainRulesInstaller.EnsureInstalled</code> automatically,
       seeding the memory directory. The <em>Settings</em> view has dedicated
       buttons for "Install in Claude Code CLI" and "Install hook" if you want
@@ -501,7 +775,7 @@ obsidianx-mcp install --vault ~/Obsidian</code></pre>
 
     <h3>Option D — automatic on every MCP boot</h3>
     <p>
-      <code>obsidianx-mcp.exe</code> calls <code>EnsureInstalled</code> in
+      <code>brainx-mcp.exe</code> calls <code>EnsureInstalled</code> in
       <code>Program.Main</code> before the JSON-RPC loop. Every Claude Code
       session that spawns the MCP re-checks rule versions and upgrades
       transparently. The on-disk version-field guard prevents clobbering
@@ -513,7 +787,7 @@ obsidianx-mcp install --vault ~/Obsidian</code></pre>
 <hr>
 
 <a id="enforce"></a>
-<section class="alt">
+<section>
   <div class="container">
     <h2>Brain-first protocol — enforced from install onward</h2>
     <p>
@@ -587,7 +861,7 @@ obsidianx-mcp install --vault ~/Obsidian</code></pre>
       <div class="after">
         <h4>After — Resolve-Inner array fix</h4>
         <pre><code>BRAIN SEARCH LOG (post-fix):
-  {"query":"obsidianx",
+  {"query":"brainx",
    "hits":5,    ← real
    "size":2216}
   → NET SAVE expected within 2 sessions</code></pre>
@@ -608,12 +882,12 @@ obsidianx-mcp install --vault ~/Obsidian</code></pre>
     <div class="checklist">
       <div class="row"><span class="ok">✓</span><span class="label">Comprehensive README (275 lines, MIT license, contributing guide)</span><span class="meta">README.md · CONTRIBUTING.md · LICENSE</span></div>
       <div class="row"><span class="ok">✓</span><span class="label">All projects build clean (Core · Mcp · Client · Server)</span><span class="meta">0 errors, dotnet 10 SDK</span></div>
-      <div class="row"><span class="ok">✓</span><span class="label">17 MCP tools — each with description, JSON schema, structured response</span><span class="meta">Program.cs ToolsList()</span></div>
-      <div class="row"><span class="ok">✓</span><span class="label">611 / 611 embeddings populated, brain_semantic_search returns mode="semantic"</span><span class="meta">.obsidianx/embeddings/*.bin · 1.79 MB</span></div>
+      <div class="row"><span class="ok">✓</span><span class="label">34 MCP tools — each with description, JSON schema, structured response</span><span class="meta">Program.cs ToolsList()</span></div>
+      <div class="row"><span class="ok">✓</span><span class="label">1,233 / 1,233 embeddings populated, brain_semantic_search returns mode="semantic"</span><span class="meta">.obsidianx/embeddings/*.bin · 1.79 MB</span></div>
       <div class="row"><span class="ok">✓</span><span class="label">brain_find_contradictions rewritten — semantic candidates + LLM verification</span><span class="meta">gemma3:4b · structured topic/claimA/claimB/severity</span></div>
       <div class="row"><span class="ok">✓</span><span class="label">Hit-count logger Resolve-Inner array bug fixed (was reporting 0% forever)</span><span class="meta">~/.claude/scripts/brain-tool-logger.ps1</span></div>
-      <div class="row"><span class="ok">✓</span><span class="label">Single-binary CLI: 'obsidianx-mcp install' wires rules + Ollama + precompute</span><span class="meta">CliInstall.cs</span></div>
-      <div class="row"><span class="ok">✓</span><span class="label">3 memory rules auto-install (proactive save / consult / session handoff)</span><span class="meta">v1.1 · idempotent · safe upgrade</span></div>
+      <div class="row"><span class="ok">✓</span><span class="label">Single-binary CLI: 'brainx-mcp install' wires rules + Ollama + precompute</span><span class="meta">CliInstall.cs</span></div>
+      <div class="row"><span class="ok">✓</span><span class="label">3 memory rules auto-install (proactive save / consult / session handoff)</span><span class="meta">v2.9 · idempotent · safe upgrade</span></div>
     </div>
 
     <h3>🟡 Flagged for follow-up</h3>
@@ -644,14 +918,14 @@ obsidianx-mcp install --vault ~/Obsidian</code></pre>
   <div class="container">
     <h2>Required: restart Claude Code now</h2>
     <p>
-      The new MCP binary lives at <code>ObsidianX.Mcp/bin/TestBuild/</code>.
+      The new MCP binary lives at <code>BrainX.Mcp/bin/TestBuild/</code>.
       The currently-running MCP processes (one per Claude Code session) hold
       the older DLL open, so a normal Release build can't overwrite it. The
       cleanest path:
     </p>
 <pre><code># 1. Quit ALL Claude Code windows (the MCP processes exit with their parent)
 # 2. From a fresh PowerShell:
-G:\Obsidian\ObsidianX\deploy-mcp.ps1
+.\deploy-mcp.ps1
 # 3. Reopen Claude Code
 
 # 4. Sanity-check by sending one query — look for mode="llm-verified"
@@ -669,11 +943,11 @@ G:\Obsidian\ObsidianX\deploy-mcp.ps1
 <footer>
   <div class="container">
     <p class="tag-line">
-      ObsidianX · MIT-licensed · built on .NET 10 + WPF + Ollama ·
-      <a href="https://github.com/xjanova/ObsidianX">github.com/xjanova/ObsidianX</a>
+      BrainX · MIT-licensed · built on .NET 10 + WPF + Ollama ·
+      <a href="https://github.com/xjanova/BrainX">github.com/xjanova/BrainX</a>
     </p>
     <p class="tag-line">
-      Brain address: <span class="kbd">0xBRAIN-f099-be76-07f0-aad3</span>
+      Brain address: <span class="kbd">0xBRAIN-e10c-6760-f9cc-707a</span>
     </p>
   </div>
 </footer>
