@@ -157,24 +157,41 @@ internal static partial class Program
     // matched passage + preview keeps the signal discriminative.
 
     // Cosine floor/ceiling for normalisation, and the two verdict cuts.
-    // Measured on this vault (1,233 notes, nomic-embed-text) on 2026-08-05,
-    // not guessed — four probes spanning the range:
+    // Measured on this vault (1,233 notes, nomic-embed-text), 2026-08-05.
     //
-    //   query                                    cos    lex    conf  verdict
-    //   ─────────────────────────────────────────────────────────────────────
-    //   EN, note exists, near-quoted            0.743  0.949  0.882  STRONG
-    //   TH, note exists, paraphrased            0.670  0.786  0.691  STRONG
-    //   EN, topical neighbour but WRONG answer  0.507  0.556  0.320  MISS
-    //   TH, nothing remotely related            0.427  0.000  0.000  MISS
+    // The first calibration used floor 0.45 / ceil 0.80 off four probes that
+    // were all near-quotes of a note title, so they scored cos 0.67-0.74 and
+    // made the range look higher than it is. Eleven real queries later, a
+    // genuine answer usually sits at cos 0.49-0.67 — under the old floor,
+    // which turned true hits into MISS. "brain walk hop decay ranking"
+    // returned MISS while the note describing exactly that sat in the vault.
+    // A false MISS is the expensive error here: it tells the agent to redo
+    // work the brain had already done.
     //
-    // Right answers land 0.69-0.88, wrong ones ≤0.32, and both thresholds sit
-    // in the empty band between. The third row is the one that matters: a
-    // note about HttpClient proxy timeouts scored well against "nginx reverse
-    // proxy timeouts" and the gate still refused it. Re-run those probes
-    // before touching these numbers — and note that changing the embedding
-    // model moves the cosine column, not the lexical one.
-    private const double RecallCosFloor = 0.45;
-    private const double RecallCosCeil = 0.80;
+    //   query                                     cos    lex   conf  verdict
+    //   ──────────────────────────────────────────────────────────────────────
+    //   EN near-quote of a note title            0.743  0.949  0.98  STRONG
+    //   TH paraphrase, note exists               0.670  0.786  0.85  STRONG
+    //   TH scoped (Playbooks), note exists       0.713  0.452  0.78  STRONG
+    //   KW "netwix dedup content signature"      0.622  0.679  0.72  STRONG
+    //   KW "agent bus codex claude middleman"    0.601  0.679  0.76  STRONG
+    //   KW "universe three.js galaxy bloom"      0.550  0.714  0.59  WEAK
+    //   KW "ssh profile allow_patterns deploy"   0.530  0.419  0.43  WEAK
+    //   KW "brain walk hop decay ranking"        0.491  0.577  0.41  WEAK
+    //   EN topical neighbour, WRONG answer       0.507  0.556  0.44  WEAK
+    //   EN kubernetes/cert-manager, absent       0.474  0.200  0.23  MISS
+    //   TH แกงส้ม recipe, absent                  0.427  0.000  0.05  MISS
+    //
+    // Cosine alone cannot separate rows 4-9 (a wrong answer scores 0.507
+    // between two right ones) — that is what the lexical term is for, and
+    // why MISS is reserved for "nothing in the vault is even close" rather
+    // than "not confident". WEAK claims nothing; only STRONG does, and
+    // STRONG still needs both signals to agree.
+    //
+    // Re-run the probes before touching these numbers. Changing the
+    // embedding model moves the cosine column, not the lexical one.
+    private const double RecallCosFloor = 0.40;
+    private const double RecallCosCeil = 0.70;
     private const double RecallStrong = 0.62;
     private const double RecallWeak = 0.35;
 
@@ -264,6 +281,16 @@ internal static partial class Program
                 ["candidates"] = filtered.Count
             },
             ["answer"] = verdict == "MISS" ? null : answer,
+            // A MISS still names what it rejected. Hiding it made the verdict
+            // unfalsifiable — "nothing was close" and "the right note was
+            // rank 1 and the numbers were wrong" printed identically, and
+            // that ambiguity cost a calibration round to notice.
+            ["nearest"] = verdict != "MISS" ? null : new JObject
+            {
+                ["id"] = top.Id,
+                ["title"] = top.Title,
+                ["why"] = "closest match, rejected — read it only if the query was phrased badly"
+            },
             ["evidence"] = verdict == "MISS" ? new JArray() : evidence,
             ["advice"] = verdict switch
             {
