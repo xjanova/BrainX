@@ -14,6 +14,15 @@
 
   <ItemGroup>
     <EmbeddedResource Include="Editor\MarkdownHighlighting.xshd" />
+    <!--
+      Boot music. EmbeddedResource, NOT Resource or Content: a Content file
+      sits next to the exe where it can be swapped or deleted, and the track
+      is meant to be part of the binary. LogicalName is explicit so a folder
+      rename can't silently turn the music off — Services/BootMusic.cs looks
+      this exact string up by name.
+    -->
+    <EmbeddedResource Include="Assets\NeonStarlight.mp3"
+                      LogicalName="BrainX.Client.Assets.NeonStarlight.mp3" />
   </ItemGroup>
 
   <ItemGroup>

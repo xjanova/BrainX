@@ -94,6 +94,12 @@ public partial class App : Application
         // timeline for diagnostics.
         StartupProgress.Report("Booting BrainX...", 0.05, tag: "boot");
 
+        // Music from the first frame, faded out by StartupProgress.Complete().
+        // Deliberately AFTER the single-instance gate above: a second launch
+        // exits at that gate, and it must do it silently rather than blaring
+        // over the session the user already has open.
+        BootMusic.Start();
+
         Dispatcher.InvokeAsync(() =>
         {
             var main = new MainWindow();
@@ -104,6 +110,9 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        // Quitting mid-boot: release the player and its temp file rather than
+        // leaving the process to tear them down.
+        BootMusic.Stop();
         try { _singleInstanceMutex?.ReleaseMutex(); } catch { /* mutex may already be abandoned */ }
         _singleInstanceMutex?.Dispose();
         _singleInstanceMutex = null;
