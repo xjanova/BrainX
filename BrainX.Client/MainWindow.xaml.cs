@@ -2317,6 +2317,12 @@ public partial class MainWindow : Window
 
     private async void Window_Loaded(object sender, RoutedEventArgs e)
     {
+        // The universe loader is the only thing on screen until the WebView2
+        // page paints, and on a cold start that is several seconds away — long
+        // enough that a static "Initializing…" reads as a hang. Mirror the real
+        // boot stages into it so the wait is described rather than hidden. The
+        // subscription drops itself once the HUD takes over.
+        Services.StartupProgress.Reported += OnStartupStageForUniverseLoader;
         Services.StartupProgress.Report("Loading theme & resources", 0.10, tag: "theme");
 
         var pulse = (Storyboard)FindResource("PulseAnimation");
@@ -8318,6 +8324,31 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// Mirror the boot timeline into the universe loader for the seconds before
+    /// the WebView2 page exists — the stretch where the app is working hard and
+    /// has nothing on screen to say so.
+    ///
+    /// Reported fires on whichever thread called Report (the update check runs
+    /// off the UI thread), so this marshals before touching anything. It stops
+    /// mattering by itself: SetUniverseLoadingStatus is a no-op once the overlay
+    /// is hidden, and the subscription is dropped when boot completes.
+    /// </summary>
+    private void OnStartupStageForUniverseLoader(Services.StartupStage ev)
+    {
+        if (ev.isComplete)
+        {
+            Services.StartupProgress.Reported -= OnStartupStageForUniverseLoader;
+            return;
+        }
+        if (!Dispatcher.CheckAccess())
+        {
+            _ = Dispatcher.BeginInvoke(new Action(() => OnStartupStageForUniverseLoader(ev)));
+            return;
+        }
+        SetUniverseLoadingStatus(ev.stage, $"{ev.progress:P0} · {ev.atMs / 1000.0:F1}s");
+    }
+
     /// <summary>Update the mini loader overlay over Universe. No-op if overlay is already hidden.</summary>
     private void SetUniverseLoadingStatus(string text, string? subText = null)
     {
@@ -8327,6 +8358,35 @@ public partial class MainWindow : Window
         if (UniverseLoadingSubText != null && subText != null)
             UniverseLoadingSubText.Text = subText;
     }
+
+    /// <summary>
+    /// Fade the WPF loader out after <paramref name="delayMs"/>. Two messages
+    /// can ask for this: `hudReady`, which means the curtain that replaces this
+    /// overlay is really on screen, and `ready`, which is only a fallback for a
+    /// page that never reports a HUD. The real handover therefore CANCELS a
+    /// pending fallback rather than losing to it — otherwise a `ready` that
+    /// arrived three seconds earlier would hold the overlay over a HUD that had
+    /// already finished drawing.
+    /// </summary>
+    private void ScheduleUniverseLoaderHandover(int delayMs, bool isFallback = false)
+    {
+        if (isFallback && _universeLoaderHandover != null) return;
+        if (!isFallback && _universeLoaderHandoverIsReal) return;
+        _universeLoaderHandover?.Stop();
+        _universeLoaderHandoverIsReal = !isFallback;
+        var hideTimer = new System.Windows.Threading.DispatcherTimer
+            { Interval = TimeSpan.FromMilliseconds(delayMs) };
+        hideTimer.Tick += (_, _) =>
+        {
+            hideTimer.Stop();
+            HideUniverseLoadingOverlay();
+        };
+        _universeLoaderHandover = hideTimer;
+        hideTimer.Start();
+    }
+
+    private System.Windows.Threading.DispatcherTimer? _universeLoaderHandover;
+    private bool _universeLoaderHandoverIsReal;
 
     /// <summary>Fade out + collapse the Universe loader once the scene is rendering with data.</summary>
     private void HideUniverseLoadingOverlay()
@@ -8364,20 +8424,14 @@ public partial class MainWindow : Window
                     $"Streaming {_graph.TotalNodes:N0} notes into galaxy",
                     "Final frame");
                 PushBrainSnapshotToUniverse();
-                // Hide the overlay after a 700ms beat — that's enough time
-                // for the user to actually READ "Streaming N notes into
-                // galaxy" before the fade-out animation kicks in. The JS
-                // builds geometry in parallel during these 700ms, so by the
-                // time the fade completes (480ms) the galaxy is rendering
-                // with real stars instead of fading from blank to blank.
-                var hideTimer = new System.Windows.Threading.DispatcherTimer
-                    { Interval = TimeSpan.FromMilliseconds(700) };
-                hideTimer.Tick += (_, _) =>
-                {
-                    hideTimer.Stop();
-                    HideUniverseLoadingOverlay();
-                };
-                hideTimer.Start();
+                // FALLBACK hide only. The handover belongs to hudReady (below):
+                // `ready` fires when the galaxy module boots, and measured here
+                // the HUD's own boot curtain — the thing that takes over from
+                // this overlay — does not paint for another three seconds.
+                // Hiding on this message put a black window in that gap, which
+                // is the hole this overlay exists to close. Four seconds is for
+                // a page that somehow never reports a HUD at all.
+                ScheduleUniverseLoaderHandover(4000, isFallback: true);
             }
             else if (msg?.type == "toggleFullscreen")
             {
@@ -8450,7 +8504,17 @@ public partial class MainWindow : Window
                 Dispatcher.BeginInvoke(new Action(() =>
                 {
                     _hudPageReady = true;
-                    PushAllHudPayloads();
+                    // If the vault finished first, MarkHudBrainReady had no page
+                    // to tell. Replay it here — the boot screen needs both the
+                    // "vault indexed" tick and the readouts, and this is the
+                    // second of the two racers to arrive.
+                    if (_hudBrainReady) AnnounceHudBrainReady();
+                    else PushAllHudPayloads();
+                    // The HUD's boot curtain exists as of this message, so the
+                    // WPF loader that has been covering the window since it
+                    // painted can stand down. Short beat so the curtain has a
+                    // frame to draw into and the fade is curtain-to-curtain.
+                    ScheduleUniverseLoaderHandover(400);
                 }));
             }
             else if (msg?.type == "hudBootStep")
@@ -8475,7 +8539,13 @@ public partial class MainWindow : Window
             }
             else if (msg?.type == "hudBootDone")
             {
-                Dispatcher.BeginInvoke(new Action(Services.StartupProgress.Complete));
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    // Stops the boot heartbeat: from here on the deadline it was
+                    // holding off has nothing left to rescue.
+                    _hudBootDone = true;
+                    Services.StartupProgress.Complete();
+                }));
             }
             else if (msg?.type == "hudAction")
             {

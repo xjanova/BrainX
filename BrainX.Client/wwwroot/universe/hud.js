@@ -44,8 +44,17 @@ const STEPS = [
  * The clock RESTARTS whenever the host says it is still working (hudBootBusy),
  * because the host now loads the page BEFORE it finishes reading the vault:
  * on a big brain that read is longer than this deadline, and expiring mid-read
- * would lift the curtain on a HUD full of zeroes. */
-const BOOT_DEADLINE_MS = 9000;
+ * would lift the curtain on a HUD full of zeroes.
+ *
+ * Twenty seconds, not nine. The heartbeat is a WPF DispatcherTimer at
+ * Background priority, and the tail of the host's startup — the Populate*
+ * block that wires every settings panel — runs synchronously on that same
+ * thread. A busy host can therefore go quiet for longer than the old nine
+ * seconds while being perfectly alive, and the curtain would come up with the
+ * expertise panel empty and fill it in on the next slow tick. This deadline is
+ * for a host that DIED; the heartbeat is what covers one that is merely
+ * working, so it can afford to be generous. */
+const BOOT_DEADLINE_MS = 20000;
 
 const state = { done: new Set(), started: performance.now(), finished: false };
 let bootDeadline = null;

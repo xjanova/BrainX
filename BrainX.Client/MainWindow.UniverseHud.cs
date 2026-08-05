@@ -37,6 +37,13 @@ public partial class MainWindow
     /// exists isn't wasted (and so a Ctrl+R reload re-arms the whole HUD).</summary>
     private bool _hudPageReady;
 
+    /// <summary>Set when the boot screen reports every section landed. Until
+    /// then the host owes it a heartbeat: the page's "a section never arrived"
+    /// deadline is the only thing that can lift the curtain on a half-filled
+    /// HUD, and it must never expire while this side is still alive and
+    /// working.</summary>
+    private bool _hudBootDone;
+
     /// <summary>
     /// False until the vault has finished indexing.
     ///
@@ -105,10 +112,25 @@ public partial class MainWindow
     {
         if (_hudBrainReady) return;
         _hudBrainReady = true;
+        // The WebView is started BEFORE the indexing and normally announces
+        // itself in the middle of it — but not always, and on the boots where
+        // it lost that race this returned here and the announcement below was
+        // simply dropped: the boot screen never heard that the vault was read,
+        // and the readouts it was holding (expertise above all) were never
+        // pushed. Whichever of the two finishes last now makes the call —
+        // see the hudReady branch in OnUniverseMessage.
         if (!_hudPageReady) return;
-        // Tick the boot screen's "reading the vault" row before the readouts
-        // it was holding up arrive, so the row that took the time is seen to
-        // finish rather than vanishing under the others.
+        AnnounceHudBrainReady();
+    }
+
+    /// <summary>
+    /// The two things the boot screen is owed once the vault is read: tick the
+    /// "reading the vault" row FIRST, so the row that took the time is seen to
+    /// finish rather than vanishing under the readouts it was holding up, then
+    /// send those readouts.
+    /// </summary>
+    private void AnnounceHudBrainReady()
+    {
         PostHud("hudBootBusy", new { label = "Vault indexed", done = true });
         PushAllHudPayloads();
     }
@@ -123,14 +145,29 @@ public partial class MainWindow
         };
         _hudTimer.Tick += async (_, _) =>
         {
-            if (!_hudPageReady || !HudOnScreen) return;
-            // Heartbeat while the vault is still being read. It puts the wait
-            // on the boot screen's board as its own row, and it keeps the
-            // page's "a section never arrived" deadline from firing and
-            // lifting the curtain on a half-filled HUD. Everything else on
-            // this tick still goes out — only the graph-derived readouts wait.
-            if (!_hudBrainReady)
-                PostHud("hudBootBusy", new { label = StatusText?.Text ?? "Reading the vault" });
+            if (!_hudPageReady) return;
+            // Heartbeat for the whole boot. It puts the host's own wait on the
+            // boot screen's board as its own row, and it keeps the page's "a
+            // section never arrived" deadline from firing and lifting the
+            // curtain on a half-filled HUD.
+            //
+            // It runs until the boot screen says it is DONE, not until the
+            // vault is read: between those two moments the readouts are still
+            // in flight, and a heartbeat that stopped at the earlier one left
+            // the deadline as the only thing running — which is how the
+            // curtain came up with the expertise panel still empty and filled
+            // it in ten seconds later.
+            //
+            // Not gated on HudOnScreen either. The boot curtain IS the app's
+            // loading screen, so it is on screen by definition while this
+            // runs; the visibility test is for the expensive payloads below.
+            if (!_hudBootDone)
+                PostHud("hudBootBusy", new
+                {
+                    label = _hudBrainReady ? "Vault indexed" : (StatusText?.Text ?? "Reading the vault"),
+                    done = _hudBrainReady,
+                });
+            if (!HudOnScreen) return;
             // The tick awaits a counter read; a machine where that read stalls
             // must not queue ticks behind it and then fire them all at once.
             if (_hudTicking) return;

@@ -4908,20 +4908,24 @@
                                  Backdrop is 88% opaque so the empty WebView's
                                  black void is masked but the WebView still
                                  receives the navigation paint underneath. -->
-                            <!-- The spinning ring is OFF by default now. It was the third
-                                 loading indicator in a row — splash, then this, then the
-                                 HUD's own boot screen — and the one that outlived the
-                                 others, leaving a ring turning over a galaxy that had
-                                 already finished loading. The splash covers the whole
-                                 boot (see StartUniverseBootWatchdog) and the HUD's boot
-                                 screen covers a reload, so nothing is left for this to
-                                 do. Kept in the tree: SetUniverseLoadingStatus still
-                                 writes to it, and it is one attribute away from
-                                 returning if the sequencing ever changes back. -->
+                            <!-- ON again, and it is the FIRST thing the app shows.
+                                 It was turned off as the third loading indicator in a
+                                 row — splash, then this, then the HUD's own boot screen
+                                 — on the reasoning that the splash covered the whole
+                                 boot. The splash has since been retired (see the note in
+                                 App.OnStartup), and the HUD's boot screen lives inside a
+                                 WebView2 that does not paint for several seconds after
+                                 launch: measured cold on this machine, the window sat
+                                 completely black for ten seconds before any loading
+                                 screen existed at all. This is the only indicator that
+                                 can cover that gap, because it is plain WPF and paints
+                                 with the window. Handed over on the page's `ready`
+                                 message, which is also when the HUD curtain behind it
+                                 has something to show. -->
                             <Border x:Name="UniverseLoadingOverlay"
                                     Background="#DD000308"
                                     Panel.ZIndex="50"
-                                    Visibility="Collapsed">
+                                    Visibility="Visible">
                                 <Border Background="#FF0E0C24"
                                         BorderBrush="#886CF0FF" BorderThickness="1"
                                         CornerRadius="10"
@@ -4995,13 +4999,13 @@
                                             </TextBlock>
                                         </Grid>
                                         <TextBlock x:Name="UniverseLoadingText"
-                                                   Text="Initializing Dashboard galaxy..."
+                                                   Text="Booting BrainX..."
                                                    FontSize="11"
                                                    FontFamily="Consolas, JetBrains Mono, Cascadia Mono"
                                                    Foreground="#FFE8E6FF"
                                                    HorizontalAlignment="Center"/>
                                         <TextBlock x:Name="UniverseLoadingSubText"
-                                                   Text="three.js + WebView2"
+                                                   Text="starting up"
                                                    FontSize="9"
                                                    FontFamily="Consolas, JetBrains Mono, Cascadia Mono"
                                                    Foreground="#88A0A8C8"
