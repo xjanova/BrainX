@@ -506,8 +506,10 @@ internal static partial class Program
             "  5. If the owner gives blanket approval like 'just do them all' for a multi-step deploy, you may chain calls without re-asking BETWEEN steps — but stop and report the moment any step returns allowed:false / success:false / host_key_mismatch:true.\n" +
             "  This rule exists because the only thing standing between Claude and 'rm -rf' on a production server is the allowlist + your judgment. The owner trusts you to use both.\n\n" +
             "═══ TOOL MENU ════════════════════════════════════════════════\n\n" +
-            "READ:  brain_search (keyword) · brain_semantic_search (embeddings) · brain_walk (graph traversal — start at note(s), expand N hops via wiki-links, returns subgraph + edges) · brain_get_note · brain_get_backlinks · brain_list · brain_scope_list (enumerate folder namespaces) · brain_stats · brain_expertise · brain_synthesize (top-K full-content bundle) · brain_bundle (~500-token pre-built bundle by topic) · brain_bundles_list · brain_suggest_links · brain_find_contradictions (LLM-verified) · brain_suggest_topics (gap analysis)\n" +
-            "WRITE: brain_create_note · brain_append_note · brain_remember · brain_import_path\n" +
+            "ASK FIRST: brain_recall (query → STRONG/WEAK/MISS verdict + the answer). One call, ~3 results, tells you whether the brain already knows this BEFORE you spend a turn re-deriving it. STRONG = cite it and move on. MISS = do the work, then save it.\n" +
+            "READ:  brain_search (keyword) · brain_semantic_search (embeddings) · brain_walk (graph traversal — start at note(s), expand N hops via wiki-links, returns subgraph + edges; diversity:0.4 when the results look like five copies of one note) · brain_get_note · brain_get_backlinks · brain_list · brain_scope_list (enumerate folder namespaces) · brain_stats · brain_expertise · brain_synthesize (top-K full-content bundle) · brain_bundle (~500-token pre-built bundle by topic) · brain_bundles_list · brain_suggest_links · brain_find_contradictions (LLM-verified) · brain_suggest_topics (gap analysis)\n" +
+            "WRITE: brain_create_note (pass supersedes:'[[Old note]]' when the new note REPLACES an old one — that demotes it everywhere instead of leaving two answers competing) · brain_append_note · brain_remember · brain_import_path\n" +
+            "A result carrying superseded:true has been retired by a newer note; read supersededBy.id instead of trusting it.\n" +
             "SSH:   ssh_profiles_list (enumerate authorized hosts) · ssh_run (exec a whitelisted command via profile_id) · ssh_tail (last N lines of a remote file) — owner-realm only, NEVER over BrainHub. Use these to grep logs, check status, read config before asking the user. Audit reaches access-log.ndjson with op=ssh_ok|ssh_fail|ssh_denied|ssh_mitm.\n" +
             "REVIEW QUEUE: submit_for_review · fetch_review_queue · post_review_verdict (Co-Pilot Arena bridge)\n" +
             "AGENT BUS: agent_send · agent_inbox · agent_peers (talk to the OTHER agents on this brain)\n\n" +
@@ -556,6 +558,27 @@ internal static partial class Program
     /// <summary>The brain's own tools. Bridged ones are appended by ToolsList.</summary>
     private static JArray CoreTools() => new()
         {
+            Tool("brain_recall",
+                "ASK THE BRAIN FIRST. Same retrieval as brain_semantic_search, but instead of a hit " +
+                "list it returns a VERDICT: STRONG (the brain already answers this — read `answer`, " +
+                "cite it, do not re-derive), WEAK (related, finish the work then save what you learn), " +
+                "MISS (unknown — do the work, then brain_create_note it). Use this as the opening move " +
+                "on any non-trivial prompt: it is one call, ~3 results, and it tells you whether to " +
+                "search further at all. `signals` carries the raw cosine + lexical numbers behind the " +
+                "verdict, so a wrong call is diagnosable instead of mysterious. Use brain_search / " +
+                "brain_semantic_search when you want the full ranked list rather than a decision.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["query"] = new JObject { ["type"] = "string", ["description"] = "what you want to know, in natural language (Thai or English)" },
+                        ["limit"] = new JObject { ["type"] = "integer", ["default"] = 3, ["description"] = "how many notes to weigh — the verdict always describes the top one" },
+                        ["preview_chars"] = new JObject { ["type"] = "integer", ["default"] = 240 },
+                        ["scope"] = new JObject { ["type"] = "string", ["description"] = "optional folder-prefix scope (e.g. 'Notes/Claude-Sessions')" }
+                    },
+                    ["required"] = new JArray { "query" }
+                }),
             Tool("brain_search",
                 "Full-text search across brain notes — matches titles, tags, AND full note bodies " +
                 "(not just previews). When a hit is deep in the body, the result carries a " +
@@ -765,7 +788,16 @@ internal static partial class Program
                         ["title"] = new JObject { ["type"] = "string", ["description"] = "note title (will become file name)" },
                         ["content"] = new JObject { ["type"] = "string", ["description"] = "full markdown body" },
                         ["folder"] = new JObject { ["type"] = "string", ["description"] = "optional folder under vault, default 'Notes'" },
-                        ["tags"] = new JObject { ["type"] = "string", ["description"] = "optional comma-separated tags added to frontmatter" }
+                        ["tags"] = new JObject { ["type"] = "string", ["description"] = "optional comma-separated tags added to frontmatter" },
+                        ["supersedes"] = new JObject
+                        {
+                            ["description"] = "optional — note(s) this one REPLACES: '[[Old note]]', an id, a path, or an array of them. Writes supersedes: frontmatter; from the next re-index those notes rank at 0.35× and every result carries superseded:true + a pointer here. Use when the new note corrects or obsoletes an old one — NOT for merely related notes (wiki-link those instead).",
+                            ["oneOf"] = new JArray
+                            {
+                                new JObject { ["type"] = "string" },
+                                new JObject { ["type"] = "array", ["items"] = new JObject { ["type"] = "string" } }
+                            }
+                        }
                     },
                     ["required"] = new JArray { "title", "content" }
                 }),
@@ -964,7 +996,8 @@ internal static partial class Program
                         ["include_seed"] = new JObject { ["type"] = "boolean", ["default"] = true, ["description"] = "include the seed note(s) in the result list" },
                         ["preview_chars"] = new JObject { ["type"] = "integer", ["default"] = 120 },
                         ["compact"] = new JObject { ["type"] = "boolean", ["default"] = false, ["description"] = "if true, drop preview/path/category — id+title+score+distance only" },
-                        ["scope"] = new JObject { ["type"] = "string", ["description"] = "optional folder-prefix scope — fences both seeds AND BFS traversal so the walk never spills outside the namespace" }
+                        ["scope"] = new JObject { ["type"] = "string", ["description"] = "optional folder-prefix scope — fences both seeds AND BFS traversal so the walk never spills outside the namespace" },
+                        ["diversity"] = new JObject { ["type"] = "number", ["default"] = 0.0, ["description"] = "0=pure score (default, unchanged). 0.3-0.5 re-selects with MMR so the result covers different corners of the graph instead of five near-identical notes from the same week. Rank 1 is never traded away." }
                     },
                     ["required"] = new JArray { "start" }
                 }),
@@ -1114,6 +1147,7 @@ internal static partial class Program
         {
             JToken result = name switch
             {
+                "brain_recall"              => BrainRecall(args),
                 "brain_search"              => BrainSearch(args),
                 "brain_get_note"            => BrainGetNote(args),
                 "brain_expertise"           => BrainExpertise(),
@@ -1475,6 +1509,20 @@ internal static partial class Program
             o["appliesTo"] = badge;
         }
 
+        // Carried in compact mode too, for the same reason the badge is: a
+        // result that is quietly out of date is worse than no result. The
+        // replacement's id travels with it so the caller can jump straight
+        // there instead of searching again.
+        if (TryGetSupersededBy(n.Id, out var supersededBy))
+        {
+            o["superseded"] = true;
+            o["supersededBy"] = new JObject
+            {
+                ["id"] = supersededBy.Id,
+                ["title"] = supersededBy.Title
+            };
+        }
+
         if (!compact)
         {
             o["category"] = n.PrimaryCategory;
@@ -1786,6 +1834,9 @@ internal static partial class Program
                 ["maxEntries"] = NoteMemoMaxEntries
             },
             ["bundles"] = BundleSummaryForStats(),
+            // Absent entirely until some note opts in, so it never reads as
+            // "0 pairs, feature broken" on a vault that simply isn't using it.
+            ["supersession"] = SupersessionStats(),
             // Surfaced here because a reader comparing token numbers needs to
             // know which setting produced them — the same query costs 3x more
             // in full than in economy.
@@ -2477,6 +2528,12 @@ internal static partial class Program
         if (File.Exists(fullPath))
             throw new InvalidOperationException($"note already exists at {relPath} — use brain_append_note to add to it");
 
+        // "This note replaces those ones." Written as frontmatter, so from
+        // the next re-index the older notes are demoted in every search
+        // instead of competing with their own replacement — no LLM pass, no
+        // contradiction scan, decided by the only party that actually knows.
+        var supersedes = ParseNoteRefArg(args["supersedes"]);
+
         var sb = new System.Text.StringBuilder();
         sb.AppendLine("---");
         sb.AppendLine($"created: {DateTime.UtcNow:O}");
@@ -2485,6 +2542,11 @@ internal static partial class Program
         {
             sb.AppendLine("tags:");
             foreach (var t in tags) sb.AppendLine($"  - {t}");
+        }
+        if (supersedes.Count > 0)
+        {
+            sb.AppendLine("supersedes:");
+            foreach (var s in supersedes) sb.AppendLine($"  - {WikiRefYaml(s)}");
         }
         sb.AppendLine("---");
         sb.AppendLine();
@@ -2504,6 +2566,26 @@ internal static partial class Program
         var contentSample = content.Length > 600 ? content[..600] : content;
         var hygiene = ComputeHygiene(title, tags, contentSample);
 
+        // Resolve the supersedes targets NOW and report what happened. A
+        // reference that matches no note is a demotion that will never fire,
+        // and the caller is the only one still holding the context needed to
+        // fix it — telling them later, in a stats block, is telling nobody.
+        JArray? supersedesReport = null;
+        if (supersedes.Count > 0)
+        {
+            supersedesReport = new JArray(supersedes.Select(s =>
+            {
+                var target = ResolveNoteRef(s);
+                return new JObject
+                {
+                    ["ref"] = s,
+                    ["resolved"] = target?.Id,
+                    ["title"] = target?.Title,
+                    ["status"] = target == null ? "UNRESOLVED — fix this reference or nothing is demoted" : "ok"
+                };
+            }));
+        }
+
         return new JObject
         {
             ["success"] = true,
@@ -2512,6 +2594,7 @@ internal static partial class Program
             ["id"] = ComputeStableId(fullPath),
             ["bytes"] = sb.Length,
             ["hygiene"] = hygiene,
+            ["supersedes"] = supersedesReport,
             ["hint"] = "BrainX client will pick this up on next re-index. Tell user to click Re-index or it auto-refreshes on editor save. Inspect `hygiene` for related notes you should wiki-link before the next turn."
         };
     }
@@ -2638,6 +2721,7 @@ internal static partial class Program
         return tool switch
         {
             "brain_search"      => $"q=\"{args["query"]?.ToString()}\"",
+            "brain_recall"      => $"q=\"{args["query"]?.ToString()}\"",
             "brain_get_note"    => $"id={args["id"]?.ToString()}",
             "brain_list"        => $"category={args["category"]?.ToString() ?? "-"} tag={args["tag"]?.ToString() ?? "-"} scope={args["scope"]?.ToString() ?? "-"}",
             "brain_scope_list"  => $"depth={args["depth"]?.ToString() ?? "2"}",
@@ -2794,6 +2878,7 @@ internal static partial class Program
         var previewChars = args["preview_chars"]?.ToObject<int>() ?? 120;
         var compact = args["compact"]?.ToObject<bool>() ?? false;
         var scope = NormaliseScope(args["scope"]?.ToString());
+        var diversity = Math.Clamp(args["diversity"]?.ToObject<double>() ?? 0.0, 0.0, 1.0);
 
         var export = LoadExport() ?? throw new InvalidOperationException("brain-export.json not found — open BrainX → Settings → Export Brain Now");
         var byId = export.Nodes.ToDictionary(n => n.Id, n => n);
@@ -2843,7 +2928,10 @@ internal static partial class Program
         // ── Score reachable nodes ──
         var ql = string.IsNullOrWhiteSpace(query) ? null : query!.ToLowerInvariant();
         var nowUtc = DateTime.UtcNow;
-        var scored = distance
+        // With diversity on, MMR needs a pool to choose from — ranking
+        // straight to `limit` would leave it nothing to trade away.
+        var poolSize = diversity > 0 ? Math.Min(limit * 3, Math.Max(limit, distance.Count)) : limit;
+        List<(NodeSummary Node, int Dist, double Score)> scored = distance
             .Where(kv => byId.ContainsKey(kv.Key))
             .Where(kv => includeSeed || kv.Value > 0)
             .Select(kv =>
@@ -2856,15 +2944,19 @@ internal static partial class Program
                     "recency"    => 1.0 / (1.0 + Math.Max(0, (nowUtc - n.ModifiedAt).TotalDays) / 30.0),
                     _            => RelevanceScore(n, dist, ql) // "relevance" or anything else
                 };
-                return (node: n, dist, score);
+                return (Node: n, Dist: dist, Score: score);
             })
-            .OrderByDescending(t => t.score)
-            .ThenBy(t => t.dist)
-            .Take(limit)
+            .OrderByDescending(t => t.Score)
+            .ThenBy(t => t.Dist)
+            .Take(poolSize)
             .ToList();
 
+        // Opt-in re-selection. At diversity=0 this returns the same list in
+        // the same order — the default walk is byte-for-byte what it was.
+        scored = ApplyWalkDiversity(scored, diversity, limit);
+
         // ── Build edges between kept nodes (deduped, single direction) ──
-        var keptIds = new HashSet<string>(scored.Select(t => t.node.Id));
+        var keptIds = new HashSet<string>(scored.Select(t => t.Node.Id));
         var edges = new JArray();
         var seenEdges = new HashSet<string>();
         foreach (var (node, _, _) in scored)
@@ -2889,20 +2981,20 @@ internal static partial class Program
         // not to re-fetch.
         var nodes = new JArray(scored.Select(t =>
         {
-            if (HasNoteMemo(t.node.Id, out var memoSha))
+            if (HasNoteMemo(t.Node.Id, out var memoSha))
             {
                 return new JObject
                 {
-                    ["id"] = t.node.Id,
-                    ["title"] = t.node.Title,
-                    ["score"] = Math.Round(t.score, 4),
-                    ["distance"] = t.dist,
+                    ["id"] = t.Node.Id,
+                    ["title"] = t.Node.Title,
+                    ["score"] = Math.Round(t.Score, 4),
+                    ["distance"] = t.Dist,
                     ["cached"] = true,
                     ["sha"] = memoSha
                 };
             }
-            var o = (JObject)BuildSearchResult(t.node, Math.Round(t.score, 4), previewChars, compact);
-            o["distance"] = t.dist;
+            var o = (JObject)BuildSearchResult(t.Node, Math.Round(t.Score, 4), previewChars, compact);
+            o["distance"] = t.Dist;
             return o;
         }));
 
@@ -2916,6 +3008,7 @@ internal static partial class Program
             ["hops"] = hops,
             ["rank"] = rank,
             ["direction"] = direction,
+            ["diversity"] = diversity,
             ["totalReachable"] = distance.Count(kv => includeSeed || kv.Value > 0),
             ["returned"] = scored.Count,
             ["nodes"] = nodes,
@@ -2931,7 +3024,9 @@ internal static partial class Program
         var imp = n.Importance;
         // Optional keyword boost — normalised against ScoreNode's typical max (~10)
         var qBoost = ql == null ? 0 : Math.Min(1.0, ScoreNode(n, ql) / 10.0);
-        return hopDecay * (1.0 + imp + qBoost);
+        // Retired notes stay reachable by the walk — they are still part of
+        // the graph's history — they just stop competing for the top slots.
+        return hopDecay * (1.0 + imp + qBoost) * SupersededFactor(n.Id);
     }
 
     /// <summary>
@@ -2982,95 +3077,25 @@ internal static partial class Program
         // back to keyword search so the tool always answers.
         var queryVec = OllamaEmbed(query);
         var ql = query.ToLowerInvariant();
-        List<(NodeSummary node, double score)> ranked;
-        string mode;
-        if (queryVec != null)
-        {
-            var semantic = new List<(NodeSummary node, double score)>(filtered.Count);
-            foreach (var n in filtered)
-            {
-                var stored = LoadEmbedding(n.Id);
-                if (stored == null) continue;
-                semantic.Add((n, Cosine(queryVec, stored)));
-            }
-            semantic.Sort((a, b) => b.score.CompareTo(a.score));
 
-            // Hybrid fusion (v2.8.0): cosine alone misses exact-term
-            // matches (ids, project codenames, mixed Thai/English
-            // queries); keyword alone misses paraphrases. Reciprocal-
-            // rank fusion combines both rankings without needing the
-            // two score scales to be comparable: each list contributes
-            // 1/(60+rank) per note, so a note near the top of EITHER
-            // list surfaces, and a note decent in BOTH beats one that
-            // is great in only one.
-            var keyword = filtered
-                .Select(n => (node: n, score: ScoreNode(n, ql, GetContentLower(export, n))))
-                .Where(x => x.score > 0)
-                .OrderByDescending(x => x.score)
-                .ToList();
-
-            if (semantic.Count > 0 && keyword.Count > 0)
-            {
-                const double K = 60.0;
-                var fused = new Dictionary<string, (NodeSummary node, double score)>();
-                void Accumulate(List<(NodeSummary node, double score)> list)
-                {
-                    for (int i = 0; i < list.Count; i++)
-                    {
-                        var (n, _) = list[i];
-                        var add = 1.0 / (K + i + 1);
-                        fused[n.Id] = fused.TryGetValue(n.Id, out var cur)
-                            ? (n, cur.score + add)
-                            : (n, add);
-                    }
-                }
-                Accumulate(semantic);
-                Accumulate(keyword);
-                ranked = fused.Values
-                    .OrderByDescending(x => x.score)
-                    .Take(limit)
-                    .ToList();
-                mode = "hybrid";
-            }
-            else
-            {
-                ranked = semantic.Take(limit).ToList();
-                mode = ranked.Count > 0 ? "semantic" : "keyword-fallback";
-            }
-        }
-        else
-        {
-            mode = "keyword-fallback";
-            ranked = new();
-        }
-
-        if (ranked.Count == 0 && mode == "keyword-fallback")
-        {
-            // Either Ollama is offline or no embeddings exist yet.
-            // Keyword fallback so callers always get useful output.
-            // Same filter set applies — staying consistent with the
-            // semantic path so callers see the same candidate universe
-            // regardless of which scorer fired.
-            ranked = filtered
-                .Select(n => (n, ScoreNode(n, ql, GetContentLower(export, n))))
-                .Where(x => x.Item2 > 0)
-                .OrderByDescending(x => x.Item2)
-                .Take(limit)
-                .ToList();
-        }
+        // The ranking itself moved to HybridRank (Program.Recall.cs) when
+        // brain_recall arrived — it must rank by EXACTLY these rules, and a
+        // copy-paste of 60 lines of fusion is how two tools start answering
+        // the same question differently. Behaviour here is unchanged.
+        var (ranked, mode, _) = HybridRank(export, filtered, ql, limit, queryVec);
 
         foreach (var (n, _) in ranked) LogAccess(n.Id, "semantic_search", query);
         var resultsArr = new JArray(ranked.Select(x =>
         {
-            var o = BuildSearchResult(x.node, Math.Round(x.score, 4), previewChars, compact);
-            var ctx = ExtractMatchContext(export, x.node, ql);
+            var o = BuildSearchResult(x.Node, Math.Round(x.Score, 4), previewChars, compact);
+            var ctx = ExtractMatchContext(export, x.Node, ql);
             if (ctx != null) o["matchContext"] = ctx;
             return o;
         }));
         StoreMemo("brain_semantic_search", args, query, resultsArr);
 
         // Phase D (v2.6.0): prefetch top-3 for the inevitable get_note
-        PrefetchNoteShas(ranked.Select(r => r.node.Id), export);
+        PrefetchNoteShas(ranked.Select(r => r.Node.Id), export);
 
         return new JObject
         {
@@ -4876,6 +4901,12 @@ internal static partial class Program
         if (DateTime.UtcNow - n.ModifiedAt < TimeSpan.FromDays(14)) s *= 1.10;
         var usage = GetUsageScores().GetValueOrDefault(n.Id);
         if (usage > 0) s *= 1.0 + Math.Min(usage, 8.0) * 0.02;
+        // The one signal here that is a demotion, not a boost, and the only
+        // one strong enough to change which note wins: a note the vault has
+        // explicitly retired should not outrank its own replacement. Fires
+        // only on notes carrying supersedes/supersededBy frontmatter — see
+        // Program.Recall.cs.
+        s *= SupersededFactor(n.Id);
         return s;
     }
 
