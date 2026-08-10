@@ -31,6 +31,38 @@ public class BrainExporter
     private const string ClaudeBeginMarker = "<!-- BRAIN:BEGIN -->";
     private const string ClaudeEndMarker = "<!-- BRAIN:END -->";
 
+    /// <summary>
+    /// Write via a temp file and one rename, never in place.
+    ///
+    /// brain-export.json is ~9 MB and is re-read by every MCP process on
+    /// essentially every tool call — twelve of them were observed live on one
+    /// vault. A plain WriteAllText truncates the file and then streams into it,
+    /// so for the whole of that window a reader sees valid JSON that stops
+    /// mid-array, or loses the open entirely to a sharing violation. Neither
+    /// looks like a bug from the reader's side: it looks like the brain
+    /// suddenly knows fewer notes.
+    ///
+    /// File.Move with overwrite is a single rename, so a reader either gets
+    /// the whole old file or the whole new one. The embedding sidecars have
+    /// used this shape for months (EmbeddingService.PrecomputeAsync) — it was
+    /// simply never applied to the largest and most-read artifact of all.
+    /// </summary>
+    private static void WriteAtomic(string path, string content)
+    {
+        var tmp = path + "." + Environment.ProcessId + ".tmp";
+        try
+        {
+            File.WriteAllText(tmp, content);
+            File.Move(tmp, path, overwrite: true);
+        }
+        catch
+        {
+            // Never leave the scratch file behind to be mistaken for real output.
+            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+            throw;
+        }
+    }
+
     public ExportResult Export(string vaultPath, BrainIdentity identity, KnowledgeGraph graph)
     {
         var exportDir = Path.Combine(vaultPath, ".obsidianx");
@@ -41,10 +73,9 @@ public class BrainExporter
         var manifestPath = Path.Combine(exportDir, "brain-manifest.json");
 
         var export = BuildExport(identity, graph, vaultPath);
-        File.WriteAllText(jsonPath,
-            JsonConvert.SerializeObject(export, Formatting.Indented));
+        WriteAtomic(jsonPath, JsonConvert.SerializeObject(export, Formatting.Indented));
 
-        File.WriteAllText(mdPath, BuildMarkdown(export));
+        WriteAtomic(mdPath, BuildMarkdown(export));
 
         var manifest = new
         {
@@ -57,8 +88,7 @@ public class BrainExporter
                 .Select(e => new { e.Category, e.Score }).ToList(),
             Schema = SchemaVersion
         };
-        File.WriteAllText(manifestPath,
-            JsonConvert.SerializeObject(manifest, Formatting.Indented));
+        WriteAtomic(manifestPath, JsonConvert.SerializeObject(manifest, Formatting.Indented));
 
         // Inject/refresh managed section in CLAUDE.md
         UpdateClaudeMd(vaultPath, export);
@@ -248,7 +278,7 @@ public class BrainExporter
         var injected = BuildClaudeSection(export).TrimEnd('\r', '\n');
         if (!File.Exists(path))
         {
-            File.WriteAllText(path, injected + "\n");
+            WriteAtomic(path, injected + "\n");
             return;
         }
 
@@ -268,7 +298,7 @@ public class BrainExporter
         {
             var quarantine = path + ".corrupt";
             try { File.Copy(path, quarantine, overwrite: true); } catch { /* best effort */ }
-            File.WriteAllText(path, injected + "\n");
+            WriteAtomic(path, injected + "\n");
             return;
         }
 
@@ -297,7 +327,12 @@ public class BrainExporter
         {
             updated = existing.TrimEnd() + "\n\n" + injected + "\n";
         }
-        File.WriteAllText(path, updated);
+        // Atomic, and this is the file that most needs it. The other three
+        // exports are regenerable from the vault by a single re-index;
+        // CLAUDE.md is the user's own instructions to every agent that opens
+        // the folder. The NUL-byte incident described above is precisely what
+        // a truncate-then-stream write leaves behind when it is interrupted.
+        WriteAtomic(path, updated);
     }
 
     private static string BuildClaudeSection(BrainExport export)

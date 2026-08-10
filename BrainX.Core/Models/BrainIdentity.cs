@@ -115,7 +115,26 @@ public class BrainIdentity
             PrivateKeyProtection = protectedWith
         };
         var json = JsonConvert.SerializeObject(dto, Formatting.Indented);
-        File.WriteAllText(path, json);
+
+        // Write-then-rename. WriteAllText truncates the existing file first,
+        // so a crash, kill or power cut in that window leaves identity.json
+        // unparseable — and the client's recovery path treats an unreadable
+        // identity as "no identity": it moves the bytes aside and calls
+        // Generate(), which mints a NEW brain address. The vault would lose
+        // the identity that names it, permanently, because of a badly-timed
+        // interruption during an ordinary save. A rename is atomic, so a
+        // reader gets the whole old file or the whole new one.
+        var tmp = path + ".tmp";
+        try
+        {
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, path, overwrite: true);
+        }
+        catch
+        {
+            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+            throw;
+        }
     }
 
     /// <summary>

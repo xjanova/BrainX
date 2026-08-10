@@ -1553,7 +1553,13 @@ internal static partial class Program
         if (max <= 0 || preview.Length <= max) return preview;
         var cut = preview[..max];
         var lastSpace = cut.LastIndexOf(' ');
-        if (lastSpace > max - 60) cut = cut[..lastSpace];
+        // lastSpace > 0, not just > max - 60. Thai is written without spaces
+        // and is about a third of this vault, so a Thai preview genuinely has
+        // no space in its first N characters and LastIndexOf returns -1. With
+        // max < 59 the old test (-1 > max - 60) was TRUE, and cut[..-1] threw
+        // ArgumentOutOfRangeException — turning any caller that trimmed tokens
+        // with a small preview_chars into a failed tool call.
+        if (lastSpace > 0 && lastSpace > max - 60) cut = cut[..lastSpace];
         return cut.TrimEnd() + "…";
     }
 
@@ -1591,7 +1597,18 @@ internal static partial class Program
             ?? throw new InvalidOperationException($"note not found: {nodeId}");
 
         var fullPath = Path.Combine(export.VaultPath, node.RelativePath);
-        var raw = File.Exists(fullPath) ? File.ReadAllText(fullPath) : node.Preview ?? "";
+        // Say so when the file is gone, instead of quietly substituting the
+        // export's ~280-char preview for the note body. brain-export.json is a
+        // snapshot refreshed only on re-index and Obsidian renames files all
+        // the time, so this branch is reached in ordinary use — and the caller
+        // could not tell the stub from a genuinely short note. Worse, the sha
+        // computed from the preview was then stored as that note's content
+        // hash and persisted for every other process to inherit.
+        if (!File.Exists(fullPath))
+            throw new InvalidOperationException(
+                $"note '{node.Title}' is indexed at {node.RelativePath} but that file no longer exists — "
+                + "the export is stale. Re-index the vault, or search again to get the current path.");
+        var raw = File.ReadAllText(fullPath);
         LogAccess(node.Id, "get_note", node.Title);
 
         // Note-memo short-circuit (v2.6.0). Only applies to full-content
@@ -1645,7 +1662,9 @@ internal static partial class Program
         }
         result["content"] = content;
 
-        if (canCache) StoreNoteMemo(nodeId, sha, raw.Length);
+        // shipped: true — this is the one call site that actually put the
+        // body in the response.
+        if (canCache) StoreNoteMemo(nodeId, sha, raw.Length, shipped: true);
         return result;
     }
 
@@ -2526,7 +2545,8 @@ internal static partial class Program
         var safeTitle = string.Concat(title.Split(Path.GetInvalidFileNameChars())).Trim();
         var safeFolder = string.Concat(folder.Split(Path.GetInvalidPathChars())).Trim();
         var relPath = Path.Combine(safeFolder, safeTitle + ".md");
-        var fullPath = Path.Combine(_vaultPath, relPath);
+        // Path.Combine drops the vault root entirely if relPath is rooted.
+        var fullPath = ResolveInsideVault(relPath, "folder");
 
         Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
 
@@ -2623,7 +2643,7 @@ internal static partial class Program
         }
         else if (!string.IsNullOrEmpty(path))
         {
-            fullPath = Path.IsPathRooted(path) ? path : Path.Combine(_vaultPath, path);
+            fullPath = ResolveInsideVault(path, "path");
             resolvedId = ComputeStableId(fullPath);
         }
         else throw new ArgumentException("id or path is required");
@@ -2631,17 +2651,35 @@ internal static partial class Program
         if (!File.Exists(fullPath))
             throw new InvalidOperationException($"file not found: {fullPath}");
 
-        // Append with a blank-line separator
-        var existing = File.ReadAllText(fullPath);
-        var previousSha = Sha256Short(existing);
-        var separator = existing.EndsWith("\n\n") ? "" : existing.EndsWith("\n") ? "\n" : "\n\n";
-        var appendBlock = separator + content + "\n";
-        File.AppendAllText(fullPath, appendBlock);
+        // Read-append-verify under a cross-process lock.
+        //
+        // This used to read the file, append, and then ASSUME the result was
+        // `existing + appendBlock` to avoid a second read. With one writer that
+        // holds. With twelve MCP servers on one vault it does not: measured
+        // with six writers on a barrier, 226 of 1800 appends succeeded while
+        // another process had grown the file in between, so the reported sha
+        // and diff described a document that never existed — and the note-memo
+        // then cached that fiction for the next ten minutes.
+        //
+        // The lock makes interleaving rare; the re-read makes the answer true
+        // even when the lock could not be taken. Belt and braces, because the
+        // failure is silent and lands in a cache other tools trust.
+        var vaultLock = AcquireVaultLock();
+        string existing, newContent, appendBlock;
+        try
+        {
+            existing = File.ReadAllText(fullPath);
+            var separator = existing.EndsWith("\n\n") ? "" : existing.EndsWith("\n") ? "\n" : "\n\n";
+            appendBlock = separator + content + "\n";
+            var block = appendBlock;
+            if (!RetryOnIo(() => File.AppendAllText(fullPath, block)))
+                throw new IOException(
+                    $"could not append to {Path.GetFileName(fullPath)} — another process is holding it. Nothing was written; retry.");
+            newContent = File.ReadAllText(fullPath);
+        }
+        finally { ReleaseVaultLock(vaultLock); }
 
-        // Construct the new content in-memory (avoid re-reading the file —
-        // we already know what we wrote) so we can compute the diff + new
-        // sha and refresh the note-memo without touching disk twice.
-        var newContent = existing + appendBlock;
+        var previousSha = Sha256Short(existing);
         var newSha = Sha256Short(newContent);
 
         // Unified diff for an append-only write (v2.6.0). Cheaper than
@@ -2655,7 +2693,11 @@ internal static partial class Program
         // Refresh the note-memo with the post-write sha. Next get_note
         // on this id will short-circuit with cached:true and Claude
         // won't re-fetch content it can reconstruct from the diff.
-        StoreNoteMemo(resolvedId, newSha, newContent.Length);
+        // shipped:false — an append returns a DIFF, not the document. A caller
+        // that never read this note has only the tail it just wrote, so
+        // short-circuiting its next get_note would assert "you already have
+        // this" about a body it has never seen. The sha still saves the hash.
+        StoreNoteMemo(resolvedId, newSha, newContent.Length, shipped: false);
 
         LogAccess(resolvedId, "write", Path.GetFileNameWithoutExtension(fullPath));
 
@@ -4037,94 +4079,60 @@ internal static partial class Program
 
     private static JToken ApplyEmbeddingFix(BrainExport export)
     {
-        // Inline reimplementation of EmbeddingService.PrecomputeMissingAsync —
-        // gives us per-note diagnostics + skips the up-front 2s reachability
-        // probe (which can return false on a cold-started Ollama and silently
-        // make the whole pass a no-op). Per-call timeouts handle Ollama-down
-        // gracefully without poisoning the entire batch.
-        const int MaxChars = 4000;     // safe under nomic-embed-text's 8192-token window
-        var dir = Path.Combine(export.VaultPath, ".obsidianx", "embeddings");
-        Directory.CreateDirectory(dir);
-
-        int written = 0, skippedFresh = 0, failed = 0, skippedNoText = 0;
-        var failedIds = new JArray();
-
-        using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(30) };
-
-        foreach (var n in export.Nodes)
+        // This WAS an inline reimplementation of PrecomputeMissingAsync, kept
+        // for per-note diagnostics. It drifted, and the drift was the worst
+        // kind: it hard-coded `model = "nomic-embed-text"` and a 4,000-char cap
+        // while every other reader and writer resolves them from the manifest.
+        // On a bge-m3 vault it therefore wrote 768-dim vectors into 1024-dim
+        // slots. VectorMath.Cosine returns 0 on a length mismatch, so those
+        // notes scored zero against every query — invisible to semantic search
+        // and to brain_recall — while the tool reported "Embedded N note(s)"
+        // and the next brain_audit confirmed 0 missing. It also stamped a fresh
+        // mtime, so the real precompute would never revisit them. A repair tool
+        // that silently destroys what it claims to fix, and hides the evidence.
+        //
+        // The duplicate is gone. EmbeddingService is the one implementation:
+        // it resolves the model and budget, invalidates on model/budget change,
+        // resumes an interrupted rebuild, writes sidecars write-then-move, and
+        // maintains the manifest. Per-note failure ids are not worth a second
+        // copy of any of that.
+        // The export carries NodeSummary; EmbeddingService speaks KnowledgeNode.
+        // Only the four fields PrecomputeAsync actually reads are needed.
+        var svc = new EmbeddingService();
+        var nodes = export.Nodes.Select(n => new BrainX.Core.Models.KnowledgeNode
         {
-            var sidecar = Path.Combine(dir, n.Id + ".bin");
-            if (File.Exists(sidecar) && File.GetLastWriteTimeUtc(sidecar) >= n.ModifiedAt)
-            {
-                skippedFresh++;
-                continue;
-            }
+            Id = n.Id,
+            Title = n.Title,
+            FilePath = string.IsNullOrEmpty(n.RelativePath)
+                ? "" : Path.Combine(export.VaultPath, n.RelativePath),
+            ModifiedAt = n.ModifiedAt
+        }).ToList();
+        var written = svc.PrecomputeAsync(export.VaultPath, nodes).GetAwaiter().GetResult();
 
-            string text;
-            try
-            {
-                var fp = string.IsNullOrEmpty(n.RelativePath) ? "" : Path.Combine(export.VaultPath, n.RelativePath);
-                if (string.IsNullOrEmpty(fp) || !File.Exists(fp))
-                {
-                    text = n.Title;
-                }
-                else
-                {
-                    var body = File.ReadAllText(fp);
-                    if (body.Length > MaxChars) body = body[..MaxChars];
-                    text = $"{n.Title}\n\n{body}";
-                }
-            }
-            catch { text = n.Title; }
-
-            if (string.IsNullOrWhiteSpace(text)) { skippedNoText++; continue; }
-
-            // POST to /api/embed with explicit UTF-8 byte body so Thai content
-            // doesn't get transcoded to '?' (the bug we hit during initial
-            // precompute via PowerShell).
-            float[]? vec = null;
-            try
-            {
-                var jsonBody = new JObject { ["model"] = "nomic-embed-text", ["input"] = text }.ToString();
-                var content = new System.Net.Http.StringContent(jsonBody, System.Text.Encoding.UTF8, "application/json");
-                var resp = http.PostAsync("http://localhost:11434/api/embed", content).GetAwaiter().GetResult();
-                if (resp.IsSuccessStatusCode)
-                {
-                    var json = JObject.Parse(resp.Content.ReadAsStringAsync().GetAwaiter().GetResult());
-                    var arr = (json["embeddings"] as JArray)?[0] as JArray;
-                    if (arr != null)
-                        vec = arr.Select(t => t.ToObject<float>()).ToArray();
-                }
-            }
-            catch { }
-
-            if (vec == null) { failed++; failedIds.Add(n.Id); continue; }
-
-            // Write float[] as little-endian bytes.
-            var bytes = new byte[vec.Length * 4];
-            Buffer.BlockCopy(vec, 0, bytes, 0, bytes.Length);
-            try
-            {
-                File.WriteAllBytes(sidecar, bytes);
-                written++;
-            }
-            catch { failed++; failedIds.Add(n.Id); }
-        }
+        var dir = Path.Combine(export.VaultPath, ".obsidianx", "embeddings");
+        var present = Directory.Exists(dir) ? Directory.EnumerateFiles(dir, "*.bin").Count() : 0;
+        var missing = Math.Max(0, export.Nodes.Count - present);
 
         return new JObject
         {
             ["kind"] = "embedding-precompute",
             ["totalNotes"] = export.Nodes.Count,
             ["written"] = written,
-            ["skippedFresh"] = skippedFresh,
-            ["skippedNoText"] = skippedNoText,
-            ["failed"] = failed,
-            ["failedIds"] = failedIds,
-            ["note"] = written == 0 && failed == 0
+            ["sidecarsPresent"] = present,
+            ["stillMissing"] = missing,
+            ["model"] = svc.Model,
+            ["maxChars"] = svc.MaxChars,
+            ["device"] = svc.GpuInUse ? "GPU" : "CPU",
+            ["note"] = written == 0 && missing == 0
                 ? "Nothing to do — every note already has a fresh embedding."
-                : failed > 0
-                    ? $"Embedded {written}, but {failed} failed (likely Ollama timeout / oversized content). Re-run brain_audit to confirm."
-                    : $"Embedded {written} note(s). Re-run brain_audit to confirm 0 missing/stale."
+                : written == 0
+                    // A bare 0 used to read as success. It also means "Ollama is
+                    // unreachable or every embed failed", and those must not
+                    // print the same sentence.
+                    ? $"Wrote nothing and {missing} note(s) are still missing — check that Ollama is running and `{svc.Model}` is pulled."
+                    : missing > 0
+                        ? $"Embedded {written} with model {svc.Model}; {missing} still missing. Re-run to continue."
+                        : $"Embedded {written} note(s) with model {svc.Model} @ {svc.MaxChars} chars. Re-run brain_audit to confirm."
         };
     }
 
@@ -4249,24 +4257,51 @@ internal static partial class Program
             var fmBody = content.Substring(fmStart + 3, fmEnd - (fmStart + 3));
             var rest = content[(fmEnd + 4)..];
 
-            // Decide: replace existing tags: list or append a new one.
-            var tagsLineRx = new Regex(@"(?m)^tags:\s*(\[.*\]|\s*$)");
+            var combined = node.Tags.Concat(suggestedTags)
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            var inlineList = "tags: [" + string.Join(", ", combined.Select(t => $"\"{t}\"")) + "]";
+
+            // The old pattern was `^tags:\s*(\[.*\]|\s*$)`, and `\s` matches
+            // newlines. On the common block form
+            //     tags:
+            //       - session
+            // it replaced only the `tags:` line and left the `- session` items
+            // stranded underneath a scalar, then joined the closing delimiter
+            // onto the last line — producing `...  - session---`. An
+            // unterminated block makes the next re-index read the note BODY as
+            // frontmatter, so the note loses its title, tags and links and
+            // drops out of search entirely. This tool is exposed as
+            // `brain_apply_audit_fix kind=untagged dryRun=false` and rewrites
+            // up to 20 real notes a call.
+            //
+            // Two explicit shapes now, neither of which can span into the next
+            // key: an inline list on one line, or a `tags:` header plus its
+            // indented `- item` lines.
+            var tagsInlineRx = new Regex(@"(?m)^tags:[ \t]*\[[^\]\r\n]*\][ \t]*\r?$");
+            var tagsBlockRx = new Regex(@"(?m)^tags:[ \t]*\r?\n(?:[ \t]+-[^\r\n]*\r?\n?)*");
+
             string newFm;
-            if (tagsLineRx.IsMatch(fmBody))
-            {
-                // Replace a single-line `tags: [a, b]` form, or append below `tags:` flow.
-                var combined = node.Tags.Concat(suggestedTags).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-                var inlineList = "[" + string.Join(", ", combined.Select(t => $"\"{t}\"")) + "]";
-                newFm = tagsLineRx.Replace(fmBody, "tags: " + inlineList, 1);
-            }
+            if (tagsInlineRx.IsMatch(fmBody))
+                newFm = tagsInlineRx.Replace(fmBody, inlineList, 1);
+            else if (tagsBlockRx.IsMatch(fmBody))
+                newFm = tagsBlockRx.Replace(fmBody, inlineList + "\n", 1);
             else
-            {
-                var combined = node.Tags.Concat(suggestedTags).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-                var inlineList = "[" + string.Join(", ", combined.Select(t => $"\"{t}\"")) + "]";
-                newFm = fmBody.TrimEnd() + Environment.NewLine + "tags: " + inlineList + Environment.NewLine;
-            }
+                newFm = fmBody.TrimEnd() + "\n" + inlineList + "\n";
+
+            // The closing delimiter must start its own line, always. fmBody is
+            // captured without its trailing newline, so concatenating "---"
+            // directly is what fused them.
+            if (!newFm.EndsWith("\n")) newFm += "\n";
 
             var rebuilt = "---" + newFm + "---" + rest;
+
+            // Refuse to write anything that is not still a well-formed
+            // frontmatter block. A corrupted note is far worse than an
+            // unapplied tag, and this tool runs unattended over 20 notes.
+            if (!rebuilt.StartsWith("---") ||
+                rebuilt.IndexOf("\n---", 3, StringComparison.Ordinal) < 0)
+                return false;
+
             File.WriteAllText(fp, rebuilt);
             return true;
         }
@@ -5613,11 +5648,18 @@ internal static partial class Program
         var limit = args["limit"]?.ToObject<int>() ?? 10;
         var preview = args["preview_chars"]?.ToObject<int>() ?? 200;
         var compact = (args["compact"]?.ToObject<bool>() ?? false) ? 1 : 0;
-        // Scope MUST be part of the key — otherwise two different scopes
-        // with the same query collide and the second caller gets the first
-        // caller's results. Found via smoke test 2026-05-14.
+        // EVERY argument that changes the result set must be in the key,
+        // otherwise two different calls collide and the second caller silently
+        // receives the first one's results — wrapped in a message asserting an
+        // "identical call ran Ns ago". Scope was added for exactly this after a
+        // smoke test on 2026-05-14; category and tag are the same filters on
+        // brain_semantic_search and were simply missed, so the bug survived in
+        // two of its three forms.
         var scope = NormaliseScope(args["scope"]?.ToString());
-        return $"{toolName}|mt={mtime}|q={q}|l={limit}|p={preview}|c={compact}|s={scope}";
+        var category = args["category"]?.ToString() ?? "";
+        var tag = args["tag"]?.ToString() ?? "";
+        return $"{toolName}|mt={mtime}|q={q}|l={limit}|p={preview}|c={compact}"
+             + $"|s={scope}|cat={category}|tag={tag}";
     }
 
     private static JToken? TryGetMemoHit(string toolName, JObject args, string queryOverride)
@@ -5706,7 +5748,24 @@ internal static partial class Program
     // SQLite at startup and flush back periodically, so a fresh MCP
     // process inherits the prior incarnation's sha history.
 
-    private record NoteSnapshot(string Sha, DateTime AtUtc, int HitCount, long ByteSize);
+    /// <summary>
+    /// <paramref name="Shipped"/> is the difference between "we know this
+    /// note's hash" and "this model has been shown this note's text", and
+    /// conflating the two was a real bug: the search prefetch called
+    /// StoreNoteMemo for its top hits from a background thread, so the very
+    /// next brain_get_note on a freshly-searched note returned metadata, a
+    /// sha, and the sentence "the full content is still in your context
+    /// window. Do NOT re-narrate." — with no content field and no content ever
+    /// having been sent. The canonical search → get_note flow silently
+    /// returned nothing, and the instruction discouraged retrying. (Observed
+    /// live twice on 2026-08-10 before it was diagnosed.)
+    ///
+    /// Only a call that actually put the body in the response may set this.
+    /// Prefetch and cross-process hydration record Shipped=false: they still
+    /// save the file read and the hash on the real get_note, which is all a
+    /// prefetch was ever able to save.
+    /// </summary>
+    private record NoteSnapshot(string Sha, DateTime AtUtc, int HitCount, long ByteSize, bool Shipped);
 
     private static readonly Dictionary<string, NoteSnapshot> _noteMemo = new();
     private static readonly object _noteMemoLock = new();
@@ -5789,6 +5848,17 @@ internal static partial class Program
                 _noteMemoMisses++;
                 return null;
             }
+            if (!entry.Shipped)
+            {
+                // We know the hash but this caller has never been given the
+                // text — a prefetch or a hydrated record from another process.
+                // Returning the short-circuit here is how the brain came to
+                // tell a model that content "is still in your context window"
+                // when it had never been sent. Treat as a miss; the entry still
+                // earned its keep by pre-warming the sha.
+                _noteMemoMisses++;
+                return null;
+            }
             var bumped = entry with { HitCount = entry.HitCount + 1 };
             _noteMemo[noteId] = bumped;
             _noteMemoHits++;
@@ -5812,7 +5882,12 @@ internal static partial class Program
         }
     }
 
-    internal static void StoreNoteMemo(string noteId, string sha, long byteSize)
+    /// <param name="shipped">
+    /// True only when this call actually returned the note's body to the
+    /// caller. Everything else — prefetch, cross-process hydration — passes
+    /// false so the memo can never claim a delivery that did not happen.
+    /// </param>
+    internal static void StoreNoteMemo(string noteId, string sha, long byteSize, bool shipped)
     {
         lock (_noteMemoLock)
         {
@@ -5821,7 +5896,12 @@ internal static partial class Program
                 var oldest = _noteMemo.OrderBy(kv => kv.Value.AtUtc).First().Key;
                 _noteMemo.Remove(oldest);
             }
-            _noteMemo[noteId] = new NoteSnapshot(sha, DateTime.UtcNow, 0, byteSize);
+            // Never let a prefetch downgrade a real delivery: if this note was
+            // already shipped and the sha still matches, keep Shipped=true.
+            var wasShipped = _noteMemo.TryGetValue(noteId, out var prev)
+                             && prev.Shipped
+                             && string.Equals(prev.Sha, sha, StringComparison.Ordinal);
+            _noteMemo[noteId] = new NoteSnapshot(sha, DateTime.UtcNow, 0, byteSize, shipped || wasShipped);
         }
         // Phase C: fire-and-forget disk persistence so the next MCP
         // process (or a sibling instance) sees what we shipped.
@@ -5872,7 +5952,7 @@ internal static partial class Program
                     // disk write reaffirming what we already know.
                     if (HasNoteMemo(id, out var existing) && string.Equals(existing, sha, StringComparison.Ordinal))
                         continue;
-                    StoreNoteMemo(id, sha, raw.Length);
+                    StoreNoteMemo(id, sha, raw.Length, shipped: false);
                     Interlocked.Increment(ref _noteMemoPrefetched);
                 }
                 catch
@@ -6007,7 +6087,15 @@ internal static partial class Program
                     // ORIGINAL shipment still applies after restart. If the
                     // entry already aged out, it'll miss on first lookup
                     // and self-correct.
-                    _noteMemo[id] = new NoteSnapshot(sha, when, 0, size);
+                    //
+                    // Shipped:false, always. This table is shared by every MCP
+                    // process on the vault, so a row here means "some session
+                    // once read this note" — not "the model on the other end of
+                    // THIS pipe has seen it". Hydrating them as delivered let
+                    // one session's reading suppress another session's first
+                    // fetch, and a fresh conversation is exactly when the model
+                    // has the least context to survive that.
+                    _noteMemo[id] = new NoteSnapshot(sha, when, 0, size, Shipped: false);
                 }
                 loaded++;
             }
@@ -6034,6 +6122,102 @@ internal static partial class Program
     /// of the day OR after a 30-minute gap, so each focused sitting is
     /// its own section.
     /// </summary>
+    /// <summary>
+    /// Retry a file operation that lost a race to another process.
+    ///
+    /// Twelve MCP processes share one vault, and every one of them appends to
+    /// the same journal and access log. Measured with six writers starting on
+    /// a barrier: 35% of plain appends and 83% of read-append pairs threw
+    /// IOException. Nothing was ever corrupted — Windows serialises the writes
+    /// and the loser gets an exception, not a torn file — so the loss is pure
+    /// giving-up, and a few milliseconds of patience recovers almost all of it.
+    ///
+    /// Jitter matters more than the delay: without it, two processes that
+    /// collide simply collide again on the same schedule.
+    /// </summary>
+    /// <summary>
+    /// Resolve a caller-supplied path and prove it lands inside the vault.
+    ///
+    /// Two tools took a path straight from tool arguments: brain_append_note
+    /// did `IsPathRooted(path) ? path : Combine(vault, path)`, and
+    /// brain_create_note built its folder with Path.Combine — which SILENTLY
+    /// DISCARDS the first argument when the second is rooted. So a `folder` of
+    /// "C:\Users\me" or a `path` of an absolute filename escaped the vault
+    /// entirely, and the tool then reported success with a path that read like
+    /// a vault-relative one. Stripping invalid path characters does nothing
+    /// about this: ".." and drive roots are perfectly valid characters.
+    ///
+    /// GetFullPath collapses "..", and the prefix check is done on the
+    /// normalised form with a trailing separator so "G:\ObsidianOther" cannot
+    /// pass as a child of "G:\Obsidian".
+    /// </summary>
+    private static string ResolveInsideVault(string candidate, string argName)
+    {
+        var root = Path.GetFullPath(_vaultPath);
+        var rootWithSep = root.EndsWith(Path.DirectorySeparatorChar)
+            ? root : root + Path.DirectorySeparatorChar;
+
+        var combined = Path.IsPathRooted(candidate)
+            ? candidate
+            : Path.Combine(root, candidate);
+        var full = Path.GetFullPath(combined);
+
+        if (!full.StartsWith(rootWithSep, StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(full, root, StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException(
+                $"{argName} resolves outside the vault ({full}). Paths must stay within {root}.");
+        return full;
+    }
+
+    private static bool RetryOnIo(Action op, int attempts = 4)
+    {
+        for (int i = 0; ; i++)
+        {
+            try { op(); return true; }
+            catch (IOException) when (i < attempts - 1) { }
+            catch (UnauthorizedAccessException) when (i < attempts - 1) { }
+            catch (IOException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
+            // 2, 6, 14 ms plus up to 8 ms of spread, keyed off the process id so
+            // two colliding processes back off onto different schedules.
+            System.Threading.Thread.Sleep((2 << i) - 2 + (Environment.ProcessId + i) % 8);
+        }
+    }
+
+    /// <summary>
+    /// A cross-process lock for one vault. The `lock` statements elsewhere in
+    /// this file guard threads inside a single server; they do nothing at all
+    /// about the eleven other servers on the same folder. Named after a hash of
+    /// the vault path so two vaults never block each other.
+    /// </summary>
+    private static Mutex? AcquireVaultLock(int timeoutMs = 2000)
+    {
+        try
+        {
+            var key = Convert.ToHexString(
+                System.Security.Cryptography.SHA1.HashData(
+                    Encoding.UTF8.GetBytes(_vaultPath.ToLowerInvariant())))[..16];
+            var m = new Mutex(false, $"Local\\brainx-vault-{key}");
+            try
+            {
+                // AbandonedMutexException means a holder died mid-write. We DID
+                // get the lock, so carry on — the alternative is deadlocking the
+                // vault forever because one process crashed once.
+                if (!m.WaitOne(timeoutMs)) { m.Dispose(); return null; }
+            }
+            catch (AbandonedMutexException) { }
+            return m;
+        }
+        catch { return null; }   // never let locking failure block a write
+    }
+
+    private static void ReleaseVaultLock(Mutex? m)
+    {
+        if (m == null) return;
+        try { m.ReleaseMutex(); } catch { }
+        try { m.Dispose(); } catch { }
+    }
+
     private static void AutoLogSession(string tool, string? context, string? extra = null)
     {
         try
@@ -6076,7 +6260,8 @@ internal static partial class Program
                 if (!string.IsNullOrEmpty(extra))   line += $"  ·  {EscapeMarkdown(extra)}";
                 sb.AppendLine(line);
 
-                File.AppendAllText(dailyPath, sb.ToString());
+                var text = sb.ToString();
+                RetryOnIo(() => File.AppendAllText(dailyPath, text));
                 _lastSessionWrite = DateTime.UtcNow;
             }
         }
@@ -6128,7 +6313,7 @@ internal static partial class Program
             {
                 // Keep the file bounded to avoid unbounded growth
                 TrimIfLarge(logPath, maxBytes: 512 * 1024);
-                File.AppendAllText(logPath, entry + "\n");
+                RetryOnIo(() => File.AppendAllText(logPath, entry + "\n"));
             }
         }
         catch (IOException) { }
