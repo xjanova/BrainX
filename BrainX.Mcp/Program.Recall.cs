@@ -76,7 +76,7 @@ internal static partial class Program
                 // half has no such tail, so superseded notes are pushed down
                 // here instead. Applied before the sort so it moves RANK,
                 // not just the number printed next to it.
-                semantic.Add((n, cos * SupersededFactor(n.Id)));
+                semantic.Add((n, cos * RankFactor(n)));
             }
             semantic.Sort((a, b) => b.score.CompareTo(a.score));
 
@@ -1013,6 +1013,32 @@ internal static partial class Program
     /// <summary>Rank multiplier — 1.0 for everything the vault hasn't explicitly retired.</summary>
     private static double SupersededFactor(string nodeId) =>
         IsSuperseded(nodeId) ? SupersededRankFactor : 1.0;
+
+    /// <summary>
+    /// How hard a machine-written report is pushed down the ranking.
+    ///
+    /// `brainx-mcp eval` already excludes these from the corpus it MEASURES —
+    /// "machine-written reports are not knowledge", and a benchmark that scores
+    /// a corpus it is itself writing into is not a measurement. The live
+    /// retrieval path had no such rule, and this session proved why it needs
+    /// one: after a dozen eval runs the vault held six of these, and
+    /// `brain_recall` answered the genuine question *"พิสูจน์ยังไงว่าค้นด้วย
+    /// ความหมายดีกว่าค้นด้วยคำตรง ๆ"* by citing **`Retrieval benchmark —
+    /// gold-live`** — a table of its own scores — where the same query had
+    /// returned the real note hours earlier. The measurement apparatus had
+    /// started answering the questions.
+    ///
+    /// A demotion rather than a filter, and the same shape as supersession: the
+    /// owner may well go looking for "the latest retrieval benchmark", and a
+    /// note that cannot be found is a worse failure than one that cannot win
+    /// rank 1. These are regenerated on every run, so they carry no history
+    /// worth competing for.
+    /// </summary>
+    private const double MachineReportRankFactor = 0.15;
+
+    /// <summary>Combined rank multiplier: retired notes and machine output both step aside.</summary>
+    private static double RankFactor(NodeSummary n) =>
+        SupersededFactor(n.Id) * (IsMachineReport(n.RelativePath) ? MachineReportRankFactor : 1.0);
 
     /// <summary>{pairs, unresolved} for brain_stats — null when nothing in the vault uses supersession.</summary>
     private static JObject? SupersessionStats()

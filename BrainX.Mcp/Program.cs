@@ -5060,12 +5060,17 @@ internal static partial class Program
         if (DateTime.UtcNow - n.ModifiedAt < TimeSpan.FromDays(14)) s *= 1.10;
         var usage = GetUsageScores().GetValueOrDefault(n.Id);
         if (usage > 0) s *= 1.0 + Math.Min(usage, 8.0) * 0.02;
-        // The one signal here that is a demotion, not a boost, and the only
-        // one strong enough to change which note wins: a note the vault has
-        // explicitly retired should not outrank its own replacement. Fires
-        // only on notes carrying supersedes/supersededBy frontmatter — see
-        // Program.Recall.cs.
-        s *= SupersededFactor(n.Id);
+        // The demotions, and the only signals here strong enough to change
+        // which note wins: a note the vault has explicitly retired should not
+        // outrank its own replacement, and a report this toolchain generated
+        // about itself should not outrank the knowledge it was measuring. Both
+        // in Program.Recall.cs.
+        //
+        // Note the recency boost two lines up cuts the other way for machine
+        // output — these files are rewritten on every run, so they are always
+        // inside the 14-day window and were collecting a permanent 10% while
+        // the notes they report on aged out of it.
+        s *= RankFactor(n);
         return s;
     }
 
