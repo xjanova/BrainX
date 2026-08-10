@@ -98,7 +98,7 @@ internal static partial class Program
                     }
                 }
                 Accumulate(semantic, 1.0);
-                Accumulate(keyword, RrfKeywordWeight);
+                Accumulate(keyword, ResolveKeywordWeight(semantic, keyword));
                 // No extra supersession factor here on purpose — RRF ranks,
                 // not scores, and BOTH input lists already carry the demotion.
                 ranked = fused.Values
@@ -222,10 +222,73 @@ internal static partial class Program
     /// regression guard for exact-term queries (ids, codenames) which is
     /// precisely what the keyword half is here to protect.
     /// </summary>
-    private static double RrfKeywordWeight =>
+    private static double? RrfKeywordWeightOverride =>
         double.TryParse(Environment.GetEnvironmentVariable("BRAINX_RRF_KW_WEIGHT"),
             System.Globalization.NumberStyles.Float,
-            System.Globalization.CultureInfo.InvariantCulture, out var w) && w >= 0 ? w : 1.0;
+            System.Globalization.CultureInfo.InvariantCulture, out var w) && w >= 0 ? w : null;
+
+    // Floor and ramp for the adaptive weight below. 0.1 is not arbitrary: a
+    // sweep across three gold sets found it to be the point where keyword
+    // costs nothing measurable on paraphrase queries (hit@5 identical to
+    // weight 0) while still recovering ground on exact-term ones. It is the
+    // safe resting value when the two rankers have nothing in common.
+    private const double RrfKwFloor = 0.10;
+    // Swept against all three gold sets 2026-08-10. Lo=0.10 started crediting
+    // keyword too early: paraphrase queries sitting at overlap 0.20 were given
+    // weight 0.325, and 0.25 was already measured to collapse their MRR. Lo=0.20
+    // recovers paraphrase hit@5 in full (34.8% -> 39.1%, matching a flat 0.1)
+    // for 1.5 pp of the journal set. Hi between 0.50 and 0.60 is a wash; 0.50
+    // wins journal MRR by a hair.
+    private static double RrfAgreeLo => EnvD("BRAINX_RRF_AGREE_LO", 0.20);
+    private static double RrfAgreeHi => EnvD("BRAINX_RRF_AGREE_HI", 0.50);
+
+    private static double EnvD(string name, double fallback) =>
+        double.TryParse(Environment.GetEnvironmentVariable(name),
+            System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : fallback;
+
+    /// <summary>
+    /// How much the keyword ranking counts inside RRF, relative to semantic's
+    /// 1.0 — decided per query from how far the two rankers AGREE.
+    ///
+    /// The equal-weight fusion this shipped with had a failure that averages
+    /// hid. Measured 2026-08-10 on three real Thai questions about notes
+    /// written that same day: semantic found 3/3 in its top ten, keyword found
+    /// 0/3, and the fusion of the two found **0/3** — brain_recall answered
+    /// MISS about notes the brain had just written. A keyword list carrying no
+    /// signal still injected 1/(K+rank) into every slot and buried the hits.
+    ///
+    /// A fixed weight cannot fix it: sweeping 0 → 1 moves the paraphrase and
+    /// journal-mined gold sets monotonically in OPPOSITE directions. What
+    /// separates the two query shapes is not any property of the keyword score
+    /// — raw score tracks sentence length, and concentration is flat (0.13 vs
+    /// 0.15 medians) — but whether keyword and semantic are looking at the
+    /// same notes at all. Top-10 overlap: paraphrase median 0.10, journal
+    /// median 0.30, and the live questions never exceeded 0.10.
+    ///
+    /// So: keyword earns a full vote when it corroborates semantic, and falls
+    /// back to a tiebreaker's whisper when it is off in its own world. Set
+    /// BRAINX_RRF_KW_WEIGHT to pin a fixed weight instead (and to reproduce
+    /// the old behaviour with =1). Overlap is set intersection, so unlike
+    /// every other candidate signal it needs no per-language normalisation —
+    /// which matters in a vault that is a third Thai.
+    /// </summary>
+    private static double ResolveKeywordWeight(
+        List<(NodeSummary node, double score)> semantic,
+        List<(NodeSummary node, double score)> keyword)
+    {
+        if (RrfKeywordWeightOverride is double pinned) return pinned;
+
+        const int Window = 10;
+        var semTop = semantic.Take(Window).Select(x => x.node.Id).ToList();
+        var kwTop = new HashSet<string>(
+            keyword.Take(Window).Select(x => x.node.Id), StringComparer.Ordinal);
+        if (semTop.Count == 0 || kwTop.Count == 0) return RrfKwFloor;
+
+        var overlap = (double)semTop.Count(kwTop.Contains) / Math.Max(semTop.Count, kwTop.Count);
+        var t = Math.Clamp((overlap - RrfAgreeLo) / (RrfAgreeHi - RrfAgreeLo), 0.0, 1.0);
+        return RrfKwFloor + (1.0 - RrfKwFloor) * t;
+    }
 
     private static JToken BrainRecall(JObject args)
     {

@@ -346,18 +346,36 @@ internal static partial class Program
     /// constant here is how the 4000-char embedding cap and the 8s embed
     /// timeout both happened.
     /// </summary>
-    private static (double Top, double Second) KeywordSignal(
+    private static (double Top, double Second, double Concentration, List<string> TopIds) KeywordSignal(
         BrainExport export, List<NodeSummary> all, string query)
     {
         var ql = query.ToLowerInvariant();
-        double top = 0, second = 0;
+        var scored = new List<(string id, double s)>(all.Count);
         foreach (var n in all)
         {
             var s = ScoreNode(n, ql, GetContentLower(export, n));
-            if (s > top) { second = top; top = s; }
-            else if (s > second) second = s;
+            if (s > 0) scored.Add((n.Id, s));
         }
-        return (top, second);
+        scored.Sort((a, b) => b.s.CompareTo(a.s));
+        var top10 = scored.Take(10).ToList();
+        var top = top10.Count > 0 ? top10[0].s : 0;
+        var second = top10.Count > 1 ? top10[1].s : 0;
+        // Concentration = how much of the top-10 mass sits in rank 1. One note
+        // far above the rest means keyword matched something DISCRIMINATIVE (a
+        // rare id, a codename). Ten notes scoring alike means it is matching
+        // common words and has no idea. Scale-free and language-free, which is
+        // what the raw score failed to be.
+        var sum = top10.Sum(x => x.s);
+        var conc = sum > 0 ? top / sum : 0;
+        return (top, second, conc, top10.Select(x => x.id).ToList());
+    }
+
+    /// <summary>Fraction of the two top-10 lists that overlap.</summary>
+    private static double Overlap(List<string> a, List<string> b)
+    {
+        if (a.Count == 0 || b.Count == 0) return 0;
+        var setB = new HashSet<string>(b, StringComparer.Ordinal);
+        return (double)a.Count(setB.Contains) / Math.Max(a.Count, b.Count);
     }
 
     private static string Percentiles(List<double> xs)
@@ -532,6 +550,8 @@ internal static partial class Program
         var kwMargins = new List<double>();
         var kwPerWord = new List<double>();
         var kwPerChar = new List<double>();
+        var kwConcs = new List<double>();
+        var kwOverlaps = new List<double>();
         var perWordByLang = new Dictionary<string, List<double>>();
         var perCharByLang = new Dictionary<string, List<double>>();
 
@@ -571,7 +591,9 @@ internal static partial class Program
             Arm("semantic", () => RunSemantic(all, vec));
             Arm("hybrid", () => RunHybrid(export, all, pair.Query, vec));
 
-            var (kwTop, kwSecond) = KeywordSignal(export, all, pair.Query);
+            var (kwTop, kwSecond, kwConc, kwTopIds) = KeywordSignal(export, all, pair.Query);
+            kwConcs.Add(kwConc);
+            kwOverlaps.Add(Overlap(kwTopIds, RunSemantic(all, vec)));
             kwTops.Add(kwTop);
             // Raw top score turned out to scale with QUERY LENGTH, not signal
             // quality: paraphrase questions are full sentences, so they
@@ -654,6 +676,8 @@ internal static partial class Program
         Result($"  kwSignal  rel-margin{Percentiles(kwMargins)}");
         Result($"  kwSignal  per-word  {Percentiles(kwPerWord)}");
         Result($"  kwSignal  per-100ch {Percentiles(kwPerChar)}");
+        Result($"  kwSignal  concentr. {Percentiles(kwConcs)}");
+        Result($"  kwSignal  sem-overlap{Percentiles(kwOverlaps)}");
         foreach (var lang in perWordByLang.Keys.OrderBy(k => k, StringComparer.Ordinal))
         {
             Result($"    [{lang}] per-word  {Percentiles(perWordByLang[lang])}");
