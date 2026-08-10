@@ -54,10 +54,87 @@ internal static partial class Program
     /// </summary>
     internal readonly record struct RankerAgreement(double Overlap, bool SameTop);
 
+    /// <summary>
+    /// How the two rankings are combined. Passed explicitly so `brainx-mcp
+    /// eval` can score every strategy in ONE run against ONE snapshot of the
+    /// vault — comparing them across runs is how a corpus that grew by three
+    /// notes gets read as a two-point improvement in the ranker.
+    /// </summary>
+    /// <remarks>
+    /// MEASURED 2026-08-11, and the answer is that none of the alternatives
+    /// below is worth shipping. Both gold sets, one run each, all arms sharing
+    /// one snapshot:
+    ///
+    ///                       journal-651 hit@5      paraphrase-46 hit@5
+    ///   keyword                 61.4%                    15.2%
+    ///   semantic                49.3%                    37.0%
+    ///   hybrid (shipped)        55.6%                    37.0%
+    ///   router                  55.5%                    34.8%
+    ///   wide 2.5                57.5%                    34.8%
+    ///   ORACLE pick             —                        43.5%
+    ///   ORACLE union            —                        37.0%
+    ///
+    /// `wide` buys 1.9 points on the keyword-labelled set and gives back 2.2 on
+    /// the honest one; `router` loses on both. And the oracles say why chasing
+    /// this further is a mistake: a PERFECT router would add only 6.5 points of
+    /// hit@5, and the union of both arms' top tens scores hit@10 45.7% against
+    /// semantic's own 50.0% — keyword's list contributes almost nothing
+    /// semantic lacks while displacing what it has.
+    ///
+    /// The number that ends the argument: **hit@1 is 17.4% for every arm here,
+    /// oracles included.** When semantic misses rank 1, keyword does not have
+    /// the answer at rank 1 either, so no combiner can fix rank 1. Fusion is at
+    /// its ceiling; the ranker itself is what needs to get better.
+    ///
+    /// Kept as selectable arms rather than deleted so the next person reads the
+    /// table instead of re-deriving it. Default is Rrf and the wide ceiling
+    /// defaults to 1.0, so nothing here changes shipped behaviour.
+    /// </remarks>
+    internal enum Fusion
+    {
+        /// <summary>Agreement-weighted RRF — what shipped, and what stays.</summary>
+        Rrf,
+        /// <summary>
+        /// RRF whose keyword weight may exceed semantic's fixed 1.0.
+        ///
+        /// The shipped weight is structurally incapable of letting keyword win.
+        /// Measured 2026-08-10: on the 651-query journal set keyword is the
+        /// BETTER arm (hit@5 61.6% vs semantic 49.3%), yet its typical overlap
+        /// of 0.40 buys it only 0.70 against semantic's 1.0 — so fusion lands
+        /// between the two arms and scores 55.8%, below its own better input.
+        /// Raising the ceiling lets a lexical query be ranked mostly by the
+        /// ranker that is right about it, and leaves paraphrase queries alone:
+        /// their overlap of ~0.10 sits below the ramp and still yields 0.10.
+        /// </summary>
+        RrfWide,
+        /// <summary>
+        /// No blending — hand the query to whichever arm the agreement signal
+        /// says owns it. The ceiling of "pick one arm"; if fusion cannot beat
+        /// this, fusion is not paying for itself.
+        /// </summary>
+        Router
+    }
+
+    private static Fusion CurrentFusion =>
+        (Environment.GetEnvironmentVariable("BRAINX_FUSION") ?? "").Trim().ToLowerInvariant() switch
+        {
+            "wide" or "rrfwide" or "rrf-wide" => Fusion.RrfWide,
+            "router" => Fusion.Router,
+            _ => Fusion.Rrf
+        };
+
+    /// <summary>Top of the RrfWide keyword-weight ramp. 1.0 reproduces Rrf exactly.</summary>
+    private static double RrfKwCeiling => EnvD("BRAINX_RRF_KW_CEILING", 1.0);
+
+    /// <summary>Overlap at or above which Router hands the query to keyword.</summary>
+    private static double RouterOverlapCut => EnvD("BRAINX_ROUTER_CUT", 0.30);
+
     private static (List<(NodeSummary Node, double Score)> Ranked, string Mode,
                     Dictionary<string, double> Cosines, RankerAgreement Agree)
-        HybridRank(BrainExport export, List<NodeSummary> filtered, string ql, int limit, float[]? queryVec)
+        HybridRank(BrainExport export, List<NodeSummary> filtered, string ql, int limit,
+                   float[]? queryVec, Fusion? fusion = null, double? kwCeiling = null)
     {
+        var fuse = fusion ?? CurrentFusion;
         var cosines = new Dictionary<string, double>(StringComparer.Ordinal);
         var agree = default(RankerAgreement);
         List<(NodeSummary node, double score)> ranked;
@@ -107,15 +184,28 @@ internal static partial class Program
                             : (n, add);
                     }
                 }
-                Accumulate(semantic, 1.0);
-                Accumulate(keyword, ResolveKeywordWeight(semantic, keyword, out agree));
-                // No extra supersession factor here on purpose — RRF ranks,
-                // not scores, and BOTH input lists already carry the demotion.
-                ranked = fused.Values
-                    .OrderByDescending(x => x.score)
-                    .Take(limit)
-                    .ToList();
-                mode = "hybrid";
+                var kwWeight = ResolveKeywordWeight(semantic, keyword, out agree, fuse, kwCeiling);
+
+                if (fuse == Fusion.Router)
+                {
+                    // Deliberately no fusion at all: whichever arm the
+                    // agreement signal says owns this query answers it alone.
+                    var pick = agree.Overlap >= RouterOverlapCut ? keyword : semantic;
+                    ranked = pick.Take(limit).ToList();
+                    mode = agree.Overlap >= RouterOverlapCut ? "router:keyword" : "router:semantic";
+                }
+                else
+                {
+                    Accumulate(semantic, 1.0);
+                    Accumulate(keyword, kwWeight);
+                    // No extra supersession factor here on purpose — RRF ranks,
+                    // not scores, and BOTH input lists already carry the demotion.
+                    ranked = fused.Values
+                        .OrderByDescending(x => x.score)
+                        .Take(limit)
+                        .ToList();
+                    mode = "hybrid";
+                }
             }
             else
             {
@@ -325,7 +415,9 @@ internal static partial class Program
     private static double ResolveKeywordWeight(
         List<(NodeSummary node, double score)> semantic,
         List<(NodeSummary node, double score)> keyword,
-        out RankerAgreement agree)
+        out RankerAgreement agree,
+        Fusion fuse = Fusion.Rrf,
+        double? kwCeilingOverride = null)
     {
         const int Window = 10;
         var semTop = semantic.Take(Window).Select(x => x.node.Id).ToList();
@@ -345,7 +437,13 @@ internal static partial class Program
         if (semTop.Count == 0 || kwTop.Count == 0) return RrfKwFloor;
 
         var t = Math.Clamp((agree.Overlap - RrfAgreeLo) / (RrfAgreeHi - RrfAgreeLo), 0.0, 1.0);
-        return RrfKwFloor + (1.0 - RrfKwFloor) * t;
+        // The ceiling is 1.0 for Rrf, which reproduces the shipped weight
+        // exactly; RrfWide raises it so a query the keyword arm demonstrably
+        // owns can actually be ranked by it.
+        var ceiling = fuse == Fusion.RrfWide
+            ? Math.Max(1.0, kwCeilingOverride ?? RrfKwCeiling)
+            : 1.0;
+        return RrfKwFloor + (ceiling - RrfKwFloor) * t;
     }
 
     // ───────────── confidence v2 — a score that has to earn its threshold ─────────────

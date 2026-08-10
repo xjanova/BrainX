@@ -611,6 +611,26 @@ internal static partial class Program
             .Ranked.Select(r => r.Node.Id).ToList();
 
     /// <summary>
+    /// One named fusion strategy. Passed explicitly rather than read from the
+    /// environment so every strategy is scored inside a SINGLE run against one
+    /// snapshot of the vault — the only way a difference between them can be
+    /// attributed to the code rather than to a corpus that moved in between.
+    /// </summary>
+    private static List<string> RunFusion(BrainExport export, List<NodeSummary> all,
+                                          string query, float[]? vec, Fusion fuse,
+                                          double? kwCeiling = null)
+        => HybridRank(export, all, query.ToLowerInvariant(), EvalTopK, vec, fuse, kwCeiling)
+            .Ranked.Select(r => r.Node.Id).ToList();
+
+    /// <summary>
+    /// Keyword-weight ceilings swept as separate ARMS rather than separate
+    /// runs. A sweep spread over three runs is three different corpora on a
+    /// vault this session has been writing to all day; as arms they share one
+    /// snapshot and the differences are attributable to the constant alone.
+    /// </summary>
+    private static readonly double[] WideCeilings = { 1.5, 2.5, 4.0 };
+
+    /// <summary>
     /// Cosine alone. Mirrors HybridRank's semantic branch rather than calling
     /// it, because that branch is not reachable on its own — the point of this
     /// arm is to show what the embedding contributes before fusion, which is
@@ -931,14 +951,27 @@ internal static partial class Program
             .ToList();
         var excluded = export.Nodes.Count - all.Count;
         if (excluded > 0) Say($"  corpus:   {all.Count} notes ({excluded} machine-written report(s) excluded)");
-        var arms = new Dictionary<string, ModeScore>
-        {
+        // Every arm scored in one run. The two experimental fusions are here
+        // because the shipped one was measured landing BETWEEN its own inputs
+        // — 55.8% against keyword's 61.6% on the journal set — and a
+        // replacement can only be judged against the same snapshot.
+        var armNames = new[] { "keyword", "semantic", "hybrid", "router" }
+            .Concat(WideCeilings.Select(c => $"wide{c:0.#}"))
+            // Two CHEATING arms. They read the labels, so they can never ship —
+            // they exist to bound the search. `oracle:pick` is the best a
+            // perfect router could do; `oracle:union` is the best ANY fusion
+            // could do, since no combiner can surface a note neither arm
+            // retrieved. Without these, tuning a fusion weight is optimising
+            // toward an unknown ceiling, which is how a week disappears into
+            // +2 points that were never worth having.
+            .Concat(new[] { "oracle:pick", "oracle:union" })
+            .ToArray();
+        var arms = armNames.ToDictionary(
+            n => n,
             // keyword is the only arm that never needs a query vector — its
             // reported cost was always the true cost.
-            ["keyword"] = new() { Name = "keyword", NeedsEmbed = false },
-            ["semantic"] = new() { Name = "semantic", NeedsEmbed = true },
-            ["hybrid"] = new() { Name = "hybrid", NeedsEmbed = true }
-        };
+            n => new ModeScore { Name = n, NeedsEmbed = n != "keyword" },
+            StringComparer.Ordinal);
         // Same three arms again, split by query language. The whole reason
         // this vault runs bge-m3 at 16,000 chars is Thai recall, and an
         // aggregate number averages that claim away.
@@ -959,16 +992,12 @@ internal static partial class Program
         var discrim = new Dictionary<string, Discriminator>(StringComparer.Ordinal);
         var discrim3 = new Dictionary<string, Discriminator>(StringComparer.Ordinal);
 
-        static Dictionary<string, ModeScore> Segment(
+        Dictionary<string, ModeScore> Segment(
             Dictionary<string, Dictionary<string, ModeScore>> map, string key)
         {
             if (!map.TryGetValue(key, out var seg))
-                map[key] = seg = new Dictionary<string, ModeScore>
-                {
-                    ["keyword"] = new() { Name = "keyword" },
-                    ["semantic"] = new() { Name = "semantic" },
-                    ["hybrid"] = new() { Name = "hybrid" }
-                };
+                map[key] = seg = armNames.ToDictionary(
+                    n => n, n => new ModeScore { Name = n }, StringComparer.Ordinal);
             return seg;
         }
 
@@ -1000,9 +1029,40 @@ internal static partial class Program
                 return ids;
             }
 
-            Arm("keyword", () => RunKeyword(export, all, pair.Query));
-            Arm("semantic", () => RunSemantic(all, vec));
+            var kwIds = Arm("keyword", () => RunKeyword(export, all, pair.Query));
+            var semIds = Arm("semantic", () => RunSemantic(all, vec));
             var hybridIds = Arm("hybrid", () => RunHybrid(export, all, pair.Query, vec));
+
+            // Rank of the first expected id, or int.MaxValue. Used only by the
+            // oracle arms below.
+            int RankOf(List<string> ids)
+            {
+                for (int i = 0; i < ids.Count; i++) if (expected.Contains(ids[i])) return i;
+                return int.MaxValue;
+            }
+            Arm("oracle:pick", () => RankOf(kwIds) <= RankOf(semIds) ? kwIds : semIds);
+            // Interleave, better-ranked arm first. Any real fusion is bounded
+            // by what the union contains, so this is the headroom for fusion
+            // as a whole rather than for routing.
+            Arm("oracle:union", () =>
+            {
+                var (a, b) = RankOf(kwIds) <= RankOf(semIds) ? (kwIds, semIds) : (semIds, kwIds);
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                var merged = new List<string>(EvalTopK);
+                for (int i = 0; i < Math.Max(a.Count, b.Count) && merged.Count < EvalTopK; i++)
+                {
+                    if (i < a.Count && seen.Add(a[i])) merged.Add(a[i]);
+                    if (merged.Count < EvalTopK && i < b.Count && seen.Add(b[i])) merged.Add(b[i]);
+                }
+                return merged;
+            });
+            Arm("router", () => RunFusion(export, all, pair.Query, vec, Fusion.Router));
+            foreach (var c in WideCeilings)
+            {
+                var ceiling = c;
+                Arm($"wide{ceiling:0.#}",
+                    () => RunFusion(export, all, pair.Query, vec, Fusion.RrfWide, ceiling));
+            }
 
             // One cosine sweep, reused by the overlap statistic and the
             // confidence probes below. Deliberately OUTSIDE Arm(): the semantic
