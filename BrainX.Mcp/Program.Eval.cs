@@ -329,7 +329,16 @@ internal static partial class Program
     /// constants (RecallCosFloor/Ceil/Strong/Weak) are exactly what is on
     /// trial here — a private copy of the formula would score the copy.
     /// </summary>
-    private static void ObserveRecall(RecallScore s, string query, IReadOnlyCollection<string> expected)
+    /// <summary>
+    /// What brain_recall actually believed about one query — its own numbers,
+    /// read back out of the tool response rather than recomputed, so the
+    /// discrimination table scores the shipping formula and not a copy of it.
+    /// <c>Ok</c> is false when the call threw.
+    /// </summary>
+    private readonly record struct RecallObservation(
+        bool Ok, double Confidence, double Cosine, double Lexical, bool HitTop);
+
+    private static RecallObservation ObserveRecall(RecallScore s, string query, IReadOnlyCollection<string> expected)
     {
         s.N++;
         JObject r;
@@ -344,7 +353,7 @@ internal static partial class Program
         // merely "recall's default window is three notes wide". Measuring both
         // separates the two.
         try { r = (JObject)BrainRecall(new JObject { ["query"] = query, ["limit"] = 10 }); }
-        catch { s.Errors++; return; }
+        catch { s.Errors++; return default; }
 
         var verdict = r["verdict"]?.ToString() ?? "MISS";
 
@@ -378,11 +387,24 @@ internal static partial class Program
             case "WEAK": s.Weak++; break;
             default: s.Miss++; break;
         }
+
+        return new RecallObservation(
+            Ok: true,
+            Confidence: r["confidence"]?.Value<double>() ?? 0,
+            Cosine: r["signals"]?["cosine"]?.Type == JTokenType.Null
+                ? 0 : r["signals"]?["cosine"]?.Value<double>() ?? 0,
+            Lexical: r["signals"]?["lexical"]?.Value<double>() ?? 0,
+            HitTop: hitTop);
     }
 
     // ───────────── the runs ─────────────
 
     private const int EvalTopK = 10;
+
+    /// <summary>Cuts the precision/coverage curve is sampled at. Spans both
+    /// formulas' usable range: v1 clusters near 0.5-0.7, v2 sits lower.</summary>
+    private static readonly double[] EvalCuts =
+        { 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90 };
 
     /// <summary>
     /// Best keyword score any note gets for this query, and the runner-up.
@@ -435,6 +457,148 @@ internal static partial class Program
              + $"· p75 {P(0.75):F2} · p90 {P(0.90):F2} · max {s[^1]:F2}";
     }
 
+    // ───────────── confidence discrimination ─────────────
+    //
+    // The finding this exists to answer, measured 2026-08-10: sweeping
+    // RecallStrong across 0.62 / 0.55 / 0.50 moved how OFTEN STRONG fired
+    // (4.3% → 28.3% → 63%) and left its precision pinned at ~31% at every
+    // setting. A threshold that changes volume but not precision is not a
+    // calibration knob — it means the quantity being thresholded carries no
+    // information about whether the retrieval is right, and every "tuning"
+    // round after that is rearranging noise.
+    //
+    // So the question before any new blend is not "what cut" but "does any
+    // signal separate a right answer from a wrong one AT ALL". AUC answers
+    // exactly that — P(signal on a query recall got right > signal on one it
+    // got wrong) — and it is invariant to scale, so a signal in cosine units
+    // and a signal in standard deviations are directly comparable. 0.50 is a
+    // coin flip no matter how impressive the number looks in a table.
+    //
+    // Every candidate here is deliberately cheap: all of them fall out of the
+    // cosine sweep the ranker already performs, so a winner can be shipped
+    // into brain_recall without a second retrieval pass.
+    private sealed class Discriminator
+    {
+        public string Name = "";
+        public string What = "";
+        public readonly List<double> Pos = new();   // queries whose top-1 WAS expected
+        public readonly List<double> Neg = new();
+
+        public void Add(double v, bool ok) => (ok ? Pos : Neg).Add(v);
+
+        public double MeanPos => Pos.Count == 0 ? 0 : Pos.Average();
+        public double MeanNeg => Neg.Count == 0 ? 0 : Neg.Average();
+
+        /// <summary>
+        /// Mann-Whitney AUC with tie-averaged ranks. Ties matter here and are
+        /// not a technicality: `agree.top1` is binary, so a naive
+        /// count-of-greater-pairs would score it far below its real power by
+        /// treating every equal pair as a loss.
+        /// </summary>
+        public double Auc()
+        {
+            if (Pos.Count == 0 || Neg.Count == 0) return double.NaN;
+            var all = new List<(double v, bool pos)>(Pos.Count + Neg.Count);
+            foreach (var v in Pos) all.Add((v, true));
+            foreach (var v in Neg) all.Add((v, false));
+            all.Sort((a, b) => a.v.CompareTo(b.v));
+
+            var ranks = new double[all.Count];
+            for (int i = 0; i < all.Count;)
+            {
+                int j = i;
+                while (j + 1 < all.Count && all[j + 1].v == all[i].v) j++;
+                // Average rank across the tied block (ranks are 1-based).
+                var shared = (i + j + 2) / 2.0;
+                for (int k = i; k <= j; k++) ranks[k] = shared;
+                i = j + 1;
+            }
+
+            double posRankSum = 0;
+            for (int i = 0; i < all.Count; i++) if (all[i].pos) posRankSum += ranks[i];
+            var n1 = (double)Pos.Count; var n2 = (double)Neg.Count;
+            return (posRankSum - n1 * (n1 + 1) / 2.0) / (n1 * n2);
+        }
+
+        /// <summary>
+        /// Hanley-McNeil standard error of the AUC. Printed as a ±95% band
+        /// because the honest gold set is 46 queries with 8 positives, where
+        /// the band is roughly ±0.20 — wide enough that a "winner" chosen on
+        /// point estimates alone would be a guess dressed as a measurement.
+        /// This is the same class of mistake as calibrating on eleven probes.
+        /// </summary>
+        public double AucSe()
+        {
+            var a = Auc();
+            if (double.IsNaN(a)) return double.NaN;
+            double n1 = Pos.Count, n2 = Neg.Count;
+            var q1 = a / (2 - a);
+            var q2 = 2 * a * a / (1 + a);
+            var v = (a * (1 - a) + (n1 - 1) * (q1 - a * a) + (n2 - 1) * (q2 - a * a)) / (n1 * n2);
+            return v <= 0 ? 0 : Math.Sqrt(v);
+        }
+
+        /// <summary>
+        /// Precision and coverage if this signal were thresholded at
+        /// <paramref name="cut"/>: of the queries that would fire, what share
+        /// had the expected note at rank 1.
+        ///
+        /// This exists to automate the rule that cost a calibration round —
+        /// sweeping a threshold and watching only how OFTEN it fires. If
+        /// precision is flat down this column while coverage climbs, the score
+        /// carries no signal and no cut will save it. The base rate is printed
+        /// beside it because a gate whose precision equals the base rate is
+        /// not a gate, however impressive the number looks alone.
+        /// </summary>
+        public (double Coverage, double Precision, int Fires) At(double cut)
+        {
+            int fires = 0, right = 0;
+            foreach (var v in Pos) if (v >= cut) { fires++; right++; }
+            foreach (var v in Neg) if (v >= cut) fires++;
+            var n = Pos.Count + Neg.Count;
+            return (n == 0 ? 0 : (double)fires / n,
+                    fires == 0 ? double.NaN : (double)right / fires,
+                    fires);
+        }
+
+        public double BaseRate => Pos.Count + Neg.Count == 0
+            ? 0 : (double)Pos.Count / (Pos.Count + Neg.Count);
+
+        private static double Pct(List<double> xs, double q)
+        {
+            if (xs.Count == 0) return 0;
+            var s = xs.OrderBy(x => x).ToList();
+            return s[Math.Min(s.Count - 1, (int)(q * s.Count))];
+        }
+
+        /// <summary>
+        /// p10/p50/p90 of one class. The playbook rule this exists for: two
+        /// different medians mean nothing if p75 of one exceeds p90 of the
+        /// other, and only the spread shows that.
+        /// </summary>
+        public string Spread(bool pos)
+        {
+            var xs = pos ? Pos : Neg;
+            return xs.Count == 0 ? "n/a"
+                : $"{Pct(xs, 0.10):F3}/{Pct(xs, 0.50):F3}/{Pct(xs, 0.90):F3}";
+        }
+    }
+
+    /// <summary>Cosine of every embedded note against the query, best first.</summary>
+    private static List<(string Id, double Cos)> ScoreCosines(List<NodeSummary> all, float[]? vec)
+    {
+        var scored = new List<(string Id, double Cos)>(all.Count);
+        if (vec == null) return scored;
+        foreach (var n in all)
+        {
+            var stored = LoadEmbedding(n.Id);
+            if (stored == null) continue;
+            scored.Add((n.Id, Cosine(vec, stored) * SupersededFactor(n.Id)));
+        }
+        scored.Sort((a, b) => b.Cos.CompareTo(a.Cos));
+        return scored;
+    }
+
     /// <summary>Keyword only — HybridRank with no query vector. This is the
     /// "brain-off" arm: identical code path, semantics withheld.</summary>
     private static List<string> RunKeyword(BrainExport export, List<NodeSummary> all, string query)
@@ -466,6 +630,174 @@ internal static partial class Program
         return scored.Take(EvalTopK).Select(x => x.id).ToList();
     }
 
+    // ───────────── the absent set — the error gold cannot see ─────────────
+    //
+    // Every gold query has a known-present answer BY CONSTRUCTION. That makes
+    // false MISS unarguable, and it makes the opposite error invisible: no
+    // gold run can ever catch recall being confident about a topic the vault
+    // does not hold, because no such query is in the set. The whole gate
+    // exists to say "you already know this", and its worst failure — saying it
+    // about something the brain has never seen — had no measurement at all.
+    //
+    // It matters more now than it did. The shipped confidence leans on an
+    // ABSOLUTE cosine floor, which is genuinely good at "nothing here is even
+    // close". Every relative signal that scores better at ranking (z, NQC,
+    // margin) is by definition blind to it: in a 1,280-note vault the best
+    // match is always several SDs above the mean, whether or not it is an
+    // answer. Replacing absolute with relative without this file would be
+    // trading a measured weakness for an unmeasured one.
+    private static List<GoldPair> ReadAbsent(string path)
+    {
+        var outp = new List<GoldPair>();
+        try
+        {
+            var root = JObject.Parse(File.ReadAllText(path));
+            // Accepts `queries` (this file's shape) or `pairs` (a gold set with
+            // its labels ignored), so an existing set can be re-scored as if
+            // its answers were absent without being rewritten.
+            var arr = root["queries"] as JArray ?? root["pairs"] as JArray ?? new JArray();
+            foreach (var p in arr)
+            {
+                var q = p["query"]?.ToString();
+                if (string.IsNullOrWhiteSpace(q)) continue;
+                outp.Add(new GoldPair
+                {
+                    Query = q,
+                    Lang = p["lang"]?.ToString() ?? (IsThai(q) ? "th" : "en"),
+                    Source = "absent"
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"absent set unreadable: {ex.Message}");
+        }
+        return outp;
+    }
+
+    /// <summary>
+    /// Score the absent set: MISS is the CORRECT answer for every query here,
+    /// so STRONG is the headline failure and WEAK is a soft one. Signal
+    /// percentiles are printed alongside because this is the negative
+    /// population a MISS threshold has to be chosen against — picking it from
+    /// the gold sets alone means choosing a cut having measured only one of
+    /// the two classes it separates.
+    /// </summary>
+    private static int RunAbsent(string path, bool quiet)
+    {
+        var queries = ReadAbsent(path);
+        if (queries.Count == 0)
+        {
+            Console.Error.WriteLine($"No queries in {path}.");
+            return 2;
+        }
+
+        void Say(string m) { if (!quiet) Console.WriteLine(m); }
+        Say($"  absent:   {queries.Count} quer(ies) "
+            + $"({queries.Count(q => q.Lang == "th")} th / {queries.Count(q => q.Lang == "en")} en)");
+
+        int strong = 0, weak = 0, miss = 0, errors = 0;
+        var sig = new Dictionary<string, List<double>>(StringComparer.Ordinal);
+        void S(string name, double v)
+        {
+            if (!sig.TryGetValue(name, out var l)) sig[name] = l = new List<double>();
+            l.Add(v);
+        }
+        var offenders = new List<string>();
+
+        foreach (var q in queries)
+        {
+            JObject r;
+            try { r = (JObject)BrainRecall(new JObject { ["query"] = q.Query, ["limit"] = 3 }); }
+            catch { errors++; continue; }
+
+            var verdict = r["verdict"]?.ToString() ?? "MISS";
+            switch (verdict)
+            {
+                case "STRONG":
+                    strong++;
+                    offenders.Add($"STRONG · {q.Query} → {r["answer"]?["title"]}");
+                    break;
+                case "WEAK": weak++; break;
+                default: miss++; break;
+            }
+
+            S("conf", r["confidence"]?.Value<double>() ?? 0);
+            var sg = r["signals"];
+            if (sg?["z"] != null && sg["z"]!.Type != JTokenType.Null) S("z.answer", sg["z"]!.Value<double>());
+            if (sg?["nqc"] != null && sg["nqc"]!.Type != JTokenType.Null) S("nqc", sg["nqc"]!.Value<double>());
+            S("lexical", sg?["lexical"]?.Value<double>() ?? 0);
+            S("overlap", sg?["rankerOverlap"]?.Value<double>() ?? 0);
+            S("agree", sg?["rankersAgreeOnTop"]?.Value<bool>() == true ? 1 : 0);
+            if (sg?["cosine"] != null && sg["cosine"]!.Type != JTokenType.Null)
+                S("cos.answer", sg["cosine"]!.Value<double>());
+            // The floor is read off this one, so it is the column to compare
+            // against the gold sets when choosing the cut.
+            if (sg?["cosMax"] != null && sg["cosMax"]!.Type != JTokenType.Null)
+                S("cos.max", sg["cosMax"]!.Value<double>());
+        }
+
+        var n = Math.Max(1, queries.Count - errors);
+        Console.WriteLine("");
+        Console.WriteLine($"  absent    n={queries.Count}  MISS {miss} ({(double)miss / n:P1}, correct) · "
+                        + $"WEAK {weak} ({(double)weak / n:P1}) · "
+                        + $"**STRONG {strong} ({(double)strong / n:P1}, false confidence)**"
+                        + (errors > 0 ? $"  ERRORS {errors}" : ""));
+        Console.WriteLine($"  formula   {(UseConfidenceV2 ? "v2" : "v1")}");
+        foreach (var kv in sig)
+            Console.WriteLine($"  absent    {kv.Key,-12} {Percentiles(kv.Value)}");
+        foreach (var o in offenders) Console.WriteLine($"  !         {o}");
+
+        // Same rule that cost three separate signals a day earlier: a number
+        // that lives only in stdout is a number nobody reads. This is the one
+        // report whose percentiles a threshold has to be chosen against, so it
+        // goes where the gold reports go.
+        var sb = new StringBuilder();
+        var stamp = DateTime.UtcNow;
+        sb.AppendLine("---");
+        sb.AppendLine($"created: {stamp:O}");
+        sb.AppendLine("source: brainx-eval");
+        sb.AppendLine("tags:");
+        sb.AppendLine("  - retrieval-benchmark");
+        sb.AppendLine("  - eval");
+        sb.AppendLine("---");
+        sb.AppendLine();
+        sb.AppendLine("# Retrieval benchmark — absent topics");
+        sb.AppendLine();
+        sb.AppendLine($"Measured **{stamp.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)} UTC**, "
+                    + $"formula **{(UseConfidenceV2 ? "v2" : "v1")}**. Overwritten on every run.");
+        sb.AppendLine();
+        sb.AppendLine("Every query here is about something the vault does **not** hold, so **MISS is the "
+                    + "correct answer** and STRONG is false confidence. No gold set can measure this: "
+                    + "gold queries all have a known-present answer by construction, which makes false "
+                    + "MISS unarguable and this error invisible.");
+        sb.AppendLine();
+        sb.AppendLine($"- MISS **{miss}** / {queries.Count} ({(double)miss / n:P1}) — correct");
+        sb.AppendLine($"- WEAK **{weak}** ({(double)weak / n:P1}) — sends the agent to read an unrelated note");
+        sb.AppendLine($"- STRONG **{strong}** ({(double)strong / n:P1}) — tells it to stop and cite one");
+        sb.AppendLine();
+        sb.AppendLine("| signal | p10 · p25 · p50 · p75 · p90 · max |");
+        sb.AppendLine("|---|---|");
+        foreach (var kv in sig) sb.AppendLine($"| `{kv.Key}` | {Percentiles(kv.Value)} |");
+        sb.AppendLine();
+        sb.AppendLine("Compare `cos.max` here against the same row in the gold reports: those two "
+                    + "populations are what the MISS floor separates, and it is the only axis on which "
+                    + "they separate at all.");
+        if (offenders.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Confidently wrong");
+            sb.AppendLine();
+            foreach (var o in offenders) sb.AppendLine($"- {o}");
+        }
+
+        var reportPath = Path.Combine(_vaultPath, "Notes", "Retrieval benchmark — absent topics.md");
+        Directory.CreateDirectory(Path.GetDirectoryName(reportPath)!);
+        File.WriteAllText(reportPath, sb.ToString(), new UTF8Encoding(false));
+        Console.WriteLine($"  report: {reportPath}");
+        return 0;
+    }
+
     // ───────────── CLI ─────────────
 
     /// <summary>
@@ -479,12 +811,13 @@ internal static partial class Program
     /// </summary>
     internal static async Task<int> EvalCliAsync(string[] args)
     {
-        string? vaultArg = null, goldArg = null;
+        string? vaultArg = null, goldArg = null, absentArg = null;
         var mine = false; var quiet = false; var limit = 0;
         for (int i = 0; i < args.Length; i++)
         {
             if (args[i] == "--vault" && i + 1 < args.Length) vaultArg = args[++i];
             else if (args[i] == "--gold" && i + 1 < args.Length) goldArg = args[++i];
+            else if (args[i] == "--absent" && i + 1 < args.Length) absentArg = args[++i];
             else if (args[i] == "--limit" && i + 1 < args.Length) int.TryParse(args[++i], out limit);
             else if (args[i] == "--mine") mine = true;
             else if (args[i] == "--quiet") quiet = true;
@@ -499,6 +832,9 @@ internal static partial class Program
                 Console.WriteLine();
                 Console.WriteLine("  --mine    Rebuild .obsidianx/eval/gold.candidates.json from the");
                 Console.WriteLine("            session journal and exit. Seeds gold.json if absent.");
+                Console.WriteLine("  --absent  Score a file of queries the vault should NOT be able to");
+                Console.WriteLine("            answer. MISS is correct; STRONG is false confidence — the");
+                Console.WriteLine("            one error a gold set can never contain. Runs alone.");
                 Console.WriteLine("Writes .obsidianx/eval/results-<date>.json and Notes/Retrieval benchmark.md");
                 return 0;
             }
@@ -527,6 +863,20 @@ internal static partial class Program
 
         var evalDir = Path.Combine(_vaultPath, ".obsidianx", "eval");
         Directory.CreateDirectory(evalDir);
+
+        // Runs alone and writes nothing. It scores a verdict, not a ranking,
+        // so it shares no metric with the arms above — folding it into the
+        // same report would invite averaging two different questions.
+        if (!string.IsNullOrWhiteSpace(absentArg))
+        {
+            var absentPath = File.Exists(absentArg)
+                ? absentArg : Path.Combine(evalDir, absentArg);
+            Say($"  absent set: {absentPath}");
+            if (OllamaEmbed("warm up the embedding model") == null)
+                Console.Error.WriteLine("  embed UNREACHABLE — every verdict would be keyword-only; aborting.");
+            else return RunAbsent(absentPath, quiet);
+            return 2;
+        }
         var goldPath = goldArg ?? Path.Combine(evalDir, "gold.json");
         var candidatePath = Path.Combine(evalDir, "gold.candidates.json");
 
@@ -604,6 +954,10 @@ internal static partial class Program
         var kwOverlaps = new List<double>();
         var perWordByLang = new Dictionary<string, List<double>>();
         var perCharByLang = new Dictionary<string, List<double>>();
+        // Insertion order is the display order, so the shipping formula is
+        // always the first row a reader compares the challengers against.
+        var discrim = new Dictionary<string, Discriminator>(StringComparer.Ordinal);
+        var discrim3 = new Dictionary<string, Discriminator>(StringComparer.Ordinal);
 
         static Dictionary<string, ModeScore> Segment(
             Dictionary<string, Dictionary<string, ModeScore>> map, string key)
@@ -633,7 +987,7 @@ internal static partial class Program
             sw.Stop();
             embedMs += sw.ElapsedMilliseconds;
 
-            void Arm(string name, Func<List<string>> run)
+            List<string> Arm(string name, Func<List<string>> run)
             {
                 sw.Restart();
                 var ids = run();
@@ -643,15 +997,25 @@ internal static partial class Program
                 Segment(byLang, pair.Lang)[name].Observe(ids, expected);
                 Segment(byTool, string.IsNullOrEmpty(pair.OriginTool) ? "unlabelled" : pair.OriginTool)
                     [name].Observe(ids, expected);
+                return ids;
             }
 
             Arm("keyword", () => RunKeyword(export, all, pair.Query));
             Arm("semantic", () => RunSemantic(all, vec));
-            Arm("hybrid", () => RunHybrid(export, all, pair.Query, vec));
+            var hybridIds = Arm("hybrid", () => RunHybrid(export, all, pair.Query, vec));
+
+            // One cosine sweep, reused by the overlap statistic and the
+            // confidence probes below. Deliberately OUTSIDE Arm(): the semantic
+            // arm's stopwatch has to keep paying for its own sweep, or the
+            // latency table starts reporting a cost the diagnostics absorbed.
+            var semSorted = ScoreCosines(all, vec);
+            var semTopIds = semSorted.Take(EvalTopK).Select(x => x.Id).ToList();
+            var cosById = semSorted.ToDictionary(x => x.Id, x => x.Cos, StringComparer.Ordinal);
+            var cosValues = semSorted.Select(x => x.Cos).ToList();
 
             var (kwTop, kwSecond, kwConc, kwTopIds) = KeywordSignal(export, all, pair.Query);
             kwConcs.Add(kwConc);
-            kwOverlaps.Add(Overlap(kwTopIds, RunSemantic(all, vec)));
+            kwOverlaps.Add(Overlap(kwTopIds, semTopIds));
             kwTops.Add(kwTop);
             // Raw top score turned out to scale with QUERY LENGTH, not signal
             // quality: paraphrase questions are full sentences, so they
@@ -675,9 +1039,75 @@ internal static partial class Program
             lc.Add(kwTop / Math.Max(1, pair.Query.Length / 100.0));
 
             sw.Restart();
-            ObserveRecall(recall, pair.Query, expected);
+            var obs = ObserveRecall(recall, pair.Query, expected);
             sw.Stop();
             recall.ElapsedMs += sw.ElapsedMilliseconds;
+
+            // ── discrimination ──────────────────────────────────────────
+            // Label: did the ranker put an expected note at rank 1. That is
+            // exactly the claim a STRONG verdict makes, so it is the claim the
+            // confidence score has to be able to predict. `foundAt3` is carried
+            // alongside because STRONG's advice is "read `answer`", and the
+            // default window is three notes wide — a signal that predicts
+            // "somewhere in the window" is still useful even if rank 1 is a
+            // coin flip between two good siblings.
+            if (obs.Ok && semSorted.Count > 0 && hybridIds.Count > 0)
+            {
+                var top1Ok = expected.Contains(hybridIds[0]);
+                var top3Ok = hybridIds.Take(3).Any(expected.Contains);
+
+                // The cosine of the note recall ACTUALLY cited, which is not
+                // always the embedding's own argmax — fusion promotes a
+                // keyword-corroborated note past it often enough to matter.
+                // Scoring the argmax instead would measure a note the verdict
+                // never mentioned.
+                var answerCos = cosById.TryGetValue(hybridIds[0], out var ac) ? ac : 0;
+                var field = SummariseField(cosValues, answerCos);
+                var agreeTop = kwTopIds.Count > 0 && semTopIds.Count > 0
+                               && kwTopIds[0] == semTopIds[0] ? 1.0 : 0.0;
+                var overlap = Overlap(kwTopIds, semTopIds);
+                var cos2 = semSorted.Count > 1 ? semSorted[1].Cos : field.Mean;
+
+                void D(string name, string what, double v)
+                {
+                    if (!discrim.TryGetValue(name, out var d))
+                        discrim[name] = d = new Discriminator { Name = name, What = what };
+                    d.Add(v, top1Ok);
+                    if (!discrim3.TryGetValue(name, out var d3))
+                        discrim3[name] = d3 = new Discriminator { Name = name, What = what };
+                    d3.Add(v, top3Ok);
+                }
+
+                // Named for what it IS — the number the running tool
+                // thresholded — not for which formula produced it. Under
+                // BRAINX_RECALL_CONF=v2 this row and conf.v2 are the same
+                // quantity, and a row called "shipping" that silently becomes
+                // the challenger is how a comparison table starts lying.
+                D($"conf.live[{(UseConfidenceV2 ? "v2" : "v1")}]",
+                    "the number brain_recall thresholded on this run", obs.Confidence);
+                // Both formulas, every run, from the same shared functions the
+                // tool calls. Without this, comparing v1 to v2 meant two runs
+                // against a vault that had moved in between — and the last time
+                // that shortcut was taken, a corpus that grew by three notes
+                // was read as a two-point change in the ranker.
+                D("conf.v1", "the original blend: absolute cosine + lexical",
+                    ConfidenceV1(answerCos, obs.Lexical));
+                // The challenger, computed from the same shared function
+                // brain_recall calls under BRAINX_RECALL_CONF=v2 — so this row
+                // is a prediction of the shipped behaviour, not a sketch of it.
+                D("conf.v2", "the per-query blend, same code brain_recall runs",
+                    ConfidenceV2(field, obs.Lexical, agreeTop));
+                D("cos.answer", "absolute cosine of the cited note", answerCos);
+                D("cos.max", "absolute cosine of the best note in the vault", field.Max);
+                D("lexical", "query trigrams contained in the cited note", obs.Lexical);
+                D("z.answer", "cited note in SDs above the corpus mean", field.Z);
+                D("margin.12", "best cosine minus runner-up, raw", field.Max - cos2);
+                D("margin.12z", "best cosine minus runner-up, in corpus SDs",
+                    field.Sd < 1e-9 ? 0 : (field.Max - cos2) / field.Sd);
+                D("nqc.top10", "spread of the top ten over the corpus mean", field.Nqc);
+                D("overlap.kw", "top-10 agreement between the two rankers", overlap);
+                D("agree.top1", "the two rankers picked the same rank 1", agreeTop);
+            }
 
             if (!quiet && ++done % 10 == 0) Console.WriteLine($"  …{done}/{gold.Count}");
         }
@@ -707,7 +1137,22 @@ internal static partial class Program
                 new JProperty(kv.Key, new JArray(kv.Value.Values.Select(a => a.ToJson()))))),
             ["byOriginTool"] = new JObject(byTool.Select(kv =>
                 new JProperty(kv.Key, new JArray(kv.Value.Values.Select(a => a.ToJson()))))),
-            ["recallVerdict"] = recall.ToJson()
+            ["recallVerdict"] = recall.ToJson(),
+            ["confidenceDiscrimination"] = new JArray(discrim.Values.Select(d => new JObject
+            {
+                ["signal"] = d.Name,
+                ["what"] = d.What,
+                ["aucTop1"] = double.IsNaN(d.Auc()) ? null : Math.Round(d.Auc(), 4),
+                ["aucTop1Ci95"] = double.IsNaN(d.AucSe()) ? null : Math.Round(1.96 * d.AucSe(), 4),
+                ["aucTop3"] = discrim3.TryGetValue(d.Name, out var d3) && !double.IsNaN(d3.Auc())
+                    ? Math.Round(d3.Auc(), 4) : null,
+                ["meanWhenRight"] = Math.Round(d.MeanPos, 4),
+                ["meanWhenWrong"] = Math.Round(d.MeanNeg, 4),
+                ["spreadWhenRight"] = d.Spread(true),
+                ["spreadWhenWrong"] = d.Spread(false),
+                ["nRight"] = d.Pos.Count,
+                ["nWrong"] = d.Neg.Count
+            }))
         };
 
         // Results are keyed by gold set, not just by date. Two gold sets
@@ -725,7 +1170,8 @@ internal static partial class Program
         var day = stamp.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
         var jsonPath = Path.Combine(evalDir, $"results-{day}{suffix}.json");
         File.WriteAllText(jsonPath, result.ToString(), new UTF8Encoding(false));
-        var notePath = WriteEvalReport(export, result, arms, byLang, byTool, recall, gold.Count, stamp, goldStem);
+        var notePath = WriteEvalReport(export, result, arms, byLang, byTool, recall,
+            gold.Count, stamp, goldStem, discrim, discrim3);
 
         Result("");
         Result($"  gold={goldStem}  n={gold.Count}  ({gold.Count(p => p.Lang == "th")} th / "
@@ -757,6 +1203,44 @@ internal static partial class Program
             Result($"    [{lang}] per-word  {Percentiles(perWordByLang[lang])}");
             Result($"    [{lang}] per-100ch {Percentiles(perCharByLang[lang])}");
         }
+        if (discrim.Count > 0)
+        {
+            Result("");
+            Result("  discrimination — can any signal tell a right rank-1 from a wrong one?");
+            Result($"  {"signal",-14} {"AUC@1",7} {"±95%",7} {"AUC@3",7}   "
+                 + $"{"p10/p50/p90 when right",-22}  {"p10/p50/p90 when wrong",-22}");
+            foreach (var d in discrim.Values)
+            {
+                var a1 = d.Auc();
+                var a3 = discrim3.TryGetValue(d.Name, out var x) ? x.Auc() : double.NaN;
+                var se = d.AucSe();
+                Result($"  {d.Name,-14} {(double.IsNaN(a1) ? "n/a" : a1.ToString("F3")),7} "
+                     + $"{(double.IsNaN(se) ? "n/a" : (1.96 * se).ToString("F3")),7} "
+                     + $"{(double.IsNaN(a3) ? "n/a" : a3.ToString("F3")),7}   "
+                     + $"{d.Spread(true),-22}  {d.Spread(false),-22}");
+            }
+            Result($"  (0.500 = coin flip · n={discrim.Values.First().Pos.Count} right / "
+                 + $"{discrim.Values.First().Neg.Count} wrong · a band that spans 0.500 proves nothing)");
+
+            // Does precision RESPOND to the cut, or only coverage? A flat
+            // precision column is the signature of a score that cannot be
+            // calibrated, and reading it off a table beats rediscovering it
+            // over three rebuilds.
+            foreach (var name in discrim.Keys.Where(k => k.StartsWith("conf.")).ToList())
+            {
+                if (!discrim.TryGetValue(name, out var d)) continue;
+                Result("");
+                Result($"  {name} — precision vs cut (base rate {d.BaseRate:P1})");
+                Result($"  {"cut",6} {"fires",7} {"coverage",10} {"precision@1",12}");
+                foreach (var cut in EvalCuts)
+                {
+                    var (cov, prec, fires) = d.At(cut);
+                    Result($"  {cut,6:F2} {fires,7} {cov,10:P1} "
+                         + $"{(double.IsNaN(prec) ? "—" : prec.ToString("P1")),12}");
+                }
+            }
+        }
+
         Result("");
         Result($"  hybrid vs keyword @5: {hy.P(hy.Hit5) - kw.P(kw.Hit5):+0.0%;-0.0%;0.0%} absolute"
              + (kw.P(kw.Hit5) > 0 ? $" ({uplift:+0.0%;-0.0%;0.0%} relative)" : ""));
@@ -829,7 +1313,8 @@ internal static partial class Program
     private static string WriteEvalReport(BrainExport export, JObject result,
         Dictionary<string, ModeScore> arms, Dictionary<string, Dictionary<string, ModeScore>> byLang,
         Dictionary<string, Dictionary<string, ModeScore>> byTool, RecallScore recall,
-        int goldCount, DateTime stamp, string goldStem)
+        int goldCount, DateTime stamp, string goldStem,
+        Dictionary<string, Discriminator> discrim, Dictionary<string, Discriminator> discrim3)
     {
         var title = goldStem.Equals("gold", StringComparison.OrdinalIgnoreCase)
             ? "Retrieval benchmark"
@@ -919,6 +1404,66 @@ internal static partial class Program
                     + $"{recall.Strong - recall.StrongAndAbsent - recall.StrongOutsideWindow} had it within reach");
         sb.AppendLine($"- expected note appeared somewhere in the top ten: {recall.Rate(recall.FoundAnywhere):P1}");
         sb.AppendLine();
+        if (discrim.Count > 0)
+        {
+            var first = discrim.Values.First();
+            sb.AppendLine("### Can the confidence score tell right from wrong?");
+            sb.AppendLine();
+            sb.AppendLine("Sweeping `RecallStrong` moved how *often* STRONG fired without moving how "
+                        + "often it was *right* — the mark of a score that carries no information about "
+                        + "the retrieval underneath it. **AUC** is the direct test: the probability that "
+                        + "a signal is higher on a query whose rank 1 was the expected note than on one "
+                        + "where it was not. **0.500 is a coin flip**, and it is scale-free, so a value "
+                        + "in cosine units and one in standard deviations compare honestly.");
+            sb.AppendLine();
+            sb.AppendLine($"Labels: **{first.Pos.Count}** queries where rank 1 was expected, "
+                        + $"**{first.Neg.Count}** where it was not.");
+            sb.AppendLine();
+            sb.AppendLine("| signal | what it measures | AUC@1 | ±95% | AUC@3 | p10/p50/p90 right | p10/p50/p90 wrong |");
+            sb.AppendLine("|---|---|---|---|---|---|---|");
+            foreach (var d in discrim.Values)
+            {
+                var a1 = d.Auc();
+                var a3 = discrim3.TryGetValue(d.Name, out var x) ? x.Auc() : double.NaN;
+                var se = d.AucSe();
+                sb.AppendLine($"| `{d.Name}` | {d.What} | "
+                            + $"{(double.IsNaN(a1) ? "n/a" : a1.ToString("F3"))} | "
+                            + $"±{(double.IsNaN(se) ? "n/a" : (1.96 * se).ToString("F3"))} | "
+                            + $"{(double.IsNaN(a3) ? "n/a" : a3.ToString("F3"))} | "
+                            + $"{d.Spread(true)} | {d.Spread(false)} |");
+            }
+            sb.AppendLine();
+            foreach (var name in discrim.Keys.Where(k => k.StartsWith("conf.")).ToList())
+            {
+                if (!discrim.TryGetValue(name, out var d)) continue;
+                sb.AppendLine($"#### `{name}` — does precision respond to the cut?");
+                sb.AppendLine();
+                sb.AppendLine($"Base rate is **{d.BaseRate:P1}**: that is what a coin flip gated on nothing "
+                            + "would score. A row whose precision matches it is a gate that is not gating. "
+                            + "If precision stays flat while coverage falls, the cut is not the problem — "
+                            + "the score is.");
+                sb.AppendLine();
+                sb.AppendLine("| cut | fires | coverage | precision@1 |");
+                sb.AppendLine("|---|---|---|---|");
+                foreach (var cut in EvalCuts)
+                {
+                    var (cov, prec, fires) = d.At(cut);
+                    sb.AppendLine($"| {cut:F2} | {fires} | {cov:P1} | "
+                                + $"{(double.IsNaN(prec) ? "—" : prec.ToString("P1"))} |");
+                }
+                sb.AppendLine();
+            }
+
+            sb.AppendLine("`conf.shipping` is the number `brain_recall` thresholds today, read back out "
+                        + "of the tool's own response — not a reimplementation. `conf.v2` is the "
+                        + "challenger, computed by the very function `brain_recall` runs under "
+                        + "`BRAINX_RECALL_CONF=v2`, so this row predicts shipped behaviour rather than "
+                        + "sketching it. A row near 0.500 is noise no matter how sensible its definition "
+                        + "sounds — and **a ±95% band that spans 0.500 is not a finding**, which is the "
+                        + "usual state of affairs on a 46-question set with 8 positives.");
+            sb.AppendLine();
+        }
+
         sb.AppendLine("`strongAndWrong` / `falseConfidence` are in the JSON but not quoted here: with "
                     + "single-label gold a different-but-genuinely-relevant note scores as wrong, so they run "
                     + "~60% and mean much less than they look. **absent from the top ten** has no such excuse "

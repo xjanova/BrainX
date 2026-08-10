@@ -569,9 +569,12 @@ internal static partial class Program
                 "cite it, do not re-derive), WEAK (related, finish the work then save what you learn), " +
                 "MISS (unknown — do the work, then brain_create_note it). Use this as the opening move " +
                 "on any non-trivial prompt: it is one call, ~3 results, and it tells you whether to " +
-                "search further at all. `signals` carries the raw cosine + lexical numbers behind the " +
-                "verdict, so a wrong call is diagnosable instead of mysterious. Use brain_search / " +
-                "brain_semantic_search when you want the full ranked list rather than a decision.",
+                "search further at all. MISS means the vault holds nothing close — it is decided by " +
+                "absolute similarity, so it is a claim about the BRAIN, not about how sure the ranker " +
+                "felt. STRONG is decided separately, from how far the cited note stands above the rest " +
+                "of the field. `signals` carries both: raw `cosine`/`lexical` plus `z`, `nqc` and " +
+                "`rankerOverlap`, so a wrong call is diagnosable instead of mysterious. Use brain_search " +
+                "/ brain_semantic_search when you want the full ranked list rather than a decision.",
                 new JObject
                 {
                     ["type"] = "object",
@@ -3134,7 +3137,7 @@ internal static partial class Program
         // brain_recall arrived — it must rank by EXACTLY these rules, and a
         // copy-paste of 60 lines of fusion is how two tools start answering
         // the same question differently. Behaviour here is unchanged.
-        var (ranked, mode, _) = HybridRank(export, filtered, ql, limit, queryVec);
+        var (ranked, mode, _, _) = HybridRank(export, filtered, ql, limit, queryVec);
 
         foreach (var (n, _) in ranked) LogAccess(n.Id, "semantic_search", query);
         var resultsArr = new JArray(ranked.Select(x =>

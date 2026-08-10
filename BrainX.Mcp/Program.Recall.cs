@@ -46,10 +46,20 @@ internal static partial class Program
     //
     // Returns the cosine map as well: recall needs the top hit's raw
     // similarity to judge confidence, and semantic_search simply ignores it.
-    private static (List<(NodeSummary Node, double Score)> Ranked, string Mode, Dictionary<string, double> Cosines)
+    /// <summary>
+    /// How far the two rankers corroborate each other on one query. Both
+    /// numbers were already being computed inside the RRF weight and thrown
+    /// away; recall needs them as confidence signals, and recomputing them
+    /// there would mean a second keyword pass over the whole corpus.
+    /// </summary>
+    internal readonly record struct RankerAgreement(double Overlap, bool SameTop);
+
+    private static (List<(NodeSummary Node, double Score)> Ranked, string Mode,
+                    Dictionary<string, double> Cosines, RankerAgreement Agree)
         HybridRank(BrainExport export, List<NodeSummary> filtered, string ql, int limit, float[]? queryVec)
     {
         var cosines = new Dictionary<string, double>(StringComparer.Ordinal);
+        var agree = default(RankerAgreement);
         List<(NodeSummary node, double score)> ranked;
         string mode;
 
@@ -98,7 +108,7 @@ internal static partial class Program
                     }
                 }
                 Accumulate(semantic, 1.0);
-                Accumulate(keyword, ResolveKeywordWeight(semantic, keyword));
+                Accumulate(keyword, ResolveKeywordWeight(semantic, keyword, out agree));
                 // No extra supersession factor here on purpose — RRF ranks,
                 // not scores, and BOTH input lists already carry the demotion.
                 ranked = fused.Values
@@ -131,7 +141,7 @@ internal static partial class Program
                 .ToList();
         }
 
-        return (ranked, mode, cosines);
+        return (ranked, mode, cosines, agree);
     }
 
     // ───────────── brain_recall — the verdict gate ─────────────
@@ -195,8 +205,17 @@ internal static partial class Program
     // instead of the four hand-probes the table above was built from.
     private static double RecallCosFloor => EnvD("BRAINX_RECALL_COS_FLOOR", 0.40);
     private static double RecallCosCeil => EnvD("BRAINX_RECALL_COS_CEIL", 0.70);
-    private static double RecallStrong => EnvD("BRAINX_RECALL_STRONG", 0.62);
-    private static double RecallWeak => EnvD("BRAINX_RECALL_WEAK", 0.35);
+
+    // The cuts travel WITH the formula. v2 puts its mass much lower than v1 —
+    // both gold sets have their v2 median under 0.30 where v1's sits near 0.55
+    // — so a v2 score read against v1's 0.62/0.35 would answer MISS to almost
+    // everything. Coupling them here means flipping BRAINX_RECALL_CONF cannot
+    // silently ship a calibration meant for the other formula; an explicit
+    // BRAINX_RECALL_STRONG still overrides either.
+    private static double RecallStrong =>
+        EnvD("BRAINX_RECALL_STRONG", UseConfidenceV2 ? RecallStrongV2 : 0.62);
+    private static double RecallWeak =>
+        EnvD("BRAINX_RECALL_WEAK", UseConfidenceV2 ? RecallWeakV2 : 0.35);
 
     /// <summary>
     /// Weight on the lexical signal in the confidence blend.
@@ -305,19 +324,313 @@ internal static partial class Program
     /// </summary>
     private static double ResolveKeywordWeight(
         List<(NodeSummary node, double score)> semantic,
-        List<(NodeSummary node, double score)> keyword)
+        List<(NodeSummary node, double score)> keyword,
+        out RankerAgreement agree)
     {
-        if (RrfKeywordWeightOverride is double pinned) return pinned;
-
         const int Window = 10;
         var semTop = semantic.Take(Window).Select(x => x.node.Id).ToList();
-        var kwTop = new HashSet<string>(
-            keyword.Take(Window).Select(x => x.node.Id), StringComparer.Ordinal);
+        var kwTopList = keyword.Take(Window).Select(x => x.node.Id).ToList();
+        var kwTop = new HashSet<string>(kwTopList, StringComparer.Ordinal);
+
+        agree = semTop.Count == 0 || kwTop.Count == 0
+            ? default
+            : new RankerAgreement(
+                (double)semTop.Count(kwTop.Contains) / Math.Max(semTop.Count, kwTopList.Count),
+                semTop[0] == kwTopList[0]);
+
+        // The override is applied AFTER agreement is measured, not before:
+        // pinning the fusion weight is a ranking decision, and it must not
+        // also blind the confidence gate to a signal it costs nothing to keep.
+        if (RrfKeywordWeightOverride is double pinned) return pinned;
         if (semTop.Count == 0 || kwTop.Count == 0) return RrfKwFloor;
 
-        var overlap = (double)semTop.Count(kwTop.Contains) / Math.Max(semTop.Count, kwTop.Count);
-        var t = Math.Clamp((overlap - RrfAgreeLo) / (RrfAgreeHi - RrfAgreeLo), 0.0, 1.0);
+        var t = Math.Clamp((agree.Overlap - RrfAgreeLo) / (RrfAgreeHi - RrfAgreeLo), 0.0, 1.0);
         return RrfKwFloor + (1.0 - RrfKwFloor) * t;
+    }
+
+    // ───────────── confidence v2 — a score that has to earn its threshold ─────────────
+    //
+    // Measured 2026-08-10 on the 46-question paraphrase set: the shipping
+    // confidence scores AUC **0.525** at predicting whether rank 1 is the
+    // expected note — a coin flip — and STRONG's precision came out at 16.7%
+    // against a base rate of 17.4%. The gate was adding nothing, which is
+    // exactly what the earlier threshold sweep implied when precision refused
+    // to move.
+    //
+    // The decomposition named the culprit: the absolute-cosine term that
+    // carries 70% of the blend cannot do the job at all. On the same set the
+    // cited note's cosine scored AUC **0.467** and the vault's best cosine
+    // **0.408** — at and BELOW a coin flip, so if anything a higher absolute
+    // similarity mildly predicts a WRONG answer.
+    //
+    // That is not a paradox: absolute cosine is query-dependent. A broad
+    // question ("how does search work") sits near hundreds of notes and
+    // produces a high top cosine with no clear winner; a sharp question sits
+    // near almost nothing and produces a lower one with an obvious winner.
+    // Reading it through two GLOBAL constants (RecallCosFloor/Ceil) measures
+    // the query's breadth and calls it confidence.
+    //
+    // Absolute cosine is not useless — it is the only thing that can answer
+    // "does the vault hold anything about this at all", which is why
+    // RecallCosMiss below still reads it. It just cannot answer "is THIS the
+    // right note", and it was being asked only the second question.
+    //
+    // Everything below replaces absolute magnitudes with per-query relative
+    // ones — how far the cited note stands above ITS OWN field — plus the two
+    // signals that were already being computed and thrown away.
+
+    private static double ConfW(string name, double fallback) => EnvD("BRAINX_CONF_" + name, fallback);
+
+    /// <summary>
+    /// The shape of one query's cosine distribution over the corpus.
+    /// <paramref name="Answer"/> is the cited note's cosine, which is NOT
+    /// necessarily the maximum — hybrid fusion can and does promote a note the
+    /// embedding ranked second.
+    /// </summary>
+    internal readonly record struct CosineField(
+        double Mean, double Sd, double Max, double Answer, double Nqc, int N)
+    {
+        /// <summary>Standard deviations the cited note stands above the corpus mean.</summary>
+        public double Z => Sd < 1e-9 ? 0 : (Answer - Mean) / Sd;
+    }
+
+    /// <summary>
+    /// Summarise a query's cosines. Takes the values only — the caller already
+    /// knows which id it cited.
+    /// </summary>
+    internal static CosineField SummariseField(ICollection<double> cosines, double answerCos)
+    {
+        if (cosines.Count == 0) return new CosineField(0, 0, 0, answerCos, 0, 0);
+
+        double sum = 0, sumSq = 0, max = double.NegativeInfinity;
+        foreach (var c in cosines) { sum += c; sumSq += c * c; if (c > max) max = c; }
+        var n = cosines.Count;
+        var mean = sum / n;
+        var sd = Math.Sqrt(Math.Max(0, sumSq / n - mean * mean));
+
+        // A full sort of the corpus's cosines — ~1,280 doubles, tens of
+        // microseconds against a ~235 ms embedding round-trip, so it is not
+        // worth a partial-selection algorithm and the arithmetic that comes
+        // with one. Stated rather than implied: the earlier version of this
+        // comment claimed it avoided sorting, which the code plainly does.
+        var top = new List<double>(cosines);
+        top.Sort((a, b) => b.CompareTo(a));
+        var k = Math.Min(10, top.Count);
+        double tSum = 0, tSumSq = 0;
+        for (int i = 0; i < k; i++) { tSum += top[i]; tSumSq += top[i] * top[i]; }
+        var tMean = tSum / k;
+        var tSd = Math.Sqrt(Math.Max(0, tSumSq / k - tMean * tMean));
+
+        // NQC (normalised query commitment): spread of the top k against the
+        // corpus mean. High = the ranker committed to a few notes; flat = it is
+        // spreading its bet across the vault and has no real opinion.
+        var nqc = Math.Abs(mean) < 1e-9 ? 0 : tSd / mean;
+        return new CosineField(mean, sd, max, answerCos, nqc, n);
+    }
+
+    // Clamp points for the two continuous signals. Set from the measured
+    // percentiles of each population rather than from intuition — the same
+    // discipline the RRF overlap weight was chosen under, and the reason the
+    // old cosine floor/ceiling were wrong for four months.
+    private static double ConfZLo => ConfW("Z_LO", 2.60);
+    private static double ConfZHi => ConfW("Z_HI", 4.20);
+    private static double ConfNqcLo => ConfW("NQC_LO", 0.018);
+    private static double ConfNqcHi => ConfW("NQC_HI", 0.055);
+
+    // Chosen from the measured precision/coverage curves, not from intuition —
+    // see `brainx-mcp eval`'s "does precision respond to the cut" table, which
+    // is printed on every run precisely so these two are re-derivable.
+    /// <summary>
+    /// The STRONG cut for v2, chosen off the measured precision/coverage
+    /// curves rather than to make STRONG fire more.
+    ///
+    ///                        journal-651                paraphrase-46
+    ///   cut     coverage  precision (base 28.1%)   coverage  precision (base 17.4%)
+    ///   0.45      76.0%        33.1%                 6.5%        33.3%
+    ///   0.55      62.2%        37.8%                 4.3%        50.0%
+    ///   0.70      38.4%        43.2%                 0.0%          —
+    ///
+    /// 0.55 is where journal precision clears its base rate by a third and
+    /// paraphrase STRONG still exists at all. Higher cuts keep buying journal
+    /// precision, but 0.60 already takes paraphrase coverage to zero — and
+    /// "STRONG unreachable for the way people actually ask" is the exact defect
+    /// P1.6 was raised to fix, so it is not worth re-introducing for a few
+    /// points on the keyword-biased set.
+    ///
+    /// The honest trade this makes on paraphrase queries: STRONG fires LESS
+    /// often than v1 did (13.0% → 4.3%) and is right about three times as often
+    /// (16.7% → 50.0%). A gate that fires half as much and is trusted is worth
+    /// more than one that fires constantly at the base rate, which is what v1
+    /// was doing.
+    ///
+    /// Not calibrated ACROSS query shapes — see the note in ConfidenceV2.
+    /// </summary>
+    private static double RecallStrongV2 => ConfW("STRONG", 0.55);
+
+    /// <summary>
+    /// Zero on purpose: under v2, MISS is decided by <see cref="RecallCosMiss"/>
+    /// alone and confidence never produces one.
+    ///
+    /// MISS says "the brain does not know this" — a claim about the VAULT. Low
+    /// confidence says "I am not sure which of these notes answers you" — a
+    /// claim about the RANKING. Conflating them is expensive in both
+    /// directions, and it was measured: a WEAK cut of 0.12 pushed false MISS on
+    /// the paraphrase set from 4.3% to 26.1% while catching not one extra
+    /// absent-topic query, because the floor had already caught them all. When
+    /// the vault does hold something and the ranker is merely unsure, WEAK —
+    /// "related, read it, then finish the work" — is the honest verdict.
+    /// </summary>
+    private static double RecallWeakV2 => ConfW("WEAK", 0.0);
+
+    /// <summary>
+    /// Absolute cosine below which nothing in the vault is close enough to be
+    /// an answer, whatever the relative signals say.
+    ///
+    /// This is the one job absolute cosine is genuinely good at, and it is why
+    /// it cannot simply be deleted from the gate. Measured 2026-08-10 against
+    /// a 24-query absent set — topics a software/AI/Thai-business vault plainly
+    /// does not hold — versus the two gold sets:
+    ///
+    ///   population                       p10     p50     p90     max
+    ///   absent (correct answer: MISS)    0.39    0.47    0.51    0.54
+    ///   gold, rank-1 right (paraphrase)  0.540   0.597   0.654
+    ///   gold, rank-1 right (journal)     0.550   0.622   0.693
+    ///
+    /// The two populations separate at ~0.53 on this axis and NOWHERE else:
+    /// `z.answer` reads 3.04 median on absent queries against 3.03 on correct
+    /// paraphrase ones — literally no separation — because in a 1,280-note
+    /// corpus the best match is always several SDs above the mean whether or
+    /// not it is an answer. Running v2 without this floor took MISS on the
+    /// absent set from 95.8% down to 37.5%: fifteen queries about pruning
+    /// apple trees and tuning violins came back WEAK, which tells the agent to
+    /// go read a note about Fortune bots.
+    ///
+    /// Re-measure with `eval --absent` after any embedding-model change; this
+    /// number lives on the cosine scale and moves when that scale does.
+    /// </summary>
+    private static double RecallCosMiss => EnvD("BRAINX_RECALL_COS_MISS", 0.53);
+
+    /// <summary>
+    /// Smallest candidate field the relative signals are allowed to speak for.
+    /// Below it, brain_recall falls back to v1 — including the MISS floor,
+    /// which is skipped, because a scope with one plausible note is not a vault
+    /// with nothing in it.
+    ///
+    /// This is arithmetic, not taste. A z-score over n samples cannot exceed
+    /// (n-1)/√n, so the ramp's own ceiling of 4.20 is UNREACHABLE for n &lt; 21
+    /// and its floor of 2.60 for n &lt; 9. `brain_recall` takes a `scope`
+    /// argument, and a caller scoping to one folder can easily hand this
+    /// function a field of five notes — where the z term would then be pinned
+    /// at zero and quietly cost every scoped query its confidence, for a reason
+    /// no reader of the verdict could have guessed. 100 keeps the attainable
+    /// maximum (9.9) clear of the ramp with room to spare.
+    /// </summary>
+    private static int ConfV2MinField => (int)EnvD("BRAINX_CONF_MIN_FIELD", 100);
+
+    private static double ConfWLex => ConfW("W_LEX", 0.40);
+    private static double ConfWZ => ConfW("W_Z", 0.30);
+    private static double ConfWNqc => ConfW("W_NQC", 0.15);
+    private static double ConfWAgree => ConfW("W_AGREE", 0.15);
+
+    /// <summary>
+    /// Blend the per-query signals into a confidence in [0,1]. Weights and
+    /// clamps are env-tunable (BRAINX_CONF_*) so `brainx-mcp eval` can sweep
+    /// them against the gold sets without a rebuild.
+    /// </summary>
+    /// <summary>
+    /// The original blend, kept as a function so the harness can score it on
+    /// every run whether or not it is the live formula. Comparing two
+    /// calibrations across two rebuilds is how a difference in the corpus gets
+    /// read as a difference in the code.
+    /// </summary>
+    internal static double ConfidenceV1(double cos, double lexical)
+    {
+        var cosNorm = Math.Clamp((cos - RecallCosFloor) / (RecallCosCeil - RecallCosFloor), 0.0, 1.0);
+        var w = RecallLexWeight;
+        return (1.0 - w) * cosNorm + w * lexical;
+    }
+
+    /// <remarks>
+    /// KNOWN LIMIT — discriminative, not calibrated. Within one population of
+    /// queries this score ranks well (AUC 0.71 on the journal set, 0.76 on the
+    /// paraphrase set). ACROSS populations its absolute level is not
+    /// comparable: the same 0.55 cut fires on 62% of short journal-mined
+    /// queries and 4% of full-sentence paraphrase questions, because the
+    /// lexical term rises mechanically as a query gets shorter — a six-word
+    /// question's trigrams are far easier for a note to contain than a
+    /// twenty-word one's.
+    ///
+    /// So a single global cut trades coverage between query shapes, and the
+    /// weights were deliberately NOT re-fitted per set to hide that. The next
+    /// move is a lexical term normalised for query length, or dropping it in
+    /// favour of signals that carry no length confound — and either one has to
+    /// be measured on both sets plus `eval --absent`, not reasoned about.
+    /// </remarks>
+    internal static double ConfidenceV2(CosineField f, double lexical, double agreeTop1)
+    {
+        static double Ramp(double v, double lo, double hi) =>
+            hi - lo < 1e-9 ? 0 : Math.Clamp((v - lo) / (hi - lo), 0.0, 1.0);
+
+        var wSum = ConfWLex + ConfWZ + ConfWNqc + ConfWAgree;
+        if (wSum < 1e-9) return 0;
+
+        var score = ConfWLex * Math.Clamp(lexical, 0.0, 1.0)
+                  + ConfWZ * Ramp(f.Z, ConfZLo, ConfZHi)
+                  + ConfWNqc * Ramp(f.Nqc, ConfNqcLo, ConfNqcHi)
+                  + ConfWAgree * Math.Clamp(agreeTop1, 0.0, 1.0);
+        return score / wSum;
+    }
+
+    /// <summary>
+    /// Which confidence formula brain_recall thresholds. "v2" switches to the
+    /// per-query blend above; anything else keeps the shipped behaviour, so
+    /// the two can be compared in one eval run instead of across rebuilds.
+    /// </summary>
+    private static bool UseConfidenceV2
+    {
+        get
+        {
+            var pin = Environment.GetEnvironmentVariable("BRAINX_RECALL_CONF");
+            if (string.Equals(pin, "v1", StringComparison.OrdinalIgnoreCase)) return false;
+            if (string.Equals(pin, "v2", StringComparison.OrdinalIgnoreCase)) return true;
+            return ConfV2Calibrated();
+        }
+    }
+
+    /// <summary>
+    /// Embedding models whose cosine scale these constants were measured on.
+    ///
+    /// <see cref="RecallCosMiss"/> is an ABSOLUTE cosine, and absolute cosine
+    /// is a property of the model, not of retrieval: a different embedder puts
+    /// its "unrelated" mass somewhere else entirely, and 0.53 would then either
+    /// answer MISS to everything or to nothing. This installer still ships
+    /// <c>DefaultModel = nomic-embed-text</c> while pinning NEW vaults to
+    /// bge-m3, so both really do exist in the wild.
+    ///
+    /// Rather than apply an unmeasured constant to an unmeasured scale, a vault
+    /// on any other model keeps the v1 formula until someone runs
+    /// `eval --absent` against it and adds it here. Opting in by hand with
+    /// BRAINX_RECALL_CONF=v2 is still allowed — that is a deliberate
+    /// experiment, not a silent default.
+    /// </summary>
+    private static readonly string[] ConfV2CalibratedModels = { "bge-m3" };
+
+    private static string? _confV2ModelVault;
+    private static bool _confV2ModelOk;
+
+    private static bool ConfV2Calibrated()
+    {
+        // Cached per vault: ResolveModel reads model.json off disk, and this
+        // is on the recall hot path. The vault cannot change under a running
+        // process without the export cache turning over anyway.
+        if (_confV2ModelVault == _vaultPath) return _confV2ModelOk;
+        _confV2ModelVault = _vaultPath;
+        var model = EmbeddingService.ResolveModel(_vaultPath) ?? "";
+        // Ollama names carry an optional tag ("bge-m3:latest"); the scale is a
+        // property of the model, not of which tag was pulled.
+        var stem = model.Split(':')[0].Trim();
+        _confV2ModelOk = ConfV2CalibratedModels.Contains(stem, StringComparer.OrdinalIgnoreCase);
+        return _confV2ModelOk;
     }
 
     private static JToken BrainRecall(JObject args)
@@ -336,7 +649,7 @@ internal static partial class Program
         var filtered = candidates.ToList();
 
         var ql = query.ToLowerInvariant();
-        var (ranked, mode, cosines) = HybridRank(export, filtered, ql, limit, OllamaEmbed(query));
+        var (ranked, mode, cosines, agree) = HybridRank(export, filtered, ql, limit, OllamaEmbed(query));
 
         if (ranked.Count == 0)
         {
@@ -361,12 +674,15 @@ internal static partial class Program
         var lexical = Containment(queryGrams, docGrams);
 
         var hasCos = cosines.TryGetValue(top.Id, out var cos);
+        var field = hasCos ? SummariseField(cosines.Values, cos) : default;
         double confidence;
-        if (hasCos)
+        if (hasCos && UseConfidenceV2 && field.N >= ConfV2MinField)
         {
-            var cosNorm = Math.Clamp((cos - RecallCosFloor) / (RecallCosCeil - RecallCosFloor), 0.0, 1.0);
-            var w = RecallLexWeight;
-            confidence = (1.0 - w) * cosNorm + w * lexical;
+            confidence = ConfidenceV2(field, lexical, agree.SameTop ? 1.0 : 0.0);
+        }
+        else if (hasCos)
+        {
+            confidence = ConfidenceV1(cos, lexical);
         }
         else
         {
@@ -377,7 +693,27 @@ internal static partial class Program
             confidence = lexical * 0.90;
         }
 
-        var verdict = confidence >= RecallStrong ? "STRONG"
+        // Two gates, because they answer two different questions and no single
+        // number answers both. "Is anything in the vault even close" is an
+        // ABSOLUTE question, and only raw cosine can answer it. "Does the note
+        // I picked stand clear of the others" is a RELATIVE one, and raw cosine
+        // is measurably worse than useless at it (AUC 0.408 — below a coin
+        // flip, because a high absolute cosine mostly means the QUESTION was
+        // broad). Feeding each gate the signal that actually measures it beats
+        // any weighting of the two into one score, which is what v1 did.
+        // Deliberately the vault's BEST cosine, not the cited note's. "Does
+        // the brain hold anything about this" is a property of the corpus and
+        // the query; the cited note is whatever fusion promoted, and it is
+        // routinely not the embedding's own favourite. Reading the floor off
+        // the cited note conflated "the vault has nothing" with "fusion picked
+        // a poor note out of a good field", and measured it: false MISS on the
+        // paraphrase set went 2.2% → 26.1%, because a wrong rank-1 with a low
+        // cosine was being reported as an empty vault while the right note sat
+        // at rank 5 well above the floor.
+        var nothingClose = UseConfidenceV2 && hasCos
+                        && field.N >= ConfV2MinField && field.Max < RecallCosMiss;
+        var verdict = nothingClose ? "MISS"
+                    : confidence >= RecallStrong ? "STRONG"
                     : confidence >= RecallWeak ? "WEAK"
                     : "MISS";
 
@@ -404,7 +740,22 @@ internal static partial class Program
                 ["mode"] = mode,
                 ["cosine"] = hasCos ? Math.Round(cos, 3) : null,
                 ["lexical"] = Math.Round(lexical, 3),
-                ["candidates"] = filtered.Count
+                ["candidates"] = filtered.Count,
+                // Relative signals, printed whether or not they are being
+                // thresholded yet: absolute cosine measures how broad the
+                // QUESTION is, and only these say how far the cited note
+                // stands above the field it was picked from. A verdict whose
+                // inputs are invisible is not diagnosable.
+                ["cosMax"] = hasCos ? Math.Round(field.Max, 3) : null,
+                ["z"] = hasCos ? Math.Round(field.Z, 2) : null,
+                ["nqc"] = hasCos ? Math.Round(field.Nqc, 4) : null,
+                ["rankerOverlap"] = Math.Round(agree.Overlap, 2),
+                ["rankersAgreeOnTop"] = agree.SameTop,
+                // Says which formula actually ran, not which one is configured
+                // — a scope small enough to fall back is otherwise invisible.
+                ["formula"] = UseConfidenceV2 && hasCos && field.N >= ConfV2MinField
+                    ? "v2"
+                    : UseConfidenceV2 && hasCos ? $"v1 (field {field.N} < {ConfV2MinField})" : "v1"
             },
             ["answer"] = verdict == "MISS" ? null : answer,
             // A MISS still names what it rejected. Hiding it made the verdict
