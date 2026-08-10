@@ -710,8 +710,28 @@ internal static partial class Program
         // paraphrase set went 2.2% → 26.1%, because a wrong rank-1 with a low
         // cosine was being reported as an empty vault while the right note sat
         // at rank 5 well above the floor.
+        // ...unless the other ranker independently picked the same note. A
+        // cosine floor asks "is anything close" of ONE ranker, and there is a
+        // whole class of query — an id, a codename, a PR number — that is
+        // semantically meaningless and lexically exact, where the embedding
+        // legitimately finds nothing while keyword lands on the answer. A bare
+        // floor cost 24 extra false MISSes on the journal-mined set (2.6% ->
+        // 6.3%), whose labels come from exactly such searches.
+        //
+        // Costs nothing on the absent set: across all 24 absent-topic queries
+        // the two rankers agreed on rank 1 exactly zero times, so this exempts
+        // none of them, and its MISS rate is unmoved at 95.8%. Corroboration
+        // between two independent rankers is evidence the vault holds
+        // something; one ranker's silence is not evidence that it does not.
+        //
+        // Measured, not hoped: it recovers 10 of those 24 (6.3% -> 4.8%), and
+        // leaves paraphrase and the live set unchanged. The remaining gap to
+        // v1's 2.6% is a real cost of the floor, paid for STRONG verdicts that
+        // cite a set holding the answer far more often (absent@10 100 -> 83).
         var nothingClose = UseConfidenceV2 && hasCos
-                        && field.N >= ConfV2MinField && field.Max < RecallCosMiss;
+                        && field.N >= ConfV2MinField
+                        && field.Max < RecallCosMiss
+                        && !agree.SameTop;
         var verdict = nothingClose ? "MISS"
                     : confidence >= RecallStrong ? "STRONG"
                     : confidence >= RecallWeak ? "WEAK"
