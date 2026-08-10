@@ -605,8 +605,17 @@ internal static partial class Program
         => HybridRank(export, all, query.ToLowerInvariant(), EvalTopK, null)
             .Ranked.Select(r => r.Node.Id).ToList();
 
-    /// <summary>Full hybrid — exactly what brain_semantic_search returns.</summary>
+    /// <summary>
+    /// Fusion with the lexical rerank explicitly OFF — the pre-2026-08-11
+    /// baseline, kept so every run still shows what the shipped default is
+    /// being compared against rather than quietly moving the goalposts.
+    /// </summary>
     private static List<string> RunHybrid(BrainExport export, List<NodeSummary> all, string query, float[]? vec)
+        => HybridRank(export, all, query.ToLowerInvariant(), EvalTopK, vec, lexRerank: false)
+            .Ranked.Select(r => r.Node.Id).ToList();
+
+    /// <summary>What brain_semantic_search and brain_recall actually return now.</summary>
+    private static List<string> RunShipped(BrainExport export, List<NodeSummary> all, string query, float[]? vec)
         => HybridRank(export, all, query.ToLowerInvariant(), EvalTopK, vec)
             .Ranked.Select(r => r.Node.Id).ToList();
 
@@ -629,6 +638,175 @@ internal static partial class Program
     /// snapshot and the differences are attributable to the constant alone.
     /// </summary>
     private static readonly double[] WideCeilings = { 1.5, 2.5, 4.0 };
+
+    /// <summary>
+    /// Lexical weights swept as arms for the RERANKING task specifically.
+    /// 0.40 is what the verdict uses; it won on the honest set and lost 1.7% of
+    /// MRR on the journal set, so the question is whether a lower weight keeps
+    /// the gain without the cost — or whether this is another no-free-lunch
+    /// trade that has to be stated rather than tuned away.
+    /// </summary>
+    private static readonly double[] LexWeights = { 0.15, 0.25, 0.40 };
+
+    // ───────────── LLM reranking ─────────────
+    //
+    // Why this and not more fusion or chunking, both of which were measured
+    // and rejected today: the two populations a ranker has to separate are
+    // ALREADY INDISTINGUISHABLE on the axis every one of those approaches
+    // uses. Cosine of the cited note, paraphrase set:
+    //
+    //     rank-1 RIGHT   p10 0.540 · p50 0.597 · p90 0.654
+    //     rank-1 WRONG   p10 0.547 · p50 0.598 · p90 0.649
+    //
+    // The same distribution. A bi-encoder scores two texts that never meet —
+    // it measures whether a note is ABOUT the query's topic, and every note in
+    // a vault this focused is about the topic. "Does this note ANSWER the
+    // question" needs the query and the candidate read together, which is what
+    // a cross-encoder or an LLM does and what cosine structurally cannot.
+    //
+    // The headroom says the same thing. On the paraphrase set hit@10 is 50.0%
+    // while hit@1 is 17.4%: **32.6 points of the answers are already in the
+    // top ten and merely in the wrong order.** Perfect reordering of a list we
+    // already retrieve is worth nearly 3x on hit@1, against the 6.5 points that
+    // a perfect ROUTER was worth. Same harness, so the claim is falsifiable.
+    private static string RerankModel =>
+        Environment.GetEnvironmentVariable("BRAINX_RERANK_MODEL") is { Length: > 0 } m
+            ? m : "gemma3:4b";
+
+    private static int RerankDepth =>
+        int.TryParse(Environment.GetEnvironmentVariable("BRAINX_RERANK_DEPTH"), out var d)
+            && d is > 1 and <= 25 ? d : 10;
+
+    /// <summary>
+    /// Reorder the top <see cref="RerankDepth"/> of the hybrid ranking by
+    /// asking a local model which candidate actually answers the question.
+    ///
+    /// Everything below the reranked window keeps its original order, so this
+    /// can only ever permute the head — it cannot lose a note the ranker found,
+    /// which keeps hit@10 a floor rather than a gamble. On any failure
+    /// (model absent, timeout, unparseable) the original order is returned
+    /// unchanged: a reranker that silently drops to random on error would be
+    /// indistinguishable from one that works badly.
+    /// </summary>
+    private static List<string> RunRerank(BrainExport export, List<NodeSummary> all,
+                                          string query, float[]? vec)
+    {
+        var ranked = HybridRank(export, all, query.ToLowerInvariant(), EvalTopK, vec).Ranked;
+        var ids = ranked.Select(r => r.Node.Id).ToList();
+        var depth = Math.Min(RerankDepth, ranked.Count);
+        if (depth < 2) return ids;
+
+        var sb = new StringBuilder();
+        sb.AppendLine("You are ranking notes from a personal knowledge vault against a question.");
+        sb.AppendLine();
+        sb.AppendLine("QUESTION: " + query);
+        sb.AppendLine();
+        sb.AppendLine("CANDIDATES:");
+        for (int i = 0; i < depth; i++)
+        {
+            var n = ranked[i].Node;
+            var ctx = ExtractMatchContext(export, n, query.ToLowerInvariant())
+                      ?? TruncatePreview(n.Preview, 400);
+            sb.AppendLine($"[{i + 1}] {n.Title}");
+            sb.AppendLine("    " + Collapse(ctx, 400));
+        }
+        sb.AppendLine();
+        sb.AppendLine("Score each candidate 0-10 for how directly it ANSWERS the question.");
+        sb.AppendLine("Being about the same general topic is NOT enough — score that low.");
+        sb.AppendLine("Reply with JSON only: {\"scores\":[{\"id\":1,\"score\":7}, ...]}");
+
+        var reply = OllamaJsonChat(RerankModel, sb.ToString());
+        if (reply?["scores"] is not JArray arr || arr.Count == 0) return ids;
+
+        var score = new Dictionary<int, double>();
+        foreach (var t in arr)
+        {
+            var idx = t?["id"]?.Value<int?>();
+            var s = t?["score"]?.Value<double?>();
+            if (idx is >= 1 && idx <= depth && s.HasValue) score[idx.Value - 1] = s.Value;
+        }
+        if (score.Count == 0) return ids;
+
+        // Ties and unscored candidates fall back to the original order, so the
+        // reranker can only improve on retrieval where it has an opinion.
+        var head = Enumerable.Range(0, depth)
+            .OrderByDescending(i => score.TryGetValue(i, out var s) ? s : -1.0)
+            .ThenBy(i => i)
+            .Select(i => ids[i])
+            .ToList();
+        head.AddRange(ids.Skip(depth));
+        return head;
+    }
+
+    /// <summary>
+    /// Reorder the same top-10 window using signals that are already computed
+    /// and already measured — no model, no network, microseconds.
+    ///
+    /// The reason to try this before anything neural: on the paraphrase set
+    /// trigram containment scored **AUC 0.666**, the highest of any single
+    /// signal tested, higher than the cosine the ranking is actually sorted by
+    /// (0.467). It has never been used to ORDER results — only to decide the
+    /// verdict after ordering was finished. So the best discriminator in the
+    /// system was being computed, printed, and then thrown away by the one
+    /// stage it could have improved.
+    ///
+    /// Containment is deliberately measured against title + matched passage +
+    /// preview rather than the full body: a 4,000-word note contains nearly
+    /// every trigram in the language and would score ~1.0 for everything.
+    /// </summary>
+    private static List<string> RunRerankLexical(BrainExport export, List<NodeSummary> all,
+                                                 string query, float[]? vec,
+                                                 double? lexWeight = null,
+                                                 double? maxOverlap = null)
+    {
+        var ql = query.ToLowerInvariant();
+        var (ranked, _, cosines, agree) = HybridRank(export, all, ql, EvalTopK, vec);
+        var ids = ranked.Select(r => r.Node.Id).ToList();
+        if (ranked.Count < 2) return ids;
+
+        // Gate derived from the mechanism, not fitted to the score. Lexical
+        // containment only carries NEW information when the keyword arm is not
+        // already driving the ranking. On the journal set the two rankers
+        // overlap ~0.40, keyword is therefore weighted near 0.70, and
+        // re-sorting by a lexical signal it has already applied just shuffles
+        // ties — measured: MRR 0.401 -> 0.394. On paraphrase, overlap ~0.10
+        // leaves keyword at the 0.10 floor, so containment is genuinely unused
+        // information — measured: MRR 0.264 -> 0.313.
+        if (maxOverlap is double cut && agree.Overlap >= cut) return ids;
+
+        var qGrams = Trigrams(query);
+        var field = SummariseField(cosines.Values,
+            cosines.TryGetValue(ranked[0].Node.Id, out var c0) ? c0 : 0);
+
+        var scored = new List<(string Id, double Score, int Orig)>(ranked.Count);
+        for (int i = 0; i < ranked.Count; i++)
+        {
+            var n = ranked[i].Node;
+            var ctx = ExtractMatchContext(export, n, ql);
+            var doc = Trigrams(n.Title + " " + (ctx ?? "") + " " + TruncatePreview(n.Preview, 500));
+            var lex = Containment(qGrams, doc);
+            var cos = cosines.TryGetValue(n.Id, out var cc) ? cc : 0;
+            // Same blend the verdict uses, evaluated per CANDIDATE instead of
+            // once for the winner — the field statistics stay global because
+            // they describe the query, not the note.
+            var per = field with { Answer = cos };
+            scored.Add((n.Id,
+                ConfidenceV2(per, lex, agree.SameTop && i == 0 ? 1.0 : 0.0, lexWeight), i));
+        }
+
+        return scored
+            .OrderByDescending(x => x.Score)
+            .ThenBy(x => x.Orig)          // ties keep the retrieval order
+            .Select(x => x.Id)
+            .ToList();
+    }
+
+    private static string Collapse(string? s, int max)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return "";
+        var t = Regex.Replace(s, @"\s+", " ").Trim();
+        return t.Length <= max ? t : t[..max];
+    }
 
     /// <summary>
     /// Cosine alone. Mirrors HybridRank's semantic branch rather than calling
@@ -832,7 +1010,7 @@ internal static partial class Program
     internal static async Task<int> EvalCliAsync(string[] args)
     {
         string? vaultArg = null, goldArg = null, absentArg = null;
-        var mine = false; var quiet = false; var limit = 0;
+        var mine = false; var quiet = false; var limit = 0; var rerank = false;
         for (int i = 0; i < args.Length; i++)
         {
             if (args[i] == "--vault" && i + 1 < args.Length) vaultArg = args[++i];
@@ -840,6 +1018,9 @@ internal static partial class Program
             else if (args[i] == "--absent" && i + 1 < args.Length) absentArg = args[++i];
             else if (args[i] == "--limit" && i + 1 < args.Length) int.TryParse(args[++i], out limit);
             else if (args[i] == "--mine") mine = true;
+            // Opt-in: one LLM call per query, so it turns a 5-minute run into
+            // a much longer one. Off by default keeps the regression runs fast.
+            else if (args[i] == "--rerank") rerank = true;
             else if (args[i] == "--quiet") quiet = true;
             else if (args[i] is "-h" or "--help" or "help")
             {
@@ -955,7 +1136,7 @@ internal static partial class Program
         // because the shipped one was measured landing BETWEEN its own inputs
         // — 55.8% against keyword's 61.6% on the journal set — and a
         // replacement can only be judged against the same snapshot.
-        var armNames = new[] { "keyword", "semantic", "hybrid", "router" }
+        var armNames = new[] { "keyword", "semantic", "hybrid", "shipped", "router" }
             .Concat(WideCeilings.Select(c => $"wide{c:0.#}"))
             // Two CHEATING arms. They read the labels, so they can never ship —
             // they exist to bound the search. `oracle:pick` is the best a
@@ -964,7 +1145,14 @@ internal static partial class Program
             // retrieved. Without these, tuning a fusion weight is optimising
             // toward an unknown ceiling, which is how a week disappears into
             // +2 points that were never worth having.
-            .Concat(new[] { "oracle:pick", "oracle:union" })
+            // oracle:top10 is the reranking ceiling: perfect reordering of the
+            // list hybrid ALREADY returns. Its hit@1 equals hybrid's hit@10 by
+            // construction, which is exactly the point — it makes the size of
+            // the prize visible next to every attempt to claim it.
+            .Concat(LexWeights.Select(w => $"lex{w:0.##}"))
+            .Concat(new[] { "lexauto" })
+            .Concat(new[] { "oracle:pick", "oracle:union", "oracle:top10" })
+            .Concat(rerank ? new[] { "rerank" } : Array.Empty<string>())
             .ToArray();
         var arms = armNames.ToDictionary(
             n => n,
@@ -1032,6 +1220,7 @@ internal static partial class Program
             var kwIds = Arm("keyword", () => RunKeyword(export, all, pair.Query));
             var semIds = Arm("semantic", () => RunSemantic(all, vec));
             var hybridIds = Arm("hybrid", () => RunHybrid(export, all, pair.Query, vec));
+            Arm("shipped", () => RunShipped(export, all, pair.Query, vec));
 
             // Rank of the first expected id, or int.MaxValue. Used only by the
             // oracle arms below.
@@ -1056,7 +1245,22 @@ internal static partial class Program
                 }
                 return merged;
             });
+            Arm("oracle:top10", () =>
+            {
+                var r = RankOf(hybridIds);
+                if (r == int.MaxValue || r == 0) return hybridIds;
+                var promoted = new List<string> { hybridIds[r] };
+                promoted.AddRange(hybridIds.Where((_, i) => i != r));
+                return promoted;
+            });
+            if (rerank) Arm("rerank", () => RunRerank(export, all, pair.Query, vec));
             Arm("router", () => RunFusion(export, all, pair.Query, vec, Fusion.Router));
+            foreach (var w in LexWeights)
+            {
+                var lexW = w;
+                Arm($"lex{lexW:0.##}", () => RunRerankLexical(export, all, pair.Query, vec, lexW));
+            }
+            Arm("lexauto", () => RunRerankLexical(export, all, pair.Query, vec, 0.40, 0.30));
             foreach (var c in WideCeilings)
             {
                 var ceiling = c;

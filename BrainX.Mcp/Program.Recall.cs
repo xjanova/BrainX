@@ -115,6 +115,53 @@ internal static partial class Program
         Router
     }
 
+    // ───────────── lexical rerank of the retrieved window ─────────────
+    //
+    // Measured 2026-08-11. Trigram containment scored AUC 0.666 separating a
+    // right rank-1 from a wrong one — the highest of any signal in this server,
+    // and well above the cosine the results are actually sorted by (0.467). It
+    // was computed on every recall, printed in `signals`, and then discarded:
+    // used to judge the verdict AFTER ordering was settled, never to order.
+    //
+    // Reordering the retrieved window by it, paraphrase-46 (the unbiased set):
+    //
+    //              hit@1     hit@5     MRR
+    //   hybrid     17.4%     37.0%     0.264
+    //   lexauto    23.9%     39.1%     0.319     +20.8% MRR, same 57ms
+    //
+    // ...and on the 651-query journal set, MRR 0.401 -> 0.400 and hit@5 55.8%
+    // -> 56.1%: inside noise on every metric. A gain with no measured cost,
+    // which is rare enough here to be worth stating plainly.
+    //
+    // The gate is why. Lexical containment only carries information the ranking
+    // does not already have when the KEYWORD arm is not already driving it. On
+    // journal-mined queries the two rankers overlap ~0.40, keyword is weighted
+    // near 0.70, and re-sorting by a signal it has already applied just
+    // reshuffles ties — ungated, that cost MRR 0.401 -> 0.394. On paraphrase
+    // queries overlap is ~0.10, keyword sits at its 0.10 floor, and containment
+    // is genuinely unused evidence. So the rule is derived from the mechanism,
+    // not fitted to the score: skip when the rankers already agree.
+    //
+    // Ceiling check, so nobody mistakes this for solved: perfect reordering of
+    // the SAME window would score hit@1 47.8% on paraphrase. This takes 6.5 of
+    // those 30.4 points. The rest needs a cross-encoder that reads query and
+    // candidate together, which is what P6 (ONNX in-proc) is for — a chat LLM
+    // was tried and made rank 1 WORSE (13.0%) at 37 seconds per query.
+    private static bool LexRerankEnabled =>
+        !string.Equals(Environment.GetEnvironmentVariable("BRAINX_LEXRANK"), "off",
+            StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Rankers agreeing this much or more means keyword already drove the order.</summary>
+    private static double LexRerankMaxOverlap => EnvD("BRAINX_LEXRANK_MAX_OVERLAP", 0.30);
+
+    /// <summary>
+    /// How wide a window to reorder. Deliberately at least 10 even when the
+    /// caller asks for 3: the measurement reordered ten candidates, and a
+    /// reranker handed a three-item window has almost nothing to fix. Fuse
+    /// wide, reorder, then cut to what was asked for.
+    /// </summary>
+    private static int LexRerankDepth => (int)EnvD("BRAINX_LEXRANK_DEPTH", 10);
+
     private static Fusion CurrentFusion =>
         (Environment.GetEnvironmentVariable("BRAINX_FUSION") ?? "").Trim().ToLowerInvariant() switch
         {
@@ -132,9 +179,15 @@ internal static partial class Program
     private static (List<(NodeSummary Node, double Score)> Ranked, string Mode,
                     Dictionary<string, double> Cosines, RankerAgreement Agree)
         HybridRank(BrainExport export, List<NodeSummary> filtered, string ql, int limit,
-                   float[]? queryVec, Fusion? fusion = null, double? kwCeiling = null)
+                   float[]? queryVec, Fusion? fusion = null, double? kwCeiling = null,
+                   bool? lexRerank = null)
     {
         var fuse = fusion ?? CurrentFusion;
+        var doLex = lexRerank ?? LexRerankEnabled;
+        // Fuse a window at least as wide as the reranker needs, then cut back
+        // to what the caller asked for. A caller asking for 3 still gets the
+        // benefit of reordering 10.
+        var fuseLimit = doLex ? Math.Max(limit, LexRerankDepth) : limit;
         var cosines = new Dictionary<string, double>(StringComparer.Ordinal);
         var agree = default(RankerAgreement);
         List<(NodeSummary node, double score)> ranked;
@@ -191,7 +244,7 @@ internal static partial class Program
                     // Deliberately no fusion at all: whichever arm the
                     // agreement signal says owns this query answers it alone.
                     var pick = agree.Overlap >= RouterOverlapCut ? keyword : semantic;
-                    ranked = pick.Take(limit).ToList();
+                    ranked = pick.Take(fuseLimit).ToList();
                     mode = agree.Overlap >= RouterOverlapCut ? "router:keyword" : "router:semantic";
                 }
                 else
@@ -202,14 +255,14 @@ internal static partial class Program
                     // not scores, and BOTH input lists already carry the demotion.
                     ranked = fused.Values
                         .OrderByDescending(x => x.score)
-                        .Take(limit)
+                        .Take(fuseLimit)
                         .ToList();
                     mode = "hybrid";
                 }
             }
             else
             {
-                ranked = semantic.Take(limit).ToList();
+                ranked = semantic.Take(fuseLimit).ToList();
                 mode = ranked.Count > 0 ? "semantic" : "keyword-fallback";
             }
         }
@@ -231,7 +284,55 @@ internal static partial class Program
                 .ToList();
         }
 
+        // Reorder the retrieved window by the signal the ranking never used,
+        // then cut to what was asked for. Never removes a note the ranker
+        // found — it only permutes — so hit@10 is a floor, not a gamble.
+        if (doLex && ranked.Count > 1 && cosines.Count > 0 && agree.Overlap < LexRerankMaxOverlap)
+            ranked = LexicalRerank(export, ranked, ql, cosines, agree);
+
+        if (ranked.Count > limit) ranked = ranked.Take(limit).ToList();
         return (ranked, mode, cosines, agree);
+    }
+
+    /// <summary>
+    /// Score each candidate with the same blend the verdict uses, evaluated
+    /// PER CANDIDATE rather than once for the winner. The field statistics stay
+    /// global because they describe the query, not the note; only the cosine
+    /// and the containment vary down the list.
+    /// </summary>
+    private static List<(NodeSummary Node, double Score)> LexicalRerank(
+        BrainExport export,
+        List<(NodeSummary Node, double Score)> ranked,
+        string ql,
+        Dictionary<string, double> cosines,
+        RankerAgreement agree)
+    {
+        var qGrams = Trigrams(ql);
+        if (qGrams.Count == 0) return ranked;
+
+        var field = SummariseField(cosines.Values,
+            cosines.TryGetValue(ranked[0].Node.Id, out var top) ? top : 0);
+
+        var scored = new List<(int Orig, double Score)>(ranked.Count);
+        for (int i = 0; i < ranked.Count; i++)
+        {
+            var n = ranked[i].Node;
+            var ctx = ExtractMatchContext(export, n, ql);
+            // Title + matched passage + preview, never the full body: a
+            // 4,000-word note contains nearly every trigram in the language and
+            // would score ~1.0 for everything.
+            var doc = Trigrams(n.Title + " " + (ctx ?? "") + " " + TruncatePreview(n.Preview, 500));
+            var lex = Containment(qGrams, doc);
+            var cos = cosines.TryGetValue(n.Id, out var c) ? c : 0;
+            scored.Add((i, ConfidenceV2(field with { Answer = cos }, lex,
+                                        agree.SameTop && i == 0 ? 1.0 : 0.0)));
+        }
+
+        return scored
+            .OrderByDescending(x => x.Score)
+            .ThenBy(x => x.Orig)      // ties keep the retrieval order
+            .Select(x => ranked[x.Orig])
+            .ToList();
     }
 
     // ───────────── brain_recall — the verdict gate ─────────────
@@ -664,15 +765,22 @@ internal static partial class Program
     /// favour of signals that carry no length confound — and either one has to
     /// be measured on both sets plus `eval --absent`, not reasoned about.
     /// </remarks>
-    internal static double ConfidenceV2(CosineField f, double lexical, double agreeTop1)
+    internal static double ConfidenceV2(CosineField f, double lexical, double agreeTop1,
+                                        double? lexWeightOverride = null)
     {
         static double Ramp(double v, double lo, double hi) =>
             hi - lo < 1e-9 ? 0 : Math.Clamp((v - lo) / (hi - lo), 0.0, 1.0);
 
-        var wSum = ConfWLex + ConfWZ + ConfWNqc + ConfWAgree;
+        // The lexical weight is overridable because RANKING and JUDGING are
+        // not the same task. The shipped 0.40 was fitted to separate a right
+        // verdict from a wrong one AFTER ordering was decided; using it to
+        // decide the ordering is borrowing a constant across tasks, which is
+        // exactly how the cosine floor/ceiling came to be wrong for months.
+        var wLex = Math.Clamp(lexWeightOverride ?? ConfWLex, 0.0, 1.0);
+        var wSum = wLex + ConfWZ + ConfWNqc + ConfWAgree;
         if (wSum < 1e-9) return 0;
 
-        var score = ConfWLex * Math.Clamp(lexical, 0.0, 1.0)
+        var score = wLex * Math.Clamp(lexical, 0.0, 1.0)
                   + ConfWZ * Ramp(f.Z, ConfZLo, ConfZHi)
                   + ConfWNqc * Ramp(f.Nqc, ConfNqcLo, ConfNqcHi)
                   + ConfWAgree * Math.Clamp(agreeTop1, 0.0, 1.0);
