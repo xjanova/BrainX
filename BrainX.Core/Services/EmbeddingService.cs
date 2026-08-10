@@ -33,7 +33,33 @@ public class EmbeddingService
     // to semantic search, so the limit IS the recall ceiling — see ResolveMaxChars.
     public int MaxChars { get; set; } = DefaultMaxChars;
 
+    /// <summary>
+    /// What a vault falls back to when nothing else says otherwise. This is
+    /// NOT the model we want new vaults on — see <see cref="PreferredModel"/>.
+    ///
+    /// It cannot be changed to bge-m3, and the reason is subtle enough to be
+    /// worth spelling out: a vault whose sidecars predate the manifest has no
+    /// model.json, so <see cref="ResolveModel"/> reports DefaultModel — and
+    /// PrecomputeAsync reads that same value as "what the existing sidecars
+    /// were built with". Point DefaultModel at bge-m3 and every legacy vault
+    /// silently claims its nomic sidecars are already bge: modelChanged is
+    /// false, the mtime check skips them all, and query vectors then come back
+    /// at 1024 dims against 768-dim sidecars. Cosine across dimensions is 0,
+    /// so semantic search returns nothing and reports no error.
+    /// </summary>
     public const string DefaultModel = "nomic-embed-text";
+
+    /// <summary>
+    /// What a NEW vault should be built with. bge-m3 reads 16,000 chars per
+    /// note against nomic's 4,000 — measured on a Thai-heavy vault, that is
+    /// the difference between 13% and 79% of notes embedded end-to-end.
+    ///
+    /// Only ever applied by <see cref="SeedManifest"/>, i.e. when there is not
+    /// a single sidecar to invalidate. Existing vaults migrate deliberately
+    /// (BRAINX_EMBED_MODEL, or an edited manifest), never as a side effect of
+    /// upgrading the binary.
+    /// </summary>
+    public const string PreferredModel = "bge-m3";
 
     // 4000 chars was measured against nomic-embed-text on 2026-05-07: 8000 was
     // fine for English but tipped Thai notes over its context and produced
@@ -150,6 +176,36 @@ public class EmbeddingService
             File.WriteAllText(Path.Combine(dir, "model.json"), json);
         }
         catch { /* best-effort — a missing manifest just means DefaultModel */ }
+    }
+
+    /// <summary>
+    /// Pin a vault that has never been embedded to <paramref name="model"/>,
+    /// by writing the manifest before the first sidecar exists. Returns false
+    /// — changing nothing — if a manifest is already there or if any sidecar
+    /// has been written, because at that point the choice has been made and
+    /// overriding it would strand vectors at the wrong dimensions.
+    ///
+    /// This is the ONLY sanctioned way to put a vault on a non-default model
+    /// without a user-visible migration. It is safe precisely because "no
+    /// sidecars" means there is nothing to invalidate.
+    ///
+    /// complete:true is honest here rather than optimistic: with zero sidecars
+    /// there is no interrupted pass to resume, and claiming otherwise would
+    /// send the first precompute down the rebuild path for no reason.
+    /// </summary>
+    public static bool SeedManifest(string vaultPath, string model)
+    {
+        try
+        {
+            var dir = Path.Combine(vaultPath, ".obsidianx", "embeddings");
+            if (File.Exists(Path.Combine(dir, "model.json"))) return false;
+            if (Directory.Exists(dir) && Directory.EnumerateFiles(dir, "*.bin").Any()) return false;
+            Directory.CreateDirectory(dir);
+            WriteManifest(dir, model, dims: 0, maxChars: ResolveMaxChars(model),
+                complete: true, rebuildStartedAt: DateTime.MinValue);
+            return File.Exists(Path.Combine(dir, "model.json"));
+        }
+        catch { return false; }
     }
 
     /// <summary>
@@ -362,7 +418,13 @@ public class EmbeddingService
             // Ollama 0.x: { "embeddings": [[…floats…]] }
             var arr = (json["embeddings"] as JArray)?[0] as JArray;
             if (arr == null) return null;
-            return arr.Select(t => t.ToObject<float>()).ToArray();
+            // Value<float>() per element, not ToObject<float>() — the latter
+            // builds a JsonSerializer for every one of the 1024 dimensions.
+            // A minor win measured against the HTTP call, kept because a
+            // precompute pass runs this ~1,200 times.
+            var vec = new float[arr.Count];
+            for (int i = 0; i < arr.Count; i++) vec[i] = arr[i].Value<float>();
+            return vec;
         }
         catch { return null; }
     }

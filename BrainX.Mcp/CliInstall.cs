@@ -56,7 +56,7 @@ internal static class CliInstall
         Console.WriteLine();
         Console.WriteLine("`install` options:");
         Console.WriteLine("  --vault PATH     Vault to install rules for (default: env BRAINX_VAULT or current dir)");
-        Console.WriteLine("  --pull-models    Pull nomic-embed-text + gemma3:4b via local Ollama if reachable");
+        Console.WriteLine("  --pull-models    Pull the embedding model + gemma3:4b via local Ollama if reachable");
         Console.WriteLine("  --precompute     Run embedding precompute after install (slow first time, ~1-2 min for 600 notes)");
         Console.WriteLine("  --quiet          Suppress section headers; print just status lines");
         Console.WriteLine();
@@ -156,7 +156,22 @@ internal static class CliInstall
 
         // Step 3 — Ollama models (optional)
         Section(opts, "3/4  Ollama models (semantic search + LLM verification)");
+
+        // Counted BEFORE anything is pulled. A vault with no sidecars is the
+        // only kind we may pin to a different embedding model, so the decision
+        // has to be read off the pre-install state — after step 4 runs there
+        // could be a thousand vectors that answer the question differently.
+        var embedDir = Path.Combine(vault, ".obsidianx", "embeddings");
+        var existing = Directory.Exists(embedDir)
+            ? Directory.EnumerateFiles(embedDir, "*.bin").Count()
+            : 0;
+        var freshVault = existing == 0 && !File.Exists(Path.Combine(embedDir, "model.json"));
+        var embedModel = freshVault
+            ? EmbeddingService.PreferredModel
+            : EmbeddingService.ResolveModel(vault);
+
         var ollamaUp = await OllamaReachable().ConfigureAwait(false);
+        var embedModelReady = false;
         if (!ollamaUp)
         {
             Console.WriteLine("  ⚠  Ollama not reachable at http://localhost:11434");
@@ -166,16 +181,22 @@ internal static class CliInstall
         else
         {
             var have = await ListOllamaModels().ConfigureAwait(false);
-            string[] required = ["nomic-embed-text", "gemma3:4b"];
+            string[] required = [embedModel, "gemma3:4b"];
             foreach (var model in required)
             {
                 var present = have.Any(m => m.StartsWith(model, StringComparison.Ordinal));
-                if (present) { Console.WriteLine($"  ✓ {model}"); continue; }
+                if (present)
+                {
+                    Console.WriteLine($"  ✓ {model}");
+                    if (model == embedModel) embedModelReady = true;
+                    continue;
+                }
                 if (opts.PullModels)
                 {
                     Console.WriteLine($"  ⤓ pulling {model} (this may take several minutes)...");
                     var ok = await PullOllamaModel(model).ConfigureAwait(false);
                     Console.WriteLine(ok ? $"  ✓ {model} pulled" : $"  ✗ {model} pull failed");
+                    if (ok && model == embedModel) embedModelReady = true;
                 }
                 else
                 {
@@ -183,14 +204,18 @@ internal static class CliInstall
                 }
             }
         }
+
+        // Pin the manifest only once the model is actually servable. Seeding it
+        // against a model Ollama does not have would leave every query embed
+        // failing under a manifest that claims the vault is set up correctly —
+        // the exact silent-degradation shape this pin exists to prevent.
+        if (freshVault && embedModelReady && EmbeddingService.SeedManifest(vault, embedModel))
+            Console.WriteLine($"  ✓ new vault pinned to {embedModel} "
+                            + $"({EmbeddingService.ResolveMaxChars(embedModel):n0} chars/note)");
         Console.WriteLine();
 
         // Step 4 — embedding precompute (optional)
         Section(opts, "4/4  Embedding precompute");
-        var embedDir = Path.Combine(vault, ".obsidianx", "embeddings");
-        var existing = Directory.Exists(embedDir)
-            ? Directory.EnumerateFiles(embedDir, "*.bin").Count()
-            : 0;
         Console.WriteLine($"  Existing sidecars: {existing}");
         if (opts.Precompute && ollamaUp)
         {
@@ -254,7 +279,7 @@ internal static class CliInstall
         Console.WriteLine();
         Console.WriteLine("Options:");
         Console.WriteLine("  --vault PATH      Vault to install for. Default: env BRAINX_VAULT or current dir.");
-        Console.WriteLine("  --pull-models     Pull nomic-embed-text + gemma3:4b via local Ollama (else just probe).");
+        Console.WriteLine("  --pull-models     Pull the embedding model + gemma3:4b via local Ollama (else just probe).");
         Console.WriteLine("  --precompute      Run embedding precompute after install.");
         Console.WriteLine("  --quiet           Suppress section headers.");
         Console.WriteLine();
