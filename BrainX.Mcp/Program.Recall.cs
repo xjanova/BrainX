@@ -191,10 +191,40 @@ internal static partial class Program
     //
     // Re-run the probes before touching these numbers. Changing the
     // embedding model moves the cosine column, not the lexical one.
-    private const double RecallCosFloor = 0.40;
-    private const double RecallCosCeil = 0.70;
-    private const double RecallStrong = 0.62;
-    private const double RecallWeak = 0.35;
+    // Env-tunable so `brainx-mcp eval` can sweep them against the gold sets
+    // instead of the four hand-probes the table above was built from.
+    private static double RecallCosFloor => EnvD("BRAINX_RECALL_COS_FLOOR", 0.40);
+    private static double RecallCosCeil => EnvD("BRAINX_RECALL_COS_CEIL", 0.70);
+    private static double RecallStrong => EnvD("BRAINX_RECALL_STRONG", 0.62);
+    private static double RecallWeak => EnvD("BRAINX_RECALL_WEAK", 0.35);
+
+    /// <summary>
+    /// Weight on the lexical signal in the confidence blend.
+    ///
+    /// This is the number that made STRONG unreachable for the queries that
+    /// need it most. Confidence is <c>(1-w)·cosNorm + w·lexical</c>, and a
+    /// paraphrase question deliberately avoids the note's surface words, so
+    /// its lexical containment is ~0 — capping confidence at 1-w = 0.60,
+    /// which sits BELOW the 0.62 STRONG cut no matter how perfect the cosine.
+    /// Measured: at 0.40, STRONG fired on 2 of 46 paraphrase questions. The
+    /// feature whose entire job is "you already know this" almost never fired
+    /// for the way people actually ask.
+    ///
+    /// 0.30 was chosen by sweeping both gold sets. It halves the false-MISS
+    /// rate — 6.5% → 2.2% on paraphrase, 2.0% → 1.5% on the journal set — and
+    /// false MISS is the one recall metric with no judgement call in it, since
+    /// every gold query has a known-present answer. STRONG also stops being
+    /// unreachable (4.3% → 13.0%).
+    ///
+    /// RecallStrong stays at 0.62 deliberately. Lowering it raises how often
+    /// STRONG fires but NOT how often it is right: measured precision within
+    /// STRONG verdicts holds at ~31% across 0.62 / 0.55 / 0.50, and the share
+    /// citing a note that is not even in the top ten holds at ~40%. A
+    /// threshold that does not change precision is not a calibration knob —
+    /// the confidence score simply is not separating good retrievals from bad
+    /// ones, and no constant here fixes that.
+    /// </summary>
+    private static double RecallLexWeight => EnvD("BRAINX_RECALL_LEX_WEIGHT", 0.30);
 
     /// <summary>
     /// How much the keyword ranking counts inside RRF, relative to the
@@ -335,7 +365,8 @@ internal static partial class Program
         if (hasCos)
         {
             var cosNorm = Math.Clamp((cos - RecallCosFloor) / (RecallCosCeil - RecallCosFloor), 0.0, 1.0);
-            confidence = 0.60 * cosNorm + 0.40 * lexical;
+            var w = RecallLexWeight;
+            confidence = (1.0 - w) * cosNorm + w * lexical;
         }
         else
         {

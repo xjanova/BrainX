@@ -201,7 +201,25 @@ internal static partial class Program
         public int Hit1, Hit5, Hit10;
         public double MrrSum;
         public int Empty;             // returned nothing at all
-        public long ElapsedMs;
+        public long ElapsedMs;        // ranking only
+
+        /// <summary>
+        /// True when this arm cannot answer without a query vector, so the
+        /// embedding round-trip is part of what a caller actually waits for.
+        ///
+        /// The harness computes the vector ONCE per query and hands it to all
+        /// three arms — correct, since they share it, but it moved the single
+        /// largest cost outside the stopwatch. `semantic 17ms/q` was the cosine
+        /// sweep alone; the embed that has to happen first is ~227 ms. Reported
+        /// per-arm cost was understating the real wait by about 4.6x, and the
+        /// recall arm was understated too because line 588 primes the query
+        /// cache that BrainRecall then hits.
+        ///
+        /// Both numbers are printed now. `rank` answers "is the ranking
+        /// algorithm fast", `total` answers "how long does the user wait",
+        /// and only the second one is a latency claim.
+        /// </summary>
+        public bool NeedsEmbed;
 
         public double P(int hits) => N == 0 ? 0 : (double)hits / N;
         public double Mrr => N == 0 ? 0 : MrrSum / N;
@@ -230,8 +248,14 @@ internal static partial class Program
             ["hit@10"] = Math.Round(P(Hit10), 4),
             ["mrr@10"] = Math.Round(Mrr, 4),
             ["emptyResults"] = Empty,
-            ["msPerQuery"] = N == 0 ? 0 : Math.Round((double)ElapsedMs / N, 1)
+            ["rankMsPerQuery"] = N == 0 ? 0 : Math.Round((double)ElapsedMs / N, 1),
+            ["totalMsPerQuery"] = N == 0 ? 0
+                : Math.Round((double)(ElapsedMs + (NeedsEmbed ? EmbedMsShared : 0)) / N, 1)
         };
+
+        /// <summary>Total embedding time for the whole run, filled in by the
+        /// caller so each arm can add it to its own cost.</summary>
+        public long EmbedMsShared;
     }
 
     /// <summary>
@@ -256,6 +280,17 @@ internal static partial class Program
         public int N, Strong, Weak, Miss, Errors;
         public int StrongRight, StrongWrong;   // STRONG, and whether `answer` was an expected note
         public int FoundAnywhere;              // expected note appeared in answer+evidence at all
+        /// <summary>
+        /// STRONG, and the expected note was nowhere in answer OR evidence.
+        /// This is the HONEST false-confidence number. StrongWrong counts a
+        /// STRONG whose rank-1 was not the labelled note, but with single-label
+        /// gold a different-but-genuinely-relevant note scores as wrong — so
+        /// StrongWrong runs ~60% and means much less than it looks. When the
+        /// note is not in the top-N at all, there is no such excuse.
+        /// </summary>
+        public int StrongAndAbsent;      // STRONG, expected note not even in top-10
+        public int StrongOutsideWindow;  // STRONG, expected note in top-10 but outside the default top-3
+        public int FoundInDefaultWindow;
         public long ElapsedMs;
 
         public double Rate(int x) => N == 0 ? 0 : (double)x / N;
@@ -273,6 +308,8 @@ internal static partial class Program
             ["errors"] = Errors,
             ["strongAndRight"] = StrongRight,
             ["strongAndWrong"] = StrongWrong,
+            ["strongAndAbsent"] = StrongAndAbsent,
+            ["strongRate"] = Math.Round(Rate(Strong), 4),
             ["falseConfidenceRate"] = Math.Round(FalseConfidence, 4),
             ["foundAnywhereRate"] = Math.Round(Rate(FoundAnywhere), 4),
             ["msPerQuery"] = N == 0 ? 0 : Math.Round((double)ElapsedMs / N, 1)
@@ -300,7 +337,13 @@ internal static partial class Program
         // and a "the brain does not know this" verdict are different facts,
         // and averaging them would quietly inflate the one metric here that is
         // supposed to be unarguable.
-        try { r = (JObject)BrainRecall(new JObject { ["query"] = query }); }
+        // limit:10, not the tool's default 3. The verdict is computed from
+        // ranked[0] alone, so limit cannot change STRONG/WEAK/MISS — but it
+        // decides how much evidence comes back, and therefore whether
+        // "expected note is absent" means "recall was wrongly confident" or
+        // merely "recall's default window is three notes wide". Measuring both
+        // separates the two.
+        try { r = (JObject)BrainRecall(new JObject { ["query"] = query, ["limit"] = 10 }); }
         catch { s.Errors++; return; }
 
         var verdict = r["verdict"]?.ToString() ?? "MISS";
@@ -312,20 +355,25 @@ internal static partial class Program
         var answerId = IdOf(r["answer"]);
         var hitTop = answerId != null && expected.Contains(answerId);
 
-        var anywhere = hitTop;
-        if (!anywhere && r["evidence"] is JArray ev)
-            foreach (var e in ev)
+        // Rank of the expected note within answer(1) + evidence(2..10).
+        var rank = hitTop ? 1 : 0;
+        if (rank == 0 && r["evidence"] is JArray ev)
+            for (int i = 0; i < ev.Count; i++)
             {
-                var id = IdOf(e);
-                if (id != null && expected.Contains(id)) { anywhere = true; break; }
+                var id = IdOf(ev[i]);
+                if (id != null && expected.Contains(id)) { rank = i + 2; break; }
             }
+        var anywhere = rank > 0;
         if (anywhere) s.FoundAnywhere++;
+        if (rank > 0 && rank <= 3) s.FoundInDefaultWindow++;
 
         switch (verdict)
         {
             case "STRONG":
                 s.Strong++;
                 if (hitTop) s.StrongRight++; else s.StrongWrong++;
+                if (!anywhere) s.StrongAndAbsent++;
+                else if (rank > 3) s.StrongOutsideWindow++;
                 break;
             case "WEAK": s.Weak++; break;
             default: s.Miss++; break;
@@ -535,9 +583,11 @@ internal static partial class Program
         if (excluded > 0) Say($"  corpus:   {all.Count} notes ({excluded} machine-written report(s) excluded)");
         var arms = new Dictionary<string, ModeScore>
         {
-            ["keyword"] = new() { Name = "keyword" },
-            ["semantic"] = new() { Name = "semantic" },
-            ["hybrid"] = new() { Name = "hybrid" }
+            // keyword is the only arm that never needs a query vector — its
+            // reported cost was always the true cost.
+            ["keyword"] = new() { Name = "keyword", NeedsEmbed = false },
+            ["semantic"] = new() { Name = "semantic", NeedsEmbed = true },
+            ["hybrid"] = new() { Name = "hybrid", NeedsEmbed = true }
         };
         // Same three arms again, split by query language. The whole reason
         // this vault runs bge-m3 at 16,000 chars is Thai recall, and an
@@ -569,11 +619,19 @@ internal static partial class Program
         }
 
         var sw = new System.Diagnostics.Stopwatch();
+        long embedMs = 0;
         int done = 0;
         foreach (var pair in gold)
         {
             var expected = new HashSet<string>(pair.ExpectedIds, StringComparer.Ordinal);
+            // Timed, and attributed to every arm that needs it. Shared across
+            // the three arms because they use the same vector — but shared is
+            // not free, and leaving it outside the clock is what made the
+            // semantic paths look 4.6x faster than a caller experiences.
+            sw.Restart();
             var vec = OllamaEmbed(pair.Query);
+            sw.Stop();
+            embedMs += sw.ElapsedMilliseconds;
 
             void Arm(string name, Func<List<string>> run)
             {
@@ -625,6 +683,15 @@ internal static partial class Program
         }
 
         // ── report ──────────────────────────────────────────────────────
+        // BEFORE anything serialises: the arms need the shared embed cost to
+        // report `total`. This assignment used to sit further down with the
+        // console output, so WriteEvalReport ran first and the report's
+        // Latency table printed total == rank — the exact understatement the
+        // split was added to remove, preserved in the one place a human reads.
+        // Third time today that a correct new signal failed to reach the
+        // surface; caught only by reading the rendered file.
+        foreach (var a in arms.Values) a.EmbedMsShared = embedMs;
+
         var stamp = DateTime.UtcNow;
         var result = new JObject
         {
@@ -662,14 +729,21 @@ internal static partial class Program
 
         Result("");
         Result($"  gold={goldStem}  n={gold.Count}  ({gold.Count(p => p.Lang == "th")} th / "
-             + $"{gold.Count(p => p.Lang == "en")} en)");
+             + $"{gold.Count(p => p.Lang == "en")} en)  embed {embedMs / Math.Max(1, gold.Count)}ms/q");
         foreach (var a in arms.Values)
             Result($"  {a.Name,-9} hit@1 {a.P(a.Hit1):P1}  hit@5 {a.P(a.Hit5):P1}  "
-                 + $"hit@10 {a.P(a.Hit10):P1}  MRR {a.Mrr:F3}  ({a.ElapsedMs / Math.Max(1, a.N)}ms/q)");
+                 + $"hit@10 {a.P(a.Hit10):P1}  MRR {a.Mrr:F3}"
+                 + $"  (rank {a.ElapsedMs / Math.Max(1, a.N)}ms · total "
+                 + $"{(a.ElapsedMs + (a.NeedsEmbed ? embedMs : 0)) / Math.Max(1, a.N)}ms/q)");
         Result($"  {"recall",-9} STRONG {recall.Strong} · WEAK {recall.Weak} · MISS {recall.Miss}"
-             + $"  falseMiss {recall.Rate(recall.Miss):P1}  falseConf {recall.FalseConfidence:P1}"
+             + $"  strongRate {recall.Rate(recall.Strong):P1}"
+             + $"  falseMiss {recall.Rate(recall.Miss):P1}"
+             + $"  absent@10 {recall.StrongAndAbsent}  outside@3 {recall.StrongOutsideWindow}"
              + (recall.Errors > 0 ? $"  ERRORS {recall.Errors}" : "")
-             + $"  ({recall.ElapsedMs / Math.Max(1, recall.N)}ms/q)");
+             // recall embeds internally, but the query cache was primed a few
+             // lines earlier, so its measured cost excludes the embed too.
+             + $"  (rank {recall.ElapsedMs / Math.Max(1, recall.N)}ms · total "
+             + $"{(recall.ElapsedMs + embedMs) / Math.Max(1, recall.N)}ms/q)");
         var kw = arms["keyword"]; var hy = arms["hybrid"];
         var uplift = kw.P(kw.Hit5) == 0 ? 0 : (hy.P(hy.Hit5) - kw.P(kw.Hit5)) / kw.P(kw.Hit5);
         Result($"  kwSignal  raw-top   {Percentiles(kwTops)}");
@@ -797,6 +871,23 @@ internal static partial class Program
 
         Table("## Overall", arms);
 
+        // Latency belongs in the report, not just the console. `rank` is the
+        // ranking step; `total` adds the embedding round-trip that every
+        // semantic path has to pay first. Printing only `rank` understated the
+        // real wait by ~4.6x — and a number that lives only in stdout is a
+        // number nobody reads.
+        sb.AppendLine("## Latency");
+        sb.AppendLine();
+        sb.AppendLine($"Query embedding costs **{arms["hybrid"].EmbedMsShared / Math.Max(1, goldCount)} ms** "
+                    + "per distinct query; every arm except `keyword` waits for it before ranking starts.");
+        sb.AppendLine();
+        sb.AppendLine("| arm | rank | total (what a caller waits) |");
+        sb.AppendLine("|---|---|---|");
+        foreach (var a in arms.Values)
+            sb.AppendLine($"| {a.Name} | {a.ElapsedMs / Math.Max(1, a.N)} ms | "
+                        + $"**{(a.ElapsedMs + (a.NeedsEmbed ? a.EmbedMsShared : 0)) / Math.Max(1, a.N)} ms** |");
+        sb.AppendLine();
+
         var kw = arms["keyword"]; var hy = arms["hybrid"];
         sb.AppendLine("## The brain-off comparison");
         sb.AppendLine();
@@ -822,10 +913,16 @@ internal static partial class Program
         sb.AppendLine($"- STRONG **{recall.Strong}** · WEAK **{recall.Weak}** · MISS **{recall.Miss}** "
                     + $"(of {recall.N})");
         sb.AppendLine($"- **false-MISS rate: {recall.Rate(recall.Miss):P1}** — claimed ignorance of a note it holds");
-        sb.AppendLine($"- **false-confidence rate: {recall.FalseConfidence:P1}** — said STRONG and cited a "
-                    + $"note that was not the expected one ({recall.StrongWrong} of "
-                    + $"{recall.StrongRight + recall.StrongWrong} STRONG verdicts)");
-        sb.AppendLine($"- expected note appeared somewhere in answer+evidence: {recall.Rate(recall.FoundAnywhere):P1}");
+        sb.AppendLine($"- of **{recall.Strong}** STRONG verdicts: **{recall.StrongAndAbsent}** cited a set that did "
+                    + $"not contain the expected note anywhere in the top ten, **{recall.StrongOutsideWindow}** had "
+                    + $"it in the top ten but outside the default three-note window, "
+                    + $"{recall.Strong - recall.StrongAndAbsent - recall.StrongOutsideWindow} had it within reach");
+        sb.AppendLine($"- expected note appeared somewhere in the top ten: {recall.Rate(recall.FoundAnywhere):P1}");
+        sb.AppendLine();
+        sb.AppendLine("`strongAndWrong` / `falseConfidence` are in the JSON but not quoted here: with "
+                    + "single-label gold a different-but-genuinely-relevant note scores as wrong, so they run "
+                    + "~60% and mean much less than they look. **absent from the top ten** has no such excuse "
+                    + "and is the number to watch.");
         sb.AppendLine();
 
         sb.AppendLine("## Bias control — which tool produced the label");
