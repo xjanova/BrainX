@@ -127,6 +127,11 @@ internal static partial class Program
             Console.OutputEncoding = new UTF8Encoding(false);
             return await GardenCliAsync(args.Skip(1).ToArray()).ConfigureAwait(false);
         }
+        if (args.Length > 0 && args[0].Equals("eval", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.OutputEncoding = new UTF8Encoding(false);
+            return await EvalCliAsync(args.Skip(1).ToArray()).ConfigureAwait(false);
+        }
         if (args.Length > 0 && (args[0] == "--version" || args[0] == "-v" || args[0].Equals("version", StringComparison.OrdinalIgnoreCase)))
         {
             Console.OutputEncoding = new UTF8Encoding(false);
@@ -4315,19 +4320,7 @@ internal static partial class Program
         var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            using var http = new System.Net.Http.HttpClient
-            {
-                // Was 8s, which is SHORTER than a cold model load and so
-                // guaranteed the thing it was meant to guard against.
-                // Measured on this vault: bge-m3 takes ~12.7 s on the first
-                // call (Ollama pulling 2.2 GB of weights into memory) and
-                // ~0.22 s once resident. The 8 s ceiling therefore cancelled
-                // EVERY cold call, returned null, and silently degraded
-                // semantic search to keyword — for ~8 s of nothing, when the
-                // keyword path alone answers in 0.17 s. WarmEmbedModel below
-                // means callers should never actually meet this ceiling.
-                Timeout = TimeSpan.FromSeconds(EmbedHttpTimeoutSeconds)
-            };
+            var http = _ollamaHttp;
             var body = new JObject
             {
                 // Resolve through the embeddings manifest so the query
@@ -4356,6 +4349,7 @@ internal static partial class Program
                 // Override with BRAINX_EMBED_GPU=1 on a box with a spare card.
                 ["options"] = new JObject { ["num_gpu"] = EmbedGpuLayers }
             }.ToString();
+            var tSetup = sw.ElapsedMilliseconds;
             var resp = http.PostAsync("http://localhost:11434/api/embed",
                 new System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json"))
                 .GetAwaiter().GetResult();
@@ -4364,11 +4358,21 @@ internal static partial class Program
                 Log($"embed: HTTP {(int)resp.StatusCode} after {sw.ElapsedMilliseconds}ms → keyword fallback");
                 return null;
             }
-            var json = JObject.Parse(resp.Content.ReadAsStringAsync().GetAwaiter().GetResult());
+            var tPost = sw.ElapsedMilliseconds;
+            var raw = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+            var tRead = sw.ElapsedMilliseconds;
+            var json = JObject.Parse(raw);
+            var tParse = sw.ElapsedMilliseconds;
             // Ollama returns "embeddings": [[float, float, ...]]
             var arr = (json["embeddings"] as JArray)?[0] as JArray;
             if (arr == null) return null;
-            var vec = arr.Select(t => t.ToObject<float>()).ToArray();
+            // Value<float>() rather than ToObject<float>(): ToObject builds a
+            // JsonSerializer per element and this runs once per dimension.
+            // Measured as a minor win, not the bottleneck — see the split
+            // timing in the log line below, which exists because two separate
+            // guesses about where this call spends its time were both wrong.
+            var vec = new float[arr.Count];
+            for (int i = 0; i < arr.Count; i++) vec[i] = arr[i].Value<float>();
 
             // Evict oldest entry when at capacity. Not strict LRU — TTL
             // does most of the work — but stops unbounded growth on
@@ -4382,8 +4386,16 @@ internal static partial class Program
                 if (oldest != null) _embedCache.TryRemove(oldest, out _);
             }
             _embedCache[key] = (vec, DateTime.UtcNow);
-            if (sw.ElapsedMilliseconds > 2000)
-                Log($"embed: {sw.ElapsedMilliseconds}ms (cold model load — subsequent queries are ~200ms)");
+            // Split timing, not a single number. A bare total said "2250ms"
+            // and two plausible explanations for it (proxy auto-detect, slow
+            // JSON deserialize) were both wrong — because nothing said WHICH
+            // phase was slow. setup=HttpClient construction, post=request to
+            // last byte of headers, read=body download, parse=JObject.Parse,
+            // conv=JArray to float[].
+            if (sw.ElapsedMilliseconds > 1000)
+                Log($"embed: {sw.ElapsedMilliseconds}ms total "
+                  + $"(setup {tSetup} · post {tPost - tSetup} · read {tRead - tPost} "
+                  + $"· parse {tParse - tRead} · conv {sw.ElapsedMilliseconds - tParse})");
             return vec;
         }
         catch (Exception ex)
@@ -4400,6 +4412,24 @@ internal static partial class Program
     /// <summary>How long to let a cold embedding-model load run before giving
     /// up. Must exceed the model's load time or the fallback is guaranteed.</summary>
     private const int EmbedHttpTimeoutSeconds = 30;
+
+    /// <summary>
+    /// One HttpClient for the whole process, not one per embed.
+    ///
+    /// This was `using var http = new HttpClient(...)` inside the call. Every
+    /// query therefore built a fresh handler, opened a fresh connection, and
+    /// left the socket in TIME_WAIT — netstat showed a pile of them. The old
+    /// shape also defeats the connection pool, which is the difference between
+    /// this path and any client that reuses one.
+    ///
+    /// A single client is the standard fix (a per-call HttpClient is the
+    /// canonical .NET socket-exhaustion bug); the timeout that used to be set
+    /// per-instance moves here unchanged.
+    /// </summary>
+    private static readonly System.Net.Http.HttpClient _ollamaHttp = new()
+    {
+        Timeout = TimeSpan.FromSeconds(EmbedHttpTimeoutSeconds)
+    };
 
     /// <summary>
     /// Ollama keep_alive for the embedding model. 10m, not the 30m first

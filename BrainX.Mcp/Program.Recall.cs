@@ -85,19 +85,20 @@ internal static partial class Program
             {
                 const double K = 60.0;
                 var fused = new Dictionary<string, (NodeSummary node, double score)>();
-                void Accumulate(List<(NodeSummary node, double score)> list)
+                void Accumulate(List<(NodeSummary node, double score)> list, double weight)
                 {
+                    if (weight <= 0) return;
                     for (int i = 0; i < list.Count; i++)
                     {
                         var (n, _) = list[i];
-                        var add = 1.0 / (K + i + 1);
+                        var add = weight / (K + i + 1);
                         fused[n.Id] = fused.TryGetValue(n.Id, out var cur)
                             ? (n, cur.score + add)
                             : (n, add);
                     }
                 }
-                Accumulate(semantic);
-                Accumulate(keyword);
+                Accumulate(semantic, 1.0);
+                Accumulate(keyword, RrfKeywordWeight);
                 // No extra supersession factor here on purpose — RRF ranks,
                 // not scores, and BOTH input lists already carry the demotion.
                 ranked = fused.Values
@@ -194,6 +195,37 @@ internal static partial class Program
     private const double RecallCosCeil = 0.70;
     private const double RecallStrong = 0.62;
     private const double RecallWeak = 0.35;
+
+    /// <summary>
+    /// How much the keyword ranking counts inside RRF, relative to the
+    /// semantic ranking's 1.0. Default 1.0 = the equal-weight fusion this
+    /// shipped with; nothing changes unless it is set.
+    ///
+    /// Why it is now tunable at all: measured 2026-08-10 on a 46-question
+    /// PARAPHRASE gold set (questions written from notes, never through a
+    /// search tool, so no presentation bias), hit@5 was semantic 39.1%,
+    /// keyword 17.4%, and hybrid — the fusion of the two — only 23.9%.
+    /// Fusing made the result WORSE than its better input. Equal weight means
+    /// a keyword list with almost no signal still injects 1/(K+rank) into
+    /// every slot and pushes genuine semantic hits down. brain_semantic_search
+    /// returns hybrid, so the tool callers actually reach was delivering ~61%
+    /// of what its own embeddings could.
+    ///
+    /// A sweep found NO constant that wins both gold sets — paraphrase wants
+    /// 0.0, the journal-mined set wants 1.0, monotonically. The default stays
+    /// at the shipped value until an adaptive rule replaces it; per-100-chars
+    /// of keyword score separates the two query shapes cleanly for Thai
+    /// (5.2x) but inverts for English, so that rule is not written yet.
+    ///
+    /// Set BRAINX_RRF_KW_WEIGHT to sweep. Re-run `brainx-mcp eval` against
+    /// BOTH gold sets before changing the default: the journal-mined set is a
+    /// regression guard for exact-term queries (ids, codenames) which is
+    /// precisely what the keyword half is here to protect.
+    /// </summary>
+    private static double RrfKeywordWeight =>
+        double.TryParse(Environment.GetEnvironmentVariable("BRAINX_RRF_KW_WEIGHT"),
+            System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out var w) && w >= 0 ? w : 1.0;
 
     private static JToken BrainRecall(JObject args)
     {
