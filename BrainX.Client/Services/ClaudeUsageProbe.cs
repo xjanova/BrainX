@@ -178,11 +178,29 @@ public sealed class ClaudeUsageProbe
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "BrainX", "WebView2", "ClaudeUsageProbe", "probe.log");
 
+    /// <summary>
+    /// Keep the diagnostic log bounded. It was append-only with no pruner and
+    /// had reached 7.5 MB — roughly 650 KB a day, forever, in the user's
+    /// profile, read by nothing in the product. Halve it when it crosses the
+    /// cap so trimming happens rarely rather than on every line.
+    /// </summary>
+    private const long LogMaxBytes = 1024 * 1024;
+
     private static void LogLine(string msg)
     {
         try
         {
             System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(LogPath)!);
+
+            var info = new System.IO.FileInfo(LogPath);
+            if (info.Exists && info.Length > LogMaxBytes)
+            {
+                // Keep the tail: the newest lines are the ones worth having
+                // when someone finally does read this.
+                var lines = System.IO.File.ReadAllLines(LogPath);
+                System.IO.File.WriteAllLines(LogPath, lines.Skip(lines.Length / 2));
+            }
+
             System.IO.File.AppendAllText(LogPath,
                 $"[{DateTime.Now:HH:mm:ss}] {msg}{Environment.NewLine}");
         }

@@ -82,15 +82,54 @@ public class CategoryRegistry
         catch (JsonException) { }
     }
 
+    /// <summary>
+    /// Persist the registry. Two things were wrong here and both were silent.
+    ///
+    /// The failure was swallowed, so <c>Add()</c> returned normally and the new
+    /// category appeared in the UI even when the write threw — it was simply
+    /// gone at next launch, with nothing logged. It now throws, because a
+    /// category the user typed is their data, not a cache.
+    ///
+    /// And the write was in place, from a list this instance loaded at
+    /// construction. Each process holds its own snapshot, so whichever saved
+    /// last erased every category the others had added since. Re-reading under
+    /// the write merges instead of clobbering, and the rename makes a reader
+    /// see the whole old file or the whole new one.
+    /// </summary>
     private void Save()
     {
+        var dir = Path.GetDirectoryName(_filePath)!;
+        Directory.CreateDirectory(dir);
+
+        var merged = new List<CustomCategory>(_categories);
         try
         {
-            var dir = Path.GetDirectoryName(_filePath)!;
-            Directory.CreateDirectory(dir);
-            File.WriteAllText(_filePath,
-                JsonConvert.SerializeObject(_categories, Formatting.Indented));
+            if (File.Exists(_filePath))
+            {
+                var onDisk = JsonConvert.DeserializeObject<List<CustomCategory>>(
+                    File.ReadAllText(_filePath));
+                // Identity is the stable Id, not the display name — a rename
+                // must update a category, not fork it.
+                if (onDisk != null)
+                    foreach (var c in onDisk)
+                        if (!merged.Any(m => string.Equals(m.Id, c.Id, StringComparison.Ordinal)))
+                            merged.Add(c);
+            }
         }
-        catch (IOException) { }
+        catch (JsonException) { /* unreadable on disk — our copy wins */ }
+        catch (IOException) { /* locked — fall back to our copy */ }
+
+        var tmp = _filePath + "." + Environment.ProcessId + ".tmp";
+        try
+        {
+            File.WriteAllText(tmp, JsonConvert.SerializeObject(merged, Formatting.Indented));
+            File.Move(tmp, _filePath, overwrite: true);
+            _categories = merged;
+        }
+        catch
+        {
+            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+            throw;
+        }
     }
 }

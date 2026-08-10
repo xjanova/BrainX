@@ -9395,16 +9395,42 @@ public partial class MainWindow : Window
     private static HttpClient BuildLocalHttpClient(double timeoutSec = 8)
         => BuildLocalHttpClient(TimeSpan.FromSeconds(timeoutSec));
 
-    private static HttpClient BuildLocalHttpClient(TimeSpan timeout)
+    /// <summary>
+    /// One pooled client per timeout, built once and reused for the life of
+    /// the app.
+    ///
+    /// This used to construct an HttpClient AND an HttpClientHandler on every
+    /// call, and callers include two polling timers (1.5 s and 3 s) — roughly
+    /// 60 loopback connections a minute cycling into TIME_WAIT for the full
+    /// 2MSL window, so around 120 sockets held at steady state plus a fresh
+    /// handler, connection pool and DNS state allocated 60 times a minute
+    /// forever. Callers still write `using var http = BuildLocalHttpClient()`;
+    /// disposing a shared HttpClient only disposes the wrapper, and the
+    /// handler underneath is what owns the sockets — but see the note below.
+    ///
+    /// Same defect family as the per-call HttpClient in the MCP's embed path,
+    /// which was costing ~2 s per semantic query until it was measured.
+    /// </summary>
+    /// <remarks>
+    /// The HANDLER is shared, not the client. Every call site wraps the result
+    /// in <c>using</c>, so returning a shared HttpClient would leave the first
+    /// caller disposing the instance everyone else still needs. A fresh
+    /// HttpClient over a shared handler is cheap — the handler is what owns the
+    /// connection pool and the sockets — and <c>disposeHandler: false</c> keeps
+    /// it alive when the wrapper is disposed. No call site changes.
+    /// </remarks>
+    private static readonly SocketsHttpHandler _localHttpHandler = new()
     {
-        var handler = new HttpClientHandler
-        {
-            UseProxy = false,
-            UseCookies = false,
-            AllowAutoRedirect = false,
-        };
-        return new HttpClient(handler) { Timeout = timeout };
-    }
+        UseProxy = false,
+        UseCookies = false,
+        AllowAutoRedirect = false,
+        // Loopback only: recycling a connection buys nothing and costs a
+        // handshake, so keep them.
+        PooledConnectionLifetime = Timeout.InfiniteTimeSpan,
+    };
+
+    private static HttpClient BuildLocalHttpClient(TimeSpan timeout)
+        => new(_localHttpHandler, disposeHandler: false) { Timeout = timeout };
 
     private async Task LoadAiBackends()
     {

@@ -55,6 +55,10 @@ internal static class McpLauncher
     private static StreamWriter? _childIn;
     private static DateTime _imageMtime;
     private static volatile bool _swapPending;
+    /// <summary>Consecutive failed hot-swaps. Bounded so a swap that cannot
+    /// succeed stops costing a kill-and-respawn on every single response.</summary>
+    private static int _swapAttempts;
+    private const int MaxSwapAttempts = 3;
     private static volatile bool _swapping;
     private static int _rapidFailures;
     private static DateTime _lastSpawn = DateTime.MinValue;
@@ -358,16 +362,30 @@ internal static class McpLauncher
 
             await SpawnChildAsync(replayInit: true).ConfigureAwait(false);
             _swapPending = false;
+            _swapAttempts = 0;
             _rapidFailures = 0;
             Log($"worker swapped: pid {oldPid} → {_child?.Id} (new binary {_imageMtime:HH:mm:ss}Z)");
             NotifyToolsChanged();
         }
         catch (Exception ex)
         {
-            // Failed to bring the NEW binary up — keep the pending flag so the
-            // watcher retries; the old child may already be gone, and if so the
-            // crash path respawns whatever the disk currently holds.
-            Log($"swap failed: {ex.Message}");
+            // Failed to bring the NEW binary up. Keeping _swapPending set makes
+            // the watcher retry — but it retries on EVERY subsequent response,
+            // and each attempt kills the worker and respawns it. One bad swap
+            // (a slow vault, brain.db locked by a sibling, a cold Ollama during
+            // the replayed handshake) therefore converted a healthy session
+            // into permanent kill-and-respawn churn, with the full worker boot
+            // paid every time. Give up after a few tries and keep serving the
+            // binary that works; the next launch picks up the new one anyway.
+            _swapAttempts++;
+            if (_swapAttempts >= MaxSwapAttempts)
+            {
+                _swapPending = false;
+                _swapAttempts = 0;
+                Log($"swap failed {MaxSwapAttempts}x ({ex.Message}) — staying on the running binary. "
+                  + "It will be picked up on the next start.");
+            }
+            else Log($"swap failed (attempt {_swapAttempts}/{MaxSwapAttempts}): {ex.Message}");
         }
         finally
         {

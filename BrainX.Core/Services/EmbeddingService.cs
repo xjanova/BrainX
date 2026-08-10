@@ -88,6 +88,20 @@ public class EmbeddingService
     public bool GpuInUse { get; private set; }
 
     /// <summary>
+    /// Notes the last pass TRIED to embed and failed on. A return value of 0
+    /// from PrecomputeAsync means both "nothing needed doing" and "every
+    /// single embed failed", and two callers turned that into a false
+    /// all-clear: the installer printed a checkmark on a pass where nothing
+    /// worked, and the nightly gardener printed nothing at all because it
+    /// guards its message with `if (written > 0)`. Check this before
+    /// reporting success.
+    /// </summary>
+    public int FailedCount { get; private set; }
+
+    /// <summary>True when Ollama could not be reached at all this pass.</summary>
+    public bool BackendUnreachable { get; private set; }
+
+    /// <summary>
     /// The embedding model actually used for the sidecars on disk is
     /// recorded in <c>.obsidianx/embeddings/model.json</c>. Every writer
     /// and reader resolves through this manifest so the query-time embed
@@ -135,6 +149,14 @@ public class EmbeddingService
         catch { return null; }
     }
 
+    /// <summary>
+    /// Vector length the sidecars were built at, per the manifest. Used by
+    /// brain_audit to spot files that disagree with it — a wrong-dimension
+    /// sidecar is present, fresh, and scores 0 against every query.
+    /// </summary>
+    public static int? ReadManifestDims(string vaultPath)
+        => ReadManifestValue(vaultPath, "dims")?.Value<int?>();
+
     /// <summary>Read a boolean manifest field; null when absent or unreadable.</summary>
     public static bool? ReadManifestFlag(string vaultPath, string field)
         => ReadManifestValue(vaultPath, field)?.Value<bool?>();
@@ -173,7 +195,17 @@ public class EmbeddingService
                 ["rebuildStartedAt"] = rebuildStartedAt.ToString("O"),
                 ["updatedAt"] = DateTime.UtcNow.ToString("O")
             }.ToString();
-            File.WriteAllText(Path.Combine(dir, "model.json"), json);
+            // Write-then-rename. This is the resume marker for a rebuild that
+            // takes ~20 minutes, and WriteAllText truncates first — a reader
+            // landing in that window parses nothing, falls back to
+            // DefaultModel, decides the model changed, and re-embeds all 1,200
+            // notes for no reason. A kill in the window loses the marker
+            // entirely. The sidecars beside it have been written this way for
+            // months; the file that describes them was not.
+            var manifestPath = Path.Combine(dir, "model.json");
+            var tmp = manifestPath + "." + Environment.ProcessId + ".tmp";
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, manifestPath, overwrite: true);
         }
         catch { /* best-effort — a missing manifest just means DefaultModel */ }
     }
@@ -227,7 +259,13 @@ public class EmbeddingService
     {
         var dir = Path.Combine(vaultPath, ".obsidianx", "embeddings");
         Directory.CreateDirectory(dir);
-        if (!await OllamaReachableAsync(ct).ConfigureAwait(false)) return 0;
+        FailedCount = 0;
+        BackendUnreachable = false;
+        if (!await OllamaReachableAsync(ct).ConfigureAwait(false))
+        {
+            BackendUnreachable = true;
+            return 0;
+        }
 
         Model = ResolveModel(vaultPath);
         // Sidecars that predate the manifest were built with the legacy
@@ -292,7 +330,7 @@ public class EmbeddingService
             var text = LoadEmbedText(node);
             if (string.IsNullOrWhiteSpace(text)) continue;
             var vec = await EmbedAsync(http, text, ct).ConfigureAwait(false);
-            if (vec == null) continue;
+            if (vec == null) { FailedCount++; continue; }
             try
             {
                 // Write-then-move. A precompute pass touches ~1,200 of these and

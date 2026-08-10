@@ -2611,6 +2611,10 @@ internal static partial class Program
             }));
         }
 
+        // A new note changes what a search should return, and the memo key
+        // cannot see it (see InvalidateSearchMemo).
+        InvalidateSearchMemo();
+
         return new JObject
         {
             ["success"] = true,
@@ -2700,6 +2704,7 @@ internal static partial class Program
         StoreNoteMemo(resolvedId, newSha, newContent.Length, shipped: false);
 
         LogAccess(resolvedId, "write", Path.GetFileNameWithoutExtension(fullPath));
+        InvalidateSearchMemo();
 
         // Hygiene snapshot on the APPENDED content — finds notes that the
         // new section should link to. Excludes the source note itself.
@@ -3139,7 +3144,7 @@ internal static partial class Program
             if (ctx != null) o["matchContext"] = ctx;
             return o;
         }));
-        StoreMemo("brain_semantic_search", args, query, resultsArr);
+        StoreMemo("brain_semantic_search", args, query, resultsArr, mode);
 
         // Phase D (v2.6.0): prefetch top-3 for the inevitable get_note
         PrefetchNoteShas(ranked.Select(r => r.Node.Id), export);
@@ -3767,6 +3772,7 @@ internal static partial class Program
         // ── 4. Embeddings health
         var embedDir = Path.Combine(export.VaultPath, ".obsidianx", "embeddings");
         int missingEmb = 0, staleEmb = 0, orphanEmb = 0;
+        var dimCounts = new Dictionary<int, int>();
         if (Directory.Exists(embedDir))
         {
             var nodeIds = new HashSet<string>(export.Nodes.Select(n => n.Id));
@@ -3780,9 +3786,41 @@ internal static partial class Program
                 var binPath = Path.Combine(embedDir, n.Id + ".bin");
                 if (!File.Exists(binPath)) { missingEmb++; continue; }
                 if (File.GetLastWriteTimeUtc(binPath) < n.ModifiedAt) staleEmb++;
+
+                // DIMENSION CHECK. Existence and mtime were the only tests
+                // here, and that is precisely how a whole vault of
+                // wrong-dimension vectors reported "excellent": a sidecar
+                // written by the wrong model is present, is newer than its
+                // note, and is therefore indistinguishable from a good one by
+                // both other checks. Cosine returns 0 across mismatched
+                // lengths, so every one of those notes silently scores zero
+                // against every query — the failure this detector exists to
+                // catch, and the one it structurally could not see.
+                //
+                // Only the file LENGTH is read, never the vector: 4 bytes per
+                // float, so length/4 is the dimension. Costs one stat call.
+                try
+                {
+                    var dims = (int)(new FileInfo(binPath).Length / 4);
+                    if (dims > 0) dimCounts[dims] = dimCounts.GetValueOrDefault(dims) + 1;
+                }
+                catch { /* unreadable sidecar already counts elsewhere */ }
             }
         }
         else missingEmb = export.Nodes.Count;
+
+        // Expected dimension: what the manifest says, else whatever the
+        // majority of sidecars agree on. Anything that disagrees is dead
+        // weight in every search until it is re-embedded.
+        int expectedDims = 0, mismatchedEmb = 0;
+        if (dimCounts.Count > 0)
+        {
+            var manifestDims = EmbeddingService.ReadManifestDims(export.VaultPath) ?? 0;
+            expectedDims = manifestDims > 0 && dimCounts.ContainsKey(manifestDims)
+                ? manifestDims
+                : dimCounts.OrderByDescending(kv => kv.Value).First().Key;
+            mismatchedEmb = dimCounts.Where(kv => kv.Key != expectedDims).Sum(kv => kv.Value);
+        }
 
         // ── 5. Near-duplicate detection (uses embeddings; can be expensive — cap)
         var nearDupes = new List<(NodeSummary a, NodeSummary b, double sim)>();
@@ -3826,6 +3864,17 @@ internal static partial class Program
 
         // ── Ranked actions — what to do next, sorted by severity
         var actions = new JArray();
+        // Ranked first on purpose: a wrong-dimension sidecar is worse than a
+        // missing one. A missing embedding is visibly missing and gets fixed;
+        // a mismatched one is present, fresh, reports healthy, and scores 0
+        // against every query — the note is simply gone from semantic search
+        // with nothing anywhere saying so.
+        if (mismatchedEmb > 0)
+            actions.Add(MakeAction("critical", "mismatched-embeddings",
+                $"{mismatchedEmb} sidecar(s) are not {expectedDims}-dim — those notes score 0 in every semantic search. "
+                + "Written by a different embedding model than the vault is configured for.",
+                "Delete the offending .bin files (or the whole .obsidianx/embeddings dir) and re-run "
+                + "`brainx-mcp garden` — mtime alone will NOT re-embed them."));
         if (missingEmb > 0)
             actions.Add(MakeAction("high", "missing-embeddings", $"{missingEmb} note(s) lack embeddings",
                 "brainx-mcp install --precompute  OR  brain_apply_audit_fix kind=missing-embeddings"));
@@ -3897,6 +3946,7 @@ internal static partial class Program
                     ["missingFrontmatter"] = missingFrontmatter.Count,
                     ["brokenWikiLinks"] = brokenWikiLinks.Count,
                     ["missingEmbeddings"] = missingEmb,
+                    ["mismatchedEmbeddings"] = mismatchedEmb,
                     ["staleEmbeddings"] = staleEmb,
                     ["orphanEmbeddings"] = orphanEmb,
                     ["factsDueForVerification"] = verifyDue.Count
@@ -3991,7 +4041,12 @@ internal static partial class Program
             {
                 ["missing"] = missingEmb,
                 ["stale"] = staleEmb,
-                ["orphanFiles"] = orphanEmb
+                ["orphanFiles"] = orphanEmb,
+                ["expectedDims"] = expectedDims,
+                ["mismatchedDims"] = mismatchedEmb,
+                ["dimHistogram"] = new JObject(dimCounts
+                    .OrderByDescending(kv => kv.Value)
+                    .Select(kv => new JProperty(kv.Key.ToString(), kv.Value)))
             },
             ["findability"] = findability,
             ["structural"] = new JObject
@@ -4326,12 +4381,19 @@ internal static partial class Program
     private const int EmbedCacheCapacity = 256;
     private static readonly TimeSpan EmbedCacheTtl = TimeSpan.FromMinutes(5);
 
-    private static string EmbedCacheKey(string text)
+    /// <param name="model">
+    /// Part of the key, not decoration. Without it a vector produced by the
+    /// previous model survives a model switch inside the 5-minute TTL and is
+    /// handed back at the wrong dimension — cosine then returns 0 for every
+    /// note while HybridRank still reports mode:"hybrid". Same failure the
+    /// vault just spent 502 sidecars proving is silent.
+    /// </param>
+    private static string EmbedCacheKey(string text, string model)
     {
         // SHA1 keeps the key compact (40 chars) and avoids holding the
         // full query text in the cache — privacy-leaning default.
         using var sha = System.Security.Cryptography.SHA1.Create();
-        var bytes = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(text));
+        var bytes = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(model + " " + text));
         return Convert.ToHexString(bytes);
     }
 
@@ -4345,7 +4407,8 @@ internal static partial class Program
     {
         if (string.IsNullOrEmpty(text)) return null;
 
-        var key = EmbedCacheKey(text);
+        var model = EmbeddingService.ResolveModel(_vaultPath);
+        var key = EmbedCacheKey(text, model);
         if (_embedCache.TryGetValue(key, out var hit))
         {
             if (DateTime.UtcNow - hit.at < EmbedCacheTtl) return hit.vec;
@@ -4362,7 +4425,7 @@ internal static partial class Program
                 // vector always matches the model (and dimensions) the
                 // sidecars were built with — a mismatch makes cosine
                 // return 0 for every note. See EmbeddingService.ResolveModel.
-                ["model"] = EmbeddingService.ResolveModel(_vaultPath),
+                ["model"] = model,
                 ["input"] = text,
                 // Ollama evicts an idle model after ~5 min, and every eviction
                 // costs the next caller a full cold load. Hold it a while —
@@ -4385,7 +4448,10 @@ internal static partial class Program
                 ["options"] = new JObject { ["num_gpu"] = EmbedGpuLayers }
             }.ToString();
             var tSetup = sw.ElapsedMilliseconds;
-            var resp = http.PostAsync("http://localhost:11434/api/embed",
+            // `using` — this is the hottest path in the server and an
+            // undisposed HttpResponseMessage holds its content buffer until GC
+            // on a worker that already carries a large corpus in memory.
+            using var resp = http.PostAsync("http://localhost:11434/api/embed",
                 new System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json"))
                 .GetAwaiter().GetResult();
             if (!resp.IsSuccessStatusCode)
@@ -4776,15 +4842,40 @@ internal static partial class Program
         if (!File.Exists(path)) throw new FileNotFoundException($"note file missing: {node.RelativePath}");
 
         var stamp = DateTime.UtcNow.ToString("O");
-        var text = File.ReadAllText(path);
-        var updated = UpsertFrontmatter(text, new (string, string)[]
+
+        // Read-modify-write of a WHOLE user note, so it takes the vault lock:
+        // anything that landed between the read and the write was previously
+        // erased outright, because this rebuilds the file from the pre-edit
+        // bytes and then reports success. Twelve MCP processes and an Obsidian
+        // window all edit these files.
+        var vaultLock = AcquireVaultLock();
+        try
         {
-            ("verifiedAt", stamp),
-            ("verifyStatus", ok ? "ok" : "failed"),
-        });
-        // UTF8 without BOM — a BOM here breaks every downstream YAML/JSON reader.
-        File.WriteAllText(path, updated, new System.Text.UTF8Encoding(false));
+            var text = File.ReadAllText(path);
+            var updated = UpsertFrontmatter(text, new (string, string)[]
+            {
+                ("verifiedAt", stamp),
+                ("verifyStatus", ok ? "ok" : "failed"),
+            });
+            // Write-then-rename, UTF8 without BOM — a BOM here breaks every
+            // downstream YAML/JSON reader, and a truncating write interrupted
+            // partway leaves the note itself cut off at whatever flushed.
+            var tmp = path + "." + Environment.ProcessId + ".tmp";
+            try
+            {
+                File.WriteAllText(tmp, updated, new System.Text.UTF8Encoding(false));
+                File.Move(tmp, path, overwrite: true);
+            }
+            catch
+            {
+                try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+                throw;
+            }
+        }
+        finally { ReleaseVaultLock(vaultLock); }
+
         LogAccess(id, "write", "mark-verified");
+        InvalidateSearchMemo();
 
         return new JObject
         {
@@ -5375,8 +5466,14 @@ internal static partial class Program
 
         sb.AppendLine("## Needs a human");
         sb.AppendLine();
+        // "critical" was missing from this list, so the single most severe
+        // action the audit can raise was the one thing the report silently
+        // dropped. Ordered by severity too — a filter that hides its top
+        // bucket is worse than no filter, because the report looks complete.
+        var rank = new Dictionary<string, int> { ["critical"] = 0, ["high"] = 1, ["medium"] = 2 };
         var human = actions.OfType<JObject>()
-            .Where(a => a["severity"]?.ToString() is "high" or "medium")
+            .Where(a => rank.ContainsKey(a["severity"]?.ToString() ?? ""))
+            .OrderBy(a => rank[a["severity"]!.ToString()])
             .ToList();
         if (human.Count == 0) sb.AppendLine("_Nothing outstanding._");
         else foreach (var a in human)
@@ -5700,8 +5797,20 @@ internal static partial class Program
         }
     }
 
-    private static void StoreMemo(string toolName, JObject args, string queryOverride, JArray fullResults)
+    /// <param name="mode">
+    /// The retrieval mode the results were produced under, when the caller has
+    /// one. A degraded run is NOT cached: the memo projection drops the `mode`
+    /// field, so replaying a keyword-fallback for ten minutes told the agent
+    /// "identical call ran Ns ago" with nothing marking it degraded — directly
+    /// against this server's own instruction to report degradation and suggest
+    /// precompute. Recomputing is cheap (the keyword path answers in ~40 ms)
+    /// and it self-heals the moment Ollama comes back, which caching prevents.
+    /// </param>
+    private static void StoreMemo(string toolName, JObject args, string queryOverride,
+        JArray fullResults, string? mode = null)
     {
+        if (mode is "keyword-fallback" or "legacy-heuristic") return;
+
         // Build a token-cheap projection: id + title + score + tags only.
         var compact = new JArray(fullResults.Select(r =>
         {
@@ -5726,6 +5835,25 @@ internal static partial class Program
             }
             _searchMemo[key] = new MemoEntry(DateTime.UtcNow, compact, fullResults.Count, 0);
         }
+    }
+
+    /// <summary>
+    /// Drop every cached search result. Called after this process writes a
+    /// note.
+    ///
+    /// The memo key carries brain-export.json's mtime, but NO note write
+    /// touches that file — it is regenerated only on re-index — while the
+    /// keyword scorer reads live note bodies. So an append followed by a
+    /// search returned the pre-edit ranking for up to ten minutes, wrapped in
+    /// "full results were returned then and remain in your earlier turn's
+    /// context", with matchContext stripped so the caller could not even see
+    /// the staleness. Writes from OTHER processes still age out on the TTL;
+    /// that is a smaller window than the one this closes and cannot be fixed
+    /// without watching the filesystem.
+    /// </summary>
+    private static void InvalidateSearchMemo()
+    {
+        lock (_memoLock) _searchMemo.Clear();
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -5908,12 +6036,25 @@ internal static partial class Program
         PersistNoteShaAsync(noteId, sha, byteSize);
     }
 
-    /// <summary>Used by Phase E (walk compaction) to peek without mutating hit/miss counters.</summary>
-    internal static bool HasNoteMemo(string noteId, out string? sha)
+    /// <summary>
+    /// Peek at the memo without mutating hit/miss counters.
+    /// </summary>
+    /// <param name="requireShipped">
+    /// Default true, and it matters. brain_walk uses this to replace a node's
+    /// preview and tags with a `cached:true` stub, so answering true for a
+    /// merely PREFETCHED note made the walk withhold the only description of a
+    /// note the model had never seen — the same lie the note memo was just
+    /// fixed for, in a second place. Only the prefetch's own de-duplication
+    /// passes false, where "do we already hold this sha" is the actual
+    /// question.
+    /// </param>
+    internal static bool HasNoteMemo(string noteId, out string? sha, bool requireShipped = true)
     {
         lock (_noteMemoLock)
         {
-            if (_noteMemo.TryGetValue(noteId, out var entry) && DateTime.UtcNow - entry.AtUtc <= MemoTtl)
+            if (_noteMemo.TryGetValue(noteId, out var entry)
+                && DateTime.UtcNow - entry.AtUtc <= MemoTtl
+                && (!requireShipped || entry.Shipped))
             {
                 sha = entry.Sha;
                 return true;
@@ -5950,7 +6091,8 @@ internal static partial class Program
                     var sha = Sha256Short(raw);
                     // Skip if already memoed at this sha — don't waste a
                     // disk write reaffirming what we already know.
-                    if (HasNoteMemo(id, out var existing) && string.Equals(existing, sha, StringComparison.Ordinal))
+                    if (HasNoteMemo(id, out var existing, requireShipped: false)
+                        && string.Equals(existing, sha, StringComparison.Ordinal))
                         continue;
                     StoreNoteMemo(id, sha, raw.Length, shipped: false);
                     Interlocked.Increment(ref _noteMemoPrefetched);
@@ -6017,6 +6159,27 @@ internal static partial class Program
                             ON note_sha_history(last_seen_at DESC);
                     """;
                     init.ExecuteNonQuery();
+
+                    // Prune on open. A row is inserted per DISTINCT revision of
+                    // a note and nothing ever deleted one: 1,760 rows across
+                    // 975 notes were already there, of which ~785 sat outside
+                    // the 24-hour window the only reader uses and could never
+                    // be read again. The ratio worsens with every edit — the
+                    // most-revised note alone had 20 rows. This same database
+                    // has already had to be rescued from a 5.7-million-row
+                    // access log, so an append-only table with no pruner is a
+                    // known shape here, not a hypothetical.
+                    //
+                    // 7 days, not 24 hours: hydration reads the last day, but
+                    // keeping a week costs almost nothing and leaves room to
+                    // widen that window without losing history first.
+                    using var prune = c.CreateCommand();
+                    prune.CommandText =
+                        "DELETE FROM note_sha_history WHERE last_seen_at < @cutoff;";
+                    prune.Parameters.AddWithValue("@cutoff",
+                        DateTime.UtcNow.AddDays(-7).ToString("O"));
+                    try { prune.ExecuteNonQuery(); } catch { /* pruning is never worth failing a read over */ }
+
                     _shaDbInitialized = true;
                 }
             }
@@ -6095,7 +6258,14 @@ internal static partial class Program
                     // one session's reading suppress another session's first
                     // fetch, and a fresh conversation is exactly when the model
                     // has the least context to survive that.
-                    _noteMemo[id] = new NoteSnapshot(sha, when, 0, size, Shipped: false);
+                    //
+                    // First row wins. The query is ORDER BY last_seen_at DESC,
+                    // so rows arrive newest-first and a plain assignment let
+                    // each OLDER revision overwrite the newer one — leaving a
+                    // sha that can never match the file, which is most of why
+                    // this warm-up did not warm anything.
+                    if (!_noteMemo.ContainsKey(id))
+                        _noteMemo[id] = new NoteSnapshot(sha, when, 0, size, Shipped: false);
                 }
                 loaded++;
             }
@@ -6223,9 +6393,19 @@ internal static partial class Program
         try
         {
             var now = DateTime.Now;   // local time for human readability
+            // InvariantCulture on every format below. This machine runs th-TH,
+            // where `yyyy` renders the Buddhist era — so 99 journal files are
+            // named 2569-08-10.md and their frontmatter dates them 543 years
+            // in the future, and they are indexed into the vault like that.
+            // Worse than cosmetic: the daily filename IS the dedup key, so the
+            // same day written under two cultures (a scheduled task as SYSTEM,
+            // a CI run, DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1) silently
+            // becomes two separate journals. The exporter already learned this
+            // lesson — BrainExporter.Inv exists for exactly this reason.
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
             var dir = Path.Combine(_vaultPath, ".obsidianx", "sessions");
             Directory.CreateDirectory(dir);
-            var dailyPath = Path.Combine(dir, $"{now:yyyy-MM-dd}.md");
+            var dailyPath = Path.Combine(dir, now.ToString("yyyy-MM-dd", inv) + ".md");
 
             lock (_sessionLogLock)
             {
@@ -6236,7 +6416,7 @@ internal static partial class Program
                 if (isNewFile)
                 {
                     sb.AppendLine("---");
-                    sb.AppendLine($"date: {now:yyyy-MM-dd}");
+                    sb.AppendLine($"date: {now.ToString("yyyy-MM-dd", inv)}");
                     sb.AppendLine($"source: {SourceTag("-auto")}");
                     sb.AppendLine("tags:");
                     sb.AppendLine("  - session");
@@ -6244,18 +6424,18 @@ internal static partial class Program
                     sb.AppendLine("  - claude");
                     sb.AppendLine("---");
                     sb.AppendLine();
-                    sb.AppendLine($"# Brain Session — {now:yyyy-MM-dd}");
+                    sb.AppendLine($"# Brain Session — {now.ToString("yyyy-MM-dd", inv)}");
                     sb.AppendLine();
                 }
 
                 if (isNewFile || gapFromLast > 30)
                 {
                     sb.AppendLine();
-                    sb.AppendLine($"## {now:HH:mm} — session opened");
+                    sb.AppendLine($"## {now.ToString("HH:mm", inv)} — session opened");
                     sb.AppendLine();
                 }
 
-                var line = $"- `{now:HH:mm:ss}`  **{tool}**";
+                var line = $"- `{now.ToString("HH:mm:ss", inv)}`  **{tool}**";
                 if (!string.IsNullOrEmpty(context)) line += $"  ·  {EscapeMarkdown(context)}";
                 if (!string.IsNullOrEmpty(extra))   line += $"  ·  {EscapeMarkdown(extra)}";
                 sb.AppendLine(line);
@@ -6312,7 +6492,10 @@ internal static partial class Program
             lock (_accessLogLock)
             {
                 // Keep the file bounded to avoid unbounded growth
-                TrimIfLarge(logPath, maxBytes: 512 * 1024);
+                // The trim rewrites the whole file, which is the one operation
+                // here that can drop hundreds of rows at once — it belongs
+                // inside the retry just as much as the append does.
+                RetryOnIo(() => TrimIfLarge(logPath, maxBytes: 512 * 1024));
                 RetryOnIo(() => File.AppendAllText(logPath, entry + "\n"));
             }
         }

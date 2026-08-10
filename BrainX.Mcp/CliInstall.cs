@@ -225,7 +225,17 @@ internal static class CliInstall
             {
                 var svc = new EmbeddingService();
                 var written = await svc.PrecomputeMissingAsync(vault, graph).ConfigureAwait(false);
-                Console.WriteLine($"  ✓ wrote {written} new embedding sidecar(s)");
+                // A checkmark on "wrote 0" used to be printed for a pass where
+                // every single embed failed — 0 means both "nothing to do" and
+                // "nothing worked", and only the service can tell them apart.
+                if (svc.BackendUnreachable)
+                    Console.WriteLine("  ✗ Ollama became unreachable — no embeddings written. Semantic search will fall back to keyword.");
+                else if (svc.FailedCount > 0)
+                    Console.WriteLine($"  ⚠  wrote {written}, but {svc.FailedCount} failed — check that `{svc.Model}` is pulled and Ollama is healthy.");
+                else if (written == 0)
+                    Console.WriteLine("  ✓ nothing to do — every note already has a fresh embedding");
+                else
+                    Console.WriteLine($"  ✓ wrote {written} new embedding sidecar(s) with {svc.Model}");
             }
             else
             {

@@ -69,10 +69,26 @@ internal static class McpRuntime
             var targetExe = Path.Combine(target, Path.GetFileName(runningExe));
             if (!NeedsSync(target)) return File.Exists(targetExe) ? targetExe : runningExe;
 
-            Mirror(sourceDir, target, log);
-            File.WriteAllText(Path.Combine(target, VersionMarker),
-                Program.ServerVersion, new UTF8Encoding(false));
-            log?.Invoke($"mcp runtime synced to {target} (v{Program.ServerVersion})");
+            var failed = Mirror(sourceDir, target, log);
+
+            // Stamp the marker ONLY on a complete mirror. It used to be written
+            // unconditionally, so a copy blocked by a live server or AV left
+            // the directory claiming the new version while still holding the
+            // old binary — every agent then launched the stale build forever,
+            // `sync-runtime` reported nothing to do, and no signal existed
+            // anywhere. Leaving the marker stale makes the next run retry.
+            if (failed == 0)
+            {
+                File.WriteAllText(Path.Combine(target, VersionMarker),
+                    Program.ServerVersion, new UTF8Encoding(false));
+                log?.Invoke($"mcp runtime synced to {target} (v{Program.ServerVersion})");
+            }
+            else
+            {
+                log?.Invoke($"mcp runtime sync INCOMPLETE — {failed} file(s) could not be replaced "
+                          + $"(a running server is holding them). Version marker left unchanged so "
+                          + $"the next run retries; agents keep using the previous build until then.");
+            }
             return File.Exists(targetExe) ? targetExe : runningExe;
         }
         catch (Exception ex)
@@ -94,8 +110,13 @@ internal static class McpRuntime
         catch { return true; }
     }
 
-    private static void Mirror(string source, string target, Action<string>? log)
+    /// <returns>
+    /// Number of files that could NOT be refreshed. The caller must not stamp
+    /// the version marker unless this is zero.
+    /// </returns>
+    private static int Mirror(string source, string target, Action<string>? log)
     {
+        var failed = 0;
         Directory.CreateDirectory(target);
         foreach (var src in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
         {
@@ -117,7 +138,7 @@ internal static class McpRuntime
                 File.Move(dst, aside);
                 File.Copy(src, dst, overwrite: false);
             }
-            catch (Exception ex) { log?.Invoke($"  could not refresh {rel}: {ex.Message}"); }
+            catch (Exception ex) { failed++; log?.Invoke($"  could not refresh {rel}: {ex.Message}"); }
         }
 
         // Sweep renamed-aside images from previous syncs once nothing holds
@@ -127,6 +148,7 @@ internal static class McpRuntime
         {
             try { File.Delete(stale); } catch { }
         }
+        return failed;
     }
 
     /// <summary>

@@ -35,7 +35,21 @@ internal static partial class Program
     private const int HeartbeatSeconds = 30;
     private const int MaxMessageBytes = 64 * 1024;
     private const int MaxInboxPending = 500;
-    private const int MaxWaitSeconds = 300;
+    /// <summary>
+    /// Ceiling on the inbox long-poll. Was 300.
+    ///
+    /// The wait is a Thread.Sleep loop on the single stdio thread that serves
+    /// every tool on this brain, so `wait_seconds:60` froze brain_search,
+    /// brain_recall and everything else for a minute, and 300 froze them for
+    /// five. The launcher could not apply a pending binary swap during the
+    /// freeze either, and a client that gives up on a wedged pipe takes the
+    /// whole session with it. Ten seconds keeps the "wait for a reply" gesture
+    /// useful while bounding the blast radius; callers poll again, which the
+    /// tool's own hint already tells them is cheap.
+    ///
+    /// Raising this needs the dispatcher to serve requests concurrently first.
+    /// </summary>
+    private const int MaxWaitSeconds = 10;
 
     private static readonly object _busLock = new();
     private static Timer? _presenceTimer;
@@ -281,7 +295,7 @@ internal static partial class Program
             ["from"] = me,
             ["delivered"] = delivered,
             ["hint"] = anyOnline
-                ? "Recipient is ONLINE. Call agent_inbox {wait_seconds:60} now to wait for the reply — they see your message piggybacked on their next tool call."
+                ? "Recipient is ONLINE. Call agent_inbox {wait_seconds:10} now to wait for the reply — they see your message piggybacked on their next tool call. Repeat the call to keep waiting; each wait blocks this brain's pipe, so short polls beat one long one."
                 : "Recipient is OFFLINE — the message is parked in their inbox and delivered when they next connect to this brain. Don't block waiting; tell the user."
         };
     }
@@ -355,7 +369,7 @@ internal static partial class Program
                 ? $"Act on the message(s), then reply with agent_send {{to:'{lastFrom ?? "…"}', reply_to:'{lastId ?? "…"}'}}. Surface the exchange to your user — don't hide the conversation."
                 : (wait > 0
                     ? "No message arrived within the wait window. agent_peers shows who's online; call agent_inbox again to keep waiting — repeat calls are cheap."
-                    : "Inbox empty. Pass wait_seconds (e.g. 60) to long-poll for a reply after you agent_send.")
+                    : "Inbox empty. Pass wait_seconds (max 10) to wait briefly for a reply after you agent_send, and call again to keep waiting.")
         };
     }
 

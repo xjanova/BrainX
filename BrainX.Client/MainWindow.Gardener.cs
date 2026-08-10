@@ -225,6 +225,18 @@ public partial class MainWindow
                 _gardenProc = p;   // the Stop button's only handle on this run
 
                 var sw = Stopwatch.StartNew();
+
+                // Drain both pipes BEFORE waiting. stdout and stderr are
+                // redirected, and a redirected pipe nobody reads fills at
+                // ~4 KB and blocks the child forever — the child then never
+                // exits, and this waits the full 15 minutes for a job that
+                // finished in seconds. Today --quiet keeps stdout small enough
+                // to hide it, but a single unhandled-exception stack trace on
+                // stderr is bigger than the buffer. That is a way to CAUSE the
+                // wedge the timeout below exists to catch.
+                var stdout = p.StandardOutput.ReadToEndAsync();
+                var stderr = p.StandardError.ReadToEndAsync();
+
                 // The audit's near-dupe pass is O(n²) over embeddings and can
                 // legitimately take minutes on a big vault. 15 min is the
                 // "something is wedged" line, not the expected case.
@@ -234,6 +246,16 @@ public partial class MainWindow
                     return (false, "", sw.Elapsed.TotalSeconds);
                 }
                 sw.Stop();
+                // Surface anything the child put on stderr — a crash here used
+                // to be invisible because nothing ever read the pipe.
+                try
+                {
+                    var err = stderr.GetAwaiter().GetResult();
+                    if (!string.IsNullOrWhiteSpace(err))
+                        System.Diagnostics.Debug.WriteLine($"[gardener] stderr: {err.Trim()}");
+                    _ = stdout.GetAwaiter().GetResult();
+                }
+                catch { }
 
                 // Health comes from the artifact, not the process output —
                 // --quiet suppresses stdout, and the artifact is what every
