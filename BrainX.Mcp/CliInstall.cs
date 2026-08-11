@@ -51,6 +51,11 @@ internal static class CliInstall
         Console.WriteLine("                                          (same stdio MCP binary — `codex mcp add`; verify with `codex mcp list`)");
         Console.WriteLine("  brainx-mcp bake-bundles [options]    Pre-bake ~500-token context bundles for top topics so");
         Console.WriteLine("                                          brain_bundle <topic> answers in ONE cheap MCP call");
+        Console.WriteLine("  brainx-mcp garden [--vault]          Re-bake stale bundles, fill embeddings, audit, write Brain health");
+        Console.WriteLine("  brainx-mcp eval [options]            Score retrieval on a labelled query set (writes Retrieval benchmark)");
+        Console.WriteLine("  brainx-mcp embed-probe [options]     Compare the in-process ONNX embedder against Ollama and against");
+        Console.WriteLine("                                          the sidecars on disk — the check that says whether the");
+        Console.WriteLine("                                          existing vectors survive a backend switch");
         Console.WriteLine("  brainx-mcp --version | -v | version  Print version + binary path + build time");
         Console.WriteLine("  brainx-mcp help                      Show this help");
         Console.WriteLine();
@@ -59,6 +64,13 @@ internal static class CliInstall
         Console.WriteLine("  --pull-models    Pull the embedding model + gemma3:4b via local Ollama if reachable");
         Console.WriteLine("  --precompute     Run embedding precompute after install (slow first time, ~1-2 min for 600 notes)");
         Console.WriteLine("  --quiet          Suppress section headers; print just status lines");
+        Console.WriteLine();
+        Console.WriteLine("Environment:");
+        Console.WriteLine("  BRAINX_VAULT           Vault path");
+        Console.WriteLine("  BRAINX_OLLAMA_URL      Daemon base URL (default http://localhost:11434)");
+        Console.WriteLine("  BRAINX_EMBED_BACKEND   ollama | onnx — default tries Ollama first and falls back");
+        Console.WriteLine("                         in-process when it is down. `onnx` needs bge-m3 ONNX in");
+        Console.WriteLine("                         %LOCALAPPDATA%\\BrainX\\models\\bge-m3 (~2.3 GB, not shipped).");
         Console.WriteLine();
         Console.WriteLine("Inside Claude Code:");
         Console.WriteLine("  Ask Claude for `brain_stats` — its `serverInfo` block shows the running");

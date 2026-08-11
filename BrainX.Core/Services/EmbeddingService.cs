@@ -467,6 +467,24 @@ public class EmbeddingService
         catch { return null; }
     }
 
+    /// <summary>
+    /// Embed one string through Ollama, with this service's model and budget.
+    /// Exists for callers that need a single vector rather than a pass over the
+    /// vault — the probe that compares backends, and any future caller that
+    /// wants to ask the daemon directly. Creates and disposes its own client,
+    /// so it is not the thing to call in a loop over 1,200 notes.
+    /// </summary>
+    public async Task<float[]?> EmbedOneAsync(string text, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var timeout = TimeSpan.FromSeconds(Math.Max(60, MaxChars / 100));
+        using var http = new HttpClient { Timeout = timeout };
+        // Query-path embeds do not borrow the card — same rule as the MCP
+        // server's own query embed, and the reason ResolveGpuLayersAsync exists.
+        _gpuLayers = 0;
+        return await EmbedAsync(http, text, ct).ConfigureAwait(false);
+    }
+
     private static byte[] FloatsToBytes(float[] floats)
     {
         var bytes = new byte[floats.Length * 4];

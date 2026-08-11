@@ -866,7 +866,7 @@ internal static partial class Program
     private static float[]? TitleVector(NodeSummary n)
     {
         if (_titleVecs.TryGetValue(n.Id, out var v)) return v;
-        var vec = OllamaEmbed(n.Title);
+        var vec = EmbedQuery(n.Title);
         if (vec != null) _titleVecs[n.Id] = vec;
         return vec;
     }
@@ -1217,7 +1217,7 @@ internal static partial class Program
             var absentPath = File.Exists(absentArg)
                 ? absentArg : Path.Combine(evalDir, absentArg);
             Say($"  absent set: {absentPath}");
-            if (OllamaEmbed("warm up the embedding model") == null)
+            if (EmbedQuery("warm up the embedding model") == null)
                 Console.Error.WriteLine("  embed UNREACHABLE — every verdict would be keyword-only; aborting.");
             else return RunAbsent(absentPath, quiet);
             return 2;
@@ -1262,7 +1262,7 @@ internal static partial class Program
         // Warm the embedding model once. Otherwise the first query pays the
         // full cold load and the per-query timings describe the load, not the
         // search — the same confusion that hid the 8s-timeout bug for weeks.
-        var warmed = OllamaEmbed("warm up the embedding model") != null;
+        var warmed = EmbedQuery("warm up the embedding model") != null;
         Say(warmed ? "  embed:    model warm" : "  embed:    UNREACHABLE — semantic/hybrid arms will be empty");
 
         // The benchmark must not measure a corpus it is itself writing into.
@@ -1358,7 +1358,7 @@ internal static partial class Program
             // not free, and leaving it outside the clock is what made the
             // semantic paths look 4.6x faster than a caller experiences.
             sw.Restart();
-            var vec = OllamaEmbed(pair.Query);
+            var vec = EmbedQuery(pair.Query);
             sw.Stop();
             embedMs += sw.ElapsedMilliseconds;
 

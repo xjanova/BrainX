@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -131,6 +131,11 @@ internal static partial class Program
         {
             Console.OutputEncoding = new UTF8Encoding(false);
             return await EvalCliAsync(args.Skip(1).ToArray()).ConfigureAwait(false);
+        }
+        if (args.Length > 0 && args[0].Equals("embed-probe", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.OutputEncoding = new UTF8Encoding(false);
+            return await EmbedProbeCliAsync(args.Skip(1).ToArray()).ConfigureAwait(false);
         }
         if (args.Length > 0 && (args[0] == "--version" || args[0] == "-v" || args[0].Equals("version", StringComparison.OrdinalIgnoreCase)))
         {
@@ -3192,7 +3197,7 @@ internal static partial class Program
         // Try Ollama embedding — non-blocking, swallow any error
         // (network, model not pulled, daemon not running) and fall
         // back to keyword search so the tool always answers.
-        var queryVec = OllamaEmbed(query);
+        var queryVec = EmbedQuery(query);
         var ql = query.ToLowerInvariant();
 
         // The ranking itself moved to HybridRank (Program.Recall.cs) when
@@ -4408,6 +4413,19 @@ internal static partial class Program
                 ["dimHistogram"] = new JObject(dimCounts
                     .OrderByDescending(kv => kv.Value)
                     .Select(kv => new JProperty(kv.Key.ToString(), kv.Value))),
+                // Can this brain still answer semantically with the daemon off?
+                // The answer used to be "no", silently, and only at the moment
+                // it mattered. Now it is a field.
+                ["inProcessBackend"] = new JObject
+                {
+                    ["available"] = OnnxEmbedder.IsAvailable(),
+                    ["modelDir"] = OnnxEmbedder.DefaultModelDir,
+                    ["why"] = OnnxEmbedder.WhyUnavailable(),
+                    ["note"] = "When present, brain_semantic_search and brain_recall keep working "
+                             + "with Ollama stopped — measured drop-in against the sidecars on disk "
+                             + "(min cos 0.9985). Ollama stays first by default; it is shared across "
+                             + "sessions while this costs ~2.5 GB in each one."
+                },
                 ["truncation"] = new JObject
                 {
                     ["model"] = embedModel,
@@ -4795,7 +4813,7 @@ internal static partial class Program
     /// Cached by text hash for <see cref="EmbedCacheTtl"/> to avoid
     /// repeated HTTP round-trips on the same query within a session.
     /// </summary>
-    private static float[]? OllamaEmbed(string text)
+    private static float[]? EmbedQuery(string text)
     {
         if (string.IsNullOrEmpty(text)) return null;
 
@@ -4805,6 +4823,17 @@ internal static partial class Program
         {
             if (DateTime.UtcNow - hit.at < EmbedCacheTtl) return hit.vec;
             _embedCache.TryRemove(key, out _);
+        }
+
+        // P6: the in-process backend, when the caller has asked for it by name.
+        // Not the default even though it is measurably faster per query (66-131
+        // ms vs ~2.2 s in the probe), because it costs ~2.5 GB of RAM in EVERY
+        // agent session, and this box runs six at once — while one Ollama
+        // daemon is shared by all of them. Latency per query is not worth 15 GB.
+        if (OnnxPreferred())
+        {
+            var viaOnnx = OnnxEmbed(text);
+            if (viaOnnx != null) { CacheEmbed(key, viaOnnx); return viaOnnx; }
         }
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -4843,13 +4872,13 @@ internal static partial class Program
             // `using` — this is the hottest path in the server and an
             // undisposed HttpResponseMessage holds its content buffer until GC
             // on a worker that already carries a large corpus in memory.
-            using var resp = http.PostAsync("http://localhost:11434/api/embed",
+            using var resp = http.PostAsync($"{OllamaBaseUrl}/api/embed",
                 new System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json"))
                 .GetAwaiter().GetResult();
             if (!resp.IsSuccessStatusCode)
             {
-                Log($"embed: HTTP {(int)resp.StatusCode} after {sw.ElapsedMilliseconds}ms → keyword fallback");
-                return null;
+                Log($"embed: HTTP {(int)resp.StatusCode} after {sw.ElapsedMilliseconds}ms → ONNX or keyword fallback");
+                return OnnxFallback(text, key, $"HTTP {(int)resp.StatusCode}");
             }
             var tPost = sw.ElapsedMilliseconds;
             var raw = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
@@ -4867,18 +4896,7 @@ internal static partial class Program
             var vec = new float[arr.Count];
             for (int i = 0; i < arr.Count; i++) vec[i] = arr[i].Value<float>();
 
-            // Evict oldest entry when at capacity. Not strict LRU — TTL
-            // does most of the work — but stops unbounded growth on
-            // very long sessions with many unique queries.
-            if (_embedCache.Count >= EmbedCacheCapacity)
-            {
-                var oldest = _embedCache
-                    .OrderBy(kv => kv.Value.at)
-                    .Select(kv => kv.Key)
-                    .FirstOrDefault();
-                if (oldest != null) _embedCache.TryRemove(oldest, out _);
-            }
-            _embedCache[key] = (vec, DateTime.UtcNow);
+            CacheEmbed(key, vec);
             // Split timing, not a single number. A bare total said "2250ms"
             // and two plausible explanations for it (proxy auto-detect, slow
             // JSON deserialize) were both wrong — because nothing said WHICH
@@ -4897,10 +4915,137 @@ internal static partial class Program
             // reports mode='keyword-fallback' but nothing said WHY, so a
             // permanently-degraded semantic search looked identical to a
             // healthy one — it cost a live debugging session to notice.
-            Log($"embed FAILED after {sw.ElapsedMilliseconds}ms → keyword fallback · {ex.GetType().Name}: {ex.Message}");
-            return null;
+            Log($"embed FAILED after {sw.ElapsedMilliseconds}ms · {ex.GetType().Name}: {ex.Message}");
+            return OnnxFallback(text, key, ex.GetType().Name);
         }
     }
+
+    /// <summary>Store a query vector under the shared TTL cache. Evicts the
+    /// oldest entry at capacity — not strict LRU, since the TTL does most of
+    /// the work, but it stops unbounded growth on very long sessions.</summary>
+    private static void CacheEmbed(string key, float[] vec)
+    {
+        if (_embedCache.Count >= EmbedCacheCapacity)
+        {
+            var oldest = _embedCache.OrderBy(kv => kv.Value.at).Select(kv => kv.Key).FirstOrDefault();
+            if (oldest != null) _embedCache.TryRemove(oldest, out _);
+        }
+        _embedCache[key] = (vec, DateTime.UtcNow);
+    }
+
+    // ───────────── P6: bge-m3 in this process ─────────────
+    //
+    // Semantic search's last hard dependency on a background daemon. With the
+    // weights on disk (see OnnxEmbedder.DefaultModelDir) a vault whose Ollama
+    // is not running still gets real vectors instead of dropping to
+    // mode:"keyword-fallback".
+    //
+    // Measured on this vault, 2026-08-11 (`brainx-mcp embed-probe`), before any
+    // of this was wired in — the switch shipped on the numbers, not on an
+    // argument about float precision:
+    //
+    //   cos(onnx, ollama)        min 0.9985 · p50 0.9999 · mean 0.9997
+    //   cos(onnx, sidecar-on-disk) min 0.9985 · p50 0.9997 · n=8
+    //   short queries (th + en)  1.0000, every one
+    //   query latency            66-131 ms in-process vs ~2,250 ms via the daemon
+    //
+    // Drop-in: the 1,288 sidecars Ollama wrote stay valid, so a fallback vector
+    // can be compared against them without the answer quietly changing meaning.
+    // The 1.0000 on short Thai queries is also what proves the hand-written
+    // XLM-RoBERTa tokenizer correct — a tokenizer that is even slightly wrong
+    // cannot land there.
+    //
+    // Ollama stays FIRST by default anyway, and the reason is memory, not
+    // quality: this backend costs ~2.5 GB resident per process, one Ollama
+    // daemon is shared by every session, and this box runs six MCP children.
+    // BRAINX_EMBED_BACKEND=onnx flips the order for anyone who would rather
+    // spend the RAM than the milliseconds.
+    private static OnnxEmbedder? _onnx;
+    private static DateTime _onnxLastUsed;
+    private static bool _onnxTried;
+    private static readonly object _onnxGate = new();
+
+    private static bool OnnxPreferred()
+        => string.Equals(Environment.GetEnvironmentVariable("BRAINX_EMBED_BACKEND"),
+                         "onnx", StringComparison.OrdinalIgnoreCase);
+
+    private static bool OnnxDisabled()
+        => string.Equals(Environment.GetEnvironmentVariable("BRAINX_EMBED_BACKEND"),
+                         "ollama", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The daemon did not answer. Try in-process, and say so — a
+    /// fallback nobody can see is how a degraded system passes for a healthy
+    /// one (the whole lesson of the 8s-timeout bug).</summary>
+    private static float[]? OnnxFallback(string text, string cacheKey, string why)
+    {
+        if (OnnxDisabled()) return null;
+        var vec = OnnxEmbed(text);
+        if (vec == null) return null;
+        Log($"embed: served in-process after Ollama {why} — semantic search stays live");
+        CacheEmbed(cacheKey, vec);
+        return vec;
+    }
+
+    /// <summary>
+    /// Embed in-process. Loads the model on first use and releases it after
+    /// <see cref="OnnxEmbedder.IdleUnload"/>, because six resident copies of a
+    /// 2.3 GB model is not a thing to do to someone's machine for a feature
+    /// most sessions never reach.
+    /// </summary>
+    private static float[]? OnnxEmbed(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return null;
+        lock (_onnxGate)
+        {
+            if (_onnx == null)
+            {
+                // One attempt per process. Retrying a missing model on every
+                // query would pay the directory walk forever and log the same
+                // line a thousand times.
+                if (_onnxTried) return null;
+                _onnxTried = true;
+                _onnx = OnnxEmbedder.TryCreate(null, out var why);
+                if (_onnx == null) { Log($"onnx: unavailable — {why}"); return null; }
+                Log("onnx: bge-m3 loaded in-process (no daemon needed)");
+                StartOnnxIdleTimer();
+            }
+            _onnxLastUsed = DateTime.UtcNow;
+            return _onnx.Embed(text);
+        }
+    }
+
+    private static Timer? _onnxIdleTimer;
+
+    private static void StartOnnxIdleTimer()
+    {
+        _onnxIdleTimer ??= new Timer(_ =>
+        {
+            lock (_onnxGate)
+            {
+                if (_onnx == null) return;
+                if (DateTime.UtcNow - _onnxLastUsed < OnnxEmbedder.IdleUnload) return;
+                _onnx.Dispose();
+                _onnx = null;
+                // Cleared so the next query is allowed to load it again — the
+                // flag exists to stop retrying a model that is NOT THERE, not
+                // to remember one that unloaded on schedule. The next caller
+                // pays the ~4 s load, which is the whole trade: 2.5 GB back to
+                // the OS for a feature a session may never touch again.
+                _onnxTried = false;
+                Log("onnx: idle — weights released");
+            }
+        }, null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
+    }
+
+    /// <summary>
+    /// Where the daemon lives. Hardcoded to localhost:11434 for its whole life,
+    /// which is right for almost everyone and impossible for anyone running
+    /// Ollama on another port or another box — and it is also the only way to
+    /// exercise the in-process fallback without stopping the user's daemon.
+    /// </summary>
+    private static string OllamaBaseUrl =>
+        Environment.GetEnvironmentVariable("BRAINX_OLLAMA_URL")?.TrimEnd('/')
+        is { Length: > 0 } url ? url : "http://localhost:11434";
 
     /// <summary>How long to let a cold embedding-model load run before giving
     /// up. Must exceed the model's load time or the fallback is guaranteed.</summary>
@@ -4961,7 +5106,7 @@ internal static partial class Program
             System.Threading.Tasks.Task.Run(() =>
             {
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                var ok = OllamaEmbed("warm") != null;
+                var ok = EmbedQuery("warm") != null;
                 Log($"embed warm-up: {(ok ? "ready" : "unavailable")} in {sw.ElapsedMilliseconds}ms");
             });
         }

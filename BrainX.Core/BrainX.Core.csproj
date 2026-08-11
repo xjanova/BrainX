@@ -36,6 +36,13 @@
          Used by SshExecutor to dial whitelisted hosts on Claude's behalf
          so the model can grep logs / read config without prompting. -->
     <PackageReference Include="SSH.NET" Version="2024.2.0" />
+    <!-- P6: bge-m3 in-process, so semantic search survives with no Ollama
+         daemon. CPU package on purpose — the GPU/DirectML variants pull a
+         native runtime into every one of the six MCP children this box runs,
+         and the card belongs to whatever model is doing the actual work
+         (see EmbeddingService.ResolveGpuLayersAsync). Weights are NOT
+         shipped: OnnxEmbedder is inert until the model is placed on disk. -->
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.28.0" />
   </ItemGroup>
 
 </Project>

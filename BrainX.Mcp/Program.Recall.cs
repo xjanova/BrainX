@@ -1008,7 +1008,7 @@ internal static partial class Program
         EnsureValidityIndex(export);
 
         var ql = query.ToLowerInvariant();
-        var (ranked, mode, cosines, agree) = HybridRank(export, filtered, ql, limit, OllamaEmbed(query));
+        var (ranked, mode, cosines, agree) = HybridRank(export, filtered, ql, limit, EmbedQuery(query));
 
         if (ranked.Count == 0)
         {
