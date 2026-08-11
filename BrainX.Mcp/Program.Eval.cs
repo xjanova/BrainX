@@ -648,6 +648,9 @@ internal static partial class Program
     /// </summary>
     private static readonly double[] LexWeights = { 0.15, 0.25, 0.40 };
 
+    /// <summary>How much of the score comes from the title vector instead of the body's.</summary>
+    private static readonly double[] TitleWeights = { 0.30, 0.50, 0.70, 1.00 };
+
     // ───────────── LLM reranking ─────────────
     //
     // Why this and not more fusion or chunking, both of which were measured
@@ -798,6 +801,95 @@ internal static partial class Program
             .OrderByDescending(x => x.Score)
             .ThenBy(x => x.Orig)          // ties keep the retrieval order
             .Select(x => x.Id)
+            .ToList();
+    }
+
+    // ───────────── title vectors ─────────────
+    //
+    // A hypothesis specific to THIS vault rather than to retrieval in general:
+    // its titles are written as one-line summaries, not labels — "Paraphrase
+    // benchmark 2026-08-10 — semantic wins 2.25x once the labels stop coming
+    // from keyword" states the finding. A note vector averages that sentence
+    // with several thousand words of surrounding detail; a title vector does
+    // not. If the dilution is what makes right and wrong notes score the same
+    // cosine (0.597 vs 0.598), the title should separate them where the body
+    // cannot.
+    //
+    // Cached for the whole run and computed only for candidates that actually
+    // appear, so repeated notes across queries cost one embed each. Titles are
+    // short, so these are the cheapest embeds in the system.
+    private static readonly Dictionary<string, float[]> _titleVecs = new(StringComparer.Ordinal);
+
+    private static float[]? TitleVector(NodeSummary n)
+    {
+        if (_titleVecs.TryGetValue(n.Id, out var v)) return v;
+        var vec = OllamaEmbed(n.Title);
+        if (vec != null) _titleVecs[n.Id] = vec;
+        return vec;
+    }
+
+    /// <summary>
+    /// Rerank the retrieved window by blending the body cosine the ranker
+    /// already used with a cosine against the TITLE alone.
+    /// </summary>
+    private static List<string> RunTitleRerank(BrainExport export, List<NodeSummary> all,
+                                               string query, float[]? vec, double titleWeight,
+                                               bool overLexical = false)
+    {
+        var ql = query.ToLowerInvariant();
+        var (ranked, _, cosines, agree) = HybridRank(export, all, ql, EvalTopK, vec, lexRerank: false);
+        var ids = ranked.Select(r => r.Node.Id).ToList();
+        if (vec == null || ranked.Count < 2) return ids;
+
+        // Two bases to blend the title against: the raw body cosine, or the
+        // lexical blend already shipping. Comparing both answers whether the
+        // title carries information the shipped signal does not already have,
+        // which is the only reason to pay for a second set of vectors.
+        var qGrams = overLexical ? Trigrams(query) : null;
+        var field = overLexical
+            ? SummariseField(cosines.Values,
+                cosines.TryGetValue(ranked[0].Node.Id, out var t0) ? t0 : 0)
+            : default;
+
+        var baseScore = new double[ranked.Count];
+        var titleScore = new double[ranked.Count];
+        for (int i = 0; i < ranked.Count; i++)
+        {
+            var n = ranked[i].Node;
+            var body = cosines.TryGetValue(n.Id, out var c) ? c : 0;
+            if (overLexical)
+            {
+                var ctx = ExtractMatchContext(export, n, ql);
+                var doc = Trigrams(n.Title + " " + (ctx ?? "") + " " + TruncatePreview(n.Preview, 500));
+                baseScore[i] = ConfidenceV2(field with { Answer = body },
+                    Containment(qGrams!, doc), agree.SameTop && i == 0 ? 1.0 : 0.0);
+            }
+            else baseScore[i] = body;
+
+            var tv = TitleVector(n);
+            titleScore[i] = tv == null ? body : Cosine(vec, tv);
+        }
+
+        // Min-max inside the window before blending. The two signals live on
+        // different scales (a normalised 0-1 blend against a raw cosine that
+        // never leaves 0.4-0.7), and adding them raw would let the flatter one
+        // decide nothing while looking like it had a weight.
+        static void Normalise(double[] xs)
+        {
+            double lo = double.MaxValue, hi = double.MinValue;
+            foreach (var x in xs) { if (x < lo) lo = x; if (x > hi) hi = x; }
+            var span = hi - lo;
+            if (span < 1e-9) { for (int i = 0; i < xs.Length; i++) xs[i] = 0; return; }
+            for (int i = 0; i < xs.Length; i++) xs[i] = (xs[i] - lo) / span;
+        }
+        Normalise(baseScore);
+        Normalise(titleScore);
+
+        return Enumerable.Range(0, ranked.Count)
+            .Select(i => (Orig: i, Score: (1.0 - titleWeight) * baseScore[i] + titleWeight * titleScore[i]))
+            .OrderByDescending(x => x.Score)
+            .ThenBy(x => x.Orig)
+            .Select(x => ids[x.Orig])
             .ToList();
     }
 
@@ -1010,7 +1102,7 @@ internal static partial class Program
     internal static async Task<int> EvalCliAsync(string[] args)
     {
         string? vaultArg = null, goldArg = null, absentArg = null;
-        var mine = false; var quiet = false; var limit = 0; var rerank = false;
+        var mine = false; var quiet = false; var limit = 0; var rerank = false; var titles = false;
         for (int i = 0; i < args.Length; i++)
         {
             if (args[i] == "--vault" && i + 1 < args.Length) vaultArg = args[++i];
@@ -1021,6 +1113,9 @@ internal static partial class Program
             // Opt-in: one LLM call per query, so it turns a 5-minute run into
             // a much longer one. Off by default keeps the regression runs fast.
             else if (args[i] == "--rerank") rerank = true;
+            // Opt-in: embeds each candidate's title once per run. Cheap per
+            // call but it is still one embed per distinct note that surfaces.
+            else if (args[i] == "--titles") titles = true;
             else if (args[i] == "--quiet") quiet = true;
             else if (args[i] is "-h" or "--help" or "help")
             {
@@ -1153,6 +1248,8 @@ internal static partial class Program
             .Concat(new[] { "lexauto" })
             .Concat(new[] { "oracle:pick", "oracle:union", "oracle:top10" })
             .Concat(rerank ? new[] { "rerank" } : Array.Empty<string>())
+            .Concat(titles ? TitleWeights.Select(w => $"title{w:0.##}") : Array.Empty<string>())
+            .Concat(titles ? TitleWeights.Select(w => $"lex+title{w:0.##}") : Array.Empty<string>())
             .ToArray();
         var arms = armNames.ToDictionary(
             n => n,
@@ -1254,6 +1351,15 @@ internal static partial class Program
                 return promoted;
             });
             if (rerank) Arm("rerank", () => RunRerank(export, all, pair.Query, vec));
+            if (titles)
+                foreach (var w in TitleWeights)
+                {
+                    var titleW = w;
+                    Arm($"title{titleW:0.##}",
+                        () => RunTitleRerank(export, all, pair.Query, vec, titleW));
+                    Arm($"lex+title{titleW:0.##}",
+                        () => RunTitleRerank(export, all, pair.Query, vec, titleW, overLexical: true));
+                }
             Arm("router", () => RunFusion(export, all, pair.Query, vec, Fusion.Router));
             foreach (var w in LexWeights)
             {
