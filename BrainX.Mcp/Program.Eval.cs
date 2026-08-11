@@ -611,7 +611,50 @@ internal static partial class Program
     /// being compared against rather than quietly moving the goalposts.
     /// </summary>
     private static List<string> RunHybrid(BrainExport export, List<NodeSummary> all, string query, float[]? vec)
-        => HybridRank(export, all, query.ToLowerInvariant(), EvalTopK, vec, lexRerank: false)
+        => HybridRank(export, all, query.ToLowerInvariant(), EvalTopK, vec,
+                      lexRerank: false, autoScope: false)
+            .Ranked.Select(r => r.Node.Id).ToList();
+
+    /// <summary>Parent directory of a vault-relative path, "" for a root note.</summary>
+    private static string FolderOf(string relativePath)
+    {
+        var p = relativePath.Replace('/', '\\');
+        var i = p.LastIndexOf('\\');
+        return i <= 0 ? "" : p[..i];
+    }
+
+    /// <summary>
+    /// The shipped ranker over a RESTRICTED candidate set — the same code, a
+    /// smaller world. Nothing about the ranking changes, which is the point:
+    /// any difference these arms show is the drawer, not the ranker.
+    /// </summary>
+    private static List<string> RunFusionScoped(BrainExport export, List<NodeSummary> drawer,
+                                                string query, float[]? vec)
+        => drawer.Count == 0
+            ? new List<string>()
+            : HybridRank(export, drawer, query.ToLowerInvariant(), EvalTopK, vec)
+                .Ranked.Select(r => r.Node.Id).ToList();
+
+    // ───────────── two-pass folder routing (the shippable half of the oracle) ─────────────
+    //
+    // The oracle arms read the label to find the right drawer. This does the
+    // only honest version of that: rank once, look at where the results
+    // CLUSTER, and give that drawer a boost on a second pass.
+    //
+    // BOOST, never FILTER — the rule from the 2026-08-02 routing decision, and
+    // the reason this cannot fail closed. If the first pass guesses the drawer
+    // wrong, notes from every other folder are still present and still ranked;
+    // they merely lose a tie-break. Filtering would hide them, and hiding the
+    // right note is indistinguishable from not having it.
+    //
+    // Deterministic on purpose. The same query gives the same drawer every
+    // time, with no dependence on who asked or what they read last — the
+    // failure the same note rejected access-log-derived boosting for.
+    /// <summary>Routing ALONE — no lexical rerank — so the two can be told apart.</summary>
+    private static List<string> RunAutoScope(BrainExport export, List<NodeSummary> all,
+                                             string query, float[]? vec)
+        => HybridRank(export, all, query.ToLowerInvariant(), EvalTopK, vec,
+                      lexRerank: false, autoScope: true)
             .Ranked.Select(r => r.Node.Id).ToList();
 
     /// <summary>What brain_semantic_search and brain_recall actually return now.</summary>
@@ -1246,7 +1289,19 @@ internal static partial class Program
             // the prize visible next to every attempt to claim it.
             .Concat(LexWeights.Select(w => $"lex{w:0.##}"))
             .Concat(new[] { "lexauto" })
-            .Concat(new[] { "oracle:pick", "oracle:union", "oracle:top10" })
+            // Two more CHEATING arms, and the most important ones in the file.
+            // Everything above tries to ORDER 1,284 candidates better. These
+            // ask a different question: what if the right drawer were opened
+            // first? A perfect reranker is bounded by what retrieval already
+            // found; a perfect router changes what is in the candidate set at
+            // all, so it is the only arm here whose ceiling is not capped by
+            // hit@10.
+            // Decomposed on purpose. The first "autoscope" measurement scored
+            // routing and a 50-deep lexical rerank together and credited the
+            // whole gain to routing — these three arms separate them.
+            .Concat(new[] { "autoscope", "lexdeep50", "route+deep" })
+            .Concat(new[] { "oracle:pick", "oracle:union", "oracle:top10",
+                            "oracle:scope", "oracle:folder" })
             .Concat(rerank ? new[] { "rerank" } : Array.Empty<string>())
             .Concat(titles ? TitleWeights.Select(w => $"title{w:0.##}") : Array.Empty<string>())
             .Concat(titles ? TitleWeights.Select(w => $"lex+title{w:0.##}") : Array.Empty<string>())
@@ -1318,6 +1373,13 @@ internal static partial class Program
             var semIds = Arm("semantic", () => RunSemantic(all, vec));
             var hybridIds = Arm("hybrid", () => RunHybrid(export, all, pair.Query, vec));
             Arm("shipped", () => RunShipped(export, all, pair.Query, vec));
+            Arm("autoscope", () => RunAutoScope(export, all, pair.Query, vec));
+            Arm("lexdeep50", () => HybridRank(export, all, pair.Query.ToLowerInvariant(),
+                    EvalTopK, vec, autoScope: false, lexDepth: 50)
+                .Ranked.Select(r => r.Node.Id).ToList());
+            Arm("route+deep", () => HybridRank(export, all, pair.Query.ToLowerInvariant(),
+                    EvalTopK, vec, autoScope: true, lexDepth: 50)
+                .Ranked.Select(r => r.Node.Id).ToList());
 
             // Rank of the first expected id, or int.MaxValue. Used only by the
             // oracle arms below.
@@ -1350,6 +1412,28 @@ internal static partial class Program
                 promoted.AddRange(hybridIds.Where((_, i) => i != r));
                 return promoted;
             });
+            // The drawer the answer actually lives in, read off the label. Real
+            // routing would have to INFER this from the query — that is the
+            // follow-on question, and it only matters if the ceiling is worth
+            // chasing, which is what these two arms are for.
+            var target = all.FirstOrDefault(n => expected.Contains(n.Id));
+            Arm("oracle:scope", () =>
+            {
+                if (target == null) return RunShipped(export, all, pair.Query, vec);
+                var drawer = all.Where(n =>
+                    string.Equals(n.Scope ?? "", target.Scope ?? "", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                return RunFusionScoped(export, drawer, pair.Query, vec);
+            });
+            Arm("oracle:folder", () =>
+            {
+                if (target == null) return RunShipped(export, all, pair.Query, vec);
+                var dir = FolderOf(target.RelativePath);
+                var drawer = all.Where(n => FolderOf(n.RelativePath)
+                    .Equals(dir, StringComparison.OrdinalIgnoreCase)).ToList();
+                return RunFusionScoped(export, drawer, pair.Query, vec);
+            });
+
             if (rerank) Arm("rerank", () => RunRerank(export, all, pair.Query, vec));
             if (titles)
                 foreach (var w in TitleWeights)

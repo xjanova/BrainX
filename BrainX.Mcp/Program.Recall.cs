@@ -162,6 +162,135 @@ internal static partial class Program
     /// </summary>
     private static int LexRerankDepth => (int)EnvD("BRAINX_LEXRANK_DEPTH", 10);
 
+    // ───────────── folder routing, decided by unanimity ─────────────
+    //
+    // Measured 2026-08-11. Restricting the candidate set to the folder the
+    // answer actually lives in is worth far more than any ranking change tried
+    // this session: hit@10 50.0% -> 71.7% on the paraphrase set, 66.1% ->
+    // 81.6% on the journal set, against the +6.5 points that fusion, chunking,
+    // LLM reranking, title vectors and lexical reranking produced between them.
+    //
+    // The catch, and it nearly shipped as a regression: the drawer has to be
+    // decided by something other than the ranking that needs fixing. Letting
+    // the first pass vote with a simple plurality took MRR from 0.323 to
+    // **0.171** — the worst result measured all day. A ranker that is right at
+    // rank 1 only 24% of the time votes for the wrong room, and the boost then
+    // buries the answer deeper than no routing at all. **Using a ranker as its
+    // own router amplifies its errors.**
+    //
+    // Unanimity is the fix: every note in the first-pass window must agree,
+    // which is a signal the ranker cannot manufacture out of its own
+    // uncertainty. With it, this beats the label-reading oracle — because the
+    // oracle FILTERS to one folder and loses everything outside, while this
+    // only boosts. "Boost, never filter" was a design rule from 2026-08-02;
+    // it is now also the higher-scoring option.
+    /// <remarks>
+    /// OFF by default, and the reason is the most useful thing in this block.
+    ///
+    /// The ceiling is real: routing to the folder the answer actually lives in
+    /// is worth hit@10 50.0% -> 71.7% (paraphrase) and 66.1% -> 81.6%
+    /// (journal), against the +6.5 points every ranking change tried this
+    /// session produced between them. Structure holds the biggest unclaimed
+    /// prize in this system.
+    ///
+    /// No implementable router reached it. Decomposed on both gold sets:
+    ///
+    ///                          paraphrase-46            journal-651
+    ///                       hit@5  hit@10   MRR      hit@5  hit@10   MRR
+    ///   no routing          39.1%  50.0%   0.268     55.9%  66.1%   0.397
+    ///   routing alone       39.1%  50.0%   0.268     55.9%  66.1%   0.397
+    ///   deep rerank alone   41.3%  50.0%   0.323     56.1%  66.1%   0.397
+    ///   both                50.0%  58.7%   0.369     56.5%  66.4%   0.398
+    ///
+    /// Neither half does anything on its own. Together they move MRR +0.046 on
+    /// 46 questions and **+0.001 on 651** — the signature of a small-sample
+    /// artifact, not an effect, and the mechanism cannot be explained either.
+    /// Two reasons to leave it off, and this codebase's own playbook says a
+    /// number you cannot explain is not a number you ship.
+    ///
+    /// Worse, an earlier version of this was nearly shipped on a
+    /// misattribution: the first "routing" measurement had the lexical rerank
+    /// switched on underneath it and credited the whole gain to routing.
+    ///
+    /// The one solid finding here is negative and worth keeping: letting the
+    /// first pass pick the drawer by PLURALITY took MRR from 0.323 to 0.171,
+    /// the worst result of the session. Using a ranker as its own router
+    /// amplifies its errors. Whatever eventually claims that ceiling has to
+    /// learn the drawer from somewhere the ranker is not — the query text, or
+    /// the caller stating it.
+    /// </remarks>
+    private static bool AutoScopeEnabled =>
+        string.Equals(Environment.GetEnvironmentVariable("BRAINX_AUTOSCOPE"), "on",
+            StringComparison.OrdinalIgnoreCase);
+
+    private static double AutoScopeBoost => EnvD("BRAINX_AUTOSCOPE_BOOST", 1.6);
+
+    /// <summary>
+    /// Share of the first-pass window that must agree on one folder. **1.0 —
+    /// unanimity — and the sweep is why:**
+    ///
+    ///   consensus   hit@1   hit@5   hit@10    MRR      (paraphrase-46)
+    ///     0.40      10.9%   26.1%   32.6%    0.171
+    ///     0.60      28.3%   45.7%   52.2%    0.346
+    ///     0.80      28.3%   47.8%   56.5%    0.357
+    ///     1.00      28.3%   50.0%   58.7%    0.369
+    ///   (no routing 23.9%   41.3%   50.0%    0.323)
+    ///
+    /// It is also the conservative end of the sweep rather than a fitted
+    /// middle, so it is the value least likely to be an artifact of a
+    /// 46-question set.
+    /// </summary>
+    private static double AutoScopeMinShare => EnvD("BRAINX_AUTOSCOPE_MIN_SHARE", 1.0);
+
+    /// <summary>How deep the first pass runs before the vote is taken.</summary>
+    private static int AutoScopeWide => (int)EnvD("BRAINX_AUTOSCOPE_WIDE", 50);
+
+    /// <summary>
+    /// How many of those the vote counts. Ten, not fifty: the tail of a
+    /// fifty-deep list is where the ranker is already guessing, and letting it
+    /// vote would elect the biggest folder in the vault rather than the most
+    /// relevant one.
+    /// </summary>
+    private static int AutoScopeVoteWindow => (int)EnvD("BRAINX_AUTOSCOPE_VOTES", 10);
+
+    internal static string FolderOfPath(string relativePath)
+    {
+        var p = relativePath.Replace('/', '\\');
+        var i = p.LastIndexOf('\\');
+        return i <= 0 ? "" : p[..i];
+    }
+
+    /// <summary>
+    /// Promote the folder the first pass unanimously points at. Returns the
+    /// list unchanged when there is no unanimous vote, which is most queries —
+    /// this fires rarely and decisively rather than often and vaguely.
+    /// </summary>
+    private static List<(NodeSummary Node, double Score)> ApplyFolderRouting(
+        List<(NodeSummary Node, double Score)> ranked, out string? drawer)
+    {
+        drawer = null;
+        var window = Math.Min(AutoScopeVoteWindow, ranked.Count);
+        if (window < 3) return ranked;
+
+        var votes = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < window; i++)
+        {
+            var f = FolderOfPath(ranked[i].Node.RelativePath);
+            votes[f] = votes.GetValueOrDefault(f) + 1;
+        }
+        var top = votes.OrderByDescending(kv => kv.Value).First();
+        if ((double)top.Value / window < AutoScopeMinShare) return ranked;
+
+        drawer = top.Key;
+        var key = top.Key;
+        return ranked
+            .Select(r => (r.Node, Score: r.Score *
+                (FolderOfPath(r.Node.RelativePath).Equals(key, StringComparison.OrdinalIgnoreCase)
+                    ? AutoScopeBoost : 1.0)))
+            .OrderByDescending(x => x.Score)
+            .ToList();
+    }
+
     private static Fusion CurrentFusion =>
         (Environment.GetEnvironmentVariable("BRAINX_FUSION") ?? "").Trim().ToLowerInvariant() switch
         {
@@ -180,14 +309,16 @@ internal static partial class Program
                     Dictionary<string, double> Cosines, RankerAgreement Agree)
         HybridRank(BrainExport export, List<NodeSummary> filtered, string ql, int limit,
                    float[]? queryVec, Fusion? fusion = null, double? kwCeiling = null,
-                   bool? lexRerank = null)
+                   bool? lexRerank = null, bool? autoScope = null, int? lexDepth = null)
     {
         var fuse = fusion ?? CurrentFusion;
         var doLex = lexRerank ?? LexRerankEnabled;
+        var doRoute = autoScope ?? AutoScopeEnabled;
         // Fuse a window at least as wide as the reranker needs, then cut back
         // to what the caller asked for. A caller asking for 3 still gets the
-        // benefit of reordering 10.
+        // benefit of reordering 10 — and of a folder vote taken over 50.
         var fuseLimit = doLex ? Math.Max(limit, LexRerankDepth) : limit;
+        if (doRoute) fuseLimit = Math.Max(fuseLimit, AutoScopeWide);
         var cosines = new Dictionary<string, double>(StringComparer.Ordinal);
         var agree = default(RankerAgreement);
         List<(NodeSummary node, double score)> ranked;
@@ -284,11 +415,19 @@ internal static partial class Program
                 .ToList();
         }
 
+        // Order matters: pick the room first, then choose within it. Routing
+        // works on the wide list because a folder vote needs enough of the
+        // ranking to be unanimous ABOUT something; the lexical rerank then
+        // sorts whatever rose to the top.
+        if (doRoute && ranked.Count >= 3)
+            ranked = ApplyFolderRouting(ranked, out _);
+
         // Reorder the retrieved window by the signal the ranking never used,
         // then cut to what was asked for. Never removes a note the ranker
         // found — it only permutes — so hit@10 is a floor, not a gamble.
         if (doLex && ranked.Count > 1 && cosines.Count > 0 && agree.Overlap < LexRerankMaxOverlap)
-            ranked = LexicalRerank(export, ranked, ql, cosines, agree);
+            ranked = LexicalRerank(export, ranked, ql, cosines, agree,
+                Math.Max(limit, lexDepth ?? LexRerankDepth));
 
         if (ranked.Count > limit) ranked = ranked.Take(limit).ToList();
         return (ranked, mode, cosines, agree);
@@ -305,10 +444,19 @@ internal static partial class Program
         List<(NodeSummary Node, double Score)> ranked,
         string ql,
         Dictionary<string, double> cosines,
-        RankerAgreement agree)
+        RankerAgreement agree,
+        int depth)
     {
         var qGrams = Trigrams(ql);
         if (qGrams.Count == 0) return ranked;
+
+        // Only the head is reordered. The fused list is now 50 deep so the
+        // folder vote has something to count, but the measurement that
+        // justified this reranked TEN — and reranking a tail the ranker is
+        // already guessing about would be changing the shipped behaviour under
+        // cover of a different feature.
+        var tail = ranked.Skip(depth).ToList();
+        if (ranked.Count > depth) ranked = ranked.Take(depth).ToList();
 
         var field = SummariseField(cosines.Values,
             cosines.TryGetValue(ranked[0].Node.Id, out var top) ? top : 0);
@@ -328,11 +476,13 @@ internal static partial class Program
                                         agree.SameTop && i == 0 ? 1.0 : 0.0)));
         }
 
-        return scored
+        var head = scored
             .OrderByDescending(x => x.Score)
             .ThenBy(x => x.Orig)      // ties keep the retrieval order
             .Select(x => ranked[x.Orig])
             .ToList();
+        head.AddRange(tail);
+        return head;
     }
 
     // ───────────── brain_recall — the verdict gate ─────────────
