@@ -86,6 +86,11 @@ function Deploy-File($srcDir, $dstDir, $name, $ts) {
     $s = Join-Path $srcDir $name
     $d = Join-Path $dstDir $name
     if (-not (Test-Path $s)) { return "missing-src" }
+    # $name may carry a subdirectory (runtimes\win-x64\native\onnxruntime.dll),
+    # which the framework-dependent layout uses for native libraries. Create it
+    # or Copy-Item fails on a path whose parent does not exist yet.
+    $dParent = Split-Path $d -Parent
+    if (-not (Test-Path $dParent)) { New-Item -ItemType Directory -Force $dParent | Out-Null }
     if (Test-Path $d) {
         try {
             Move-Item $d "$d.stale.$ts" -Force -ErrorAction Stop
@@ -122,7 +127,15 @@ function Deploy-Set($srcDir, $dstDir, $assets, $ts, $label) {
 $devAssets = @(
     "brainx-mcp.dll", "brainx-mcp.exe", "brainx-mcp.pdb",
     "brainx-mcp.deps.json", "brainx-mcp.runtimeconfig.json",
-    "BrainX.Core.dll", "BrainX.Core.pdb"
+    "BrainX.Core.dll", "BrainX.Core.pdb",
+    # P6: the in-process embedder. Managed wrapper at the root, native runtime
+    # under runtimes\ in a framework-dependent layout. Miss these and the
+    # deployed binary throws FileNotFoundException the first time semantic
+    # search falls back -- which OnnxEmbedder catches and reports as
+    # "unavailable", i.e. the feature would look absent rather than broken.
+    "Microsoft.ML.OnnxRuntime.dll", "System.Numerics.Tensors.dll",
+    "runtimes\win-x64\native\onnxruntime.dll",
+    "runtimes\win-x64\native\onnxruntime_providers_shared.dll"
 )
 $devFailed = Deploy-Set $fwBuild $devRelease $devAssets $ts "dev Release"
 
@@ -132,16 +145,57 @@ $devFailed = Deploy-Set $fwBuild $devRelease $devAssets $ts "dev Release"
 #    which are unchanged and identical across builds.
 $appFailed = @()
 if (Test-Path $installedMcp) {
+    # A self-contained publish flattens runtimes\ into the output root, so the
+    # native names have no subdirectory here. Same files, different layout --
+    # which is exactly why the two lists are separate.
     $appAssets = @(
         "brainx-mcp.dll", "brainx-mcp.exe",
         "brainx-mcp.deps.json", "brainx-mcp.runtimeconfig.json",
-        "BrainX.Core.dll"
+        "BrainX.Core.dll",
+        "Microsoft.ML.OnnxRuntime.dll", "System.Numerics.Tensors.dll",
+        "onnxruntime.dll", "onnxruntime_providers_shared.dll"
     )
     $appFailed = Deploy-Set $scBuild $installedMcp $appAssets $ts "installed app"
 } else {
     Write-Output ""
     Write-Output "[skip] no installed app at $installedMcp (dev-only machine)"
 }
+
+# 5b. The guard this script was missing.
+#
+# The asset lists above are hardcoded, so adding a NuGet package ships a binary
+# that references a DLL nobody copied. That is not a loud failure: the managed
+# code throws FileNotFoundException deep inside a feature, the feature reports
+# itself unavailable, and the deploy says [OK]. It happened the first time P6
+# was deployed -- onnxruntime.dll simply was not there.
+#
+# So: every managed DLL the build produced must exist SOMEWHERE under the
+# destination. Names already present from an earlier install are fine; a name
+# that has never been copied is a new dependency that this script does not know
+# about yet.
+function Check-Coverage($srcDir, $dstDir, $label) {
+    if (-not (Test-Path $dstDir)) { return }
+    $have = @{}
+    Get-ChildItem $dstDir -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue |
+        ForEach-Object { $have[$_.Name] = $true }
+    $missing = @()
+    Get-ChildItem $srcDir -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue |
+        ForEach-Object { if (-not $have.ContainsKey($_.Name)) { $missing += $_.Name } }
+    # mscordaccore is the .NET debugging DAC, and its file name carries the
+    # runtime's build number -- so a self-contained publish on a newer patch
+    # always "misses". It is used by debuggers reading a crash dump, never by
+    # the running process, and hot-swapping it would mean swapping the runtime.
+    # Left out on purpose: a warning that fires every single run is a warning
+    # everyone learns to scroll past, which is worse than no warning at all.
+    $missing = $missing | Where-Object { $_ -notlike "mscordaccore*" } | Sort-Object -Unique
+    if ($missing.Count -gt 0) {
+        Write-Warning "${label}: $($missing.Count) DLL(s) in the build output were never deployed --"
+        Write-Warning "  $($missing -join ', ')"
+        Write-Warning "  If that is a new dependency, add it to the asset list in this script."
+    }
+}
+Check-Coverage $fwBuild $devRelease "dev Release"
+if (Test-Path $installedMcp) { Check-Coverage $scBuild $installedMcp "installed app" }
 
 # 6. Report resulting versions so the operator can confirm the swap.
 Write-Output ""
