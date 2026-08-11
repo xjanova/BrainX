@@ -854,6 +854,9 @@ internal static partial class Program
         if (scope.Length > 0) candidates = candidates.Where(n => ScopeMatches(n, scope));
         var filtered = candidates.ToList();
 
+        using var _lens = AsOfScope(args["asOf"]);
+        EnsureValidityIndex(export);
+
         var ql = query.ToLowerInvariant();
         var (ranked, mode, cosines, agree) = HybridRank(export, filtered, ql, limit, OllamaEmbed(query));
 
@@ -952,6 +955,10 @@ internal static partial class Program
         var answer = BuildSearchResult(top, Math.Round(ranked[0].Score, 4), previewChars, compact: false);
         answer["path"] = top.RelativePath;
         if (matchCtx != null) answer["matchContext"] = matchCtx;
+        // A cited note whose window has closed is the single most dangerous
+        // thing this tool can return, so the fact travels WITH the answer
+        // rather than sitting in a separate field the caller may not read.
+        if (ValidityJson(top.Id) is JObject vj) answer["validity"] = vj;
 
         var evidence = new JArray(ranked.Skip(1).Select(r =>
             BuildSearchResult(r.Node, Math.Round(r.Score, 4), 0, compact: true)));
@@ -981,7 +988,8 @@ internal static partial class Program
                 // — a scope small enough to fall back is otherwise invisible.
                 ["formula"] = UseConfidenceV2 && hasCos && field.N >= ConfV2MinField
                     ? "v2"
-                    : UseConfidenceV2 && hasCos ? $"v1 (field {field.N} < {ConfV2MinField})" : "v1"
+                    : UseConfidenceV2 && hasCos ? $"v1 (field {field.N} < {ConfV2MinField})" : "v1",
+                ["asOf"] = Iso(_asOf)
             },
             ["answer"] = verdict == "MISS" ? null : answer,
             // A MISS still names what it rejected. Hiding it made the verdict
@@ -1220,6 +1228,209 @@ internal static partial class Program
     private static double SupersededFactor(string nodeId) =>
         IsSuperseded(nodeId) ? SupersededRankFactor : 1.0;
 
+    // ───────────── bi-temporal validity (P3) ─────────────
+    //
+    // Supersession already answers "is this note retired". It cannot answer
+    // "was it true in May", and it cannot say WHEN it stopped being true — so a
+    // fact that was correct for four months and wrong for one is indistinguish-
+    // able from a fact that was never right.
+    //
+    // So every note gets a window. `validFrom:` / `validUntil:` in frontmatter
+    // when the author knows; otherwise the window is open. Nothing is deleted
+    // and nothing is hidden — a closed window is still searchable, still
+    // linkable, and still the correct answer to a question about that period.
+    // It just stops being served as CURRENT.
+    //
+    // The half that costs nothing to use: when note B declares `supersedes: A`,
+    // A's window closes at B's start automatically. The author writes the
+    // supersession they were already writing, and the old fact acquires an end
+    // date without anyone editing it. Deriving it beats stamping the file —
+    // rewriting A on B's behalf is the janitor-that-reorganises failure, and it
+    // would also lose the distinction between "the author dated this" and "we
+    // inferred it".
+    /// <param name="From">
+    /// When this claim began. Explicit `validFrom:` when the author gave one,
+    /// otherwise when the note was written — because a note written in July is
+    /// not evidence of what was believed in February, and a time-travelling
+    /// query that returns it has answered a different question. That fallback
+    /// is invisible on a normal query, where everything predates "now".
+    /// </param>
+    /// <param name="FromExplicit">
+    /// False when <paramref name="From"/> was inferred from the note's own
+    /// date. Kept so results only advertise a window the author actually
+    /// declared — inferring one and then reporting it as fact is how a
+    /// convenience becomes a claim nobody made.
+    /// </param>
+    internal readonly record struct Validity(
+        DateTime? From, bool FromExplicit, DateTime? Until, string? ClosedBy);
+
+    /// <summary>
+    /// Dates are formatted with InvariantCulture everywhere below, without
+    /// exception. This box runs a Thai locale, so the default formatter writes
+    /// 2026 as the Buddhist-era 2569 — a bug this codebase has already shipped
+    /// three times (the eval's result filenames, the gardener report body, and
+    /// the first run of this very feature, which printed windows as
+    /// "2569-01-10 → 2569-04-01").
+    /// </summary>
+    private static string Iso(DateTime d) =>
+        d.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+
+    private static readonly Dictionary<string, Validity> _validity = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The instant the current request is asking about. Set per tool call from
+    /// an `asOf` argument and reset afterwards; the stdio loop is
+    /// single-threaded, the same assumption the Thai-gram cache already makes.
+    /// </summary>
+    private static DateTime _asOf = DateTime.UtcNow;
+
+    /// <summary>
+    /// Read an `asOf` argument and make it the lens for this call. Returns a
+    /// disposable that restores "now", so one time-travelling query cannot
+    /// leave the next caller reading history without knowing it.
+    /// </summary>
+    private static IDisposable AsOfScope(JToken? arg)
+    {
+        var prev = _asOf;
+        var parsed = ParseFrontmatterDate(arg?.Type == JTokenType.Null ? null : arg?.ToString());
+        _asOf = parsed ?? DateTime.UtcNow;
+        return new Restore(() => _asOf = prev);
+    }
+
+    private sealed class Restore : IDisposable
+    {
+        private readonly Action _undo;
+        public Restore(Action undo) => _undo = undo;
+        public void Dispose() => _undo();
+    }
+
+    /// <summary>
+    /// Frontmatter dates, tolerantly. Accepts DateTime, ISO, yyyy-MM-dd, and
+    /// Buddhist years — a Thai-locale formatter writes 2569 for 2026, and this
+    /// vault contains files stamped that way. Reading 2569 as a year 543 in the
+    /// future would leave every one of those notes "not valid yet".
+    /// </summary>
+    private static DateTime? ParseFrontmatterDate(object? value)
+    {
+        if (value == null) return null;
+        if (value is DateTime dt) return dt;
+        var s = (value as string ?? value.ToString() ?? "").Trim().Trim('"', '\'');
+        if (s.Length == 0) return null;
+
+        var m = Regex.Match(s, @"^(\d{4})-(\d{1,2})-(\d{1,2})");
+        if (m.Success)
+        {
+            var y = int.Parse(m.Groups[1].Value);
+            if (y >= 2400) y -= 543;                 // Buddhist era
+            try
+            {
+                return new DateTime(y, int.Parse(m.Groups[2].Value),
+                                    int.Parse(m.Groups[3].Value), 0, 0, 0, DateTimeKind.Utc);
+            }
+            catch { return null; }
+        }
+        return DateTime.TryParse(s, System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AdjustToUniversal, out var parsed) ? parsed : null;
+    }
+
+    private static DateTime? FrontmatterDate(NodeSummary n, params string[] keys)
+    {
+        foreach (var key in keys)
+            foreach (var kv in n.Properties)
+                if (string.Equals(kv.Key, key, StringComparison.OrdinalIgnoreCase))
+                {
+                    var d = ParseFrontmatterDate(kv.Value);
+                    if (d != null) return d;
+                }
+        return null;
+    }
+
+    /// <summary>When a note's own life began — its declared start, else when it was written.</summary>
+    private static DateTime NoteStart(NodeSummary n) =>
+        FrontmatterDate(n, "validFrom", "valid_from")
+        ?? FrontmatterDate(n, "created") ?? n.ModifiedAt;
+
+    private static void EnsureValidityIndex(BrainExport export)
+    {
+        // Piggybacks on the supersession index, which is already rebuilt
+        // exactly when the vault turns over.
+        EnsureSupersededIndex();
+        if (_validity.Count > 0 && _validityMtime == _exportCacheMtime) return;
+        _validityMtime = _exportCacheMtime;
+        _validity.Clear();
+
+        var byId = export.Nodes.ToDictionary(n => n.Id, n => n, StringComparer.Ordinal);
+        foreach (var n in export.Nodes)
+        {
+            var explicitFrom = FrontmatterDate(n, "validFrom", "valid_from");
+            var until = FrontmatterDate(n, "validUntil", "valid_until");
+            string? closedBy = null;
+
+            // Inferred close: whatever replaced it started, so this stopped.
+            if (until == null && TryGetSupersededBy(n.Id, out var by)
+                && byId.TryGetValue(by.Id, out var newer))
+            {
+                until = NoteStart(newer);
+                closedBy = by.Title;
+            }
+
+            // Every note gets a start, even without frontmatter. Costs nothing
+            // today (nothing is in the future) and is what makes asOf mean
+            // "what did we believe then" rather than "today's answers, filtered".
+            _validity[n.Id] = new Validity(
+                explicitFrom ?? NoteStart(n), explicitFrom != null, until, closedBy);
+        }
+    }
+
+    private static long _validityMtime = long.MinValue;
+
+    /// <summary>Was this note's claim in force at <paramref name="when"/>?</summary>
+    private static bool ValidAt(string nodeId, DateTime when)
+    {
+        if (!_validity.TryGetValue(nodeId, out var v)) return true;   // open window
+        if (v.From is DateTime f && when < f) return false;
+        if (v.Until is DateTime u && when >= u) return false;
+        return true;
+    }
+
+    /// <summary>
+    /// How hard a note whose window has closed is pushed down. Same shape and
+    /// same strength as supersession, because it is the same claim — this is
+    /// not the current answer — stated with a date attached.
+    /// </summary>
+    private const double OutOfWindowRankFactor = 0.35;
+
+    private static double TemporalFactor(string nodeId) =>
+        ValidAt(nodeId, _asOf) ? 1.0 : OutOfWindowRankFactor;
+
+    /// <summary>
+    /// Validity fields for a search result — null when there is nothing worth
+    /// saying, which is the common case. Silence here is deliberate: stamping
+    /// every hit with an inferred window nobody declared would train the reader
+    /// to ignore the field precisely when it matters.
+    /// </summary>
+    private static JObject? ValidityJson(string nodeId)
+    {
+        if (!_validity.TryGetValue(nodeId, out var v)) return null;
+        var valid = ValidAt(nodeId, _asOf);
+        var hasWindow = v.Until != null || v.FromExplicit;
+        if (valid && !hasWindow) return null;
+
+        var o = new JObject { ["validNow"] = valid };
+        if (v.From is DateTime f && (v.FromExplicit || !valid))
+        {
+            o["validFrom"] = Iso(f);
+            if (!v.FromExplicit) o["validFromInferred"] = true;
+        }
+        if (v.Until is DateTime u) o["validUntil"] = Iso(u);
+        if (v.ClosedBy != null)
+        {
+            o["closedBy"] = v.ClosedBy;
+            o["closedByInferred"] = true;
+        }
+        return o;
+    }
+
     /// <summary>
     /// How hard a machine-written report is pushed down the ranking.
     ///
@@ -1242,9 +1453,36 @@ internal static partial class Program
     /// </summary>
     private const double MachineReportRankFactor = 0.15;
 
-    /// <summary>Combined rank multiplier: retired notes and machine output both step aside.</summary>
+    /// <summary>
+    /// Combined rank multiplier: retired notes, machine output, and facts whose
+    /// window has closed all step aside — without ever leaving the index.
+    /// </summary>
     private static double RankFactor(NodeSummary n) =>
-        SupersededFactor(n.Id) * (IsMachineReport(n.RelativePath) ? MachineReportRankFactor : 1.0);
+        RetirementFactor(n.Id)
+        * (IsMachineReport(n.RelativePath) ? MachineReportRankFactor : 1.0);
+
+    /// <summary>
+    /// One demotion for "this is not the current answer", expressed by whichever
+    /// mechanism knows the most.
+    ///
+    /// Supersession alone is time-blind: it demotes a note because something
+    /// replaced it, with no idea WHEN. Asked what the deploy host was in May,
+    /// the May answer came back at 0.35x because it was replaced in July —
+    /// punished for a fact from the querent's future. Caught by the first
+    /// asOf run, not by reasoning.
+    ///
+    /// So when a note has a validity window — declared, or inferred from the
+    /// start of whatever superseded it — that window governs, because it can
+    /// answer "not current AS OF WHEN". The flat supersession factor applies
+    /// only when there is no date to reason with, which is exactly the case it
+    /// was written for.
+    /// </summary>
+    private static double RetirementFactor(string nodeId)
+    {
+        if (_validity.TryGetValue(nodeId, out var v) && v.Until != null)
+            return ValidAt(nodeId, _asOf) ? 1.0 : OutOfWindowRankFactor;
+        return SupersededFactor(nodeId) * TemporalFactor(nodeId);
+    }
 
     /// <summary>{pairs, unresolved} for brain_stats — null when nothing in the vault uses supersession.</summary>
     private static JObject? SupersessionStats()

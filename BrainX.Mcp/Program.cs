@@ -583,7 +583,8 @@ internal static partial class Program
                         ["query"] = new JObject { ["type"] = "string", ["description"] = "what you want to know, in natural language (Thai or English)" },
                         ["limit"] = new JObject { ["type"] = "integer", ["default"] = 3, ["description"] = "how many notes to weigh — the verdict always describes the top one" },
                         ["preview_chars"] = new JObject { ["type"] = "integer", ["default"] = 240 },
-                        ["scope"] = new JObject { ["type"] = "string", ["description"] = "optional folder-prefix scope (e.g. 'Notes/Claude-Sessions')" }
+                        ["scope"] = new JObject { ["type"] = "string", ["description"] = "optional folder-prefix scope (e.g. 'Notes/Claude-Sessions')" },
+                        ["asOf"] = new JObject { ["type"] = "string", ["description"] = "YYYY-MM-DD — answer as of that date instead of today. Notes whose validity window had not opened, or had already closed, are demoted. Use to ask what was believed then." }
                     },
                     ["required"] = new JArray { "query" }
                 }),
@@ -857,7 +858,10 @@ internal static partial class Program
                 "(Ollama unreachable). Use this when the user asks an open-ended question or you need " +
                 "topical neighbors rather than exact-match hits. Optional category/tag/scope filters " +
                 "narrow the search BEFORE the cosine pass — much faster than post-filtering when you " +
-                "already know the topic area. Same preview_chars/compact options as brain_search.",
+                "already know the topic area. Same preview_chars/compact options as brain_search. " +
+                "Facts carry TIME: a note with validFrom/validUntil — or one automatically closed by a " +
+                "note that supersedes it — is demoted once its window has passed and every result says " +
+                "so in `validity`. Pass asOf=YYYY-MM-DD to ask what was believed on a given day.",
                 new JObject
                 {
                     ["type"] = "object",
@@ -870,7 +874,8 @@ internal static partial class Program
                         ["category"] = new JObject { ["type"] = "string", ["description"] = "restrict to a primary or secondary category (e.g. 'AI_MachineLearning')" },
                         ["tag"] = new JObject { ["type"] = "string", ["description"] = "restrict to notes carrying this tag" },
                         ["scope"] = new JObject { ["type"] = "string", ["description"] = "restrict to notes whose path starts with this folder (e.g. 'Notes/Claude-Sessions')" },
-                        ["bypass_cache"] = new JObject { ["type"] = "boolean", ["description"] = "if true, skip the 10-min memo cache and always re-run", ["default"] = false }
+                        ["bypass_cache"] = new JObject { ["type"] = "boolean", ["description"] = "if true, skip the 10-min memo cache and always re-run", ["default"] = false },
+                        ["asOf"] = new JObject { ["type"] = "string", ["description"] = "YYYY-MM-DD — rank as of that date. Notes carrying validFrom/validUntil (or closed automatically by a note that supersedes them) are demoted when their window did not cover that day. Every result carries a `validity` block when it has a window." }
                     },
                     ["required"] = new JArray { "query" }
                 }),
@@ -3130,6 +3135,9 @@ internal static partial class Program
             candidates = candidates.Where(n => ScopeMatches(n, scope));
         var filtered = candidates.ToList();
 
+        using var _lens = AsOfScope(args["asOf"]);
+        EnsureValidityIndex(export);
+
         // Try Ollama embedding — non-blocking, swallow any error
         // (network, model not pulled, daemon not running) and fall
         // back to keyword search so the tool always answers.
@@ -3148,6 +3156,9 @@ internal static partial class Program
             var o = BuildSearchResult(x.Node, Math.Round(x.Score, 4), previewChars, compact);
             var ctx = ExtractMatchContext(export, x.Node, ql);
             if (ctx != null) o["matchContext"] = ctx;
+            // Carried even in compact mode: "this stopped being true in May"
+            // is not a detail to drop for token economy.
+            if (ValidityJson(x.Node.Id) is JObject vj) o["validity"] = vj;
             return o;
         }));
         StoreMemo("brain_semantic_search", args, query, resultsArr, mode);
@@ -3160,6 +3171,9 @@ internal static partial class Program
             ["query"] = query,
             ["mode"] = mode,
             ["count"] = ranked.Count,
+            // Echoed so a time-travelling result set can never be mistaken for
+            // today's — the caller sees which day it asked about.
+            ["asOf"] = Iso(_asOf),
             ["results"] = resultsArr
         };
     }
