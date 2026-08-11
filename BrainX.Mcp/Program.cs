@@ -947,7 +947,9 @@ internal static partial class Program
                 "Holistic brain health scan. Walks every note and reports issues across six categories: " +
                 "structural (missing frontmatter, broken wiki-links), content quality (stubs, untagged, " +
                 "uncategorized, wall-of-text), graph health (orphans, super-hubs, near-duplicates, " +
-                "stale notes), embedding freshness (missing/stale/orphan sidecars), FACT freshness — " +
+                "stale notes), embedding health (missing/stale/orphan/wrong-dimension sidecars, plus " +
+                "TRUNCATION — notes whose text runs past the model's char budget, so their tail sits " +
+                "in no vector and only keyword search can reach it), FACT freshness — " +
                 "lines in old notes that assert a present-tense fact (a price, a version, 'currently') " +
                 "with no date on the line, which an agent would quote today as if it were still true — " +
                 "and writes a single brainHealth score in [0,1]. Persists summary to " +
@@ -3990,6 +3992,66 @@ internal static partial class Program
             mismatchedEmb = dimCounts.Where(kv => kv.Key != expectedDims).Sum(kv => kv.Value);
         }
 
+        // ── 4b. The tail that is in no vector.
+        //
+        // EmbeddingService feeds the model `title + the first MaxChars of the
+        // file` and drops the rest on the floor: no error, no flag, and a
+        // sidecar indistinguishable from a complete one. Every other check
+        // above asks whether a vector EXISTS; not one asked how much of the
+        // note it was built from. On this vault that hid 60 hand-written notes
+        // whose last ~476,000 characters have never been inside any vector —
+        // keyword search still reaches those words (brain_search reads full
+        // bodies), semantic search structurally cannot, and nothing said so.
+        //
+        // Measured in CHARACTERS, not bytes, and that distinction is the whole
+        // check: Thai is 3 bytes per character in UTF-8, so a byte-length test
+        // would report a 6,000-character Thai note as truncated when the model
+        // read every word of it. Byte length is still used as the cheap
+        // pre-filter — it is always >= the character count, so a file inside
+        // the budget in bytes cannot exceed it in chars, and only the rest are
+        // read (268 of ~1,300 files here).
+        //
+        // Reported, never auto-fixed. Both fixes belong to the author: split
+        // the note, or raise the budget deliberately — and raising it re-embeds
+        // the entire vault by design, which is not a thing an audit may start.
+        var embedModel = EmbeddingService.ResolveModel(export.VaultPath);
+        var embedBudget = EmbeddingService.ReadManifestMaxChars(export.VaultPath)
+                          ?? EmbeddingService.ResolveMaxChars(embedModel);
+        var truncatedNotes = new List<(NodeSummary Node, int Chars, int Unread)>();
+        long truncatedChars = 0, truncatedImportedChars = 0;
+        int truncatedImported = 0, truncationRead = 0;
+        if (embedBudget > 0)
+        {
+            foreach (var n in export.Nodes)
+            {
+                try
+                {
+                    var fp = Path.Combine(export.VaultPath, n.RelativePath);
+                    var fi = new FileInfo(fp);
+                    if (!fi.Exists || fi.Length <= embedBudget) continue;
+                    truncationRead++;
+                    var chars = File.ReadAllText(fp).Length;
+                    if (chars <= embedBudget) continue;
+                    var unread = chars - embedBudget;
+                    // Imported notes are counted but not listed, exactly as the
+                    // content checks treat them: the owner will not be splitting
+                    // a vendor README, and 114 of them drowning the 60 notes they
+                    // actually wrote is how a real finding gets ignored.
+                    if (n.Tags.Any(t => t.Equals("imported", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        truncatedImported++;
+                        truncatedImportedChars += unread;
+                    }
+                    else
+                    {
+                        truncatedNotes.Add((n, chars, unread));
+                        truncatedChars += unread;
+                    }
+                }
+                catch { /* unreadable file is already someone else's finding */ }
+            }
+        }
+
         // ── 5. Near-duplicate detection (uses embeddings; can be expensive — cap)
         var nearDupes = new List<(NodeSummary a, NodeSummary b, double sim)>();
         if (includeNearDupes && missingEmb < export.Nodes.Count / 2)
@@ -4085,6 +4147,20 @@ internal static partial class Program
                 $"{verifyDue.Count} note(s) carry a verifyCmd that is past its TTL",
                 "Read verification.due, RUN each verifyCmd YOURSELF after reading it, then "
                 + "brain_mark_verified id=<id> ok=true|false. The brain never executes these."));
+        // Severity "medium", not "high", and the wording says why: these notes
+        // are still findable by keyword. What is gone is their reachability by
+        // meaning — a real loss, and a smaller one than a note with no vector
+        // at all, which is what "high" above already means.
+        if (truncatedNotes.Count > 0)
+            actions.Add(MakeAction("medium", "truncated-embeddings",
+                $"{truncatedNotes.Count} hand-written note(s) hold {truncatedChars:n0} character(s) past the "
+                + $"{embedBudget:n0}-char embedding budget — that text is in no vector, so semantic search "
+                + "and brain_recall cannot reach it (keyword search still can)"
+                + (truncatedImported > 0
+                    ? $". A further {truncatedImported} imported note(s) hide {truncatedImportedChars:n0} more, not listed."
+                    : "."),
+                "Read embeddings.truncation.notes and split the biggest ones where their topics split. "
+                + "Raising the budget instead re-embeds the entire vault — deliberate, never automatic."));
         if (unanchored.Count > 0)
             actions.Add(MakeAction("medium", "undated-volatile-claims",
                 $"{unanchored.Count} note(s) older than {staleDays} days assert {freshnessClaims} "
@@ -4125,6 +4201,7 @@ internal static partial class Program
                     ["mismatchedEmbeddings"] = mismatchedEmb,
                     ["staleEmbeddings"] = staleEmb,
                     ["orphanEmbeddings"] = orphanEmb,
+                    ["truncatedEmbeddings"] = truncatedNotes.Count,
                     ["factsDueForVerification"] = verifyDue.Count
                 };
             if (findability["counts"] is JObject fc)
@@ -4253,9 +4330,44 @@ internal static partial class Program
                 ["orphanFiles"] = orphanEmb,
                 ["expectedDims"] = expectedDims,
                 ["mismatchedDims"] = mismatchedEmb,
+                // Flat counts so the garden report's Counts table carries them;
+                // the detail lives in `truncation` below.
+                ["truncatedNotes"] = truncatedNotes.Count,
+                ["truncatedUnreadChars"] = truncatedChars,
                 ["dimHistogram"] = new JObject(dimCounts
                     .OrderByDescending(kv => kv.Value)
-                    .Select(kv => new JProperty(kv.Key.ToString(), kv.Value)))
+                    .Select(kv => new JProperty(kv.Key.ToString(), kv.Value))),
+                ["truncation"] = new JObject
+                {
+                    ["model"] = embedModel,
+                    ["charBudget"] = embedBudget,
+                    ["filesRead"] = truncationRead,
+                    ["counts"] = new JObject
+                    {
+                        ["notes"] = truncatedNotes.Count,
+                        ["unreadChars"] = truncatedChars,
+                        ["importedNotes"] = truncatedImported,
+                        ["importedUnreadChars"] = truncatedImportedChars
+                    },
+                    ["notes"] = new JArray(truncatedNotes
+                        .OrderByDescending(t => t.Unread)
+                        .Take(perCategoryLimit)
+                        .Select(t => new JObject
+                        {
+                            ["id"] = t.Node.Id,
+                            ["title"] = t.Node.Title,
+                            ["path"] = t.Node.RelativePath,
+                            ["chars"] = t.Chars,
+                            ["unreadChars"] = t.Unread,
+                            ["embeddedPct"] = Math.Round(100.0 * embedBudget / t.Chars, 1)
+                        })),
+                    ["hint"] = "These notes are embedded from their first " + embedBudget.ToString("n0")
+                             + " characters only — the rest is in no vector, so brain_semantic_search "
+                             + "and brain_recall cannot see it (brain_search still can: it reads full "
+                             + "bodies). Fix by splitting the note where its topics split — which is "
+                             + "also what makes it linkable — or by raising the budget deliberately, "
+                             + "which re-embeds the whole vault. Never auto-fixed."
+                }
             },
             ["findability"] = findability,
             ["structural"] = new JObject
@@ -5653,8 +5765,12 @@ internal static partial class Program
         foreach (var section in new[] { "contentQuality", "graphHealth", "structural", "findability", "freshness" })
             if (audit[section]?["counts"] is JObject c)
                 foreach (var p in c.Properties()) counts[p.Name] = p.Value;
+        // Scalars only. `dimHistogram` and `truncation` are objects, and a
+        // Counts line rendered as `embeddings.truncation: {…}` is a JSON dump
+        // in the middle of a human report — their detail has its own section.
         if (audit["embeddings"] is JObject emb)
-            foreach (var p in emb.Properties()) counts["embeddings." + p.Name] = p.Value;
+            foreach (var p in emb.Properties())
+                if (p.Value is JValue) counts["embeddings." + p.Name] = p.Value;
         if (verification?["dueCount"] != null) counts["factsDueForVerification"] = verification["dueCount"];
 
         var sb = new System.Text.StringBuilder();
@@ -5730,6 +5846,41 @@ internal static partial class Program
             sb.AppendLine();
             sb.AppendLine("Fix with `asOf:` in the frontmatter, a date in the sentence, a link to "
                         + "where the number actually lives, or `timeless: true`. Never bulk-edited.");
+            sb.AppendLine();
+        }
+
+        // Same reason the freshness section exists: a count cannot tell anyone
+        // WHICH note to split, and this is a finding whose whole value is the
+        // list. It was invisible for as long as it was a number nobody printed.
+        if (audit["embeddings"]?["truncation"] is JObject tr
+            && tr["notes"] is JArray trNotes && trNotes.Count > 0)
+        {
+            var c = tr["counts"]!;
+            // InvariantCulture on every number for the same reason the dates go
+            // through Iso(): this machine runs a Thai locale, and a report is
+            // read long after the run that produced it.
+            string N(JToken? t) => (t?.Value<long>() ?? 0)
+                .ToString("n0", System.Globalization.CultureInfo.InvariantCulture);
+            sb.AppendLine("## Notes the embedder only half-read");
+            sb.AppendLine();
+            sb.AppendLine($"{N(c["notes"])} hand-written note(s) run past the {N(tr["charBudget"])}-char "
+                        + $"budget of `{tr["model"]}`, leaving **{N(c["unreadChars"])} characters in no "
+                        + "vector at all**. Keyword search still finds those words; "
+                        + "`brain_semantic_search` and `brain_recall` cannot.");
+            if (c["importedNotes"]?.Value<int>() > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine($"(Plus {N(c["importedNotes"])} imported note(s) holding "
+                            + $"{N(c["importedUnreadChars"])} more — not listed; nobody is going to "
+                            + "split a vendor README.)");
+            }
+            sb.AppendLine();
+            foreach (var t in trNotes.OfType<JObject>().Take(10))
+                sb.AppendLine($"- [[{t["title"]}]] — {N(t["unreadChars"])} of {N(t["chars"])} chars unread "
+                            + $"({t["embeddedPct"]}% embedded)");
+            sb.AppendLine();
+            sb.AppendLine("Split where the topics split. Raising the budget re-embeds the whole "
+                        + "vault and is never done automatically.");
             sb.AppendLine();
         }
 
