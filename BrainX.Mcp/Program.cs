@@ -484,8 +484,8 @@ internal static partial class Program
             "AUTO-JOURNAL — The server AUTOMATICALLY logs every tool call you make to .obsidianx/sessions/<date>.md. You NEVER need to narrate 'I searched for X' — the brain is already tracking it. Focus your output on substance.\n\n" +
             "═══ HARD RULES ═══════════════════════════════════════════════\n\n" +
             "BEFORE ANSWERING any non-trivial prompt:\n" +
-            "  1. Run brain_search with 2-4 keywords from the prompt.\n" +
-            "  2. If 0 hits: retry with brain_semantic_search (Ollama embeddings — finds notes with no keyword overlap, works for natural-language Thai).\n" +
+            "  1. Run brain_search with 2-4 keywords from the prompt. If you can name the project or the kind of note you need, PASS `scope` — measured +15-22 points of hit@10, the biggest single retrieval lever in this brain, and it costs nothing.\n" +
+            "  2. If 0 hits: retry with brain_semantic_search (Ollama embeddings — finds notes with no keyword overlap, works for natural-language Thai). Drop `scope` before you conclude the brain is empty — a wrong scope hides the answer.\n" +
             "  3. Cite note titles you actually read. Citing proves the brain was consulted.\n" +
             "  Skip ONLY for: trivial Q (<60 chars), prompt with explicit file path, generic framework knowledge.\n\n" +
             "AFTER any answer that took > 2 tool calls AND produced a non-trivial insight:\n" +
@@ -583,7 +583,7 @@ internal static partial class Program
                         ["query"] = new JObject { ["type"] = "string", ["description"] = "what you want to know, in natural language (Thai or English)" },
                         ["limit"] = new JObject { ["type"] = "integer", ["default"] = 3, ["description"] = "how many notes to weigh — the verdict always describes the top one" },
                         ["preview_chars"] = new JObject { ["type"] = "integer", ["default"] = 240 },
-                        ["scope"] = new JObject { ["type"] = "string", ["description"] = "optional folder-prefix scope (e.g. 'Notes/Claude-Sessions')" },
+                        ["scope"] = new JObject { ["type"] = "string", ["description"] = "PASS THIS WHENEVER YOU CAN NAME THE AREA — same retrieval payoff as brain_search's scope (hit@10 +15-22 points, measured), and it is what turns a WEAK verdict into a STRONG one. Takes a PROJECT name ('lotto'), a KIND ('playbook' | 'session' | 'instructions' | 'knowledge'), or a folder prefix ('Notes/Claude-Sessions'). A wrong scope hides the answer, so state it only when you know it." },
                         ["asOf"] = new JObject { ["type"] = "string", ["description"] = "YYYY-MM-DD — answer as of that date instead of today. Notes whose validity window had not opened, or had already closed, are demoted. Use to ask what was believed then." }
                     },
                     ["required"] = new JArray { "query" }
@@ -606,7 +606,7 @@ internal static partial class Program
                         ["preview_chars"] = new JObject { ["type"] = "integer", ["description"] = "max chars per preview (default 200, set 0 for full preview)", ["default"] = 200 },
                         ["compact"] = new JObject { ["type"] = "boolean", ["description"] = "if true, drop preview/path/category; return id+title+score+tags only", ["default"] = false },
                         ["bypass_cache"] = new JObject { ["type"] = "boolean", ["description"] = "if true, skip the 10-min memo cache and always re-run", ["default"] = false },
-                        ["scope"] = new JObject { ["type"] = "string", ["description"] = "optional scope filter. Accepts THREE forms: a PROJECT name from the vault's imported repos (e.g. 'lotto', 'netwix') which matches notes belonging to that project wherever they live; a KIND ('instructions' | 'playbook' | 'session' | 'knowledge') to ask e.g. only for rules; or a folder prefix (e.g. 'Notes/Claude-Sessions'). Use brain_scope_list to discover scopes. State it explicitly — the brain never guesses your project from what you read earlier." }
+                        ["scope"] = new JObject { ["type"] = "string", ["description"] = "THE HIGHEST-VALUE ARGUMENT ON THIS TOOL — not a speed knob. Measured on this vault (brainx-mcp eval, 2026-08-11): restricting to the folder the answer lives in moved hit@10 from 66.1% to 81.6% across 651 journal queries, and 50.0% to 71.7% across 46 paraphrase queries — several times what any ranking change has produced, because scope changes WHAT gets searched rather than the order of what came back. Pass it whenever you can name the area. It IS a hard filter, so a wrong scope hides the answer completely: state it only when you know it, and choose the widest scope that still contains the answer. THREE forms: a PROJECT name from the vault's imported repos (e.g. 'lotto', 'netwix') which matches that body of work wherever it lives; a KIND ('instructions' | 'playbook' | 'session' | 'knowledge') to ask e.g. only for rules; or a folder prefix (e.g. 'Notes/Claude-Sessions'). Use brain_scope_list to discover scopes. State it explicitly — the brain never guesses your project from what you read earlier." }
                     },
                     ["required"] = new JArray { "query" }
                 }),
@@ -857,8 +857,10 @@ internal static partial class Program
                 "(ids, codenames) surface. mode field reports 'hybrid', 'semantic', or 'keyword-fallback' " +
                 "(Ollama unreachable). Use this when the user asks an open-ended question or you need " +
                 "topical neighbors rather than exact-match hits. Optional category/tag/scope filters " +
-                "narrow the search BEFORE the cosine pass — much faster than post-filtering when you " +
-                "already know the topic area. Same preview_chars/compact options as brain_search. " +
+                "narrow the search BEFORE the cosine pass. `scope` is the argument that matters most: " +
+                "naming the area the answer lives in is worth +15-22 points of hit@10 — measured, and " +
+                "larger than every ranking change shipped to date. Same preview_chars/compact options " +
+                "as brain_search. " +
                 "Facts carry TIME: a note with validFrom/validUntil — or one automatically closed by a " +
                 "note that supersedes it — is demoted once its window has passed and every result says " +
                 "so in `validity`. Pass asOf=YYYY-MM-DD to ask what was believed on a given day.",
@@ -873,7 +875,7 @@ internal static partial class Program
                         ["compact"] = new JObject { ["type"] = "boolean", ["default"] = false },
                         ["category"] = new JObject { ["type"] = "string", ["description"] = "restrict to a primary or secondary category (e.g. 'AI_MachineLearning')" },
                         ["tag"] = new JObject { ["type"] = "string", ["description"] = "restrict to notes carrying this tag" },
-                        ["scope"] = new JObject { ["type"] = "string", ["description"] = "restrict to notes whose path starts with this folder (e.g. 'Notes/Claude-Sessions')" },
+                        ["scope"] = new JObject { ["type"] = "string", ["description"] = "THE HIGHEST-VALUE ARGUMENT ON THIS TOOL. Applied BEFORE the cosine pass, so it is also the cheapest — but speed is not why you pass it. Measured (brainx-mcp eval, 2026-08-11): folder-scoped retrieval moved hit@10 from 66.1% to 81.6% across 651 journal queries and 50.0% to 71.7% across 46 paraphrase queries, because scope changes WHAT gets searched rather than the order of what came back. Same three forms as brain_search: a PROJECT name ('lotto', 'netwix') matching that body of work wherever it lives, a KIND ('instructions' | 'playbook' | 'session' | 'knowledge'), or a folder prefix ('Notes/Claude-Sessions'); brain_scope_list discovers them. It IS a hard filter — a wrong scope hides the answer, so state it only when you know it, and pick the widest one that still contains the answer." },
                         ["bypass_cache"] = new JObject { ["type"] = "boolean", ["description"] = "if true, skip the 10-min memo cache and always re-run", ["default"] = false },
                         ["asOf"] = new JObject { ["type"] = "string", ["description"] = "YYYY-MM-DD — rank as of that date. Notes carrying validFrom/validUntil (or closed automatically by a note that supersedes them) are demoted when their window did not cover that day. Every result carries a `validity` block when it has a window." }
                     },
