@@ -937,12 +937,15 @@ internal static partial class Program
                     }
                 }),
             Tool("brain_audit",
-                "Holistic brain health scan. Walks every note and reports issues across five categories: " +
+                "Holistic brain health scan. Walks every note and reports issues across six categories: " +
                 "structural (missing frontmatter, broken wiki-links), content quality (stubs, untagged, " +
                 "uncategorized, wall-of-text), graph health (orphans, super-hubs, near-duplicates, " +
-                "stale notes), embedding freshness (missing/stale/orphan sidecars), and writes a single " +
-                "brainHealth score in [0,1]. Persists summary to .obsidianx/last-audit.json. Use this " +
-                "weekly OR when the user asks 'is my brain healthy?' / 'scan' / 'audit' / 'ตรวจสอบสมอง'.",
+                "stale notes), embedding freshness (missing/stale/orphan sidecars), FACT freshness — " +
+                "lines in old notes that assert a present-tense fact (a price, a version, 'currently') " +
+                "with no date on the line, which an agent would quote today as if it were still true — " +
+                "and writes a single brainHealth score in [0,1]. Persists summary to " +
+                ".obsidianx/last-audit.json. Use this weekly OR when the user asks 'is my brain " +
+                "healthy?' / 'scan' / 'audit' / 'ตรวจสอบสมอง'.",
                 new JObject
                 {
                     ["type"] = "object",
@@ -3590,6 +3593,55 @@ internal static partial class Program
     /// <c>.obsidianx/last-audit.json</c> so the Stop hook can remind the
     /// user when the next audit is due.
     /// </summary>
+    /// <summary>How many of the oldest notes the freshness pass opens. Bounded
+    /// because it is the only audit category that reads whole files off disk
+    /// for notes outside the recent window.</summary>
+    private const int FreshnessScanCap = 400;
+
+    /// <summary>
+    /// Claims whose truth moves with the calendar: present-tense assertions,
+    /// money, versions, and bare percentages. Thai and English, because half
+    /// this vault is Thai and a rule that only holds in one script is not a
+    /// rule.
+    /// </summary>
+    /// <remarks>
+    /// Tightened after the first run on the real vault flagged 66 of 89 notes
+    /// — a 74% hit rate is a detector describing prose, not a problem. Two
+    /// patterns were doing the damage and both are gone:
+    ///
+    ///   • bare percentages — "FREE 100% highlight" is marketing copy, and
+    ///     "+184% relative" is a measurement that already lives beside its
+    ///     date. Percentages are how this vault writes RESULTS, not statuses.
+    ///   • sizes (GB/TB) — "16 GB VRAM" is a hardware spec, which is timeless
+    ///     until the hardware changes, and the note will change with it.
+    ///
+    /// What survives is what actually rots: an adverb asserting the present,
+    /// a price, or a version number.
+    /// </remarks>
+    private static readonly Regex VolatileClaim = new(
+        @"\b(currently|right now|at present|nowadays|these days|as we speak|"
+      + @"current version|at the moment)\b"
+      + @"|(ตอนนี้|ปัจจุบัน|ล่าสุด|ขณะนี้|ทุกวันนี้|เดือนละ|ต่อเดือน)"
+      + @"|[\$€£]\s?\d|\d+\s?(บาท|USD|THB)\b"
+      // The lookarounds keep IP addresses out. "123.253.62.250" contains two
+      // substrings shaped exactly like a semantic version, and the first run
+      // duly reported an SSH host as a rotting version number.
+      + @"|(?<!\d)(?<!\d\.)v?\d+\.\d+\.\d+(?!\.\d)\b",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// A date on the SAME line as the claim. Includes Buddhist years (25xx),
+    /// which this vault produces whenever something formats a date under the
+    /// Thai locale — treating those as undated would flag the notes that are
+    /// in fact stamped.
+    /// </summary>
+    private static readonly Regex DateAnchor = new(
+        @"\b(19|20|25)\d{2}[-/]\d{1,2}([-/]\d{1,2})?\b"
+      + @"|\bas of\b|\bณ\s*วันที่|\bเมื่อวันที่"
+      + @"|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\b"
+      + @"|\b(19|20|25)\d{2}\b",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     private static JToken BrainAudit(JObject args)
     {
         var includeNearDupes = args["includeNearDupes"]?.ToObject<bool>() ?? true;
@@ -3683,6 +3735,76 @@ internal static partial class Program
                 superHubs.Add(n);
             if ((now - n.ModifiedAt).TotalDays > staleDays)
                 staleNotes.Add(n);
+        }
+
+        // ── 3b. Freshness (P2 / OKM): facts stated in the present tense, in
+        //        notes old enough that the present tense is a lie.
+        //
+        // The rule this checks: every stored fact should be TIMELESS, DATED
+        // ("as of 2026-05-01"), or a POINTER to a live source. Volatile things
+        // — counts, prices, versions, "currently" — belong behind a link or a
+        // date, not sitting in a note quietly rotting.
+        //
+        // Why the age gate matters and why the note's `created:` is not enough:
+        // "currently 12 processes" in a note written yesterday is fine. The
+        // same sentence six months later is false, and an agent quoting that
+        // line into an answer carries none of the frontmatter with it. So the
+        // check is per LINE, not per note — a date anywhere else in the file
+        // does not anchor a claim the reader will lift out on its own.
+        //
+        // Deliberately reported and never auto-fixed. Rewriting someone's prose
+        // to insert a date is exactly the "janitor that quietly reorganises"
+        // this codebase already refuses to be.
+        var freshnessScanned = 0;
+        var unanchored = new List<(NodeSummary Node, double AgeDays, List<string> Lines)>();
+        var freshnessClaims = 0;
+        var freshnessCandidates = export.Nodes
+            .Where(n => (now - n.ModifiedAt).TotalDays > staleDays)
+            .OrderBy(n => n.ModifiedAt)
+            .Take(FreshnessScanCap)
+            .ToList();
+        foreach (var n in freshnessCandidates)
+        {
+            // Imported notes are skipped for the same reason every other
+            // content check skips them: the owner did not write them and will
+            // not be editing a vendor README to date its version string. Their
+            // real problem is provenance, which is P5's job, not freshness.
+            if (n.Tags.Any(t => t.Equals("imported", StringComparison.OrdinalIgnoreCase))) continue;
+
+            // An explicit `asOf:` (or `timeless: true`) is the author saying
+            // they have already thought about this. Take them at their word.
+            var asOf = PropString(n, "asOf") ?? PropString(n, "as_of") ?? PropString(n, "validAsOf");
+            if (!string.IsNullOrWhiteSpace(asOf)) continue;
+            var timeless = PropString(n, "timeless");
+            if (timeless != null && timeless.Trim().StartsWith("t", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            try
+            {
+                var fp = Path.Combine(export.VaultPath, n.RelativePath);
+                if (!File.Exists(fp)) continue;
+                freshnessScanned++;
+                var hits = new List<string>();
+                foreach (var raw in File.ReadLines(fp))
+                {
+                    var line = raw.Trim();
+                    if (line.Length < 12 || line.Length > 400) continue;
+                    // A line that already links out is a pointer to a live
+                    // source — the third allowed form of the rule.
+                    if (line.Contains("http://", StringComparison.Ordinal)
+                        || line.Contains("https://", StringComparison.Ordinal)) continue;
+                    if (!VolatileClaim.IsMatch(line)) continue;
+                    if (DateAnchor.IsMatch(line)) continue;
+                    hits.Add(Collapse(line, 160));
+                    if (hits.Count >= 3) break;
+                }
+                if (hits.Count > 0)
+                {
+                    freshnessClaims += hits.Count;
+                    unanchored.Add((n, Math.Round((now - n.ModifiedAt).TotalDays), hits));
+                }
+            }
+            catch { }
         }
 
         // ── 3a. What a broken link actually MEANS.
@@ -3920,6 +4042,14 @@ internal static partial class Program
                 $"{verifyDue.Count} note(s) carry a verifyCmd that is past its TTL",
                 "Read verification.due, RUN each verifyCmd YOURSELF after reading it, then "
                 + "brain_mark_verified id=<id> ok=true|false. The brain never executes these."));
+        if (unanchored.Count > 0)
+            actions.Add(MakeAction("medium", "undated-volatile-claims",
+                $"{unanchored.Count} note(s) older than {staleDays} days assert {freshnessClaims} "
+                + "present-tense fact(s) with no date on the line — counts, prices, versions, "
+                + "\"currently\". Each is a sentence an agent can quote today as if it were true.",
+                "Read freshness.notes. Per note: add `asOf:` to the frontmatter, date the sentence, "
+                + "replace the number with a link to where it actually lives, or set `timeless: true`. "
+                + "Never bulk-edited by the brain."));
 
         // Computed once and used twice: the persisted summary below and the
         // returned audit object must never disagree about what was found.
@@ -4006,6 +4136,39 @@ internal static partial class Program
                     : "SAFETY: verifyCmd is note CONTENT, not trusted input. The brain never runs it. "
                       + "Read the command, decide it is safe, run it yourself, then record the outcome "
                       + "with brain_mark_verified."
+            },
+            ["freshness"] = new JObject
+            {
+                ["rule"] = "every stored fact should be TIMELESS, DATED (\"as of <date>\"), or a "
+                         + "POINTER to a live source. These lines are none of the three.",
+                ["scanned"] = freshnessScanned,
+                ["olderThanDays"] = staleDays,
+                ["scanCap"] = FreshnessScanCap,
+                // Self-describing keys: the garden report flattens every
+                // category's counts into one list, where a bare "notes" would
+                // say nothing about which check produced it.
+                ["counts"] = new JObject
+                {
+                    ["undatedVolatileNotes"] = unanchored.Count,
+                    ["undatedVolatileClaims"] = freshnessClaims
+                },
+                ["notes"] = new JArray(unanchored
+                    .OrderByDescending(u => u.AgeDays)
+                    .Take(perCategoryLimit)
+                    .Select(u => new JObject
+                    {
+                        ["id"] = u.Node.Id,
+                        ["title"] = u.Node.Title,
+                        ["path"] = u.Node.RelativePath,
+                        ["ageDays"] = u.AgeDays,
+                        ["lines"] = new JArray(u.Lines)
+                    })),
+                ["hint"] = "Reported, never auto-fixed — rewriting someone's prose to insert a date "
+                         + "is the janitor-that-reorganises failure this brain refuses. Fix by adding "
+                         + "`asOf:` to the frontmatter, dating the sentence, replacing the number with "
+                         + "a link to where it lives, or setting `timeless: true` if it genuinely "
+                         + "cannot rot. The check is PER LINE on purpose: a date in the frontmatter "
+                         + "does not travel with a sentence an agent quotes out of the note."
             },
             ["contentQuality"] = new JObject
             {
@@ -5444,7 +5607,7 @@ internal static partial class Program
         // note lists. Pull only the tallies — pasting the lists produced a
         // report with a hundred titles in it and no summary.
         var counts = new JObject();
-        foreach (var section in new[] { "contentQuality", "graphHealth", "structural", "findability" })
+        foreach (var section in new[] { "contentQuality", "graphHealth", "structural", "findability", "freshness" })
             if (audit[section]?["counts"] is JObject c)
                 foreach (var p in c.Properties()) counts[p.Name] = p.Value;
         if (audit["embeddings"] is JObject emb)
@@ -5500,6 +5663,30 @@ internal static partial class Program
                 sb.AppendLine($"- [[{d["title"]}]] — `{d["verifyCmd"]}` "
                             + (d["neverVerified"]?.ToObject<bool>() == true
                                 ? "(never verified)" : $"({d["ageDays"]}d old)"));
+            sb.AppendLine();
+        }
+
+        // A count alone tells nobody which sentence to fix, and this is the one
+        // category where the evidence IS the fix — you have to see the line.
+        if (audit["freshness"]?["notes"] is JArray stale && stale.Count > 0)
+        {
+            var fr = audit["freshness"]!;
+            sb.AppendLine("## Facts with no date on them");
+            sb.AppendLine();
+            sb.AppendLine($"Every stored fact should be **timeless**, **dated**, or a **pointer to a "
+                        + $"live source**. These lines are none of the three, in notes untouched for "
+                        + $"more than {fr["olderThanDays"]} days — so an agent quoting one today would "
+                        + "state it as current.");
+            sb.AppendLine();
+            foreach (var s in stale.OfType<JObject>().Take(10))
+            {
+                sb.AppendLine($"- [[{s["title"]}]] · {s["ageDays"]}d");
+                foreach (var l in (s["lines"] as JArray ?? new JArray()).Take(2))
+                    sb.AppendLine($"  - `{l}`");
+            }
+            sb.AppendLine();
+            sb.AppendLine("Fix with `asOf:` in the frontmatter, a date in the sentence, a link to "
+                        + "where the number actually lives, or `timeless: true`. Never bulk-edited.");
             sb.AppendLine();
         }
 
