@@ -1193,6 +1193,12 @@ internal static partial class Program
         Say($"brainx-mcp eval · v{ServerVersion}");
         Say($"  vault: {_vaultPath}");
 
+        // The benchmark asks ~720 recall questions per run through the real
+        // BrainRecall, which logs one access row each. Those rows are not
+        // behaviour — nobody wanted to know any of it — and they were evicting
+        // the actual history that ranking and brain_suggest_topics read.
+        SuppressAccessLog = true;
+
         var export = LoadExport();
         if (export == null)
         {

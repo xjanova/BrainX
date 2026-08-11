@@ -943,6 +943,25 @@ internal static partial class Program
                         ["limit"] = new JObject { ["type"] = "integer", ["default"] = 10 }
                     }
                 }),
+            Tool("brain_dream",
+                "The dream pass — what the brain's own USAGE says about how it should be organised. " +
+                "Deterministic counters over access-log.ndjson, no LLM, nothing written: questions " +
+                "asked on 3+ separate days (answered every time = the answer belongs in a playbook " +
+                "instead of a search; never answered = the highest-value note that doesn't exist " +
+                "yet), notes rewritten on 3+ separate days (a value that moves — point at its source " +
+                "instead of copying it), notes the work actually runs on, and dormant notes. " +
+                "EVERY check states the history it needs and is WITHHELD by name when the log is " +
+                "shorter than that — read `withheld` before concluding the brain has nothing to say. " +
+                "Use when the user asks 'what should I write next?', 'what have I been asking?', or " +
+                "at the end of a long stretch of work.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["limit"] = new JObject { ["type"] = "integer", ["default"] = 10, ["description"] = "max proposals per check" }
+                    }
+                }),
             Tool("brain_audit",
                 "Holistic brain health scan. Walks every note and reports issues across six categories: " +
                 "structural (missing frontmatter, broken wiki-links), content quality (stubs, untagged, " +
@@ -1189,6 +1208,7 @@ internal static partial class Program
                 "brain_suggest_links"       => BrainSuggestLinks(args),
                 "brain_find_contradictions" => BrainFindContradictions(args),
                 "brain_suggest_topics"      => BrainSuggestTopics(args),
+                "brain_dream"               => BrainDream(args),
                 "brain_audit"               => BrainAudit(args),
                 "brain_apply_audit_fix"     => BrainApplyAuditFix(args),
                 "submit_for_review"         => SubmitForReview(args),
@@ -3628,6 +3648,57 @@ internal static partial class Program
     }
 
     /// <summary>
+    /// The dream pass. Counters only — see <see cref="DreamPass"/> for what is
+    /// counted and, more importantly, for what it refuses to count when the log
+    /// is too short to support the claim.
+    /// </summary>
+    private static JToken BrainDream(JObject args)
+    {
+        var limit = Math.Clamp(args["limit"]?.ToObject<int>() ?? 10, 1, 50);
+        var export = LoadExport() ?? throw new InvalidOperationException("no brain-export");
+        var report = RunDreamPass(export, limit);
+        return DreamToJson(report);
+    }
+
+    private static DreamPass.Report RunDreamPass(BrainExport export, int limit)
+        => new DreamPass().Analyze(_vaultPath,
+            export.Nodes.Select(n => new DreamPass.KnowledgeNodeLite(n.Id, n.Title, n.ModifiedAt)).ToList(),
+            limit);
+
+    private static JObject DreamToJson(DreamPass.Report r) => new()
+    {
+        // The window comes FIRST on purpose. Every number under it is only as
+        // good as the history it was computed over, and a reader who sees the
+        // proposals before the span will trust them more than they should.
+        ["window"] = new JObject
+        {
+            ["rows"] = r.LogRows,
+            ["spanDays"] = r.SpanDays,
+            ["distinctDays"] = r.DistinctDays,
+            ["from"] = r.From?.ToString("O"),
+            ["to"] = r.To?.ToString("O"),
+            ["deliberateReads"] = r.DeliberateRows,
+            ["questionsAsked"] = r.QuestionRows
+        },
+        ["withheld"] = new JArray(r.Withheld),
+        ["proposals"] = new JArray(r.Proposals.Select(p => new JObject
+        {
+            ["kind"] = p.Kind,
+            ["subject"] = p.Subject,
+            ["noteId"] = p.NoteId,
+            ["confidence"] = p.Confidence,
+            ["evidenceDays"] = p.EvidenceDays,
+            ["evidence"] = p.Evidence,
+            ["action"] = p.Action
+        })),
+        ["hint"] = r.Proposals.Count == 0 && r.Withheld.Count > 0
+            ? "Nothing to propose YET — the checks above were withheld for lack of history, not "
+              + "because the brain is tidy. The log accumulates from here; ask again in a week."
+            : "Proposals only. Nothing here has been applied, and the dormant check never demotes "
+              + "or deletes anything."
+    };
+
+    /// <summary>
     /// Holistic brain health scan. Walks every note and reports issues across
     /// five categories: structural (frontmatter, broken wiki-links), content
     /// quality (stubs, untagged, uncategorized, wall-of-text), graph health
@@ -5739,7 +5810,15 @@ internal static partial class Program
         // this runs unattended, so it stays on — an overnight job is exactly
         // where an O(n²) pass belongs.
         var audit = BrainAudit(new JObject()) as JObject ?? new JObject();
-        var reportPath = WriteGardenReport(export, audit, startedAt, rebaked, embedded);
+        // Tier B. Pure counting over the access log, so it costs a file read and
+        // cannot fail the run — but it is the only part of the gardener that
+        // looks at how the brain is USED rather than at how it is built.
+        var dream = DreamToJson(RunDreamPass(export, 10));
+        var reportPath = WriteGardenReport(export, audit, dream, startedAt, rebaked, embedded);
+        Say($"  dream:      {(dream["proposals"] as JArray)?.Count ?? 0} proposal(s) from "
+          + $"{dream["window"]?["spanDays"]}d of history"
+          + ((dream["withheld"] as JArray)?.Count > 0
+              ? $", {(dream["withheld"] as JArray)!.Count} check(s) withheld" : ""));
         Say($"  audit:      health {audit["brainHealth"]} ({audit["healthBand"]})");
         Say($"  report:     {reportPath}");
         Say($"Done in {(DateTime.UtcNow - startedAt).TotalSeconds:0.0}s");
@@ -5752,7 +5831,7 @@ internal static partial class Program
     /// vault it is supposed to be tending. "Needs a human" is listed first
     /// because it is the only part that will not fix itself tomorrow.
     /// </summary>
-    private static string WriteGardenReport(BrainExport export, JObject audit,
+    private static string WriteGardenReport(BrainExport export, JObject audit, JObject dream,
         DateTime startedAt, int rebaked, int embedded)
     {
         var verification = audit["verification"] as JObject;
@@ -5846,6 +5925,33 @@ internal static partial class Program
             sb.AppendLine();
             sb.AppendLine("Fix with `asOf:` in the frontmatter, a date in the sentence, a link to "
                         + "where the number actually lives, or `timeless: true`. Never bulk-edited.");
+            sb.AppendLine();
+        }
+
+        // The dream pass. Printed even when it has nothing to propose, because
+        // "withheld for lack of history" is the finding on a young log, and a
+        // section that vanishes when it is empty teaches the reader that
+        // silence means health.
+        var dreamProposals = dream["proposals"] as JArray ?? new JArray();
+        var dreamWithheld = dream["withheld"] as JArray ?? new JArray();
+        if (dreamProposals.Count > 0 || dreamWithheld.Count > 0)
+        {
+            var w = dream["window"];
+            sb.AppendLine("## What your own usage says");
+            sb.AppendLine();
+            sb.AppendLine($"From {w?["rows"]} access-log row(s) spanning **{w?["spanDays"]} day(s)** "
+                        + $"({w?["distinctDays"]} distinct), of which {w?["deliberateReads"]} were "
+                        + $"deliberate reads and {w?["questionsAsked"]} were questions asked.");
+            sb.AppendLine();
+            foreach (var p in dreamProposals.OfType<JObject>())
+                sb.AppendLine($"- **{p["kind"]}** ({p["confidence"]}) — {p["subject"]}  \n  "
+                            + $"_{p["evidence"]}_ · {p["action"]}");
+            if (dreamWithheld.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("Withheld for lack of history — these are not clean bills of health:");
+                foreach (var x in dreamWithheld) sb.AppendLine($"- {x}");
+            }
             sb.AppendLine();
         }
 
@@ -6847,12 +6953,23 @@ internal static partial class Program
     }
 
     /// <summary>
+    /// Set by the benchmark. The eval harness drives the REAL ranking path on
+    /// purpose — that is what makes it honest — and BrainRecall logs an access
+    /// row per call, so a single `brainx-mcp eval` run wrote ~720 rows of
+    /// machine traffic into the file that is supposed to record what a human
+    /// asked for. On 2026-08-11 the log was 99% benchmark. A measurement that
+    /// overwrites the memory it measures is not a measurement.
+    /// </summary>
+    internal static bool SuppressAccessLog;
+
+    /// <summary>
     /// Append an access event to access-log.ndjson. The 3D graph watcher
     /// tails this file and pulses the corresponding node on the graph.
     /// One line per event (NDJSON) so we can append without rewriting.
     /// </summary>
     private static void LogAccess(string nodeId, string op, string? context)
     {
+        if (SuppressAccessLog) return;
         try
         {
             var dir = Path.Combine(_vaultPath, ".obsidianx");
@@ -6884,7 +7001,7 @@ internal static partial class Program
                 // The trim rewrites the whole file, which is the one operation
                 // here that can drop hundreds of rows at once — it belongs
                 // inside the retry just as much as the append does.
-                RetryOnIo(() => TrimIfLarge(logPath, maxBytes: 512 * 1024));
+                RetryOnIo(() => TrimIfLarge(logPath, AccessLogMaxBytes));
                 RetryOnIo(() => File.AppendAllText(logPath, entry + "\n"));
             }
         }
@@ -6892,6 +7009,48 @@ internal static partial class Program
         catch (UnauthorizedAccessException) { }
     }
 
+    /// <summary>
+    /// Ops that record a DECISION — somebody chose this note, or changed it.
+    /// Sparse, irreplaceable, and the only rows any learning pass can use.
+    /// `recall` belongs here because it is one row per question asked, and it
+    /// carries the question. Search/walk rows are impressions: one row per
+    /// RESULT, hundreds per minute, and nothing chose any of them.
+    /// </summary>
+    private static readonly HashSet<string> _decisionOps =
+        new(StringComparer.OrdinalIgnoreCase)
+        { "get_note", "bundle-read", "synthesize", "get_backlinks", "write", "recall" };
+
+    /// <summary>SSH rows are an audit trail, not telemetry. They are never
+    /// thinned, at any age, whatever else has to go.</summary>
+    private static bool IsAuditRow(string op) => op.StartsWith("ssh_", StringComparison.OrdinalIgnoreCase);
+
+    private const int AccessLogMaxBytes = 4 * 1024 * 1024;
+    private const int KeepDecisionRows = 20000;
+    private const int KeepImpressionRows = 1000;
+
+    /// <summary>
+    /// Bound the log WITHOUT letting the loud rows evict the meaningful ones.
+    ///
+    /// The old rule was "keep the last 2000 lines" at 512 KB. Every brain_search
+    /// writes one line PER RESULT and `brainx-mcp eval` asks ~720 recall
+    /// questions per run, so two benchmark runs wiped the entire history — the
+    /// file was measured on 2026-08-11 holding 2,328 rows spanning **2 hours
+    /// and 43 minutes**, of which 2,299 were the eval's own recall calls. Four
+    /// get_note rows survived.
+    ///
+    /// Everything downstream had been reading that keyhole and calling it
+    /// history: the usage boost in ranking asks for a 90-day window, and
+    /// brain_suggest_topics asks for 14 days, over a file that could not hold
+    /// one afternoon. Neither failed — both silently returned what a keyhole
+    /// contains, which is the exact shape of failure the "silently stale,
+    /// truncated, or skipped" playbook is about.
+    ///
+    /// So the budget is per CLASS of row, newest first: decisions (a note was
+    /// opened, written, or asked for by a human) get 20,000 slots, impressions
+    /// (search/walk result rows) get 1,000, and SSH audit rows are never
+    /// dropped at all. A busy search session or a benchmark can now only
+    /// consume the impression budget — it can no longer reach the history.
+    /// </summary>
     private static void TrimIfLarge(string path, int maxBytes)
     {
         try
@@ -6899,9 +7058,34 @@ internal static partial class Program
             var fi = new FileInfo(path);
             if (!fi.Exists || fi.Length < maxBytes) return;
             var lines = File.ReadAllLines(path);
-            // keep last 2000 entries
-            var kept = lines.Length > 2000 ? lines[^2000..] : lines;
-            File.WriteAllLines(path, kept);
+
+            int decisions = 0, impressions = 0;
+            var keep = new List<string>(Math.Min(lines.Length, KeepDecisionRows + KeepImpressionRows));
+            // Newest first, so the rows that survive are the most recent of
+            // each class rather than the most recent of the file.
+            for (int i = lines.Length - 1; i >= 0; i--)
+            {
+                var line = lines[i];
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                string op;
+                try { op = JObject.Parse(line)["op"]?.ToString() ?? ""; }
+                // An unparseable row is not evidence of anything, but it is also
+                // not worth deleting someone's file over. Treat it as an
+                // impression and let it age out.
+                catch { op = ""; }
+
+                if (IsAuditRow(op)) { keep.Add(line); continue; }
+                if (_decisionOps.Contains(op))
+                {
+                    if (decisions++ < KeepDecisionRows) keep.Add(line);
+                }
+                else if (impressions++ < KeepImpressionRows) keep.Add(line);
+            }
+            keep.Reverse();
+            // Atomic: this rewrites the whole log, and the gardener/HUD can kill
+            // this process mid-run. A half-written access log is worse than an
+            // oversized one.
+            AtomicWrite(path, string.Join(Environment.NewLine, keep) + Environment.NewLine);
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
