@@ -1223,7 +1223,7 @@ internal static partial class Program
     {
         string? vaultArg = null, goldArg = null, absentArg = null;
         var mine = false; var quiet = false; var limit = 0; var rerank = false; var titles = false;
-        var crossEncoder = false;
+        var crossEncoder = false; var dump = false;
         for (int i = 0; i < args.Length; i++)
         {
             if (args[i] == "--vault" && i + 1 < args.Length) vaultArg = args[++i];
@@ -1242,6 +1242,11 @@ internal static partial class Program
             // window is 10 passes per query. Measured on this box at ~2.2 s per
             // pair on CPU — budget the run before starting it, not after.
             else if (args[i] == "--ce") crossEncoder = true;
+            // Per-query ranks for every arm, to .obsidianx/eval/dump-*.json.
+            // The aggregate says which arm wins; only this says on WHICH
+            // questions, which is the data every "why is rank 1 stuck"
+            // analysis has needed and not had.
+            else if (args[i] == "--dump") dump = true;
             else if (args[i] == "--quiet") quiet = true;
             else if (args[i] is "-h" or "--help" or "help")
             {
@@ -1434,6 +1439,7 @@ internal static partial class Program
         var sw = new System.Diagnostics.Stopwatch();
         long embedMs = 0;
         int done = 0;
+        var perQuery = new List<JObject>();
         foreach (var pair in gold)
         {
             var expected = new HashSet<string>(pair.ExpectedIds, StringComparer.Ordinal);
@@ -1446,6 +1452,13 @@ internal static partial class Program
             sw.Stop();
             embedMs += sw.ElapsedMilliseconds;
 
+            // Per-arm ranks for this one query, kept only under --dump. The
+            // aggregate tables answer "which arm is better"; only this answers
+            // "on WHICH questions, and where was the answer when it lost" —
+            // the question every post-hoc analysis this month has needed and
+            // had to guess at.
+            var qRanks = dump ? new JObject() : null;
+
             List<string> Arm(string name, Func<List<string>> run)
             {
                 sw.Restart();
@@ -1456,6 +1469,13 @@ internal static partial class Program
                 Segment(byLang, pair.Lang)[name].Observe(ids, expected);
                 Segment(byTool, string.IsNullOrEmpty(pair.OriginTool) ? "unlabelled" : pair.OriginTool)
                     [name].Observe(ids, expected);
+                if (qRanks != null)
+                {
+                    var r = -1;
+                    for (int i = 0; i < ids.Count; i++)
+                        if (expected.Contains(ids[i])) { r = i + 1; break; }
+                    qRanks[name] = r;   // 1-based; -1 = not in the returned window
+                }
                 return ids;
             }
 
@@ -1654,6 +1674,27 @@ internal static partial class Program
                 D("agree.top1", "the two rankers picked the same rank 1", agreeTop);
             }
 
+            // `target` is the oracle arms' lookup above — same note, reused.
+            if (qRanks != null)
+            {
+                perQuery.Add(new JObject
+                {
+                    ["query"] = pair.Query,
+                    ["lang"] = pair.Lang,
+                    ["originTool"] = pair.OriginTool,
+                    ["expected"] = new JArray(pair.ExpectedIds),
+                    // The three features every past post-hoc guess has reached
+                    // for: which drawer the answer lives in, what kind of note
+                    // it is, and how big it is. Carried per query so the next
+                    // analysis joins nothing.
+                    ["targetTitle"] = target?.Title,
+                    ["targetFolder"] = target == null ? null : FolderOf(target.RelativePath),
+                    ["targetKind"] = target?.Kind,
+                    ["targetWords"] = target?.WordCount,
+                    ["ranks"] = qRanks
+                });
+            }
+
             if (!quiet && ++done % 10 == 0) Console.WriteLine($"  …{done}/{gold.Count}");
         }
 
@@ -1715,6 +1756,14 @@ internal static partial class Program
         var day = stamp.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
         var jsonPath = Path.Combine(evalDir, $"results-{day}{suffix}.json");
         File.WriteAllText(jsonPath, result.ToString(), new UTF8Encoding(false));
+        if (dump && perQuery.Count > 0)
+        {
+            var dumpPath = Path.Combine(evalDir, $"dump-{day}{suffix}.json");
+            File.WriteAllText(dumpPath,
+                new JObject { ["ranAt"] = stamp.ToString("O"), ["queries"] = new JArray(perQuery) }.ToString(),
+                new UTF8Encoding(false));
+            Result($"  dump:   {dumpPath}");
+        }
         var notePath = WriteEvalReport(export, result, arms, byLang, byTool, recall,
             gold.Count, stamp, goldStem, discrim, discrim3);
 
