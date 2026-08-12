@@ -809,8 +809,13 @@ internal static partial class Program
     {
         if (_ceTried) return _ce;
         _ceTried = true;
-        _ce = CrossEncoderReranker.TryCreate(null, out var why);
+        // BRAINX_CE_DIR points the arm at an alternate export (int8, fp16) so
+        // quantisation levels are compared by the same harness — a probe alone
+        // says "wired correctly", only the eval says "worth it".
+        var dir = Environment.GetEnvironmentVariable("BRAINX_CE_DIR") is { Length: > 0 } d ? d : null;
+        _ce = CrossEncoderReranker.TryCreate(dir, out var why);
         if (_ce == null) Console.Error.WriteLine($"  ce:       unavailable — {why}");
+        else Console.WriteLine($"  ce:       {dir ?? CrossEncoderReranker.DefaultModelDir}");
         return _ce;
     }
 
