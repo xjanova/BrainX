@@ -282,8 +282,74 @@ internal sealed class UnigramTokenizer
     /// </summary>
     public int[] Encode(string text, int maxTokens)
     {
+        var ids = Pieces(text);
+        // Truncate the BODY, then wrap — so the sequence the model sees always
+        // ends with </s>, which is what it was trained to expect.
+        var budget = Math.Max(2, maxTokens) - 2;
+        if (ids.Count > budget) ids.RemoveRange(budget, ids.Count - budget);
+
+        var outIds = new int[ids.Count + 2];
+        outIds[0] = BosId;
+        ids.CopyTo(outIds, 1);
+        outIds[^1] = EosId;
+        return outIds;
+    }
+
+    /// <summary>
+    /// A PAIR, in the layout XLM-R was trained on:
+    /// <c>&lt;s&gt; a &lt;/s&gt;&lt;/s&gt; b &lt;/s&gt;</c>.
+    ///
+    /// The doubled separator is not a typo and not cosmetic — RoBERTa-family
+    /// models have no segment embeddings (<c>type_vocab_size: 1</c> in
+    /// bge-reranker-v2-m3's config), so the only thing telling the model where
+    /// the query ends and the document begins is this token pattern. Feed it a
+    /// single <c>&lt;/s&gt;</c> and it still returns a confident-looking score,
+    /// computed over a boundary it was never trained to read.
+    ///
+    /// Truncation is <c>longest_first</c>, matching HuggingFace's default for
+    /// pair encoding: the longer side is shortened until the budget fits, so a
+    /// short query is never eaten by a long document. Written closed-form
+    /// rather than one-token-at-a-time — same result, and this runs once per
+    /// candidate on every reranked query.
+    /// </summary>
+    public int[] EncodePair(string a, string b, int maxTokens)
+    {
+        var ta = Pieces(a);
+        var tb = Pieces(b);
+        // <s> … </s></s> … </s> = four specials.
+        var budget = Math.Max(4, maxTokens) - 4;
+        if (ta.Count + tb.Count > budget)
+        {
+            var half = budget / 2;
+            int keepA, keepB;
+            if (ta.Count > half && tb.Count > half) { keepB = half; keepA = budget - half; }
+            else if (ta.Count > half) { keepB = tb.Count; keepA = budget - keepB; }
+            else { keepA = ta.Count; keepB = budget - keepA; }
+            if (ta.Count > keepA) ta.RemoveRange(keepA, ta.Count - keepA);
+            if (tb.Count > keepB) tb.RemoveRange(keepB, tb.Count - keepB);
+        }
+
+        var outIds = new int[ta.Count + tb.Count + 4];
+        var w = 0;
+        outIds[w++] = BosId;
+        foreach (var id in ta) outIds[w++] = id;
+        outIds[w++] = EosId;
+        outIds[w++] = EosId;
+        foreach (var id in tb) outIds[w++] = id;
+        outIds[w++] = EosId;
+        return outIds;
+    }
+
+    /// <summary>
+    /// The body of a sequence — normalised, segmented, no specials attached.
+    /// Both <see cref="Encode"/> and <see cref="EncodePair"/> build on this, so
+    /// a pair is tokenised by exactly the code path the cosine probe verified
+    /// for single sequences.
+    /// </summary>
+    private List<int> Pieces(string text)
+    {
         var s = Normalise(text);
-        if (s.Length == 0) return new[] { BosId, EosId };
+        if (s.Length == 0) return new List<int>();
 
         var n = s.Length;
         // best[i] = score of the best segmentation of s[0..i)
@@ -324,20 +390,10 @@ internal sealed class UnigramTokenizer
             }
         }
 
-        var ids = new List<int>(Math.Min(n, maxTokens));
+        var ids = new List<int>(n);
         for (int i = n; i > 0; i = prev[i]) ids.Add(pieceId[i]);
         ids.Reverse();
-
-        // Truncate the BODY, then wrap — so the sequence the model sees always
-        // ends with </s>, which is what it was trained to expect.
-        var budget = Math.Max(2, maxTokens) - 2;
-        if (ids.Count > budget) ids.RemoveRange(budget, ids.Count - budget);
-
-        var outIds = new int[ids.Count + 2];
-        outIds[0] = BosId;
-        ids.CopyTo(outIds, 1);
-        outIds[^1] = EosId;
-        return outIds;
+        return ids;
     }
 
     /// <summary>

@@ -784,6 +784,78 @@ internal static partial class Program
         return head;
     }
 
+    // ───────────── cross-encoder reranking ─────────────
+    //
+    // The same window, the same permute-only rule, and the same question the
+    // LLM arm answered badly — but asked of a model built for it. bge-reranker
+    // -v2-m3 reads the query and the candidate in ONE sequence, which is the
+    // property the comment above says cosine structurally cannot have and an
+    // instruction-tuned chat model has to be talked into.
+    //
+    // `oracle:top10` is the number to beat this against: it is what a PERFECT
+    // reordering of this exact window would score, so the gap between "ce" and
+    // "oracle:top10" is how much of the prize this model actually claims.
+
+    private static CrossEncoderReranker? _ce;
+    private static bool _ceTried;
+
+    /// <summary>
+    /// The reranker, loaded once per eval run. Absence is not an error — the
+    /// arm returns the ranking it was given, exactly like the LLM arm does when
+    /// Ollama is down, so a run on a machine without the weights still produces
+    /// every other number.
+    /// </summary>
+    private static CrossEncoderReranker? Ce()
+    {
+        if (_ceTried) return _ce;
+        _ceTried = true;
+        _ce = CrossEncoderReranker.TryCreate(null, out var why);
+        if (_ce == null) Console.Error.WriteLine($"  ce:       unavailable — {why}");
+        return _ce;
+    }
+
+    private static int CeDepth =>
+        int.TryParse(Environment.GetEnvironmentVariable("BRAINX_CE_DEPTH"), out var d)
+            && d is > 1 and <= 25 ? d : 10;
+
+    private static int CeMaxTokens =>
+        int.TryParse(Environment.GetEnvironmentVariable("BRAINX_CE_TOKENS"), out var t)
+            && t is >= 64 and <= 8192 ? t : CrossEncoderReranker.DefaultMaxTokens;
+
+    /// <summary>
+    /// Reorder the top <see cref="CeDepth"/> of the hybrid ranking by scoring
+    /// each candidate against the query with the cross-encoder.
+    ///
+    /// Head-only, like every other rerank arm: nothing below the window moves,
+    /// so hit@10 is a floor and only the ORDER of what retrieval already found
+    /// is at stake. On any failure the original order is returned unchanged.
+    /// </summary>
+    private static List<string> RunCrossEncoder(BrainExport export, List<NodeSummary> all,
+                                                string query, float[]? vec)
+    {
+        var ranked = HybridRank(export, all, query.ToLowerInvariant(), EvalTopK, vec).Ranked;
+        var ids = ranked.Select(r => r.Node.Id).ToList();
+        var depth = Math.Min(CeDepth, ranked.Count);
+        if (depth < 2) return ids;
+
+        var ce = Ce();
+        if (ce == null) return ids;
+
+        var docs = new List<string>(depth);
+        for (int i = 0; i < depth; i++) docs.Add(DocText(export, ranked[i].Node, query));
+
+        var scores = ce.Score(query, docs, CeMaxTokens);
+        if (scores == null) return ids;
+
+        var head = Enumerable.Range(0, depth)
+            .OrderByDescending(i => scores[i])
+            .ThenBy(i => i)
+            .Select(i => ids[i])
+            .ToList();
+        head.AddRange(ids.Skip(depth));
+        return head;
+    }
+
     /// <summary>
     /// Reorder the same top-10 window using signals that are already computed
     /// and already measured — no model, no network, microseconds.
@@ -1146,6 +1218,7 @@ internal static partial class Program
     {
         string? vaultArg = null, goldArg = null, absentArg = null;
         var mine = false; var quiet = false; var limit = 0; var rerank = false; var titles = false;
+        var crossEncoder = false;
         for (int i = 0; i < args.Length; i++)
         {
             if (args[i] == "--vault" && i + 1 < args.Length) vaultArg = args[++i];
@@ -1159,6 +1232,11 @@ internal static partial class Program
             // Opt-in: embeds each candidate's title once per run. Cheap per
             // call but it is still one embed per distinct note that surfaces.
             else if (args[i] == "--titles") titles = true;
+            // Opt-in, and the most expensive arm in the file: one forward pass
+            // of a 568M-parameter cross-encoder per CANDIDATE, so a 10-deep
+            // window is 10 passes per query. Measured on this box at ~2.2 s per
+            // pair on CPU — budget the run before starting it, not after.
+            else if (args[i] == "--ce") crossEncoder = true;
             else if (args[i] == "--quiet") quiet = true;
             else if (args[i] is "-h" or "--help" or "help")
             {
@@ -1309,6 +1387,7 @@ internal static partial class Program
             .Concat(new[] { "oracle:pick", "oracle:union", "oracle:top10",
                             "oracle:scope", "oracle:folder" })
             .Concat(rerank ? new[] { "rerank" } : Array.Empty<string>())
+            .Concat(crossEncoder ? new[] { "ce" } : Array.Empty<string>())
             .Concat(titles ? TitleWeights.Select(w => $"title{w:0.##}") : Array.Empty<string>())
             .Concat(titles ? TitleWeights.Select(w => $"lex+title{w:0.##}") : Array.Empty<string>())
             .ToArray();
@@ -1441,6 +1520,7 @@ internal static partial class Program
             });
 
             if (rerank) Arm("rerank", () => RunRerank(export, all, pair.Query, vec));
+            if (crossEncoder) Arm("ce", () => RunCrossEncoder(export, all, pair.Query, vec));
             if (titles)
                 foreach (var w in TitleWeights)
                 {

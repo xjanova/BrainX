@@ -137,6 +137,11 @@ internal static partial class Program
             Console.OutputEncoding = new UTF8Encoding(false);
             return await EmbedProbeCliAsync(args.Skip(1).ToArray()).ConfigureAwait(false);
         }
+        if (args.Length > 0 && args[0].Equals("rerank-probe", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.OutputEncoding = new UTF8Encoding(false);
+            return await RerankProbeCliAsync(args.Skip(1).ToArray()).ConfigureAwait(false);
+        }
         if (args.Length > 0 && (args[0] == "--version" || args[0] == "-v" || args[0].Equals("version", StringComparison.OrdinalIgnoreCase)))
         {
             Console.OutputEncoding = new UTF8Encoding(false);
