@@ -142,6 +142,11 @@ internal static partial class Program
             Console.OutputEncoding = new UTF8Encoding(false);
             return await RerankProbeCliAsync(args.Skip(1).ToArray()).ConfigureAwait(false);
         }
+        if (args.Length > 0 && args[0].Equals("embed-sections", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.OutputEncoding = new UTF8Encoding(false);
+            return await EmbedSectionsCliAsync(args.Skip(1).ToArray()).ConfigureAwait(false);
+        }
         if (args.Length > 0 && (args[0] == "--version" || args[0] == "-v" || args[0].Equals("version", StringComparison.OrdinalIgnoreCase)))
         {
             Console.OutputEncoding = new UTF8Encoding(false);
@@ -5955,6 +5960,19 @@ internal static partial class Program
             embedded = await svc.PrecomputeAsync(_vaultPath, nodes).ConfigureAwait(false);
         else Say("  embeddings: skipped (Ollama unreachable)");
         if (embedded > 0) Say($"  embeddings: {embedded} written ({(svc.GpuInUse ? "GPU" : "CPU")})");
+
+        // ── 2b. Section vectors for session notes — the mtime check inside
+        // skips everything fresh, so a quiet night costs one directory scan.
+        // Runs through the same CLI body as `brainx-mcp embed-sections`, so
+        // the nightly pass and the manual one can never disagree about which
+        // notes qualify or how they split.
+        try
+        {
+            var sectExit = await EmbedSectionsCliAsync(
+                new[] { "--vault", _vaultPath }).ConfigureAwait(false);
+            if (sectExit != 0) Say("  sections:   FAILED — see lines above");
+        }
+        catch (Exception ex) { Say($"  sections:   skipped ({ex.GetType().Name})"); }
 
         // ── 3. Audit + report. Near-dupe detection is the expensive part and
         // this runs unattended, so it stays on — an overnight job is exactly

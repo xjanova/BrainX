@@ -485,6 +485,36 @@ public class EmbeddingService
         return await EmbedAsync(http, text, ct).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Embed many strings on ONE HttpClient, with the same GPU etiquette as a
+    /// precompute pass (borrow the card only when nothing else owns it). This
+    /// is the loop EmbedOneAsync warns it is not: a section pass over ~300
+    /// session notes is ~2,000 embeds, and a fresh client per call would pay
+    /// connection setup two thousand times.
+    ///
+    /// Per-item null on failure, never a shortened list — the caller is
+    /// pairing these with the texts it sent, and a silently compacted result
+    /// would misalign every vector after the first failure.
+    /// </summary>
+    public async Task<List<float[]?>> EmbedBatchAsync(IReadOnlyList<string> texts,
+        Action<int, int>? progress = null, CancellationToken ct = default)
+    {
+        var outp = new List<float[]?>(texts.Count);
+        var timeout = TimeSpan.FromSeconds(Math.Max(60, MaxChars / 100));
+        using var http = new HttpClient { Timeout = timeout };
+        _gpuLayers = await ResolveGpuLayersAsync(http, ct).ConfigureAwait(false);
+        GpuInUse = _gpuLayers > 0;
+        for (int i = 0; i < texts.Count; i++)
+        {
+            if (ct.IsCancellationRequested) { outp.Add(null); continue; }
+            outp.Add(string.IsNullOrWhiteSpace(texts[i])
+                ? null
+                : await EmbedAsync(http, texts[i], ct).ConfigureAwait(false));
+            progress?.Invoke(i + 1, texts.Count);
+        }
+        return outp;
+    }
+
     private static byte[] FloatsToBytes(float[] floats)
     {
         var bytes = new byte[floats.Length * 4];

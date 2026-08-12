@@ -1368,7 +1368,12 @@ internal static partial class Program
         // because the shipped one was measured landing BETWEEN its own inputs
         // — 55.8% against keyword's 61.6% on the journal set — and a
         // replacement can only be judged against the same snapshot.
-        var armNames = new[] { "keyword", "semantic", "hybrid", "shipped", "router" }
+        // `sect` = shipped + max(whole-note, best-section) cosine, one variable
+        // apart from the row above it. Present on every run because its cost is
+        // a few thousand extra SIMD cosines — and because the sections idea was
+        // once rejected on a whole-vault measurement that never split by kind;
+        // this row is where the kind-scoped version answers for itself.
+        var armNames = new[] { "keyword", "semantic", "hybrid", "shipped", "sect", "router" }
             .Concat(WideCeilings.Select(c => $"wide{c:0.#}"))
             // Two CHEATING arms. They read the labels, so they can never ship —
             // they exist to bound the search. `oracle:pick` is the best a
@@ -1393,7 +1398,7 @@ internal static partial class Program
             // Decomposed on purpose. The first "autoscope" measurement scored
             // routing and a 50-deep lexical rerank together and credited the
             // whole gain to routing — these three arms separate them.
-            .Concat(new[] { "autoscope", "lexdeep50", "route+deep" })
+            .Concat(new[] { "autoscope", "lexdeep50", "route+deep", "sect+deep" })
             .Concat(new[] { "oracle:pick", "oracle:union", "oracle:top10",
                             "oracle:scope", "oracle:folder" })
             .Concat(rerank ? new[] { "rerank" } : Array.Empty<string>())
@@ -1483,12 +1488,22 @@ internal static partial class Program
             var semIds = Arm("semantic", () => RunSemantic(all, vec));
             var hybridIds = Arm("hybrid", () => RunHybrid(export, all, pair.Query, vec));
             Arm("shipped", () => RunShipped(export, all, pair.Query, vec));
+            Arm("sect", () => HybridRank(export, all, pair.Query.ToLowerInvariant(),
+                    EvalTopK, vec, sectionMax: true)
+                .Ranked.Select(r => r.Node.Id).ToList());
             Arm("autoscope", () => RunAutoScope(export, all, pair.Query, vec));
             Arm("lexdeep50", () => HybridRank(export, all, pair.Query.ToLowerInvariant(),
                     EvalTopK, vec, autoScope: false, lexDepth: 50)
                 .Ranked.Select(r => r.Node.Id).ToList());
             Arm("route+deep", () => HybridRank(export, all, pair.Query.ToLowerInvariant(),
                     EvalTopK, vec, autoScope: true, lexDepth: 50)
+                .Ranked.Select(r => r.Node.Id).ToList());
+            // sect and route+deep move DIFFERENT queries (sections un-hide
+            // session notes; routing re-weights the drawer), so their sum is
+            // an empirical question, not an inference — this row answers it,
+            // with both components' solo rows above it for attribution.
+            Arm("sect+deep", () => HybridRank(export, all, pair.Query.ToLowerInvariant(),
+                    EvalTopK, vec, autoScope: true, lexDepth: 50, sectionMax: true)
                 .Ranked.Select(r => r.Node.Id).ToList());
 
             // Rank of the first expected id, or int.MaxValue. Used only by the

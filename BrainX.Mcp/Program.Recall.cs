@@ -309,11 +309,13 @@ internal static partial class Program
                     Dictionary<string, double> Cosines, RankerAgreement Agree)
         HybridRank(BrainExport export, List<NodeSummary> filtered, string ql, int limit,
                    float[]? queryVec, Fusion? fusion = null, double? kwCeiling = null,
-                   bool? lexRerank = null, bool? autoScope = null, int? lexDepth = null)
+                   bool? lexRerank = null, bool? autoScope = null, int? lexDepth = null,
+                   bool? sectionMax = null)
     {
         var fuse = fusion ?? CurrentFusion;
         var doLex = lexRerank ?? LexRerankEnabled;
         var doRoute = autoScope ?? AutoScopeEnabled;
+        var doSections = sectionMax ?? SectionVectorsEnabled;
         // Fuse a window at least as wide as the reranker needs, then cut back
         // to what the caller asked for. A caller asking for 3 still gets the
         // benefit of reordering 10 — and of a folder vote taken over 50.
@@ -332,6 +334,23 @@ internal static partial class Program
                 var stored = LoadEmbedding(n.Id);
                 if (stored == null) continue;
                 var cos = Cosine(queryVec, stored);
+                // max(whole note, best section): a day-wide session note can
+                // now be found by its sharpest passage instead of its average
+                // — the vector for the WHOLE note only ever loses this max to
+                // a vector for part of the same note, so nothing outside the
+                // note can be displaced by the change. Notes without a
+                // sections sidecar (the overwhelming majority) pay one
+                // File.Exists and keep their old score exactly.
+                if (doSections)
+                {
+                    var secs = LoadSectionEmbeddings(n.Id);
+                    if (secs != null)
+                        foreach (var sv in secs)
+                        {
+                            var sc = Cosine(queryVec, sv);
+                            if (sc > cos) cos = sc;
+                        }
+                }
                 cosines[n.Id] = cos;
                 // The keyword half is demoted inside ScoreNode; the cosine
                 // half has no such tail, so superseded notes are pushed down
