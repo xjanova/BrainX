@@ -135,7 +135,15 @@ $devAssets = @(
     # "unavailable", i.e. the feature would look absent rather than broken.
     "Microsoft.ML.OnnxRuntime.dll", "System.Numerics.Tensors.dll",
     "runtimes\win-x64\native\onnxruntime.dll",
-    "runtimes\win-x64\native\onnxruntime_providers_shared.dll"
+    "runtimes\win-x64\native\onnxruntime_providers_shared.dll",
+    # SSH.NET 2024.2.0 -> 2026.0.0 (GHSA-q939-rpr3-3284). This one exposes the
+    # coverage guard's blind spot: the guard checks that every built DLL's NAME
+    # exists somewhere under the destination, so a dependency that is merely
+    # OUTDATED there stays silent -- and Core.dll then demands an assembly
+    # version the old file cannot satisfy, which is a FileLoadException the
+    # first time an ssh_* tool loads. Any package UPGRADE whose dll already
+    # shipped must be added here by hand.
+    "Renci.SshNet.dll"
 )
 $devFailed = Deploy-Set $fwBuild $devRelease $devAssets $ts "dev Release"
 
@@ -153,7 +161,8 @@ if (Test-Path $installedMcp) {
         "brainx-mcp.deps.json", "brainx-mcp.runtimeconfig.json",
         "BrainX.Core.dll",
         "Microsoft.ML.OnnxRuntime.dll", "System.Numerics.Tensors.dll",
-        "onnxruntime.dll", "onnxruntime_providers_shared.dll"
+        "onnxruntime.dll", "onnxruntime_providers_shared.dll",
+        "Renci.SshNet.dll"
     )
     $appFailed = Deploy-Set $scBuild $installedMcp $appAssets $ts "installed app"
 } else {
