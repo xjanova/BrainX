@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using Newtonsoft.Json.Linq;
 
 namespace BrainX.Server.Mcp;
 
@@ -27,6 +28,23 @@ namespace BrainX.Server.Mcp;
 /// The MCP is strictly request→response over lines, so calls are serialised
 /// through a semaphore. Concurrency comes from having several sessions, not
 /// from pipelining one pipe.
+///
+/// TWO FAILURE MODES DRIVE THE SEND PATH (same reasoning as
+/// BrainX.Mcp/Bridge/McpBridgeConnection, which faces this from the client side):
+///
+/// 1. A TIMEOUT DESYNCS A LINE PROTOCOL. The child's serve loop is strictly
+///    sequential — it finishes the slow tool, writes that response, and only
+///    then reads the next request. So if a call times out and we simply return,
+///    the *next* call on this child reads the abandoned call's answer as its
+///    own, and every tool result on the session is silently off by one from then
+///    on. Wrong results are far worse than an error, so a timeout POISONS the
+///    child: it is dropped from McpSessionManager and the session must
+///    re-initialize. Same for a client disconnect or a broken pipe — anything
+///    that leaves a request on the wire with its answer unclaimed.
+///
+/// 2. THE NEXT LINE IS NOT NECESSARILY THE ANSWER. We therefore read *until the
+///    id matches*, skipping stray non-JSON stdout and interleaved notifications
+///    instead of returning the first thing that arrives.
 /// </summary>
 public sealed class McpChild : IAsyncDisposable
 {
@@ -34,8 +52,31 @@ public sealed class McpChild : IAsyncDisposable
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly string _sessionId;
 
+    /// <summary>
+    /// The one in-flight stdout read. Abandoning a read and starting another on
+    /// the same pipe would let two tasks race for one line and lose messages
+    /// non-deterministically, so a read that outlives its deadline is parked
+    /// here rather than cancelled. Nothing ever claims it: the child is poisoned
+    /// and killed, which completes the orphan.
+    /// </summary>
+    private Task<string?>? _pendingRead;
+
+    private volatile bool _poisoned;
+
     public DateTime LastUsedUtc { get; private set; } = DateTime.UtcNow;
-    public bool IsAlive => !_proc.HasExited;
+
+    /// <summary>
+    /// Out of sync with its child and never reusable — a call timed out, was
+    /// abandoned, or the pipe broke mid-message. McpSessionManager treats this
+    /// exactly like a dead child: the session is dropped, and the next request
+    /// on it gets 404 "re-initialize".
+    /// </summary>
+    public bool Poisoned => _poisoned;
+
+    public bool IsAlive
+    {
+        get { try { return !_poisoned && !_proc.HasExited; } catch { return false; } }
+    }
 
     private McpChild(Process proc, string sessionId)
     {
@@ -92,32 +133,83 @@ public sealed class McpChild : IAsyncDisposable
     /// Send one JSON-RPC line, return the response line. Null for
     /// notifications, which the MCP answers with an empty string.
     /// Serialised: the child is a single line-oriented pipe.
+    ///
+    /// Throws <see cref="TimeoutException"/> when the child does not answer in
+    /// time and <see cref="OperationCanceledException"/> when the caller gives
+    /// up first. Both leave the child <see cref="Poisoned"/> — see the class
+    /// remarks for why returning quietly is not an option.
     /// </summary>
     public async Task<string?> SendAsync(string jsonLine, TimeSpan timeout, CancellationToken ct = default)
     {
+        // ONE MESSAGE = ONE LINE. A pretty-printed body would go down the pipe
+        // as several lines and be answered as several messages — the same
+        // off-by-one, reached without any timing at all. Collapse it before
+        // anything is written, while refusing still costs nothing.
+        jsonLine = ToSingleLine(jsonLine);
+
         await _gate.WaitAsync(ct);
         try
         {
+            if (_poisoned)
+                throw new InvalidOperationException(
+                    "MCP child is out of sync with a previous call — session dropped, re-initialize");
             if (_proc.HasExited)
-                throw new InvalidOperationException($"MCP child exited (code {_proc.ExitCode})");
+                throw new InvalidOperationException($"MCP child exited (code {SafeExitCode()})");
 
             LastUsedUtc = DateTime.UtcNow;
 
-            await _proc.StandardInput.WriteLineAsync(jsonLine.AsMemory(), ct);
-            await _proc.StandardInput.FlushAsync(ct);
+            // Past this point the request is ON THE WIRE and its answer is owed
+            // to us. Every failure below therefore poisons rather than returns.
+            try
+            {
+                await _proc.StandardInput.WriteLineAsync(jsonLine.AsMemory(), ct);
+                await _proc.StandardInput.FlushAsync(ct);
+            }
+            catch
+            {
+                _poisoned = true;   // possibly a half-written line
+                throw;
+            }
 
             // Notifications get no reply, so a read would hang until the next
             // unrelated response and desynchronise the pipe. Detect them by the
-            // absence of an "id" and return immediately.
-            if (IsNotification(jsonLine)) return null;
+            // absence of an "id" and return immediately — nothing is owed, so
+            // the pipe stays in sync.
+            var kind = Classify(jsonLine, out var wantId);
+            if (kind == OutgoingKind.Notification) return null;
 
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(timeout);
-            var readTask = _proc.StandardOutput.ReadLineAsync(cts.Token).AsTask();
-            var line = await readTask;
+            var deadline = DateTime.UtcNow + timeout;
+            while (true)
+            {
+                var line = await ReadLineBeforeAsync(deadline, ct);
+                if (line == null)
+                {
+                    _poisoned = true;
+                    if (ct.IsCancellationRequested)
+                        throw new OperationCanceledException(
+                            $"caller abandoned an in-flight MCP call — child poisoned", ct);
+                    throw new TimeoutException(_proc.HasExited
+                        ? $"MCP child exited (code {SafeExitCode()}) with a call in flight"
+                        : $"MCP child did not answer within {timeout.TotalSeconds:0}s — child poisoned");
+                }
 
-            LastUsedUtc = DateTime.UtcNow;
-            return line ?? throw new InvalidOperationException("MCP child closed stdout");
+                // Opaque request (we could not read our own id back out of it):
+                // fall back to the first parseable message, which is what the
+                // child will have answered with id:null anyway.
+                if (kind == OutgoingKind.Opaque)
+                {
+                    if (!IsJsonMessage(line)) continue;
+                    LastUsedUtc = DateTime.UtcNow;
+                    return line;
+                }
+
+                var msgId = TryGetMessageId(line);
+                if (msgId == null) continue;                             // stray stdout, or a notification
+                if (!JToken.DeepEquals(msgId, wantId)) continue;         // an answer we no longer want
+
+                LastUsedUtc = DateTime.UtcNow;
+                return line;
+            }
         }
         finally
         {
@@ -125,23 +217,114 @@ public sealed class McpChild : IAsyncDisposable
         }
     }
 
-    private static bool IsNotification(string jsonLine)
+    /// <summary>
+    /// Read one line, giving up at <paramref name="deadline"/> or when the
+    /// caller cancels. Returns null in both cases; the caller poisons. The
+    /// in-flight read is parked in <see cref="_pendingRead"/> rather than
+    /// cancelled — see that field for why.
+    /// </summary>
+    private async Task<string?> ReadLineBeforeAsync(DateTime deadline, CancellationToken ct)
     {
+        _pendingRead ??= _proc.StandardOutput.ReadLineAsync();
+
+        var remaining = deadline - DateTime.UtcNow;
+        if (remaining <= TimeSpan.Zero || ct.IsCancellationRequested) return null;
+
+        using var delayCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var done = await Task.WhenAny(_pendingRead, Task.Delay(remaining, delayCts.Token));
+        delayCts.Cancel();                      // stop the timer when the read won
+        if (done != _pendingRead) return null;  // deadline passed, or caller cancelled
+
+        var task = _pendingRead;
+        _pendingRead = null;
+        try { return await task; } catch { return null; }   // stdout closed → poison
+    }
+
+    private enum OutgoingKind
+    {
+        /// <summary>Has an id — exactly one response is owed, matched on that id.</summary>
+        Request,
+        /// <summary>No id — no response is coming.</summary>
+        Notification,
+        /// <summary>Unparseable — the child will answer with id:null.</summary>
+        Opaque,
+    }
+
+    private static OutgoingKind Classify(string jsonLine, out JToken? id)
+    {
+        id = null;
         try
         {
-            var o = Newtonsoft.Json.Linq.JObject.Parse(jsonLine);
-            return o["id"] == null || o["id"]!.Type == Newtonsoft.Json.Linq.JTokenType.Null;
+            var o = JObject.Parse(jsonLine.TrimStart('﻿'));
+            var raw = o["id"];
+            if (raw == null || raw.Type == JTokenType.Null) return OutgoingKind.Notification;
+            id = raw;
+            return OutgoingKind.Request;
         }
         catch
         {
-            return false;   // unparseable → let the child reject it and reply
+            return OutgoingKind.Opaque;
         }
     }
+
+    /// <summary>
+    /// The id of an incoming message, or null if it has none (a notification)
+    /// or is not JSON at all (a banner, a stray print). Both are skipped rather
+    /// than mis-attributed to the call we are waiting on.
+    /// </summary>
+    private static JToken? TryGetMessageId(string line)
+    {
+        try
+        {
+            var o = JObject.Parse(line.TrimStart('﻿'));
+            var id = o["id"];
+            return id == null || id.Type == JTokenType.Null ? null : id;
+        }
+        catch { return null; }
+    }
+
+    private static bool IsJsonMessage(string line)
+    {
+        try { JObject.Parse(line.TrimStart('﻿')); return true; }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// Guarantee the framing the child's serve loop assumes. Re-serialising is
+    /// only reached for a body that already contains a newline, so the ordinary
+    /// path is a byte-exact passthrough and no note content is reformatted.
+    /// </summary>
+    private static string ToSingleLine(string jsonLine)
+    {
+        if (jsonLine.AsSpan().IndexOfAny('\r', '\n') < 0) return jsonLine;
+        try
+        {
+            return JObject.Parse(jsonLine.TrimStart('﻿')).ToString(Newtonsoft.Json.Formatting.None);
+        }
+        catch (Exception ex)
+        {
+            // Nothing has been written yet, so refusing here costs a clean error
+            // instead of a pipe we can never trust again.
+            throw new ArgumentException($"multi-line MCP request is not valid JSON: {ex.Message}", nameof(jsonLine));
+        }
+    }
+
+    private int SafeExitCode() { try { return _proc.ExitCode; } catch { return -1; } }
 
     public async ValueTask DisposeAsync()
     {
         try
         {
+            // A poisoned child is mid-tool with an answer nobody will read, so
+            // closing stdin would just make us wait out the tool before it
+            // notices. Kill it: that also completes the orphaned _pendingRead.
+            if (_poisoned)
+            {
+                Console.WriteLine($"[mcp:{_sessionId[..Math.Min(8, _sessionId.Length)]}] poisoned child killed");
+                if (!_proc.HasExited) _proc.Kill(entireProcessTree: true);
+                return;
+            }
+
             // Closing stdin ends the child's read loop → clean exit.
             if (!_proc.HasExited) _proc.StandardInput.Close();
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));

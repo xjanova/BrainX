@@ -31,13 +31,21 @@ public static class McpHttpRoutes
 {
     public const string SessionHeader = "Mcp-Session-Id";
     private const int MaxBodyBytes = 1024 * 1024;          // 1 MB
-    private static readonly TimeSpan CallTimeout = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan DefaultCallTimeout = TimeSpan.FromMinutes(2);
 
+    /// <summary>
+    /// Mount the endpoint. <paramref name="callTimeout"/> exists so the
+    /// verification harness can blow the deadline in seconds rather than
+    /// minutes; production always takes the default.
+    /// </summary>
     public static void MapBrainMcp(
         this WebApplication app,
         McpSessionManager sessions,
-        Func<HttpRequest, McpScope> resolveScope)
+        Func<HttpRequest, McpScope> resolveScope,
+        TimeSpan? callTimeout = null)
     {
+        var deadline = callTimeout ?? DefaultCallTimeout;
+
         // ── POST /mcp — the whole protocol ────────────────────────────────
         app.MapPost("/mcp", async (HttpContext ctx) =>
         {
@@ -82,7 +90,7 @@ public static class McpHttpRoutes
                 var (newId, child) = created.Value;
                 try
                 {
-                    var line = await child.SendAsync(body, CallTimeout, ctx.RequestAborted);
+                    var line = await child.SendAsync(body, deadline, ctx.RequestAborted);
                     ctx.Response.Headers[SessionHeader] = newId;
                     Console.WriteLine($"[mcp] session {newId[..8]} up · scope={scope} · {sessions.Count} live");
                     return Results.Content(line ?? "", "application/json");
@@ -131,7 +139,7 @@ public static class McpHttpRoutes
 
             try
             {
-                var line = await sess.SendAsync(body, CallTimeout, ctx.RequestAborted);
+                var line = await sess.SendAsync(body, deadline, ctx.RequestAborted);
                 if (line is null) return Results.StatusCode(StatusCodes.Status202Accepted);   // notification
 
                 // Never advertise what we would refuse — and never leak that the
@@ -156,8 +164,26 @@ public static class McpHttpRoutes
 
                 return Results.Content(line, "application/json");
             }
+            catch (TimeoutException ex)
+            {
+                // The child still owes us that answer and will write it whenever
+                // the tool finishes, so this session can never be read from again
+                // without every result being off by one. Drop it now — the client
+                // re-initializes onto a clean child. See McpChild's class remarks.
+                Console.WriteLine($"[mcp] session {sessionId[..8]} TIMED OUT · {ex.Message}");
+                sessions.Remove(sessionId);
+                return RpcError(id, -32005, "MCP call timed out — session dropped, re-initialize",
+                                StatusCodes.Status504GatewayTimeout);
+            }
             catch (OperationCanceledException)
             {
+                // Client hung up mid-call. Same desync if the request had already
+                // gone to the child, which is exactly what Poisoned records.
+                if (sess.Poisoned)
+                {
+                    Console.WriteLine($"[mcp] session {sessionId[..8]} abandoned mid-call · dropped");
+                    sessions.Remove(sessionId);
+                }
                 return RpcError(id, -32005, "client disconnected or call timed out", StatusCodes.Status504GatewayTimeout);
             }
             catch (Exception ex)

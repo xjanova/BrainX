@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <!-- Web SDK, not the plain one: the harness mounts the REAL /mcp endpoint on a
+       real Kestrel rather than re-implementing the route, so it needs the same
+       ASP.NET Core framework reference BrainX.Server has. -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RazorLangVersion>Latest</RazorLangVersion>
+    <RootNamespace>BrainX.Tests</RootNamespace>
+    <!-- Never published or shipped — this is a developer-run verification tool. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\BrainX.Server\BrainX.Server.csproj" />
+  </ItemGroup>
+
+</Project>

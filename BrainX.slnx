@@ -2,4 +2,5 @@
   <Project Path="BrainX.Client/BrainX.Client.csproj" />
   <Project Path="BrainX.Server/BrainX.Server.csproj" />
   <Project Path="BrainX.Mcp/BrainX.Mcp.csproj" />
+  <Project Path="BrainX.Tests/BrainX.Tests.csproj" />
 </Solution>
