@@ -812,28 +812,37 @@ internal static partial class Program
     /// The STRONG cut for v2, chosen off the measured precision/coverage
     /// curves rather than to make STRONG fire more.
     ///
+    /// Recalibrated 2026-08-13 on the post-section-vector field (sections
+    /// moved the cosine distribution this score is built from, so the old
+    /// tables no longer described the shipped ranker):
+    ///
     ///                        journal-651                paraphrase-46
-    ///   cut     coverage  precision (base 28.1%)   coverage  precision (base 17.4%)
-    ///   0.45      76.0%        33.1%                 6.5%        33.3%
-    ///   0.55      62.2%        37.8%                 4.3%        50.0%
-    ///   0.70      38.4%        43.2%                 0.0%          —
+    ///   cut     coverage  precision (base 28.1%)   coverage  precision (base 19.6%)
+    ///   0.55      67.3%        34.9%                 2.2%       100% (n=1)
+    ///   0.70      39.3%        41.4%                 0.0%          —
+    ///   0.85      19.2%        50.4%                 0.0%          —
     ///
-    /// 0.55 is where journal precision clears its base rate by a third and
-    /// paraphrase STRONG still exists at all. Higher cuts keep buying journal
-    /// precision, but 0.60 already takes paraphrase coverage to zero — and
-    /// "STRONG unreachable for the way people actually ask" is the exact defect
-    /// P1.6 was raised to fix, so it is not worth re-introducing for a few
-    /// points on the keyword-biased set.
+    /// 0.70, and the old defence of 0.55 is explicitly REVERSED. That comment
+    /// held the cut down so STRONG stayed reachable for full-sentence
+    /// questions — the P1.6 principle. Then the absent set was measured on the
+    /// same field: queries the vault has NO answer to reach confidence 0.41,
+    /// while the paraphrase set's RIGHT answers sit at p50 0.28. There is no
+    /// cut that makes STRONG generous on hard questions without letting it
+    /// fire on unanswerable ones, and a sweep of the lexical weight
+    /// (W_LEX 0.40 / 0.15 / 0 — AUC fell monotonically: 0.709/0.703/0.658
+    /// paraphrase, 0.682/0.680/0.667 journal) showed the gap is not the
+    /// lexical term's length confound either: the label populations genuinely
+    /// differ. The signal is the limit, not the constant.
     ///
-    /// The honest trade this makes on paraphrase queries: STRONG fires LESS
-    /// often than v1 did (13.0% → 4.3%) and is right about three times as often
-    /// (16.7% → 50.0%). A gate that fires half as much and is trusted is worth
-    /// more than one that fires constantly at the base rate, which is what v1
-    /// was doing.
-    ///
-    /// Not calibrated ACROSS query shapes — see the note in ConfidenceV2.
+    /// So for full-sentence questions the honest verdict IS WEAK — "related,
+    /// read it, then finish the work" — and STRONG at 0.55 on the journal
+    /// shape was firing on 67% of queries at 6.8 points over base rate, which
+    /// is claiming to know at very nearly the rate of not knowing. 0.70 halves
+    /// the claims and buys +6.5 points of precision; the verdict now also
+    /// carries its own measured track record (meta.calibration) so a caller
+    /// weighs STRONG by numbers rather than by the adjective.
     /// </summary>
-    private static double RecallStrongV2 => ConfW("STRONG", 0.55);
+    private static double RecallStrongV2 => ConfW("STRONG", 0.70);
 
     /// <summary>
     /// Zero on purpose: under v2, MISS is decided by <see cref="RecallCosMiss"/>
@@ -1158,7 +1167,23 @@ internal static partial class Program
                 ["formula"] = UseConfidenceV2 && hasCos && field.N >= ConfV2MinField
                     ? "v2"
                     : UseConfidenceV2 && hasCos ? $"v1 (field {field.N} < {ConfV2MinField})" : "v1",
-                ["asOf"] = Iso(_asOf)
+                ["asOf"] = Iso(_asOf),
+                // The verdict's own measured track record, so "STRONG" is a
+                // number a caller can weigh rather than an adjective it must
+                // trust. Static by design: these are properties of a
+                // calibration RUN, not of this query, and they change only
+                // when someone re-runs `brainx-mcp eval` and updates them
+                // beside the cut they justify.
+                ["calibration"] = new JObject
+                {
+                    ["measured"] = "2026-08-13",
+                    ["strongPrecisionAt1"] = 0.41,
+                    ["strongCoverage"] = 0.39,
+                    ["set"] = "journal-651, post-section-vectors",
+                    ["note"] = "full-sentence questions rarely reach STRONG by design — "
+                             + "their honest verdict is WEAK (read and verify); "
+                             + "labels are click-derived, so true precision is likely higher"
+                }
             },
             ["answer"] = verdict == "MISS" ? null : answer,
             // A MISS still names what it rejected. Hiding it made the verdict
