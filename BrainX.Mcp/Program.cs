@@ -147,6 +147,16 @@ internal static partial class Program
             Console.OutputEncoding = new UTF8Encoding(false);
             return await EmbedSectionsCliAsync(args.Skip(1).ToArray()).ConfigureAwait(false);
         }
+        if (args.Length > 0 && args[0].Equals("bench", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.OutputEncoding = new UTF8Encoding(false);
+            return await BenchCliAsync(args.Skip(1).ToArray()).ConfigureAwait(false);
+        }
+        if (args.Length > 0 && args[0].Equals("export", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.OutputEncoding = new UTF8Encoding(false);
+            return ExportCli(args.Skip(1).ToArray());
+        }
         if (args.Length > 0 && (args[0] == "--version" || args[0] == "-v" || args[0].Equals("version", StringComparison.OrdinalIgnoreCase)))
         {
             Console.OutputEncoding = new UTF8Encoding(false);
