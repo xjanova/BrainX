@@ -396,20 +396,37 @@ internal static partial class Program
     /// (the one reporting "claude-ai" and the one reporting a connection name)
     /// hang off the same claude.exe.
     ///
+    /// ONE parent is not enough, though: the server normally runs under its own
+    /// LAUNCHER (brainx-mcp respawns the real server from current\ so a pending
+    /// binary swap can land between sessions), so the direct parent is our own
+    /// image and the host sits one level up. Proven live on 2026-08-14: every
+    /// desktop-host session fell back to the generic slug — and its bus address
+    /// — because the probe stopped at the launcher. So walk the ancestor chain,
+    /// skip frames that are our own image, and let the NEAREST vendor frame
+    /// win: nearest-first is what keeps `claude → powershell → codex exec →
+    /// brainx-mcp` resolving to codex, not claude.
+    ///
     /// The env vars stay as a secondary signal — they cover `brainx-mcp` started
     /// by hand from a Claude Code terminal, where the parent is bash or node.
     /// </summary>
     private static string? HostVendor()
     {
-        var parent = ParentProcessName();
-        if (parent != null)
+        string self;
+        try { using var me = System.Diagnostics.Process.GetCurrentProcess(); self = me.ProcessName; }
+        catch { self = "brainx-mcp"; }
+
+        foreach (var ancestor in AncestorProcessNames(maxDepth: 4))
         {
+            // Own image first: a frame named like us is the launcher, and it
+            // must never match a vendor (imagine the binary renamed
+            // "brainx-mcp-codex") — skip it and keep climbing.
+            if (ancestor.Equals(self, StringComparison.OrdinalIgnoreCase)) continue;
             // cluadex first. "CluadeX" happens not to contain "claude" — the
             // letters are transposed — but leaning on that near-miss would be a
             // trap for whoever renames the binary next.
-            if (parent.Contains("cluadex", StringComparison.OrdinalIgnoreCase)) return "cluadex";
-            if (parent.Contains("codex", StringComparison.OrdinalIgnoreCase)) return "codex";
-            if (parent.Contains("claude", StringComparison.OrdinalIgnoreCase)) return "claude";
+            if (ancestor.Contains("cluadex", StringComparison.OrdinalIgnoreCase)) return "cluadex";
+            if (ancestor.Contains("codex", StringComparison.OrdinalIgnoreCase)) return "codex";
+            if (ancestor.Contains("claude", StringComparison.OrdinalIgnoreCase)) return "claude";
         }
 
         if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CLAUDECODE"))
@@ -420,28 +437,40 @@ internal static partial class Program
     }
 
     /// <summary>
-    /// Image name of the process that spawned us, or null. .NET exposes no
-    /// parent-process API, and System.Management would drag WMI into a console
-    /// app for one field, so ask ntdll directly.
+    /// Image names of our ancestors, nearest first, at most maxDepth hops.
+    /// .NET exposes no parent-process API, and System.Management would drag WMI
+    /// into a console app for one field, so ask ntdll directly. The walk ends
+    /// at any pid that won't resolve — an exited ancestor's pid may already
+    /// belong to something unrelated, so a miss is the right answer there.
     /// </summary>
-    private static string? ParentProcessName()
+    private static IEnumerable<string> AncestorProcessNames(int maxDepth)
     {
-        if (!OperatingSystem.IsWindows()) return null;
+        if (!OperatingSystem.IsWindows()) yield break;
+        var pid = Environment.ProcessId;
+        for (var depth = 0; depth < maxDepth; depth++)
+        {
+            var hop = ParentOf(pid);
+            if (hop == null) yield break;
+            yield return hop.Value.Name;
+            pid = hop.Value.Pid;
+        }
+    }
+
+    private static (string Name, int Pid)? ParentOf(int pid)
+    {
         try
         {
             var pbi = new ProcessBasicInformation();
-            using var self = System.Diagnostics.Process.GetCurrentProcess();
-            if (NtQueryInformationProcess(self.Handle, 0, ref pbi,
+            using var proc = System.Diagnostics.Process.GetProcessById(pid);
+            if (NtQueryInformationProcess(proc.Handle, 0, ref pbi,
                     System.Runtime.InteropServices.Marshal.SizeOf<ProcessBasicInformation>(), out _) != 0)
                 return null;
 
             int ppid = pbi.InheritedFromUniqueProcessId.ToInt32();
             if (ppid <= 0) return null;
 
-            // A parent that has already exited throws here — and its pid may by
-            // then belong to something unrelated, so a miss is the right answer.
             using var parent = System.Diagnostics.Process.GetProcessById(ppid);
-            return parent.ProcessName;
+            return (parent.ProcessName, ppid);
         }
         catch { return null; }
     }
@@ -687,9 +716,9 @@ internal static partial class Program
             Tool("agent_inbox",
                 "Read messages other agents sent YOU through this brain. Messages are consumed on read " +
                 "(moved to the read/ audit folder; one-shot delivery per agent identity) — pass peek:true " +
-                "to look without consuming. Pass wait_seconds (max 300) to LONG-POLL: the call blocks until " +
-                "mail arrives or the window expires, which is how you wait for the other agent's reply " +
-                "after agent_send. Keep wait_seconds ≤60 per call and just call again to keep waiting — " +
+                "to look without consuming. Pass wait_seconds (max 10 — the server clamps higher values) to " +
+                "LONG-POLL: the call blocks until mail arrives or the window expires, which is how you wait " +
+                "for the other agent's reply after agent_send. Call again to keep waiting — " +
                 "repeat calls are cheap. You rarely need to poll blind: every other tool response " +
                 "piggybacks an `agentBus` block whenever mail is waiting.",
                 new JObject
@@ -697,7 +726,7 @@ internal static partial class Program
                     ["type"] = "object",
                     ["properties"] = new JObject
                     {
-                        ["wait_seconds"] = new JObject { ["type"] = "integer", ["default"] = 0, ["description"] = "0 = return immediately; N>0 = block up to N seconds for mail to arrive (max 300, suggest ≤60 per call)" },
+                        ["wait_seconds"] = new JObject { ["type"] = "integer", ["default"] = 0, ["description"] = "0 = return immediately; N>0 = block up to N seconds for mail to arrive (server clamps to max 10; call again to keep waiting)" },
                         ["peek"] = new JObject { ["type"] = "boolean", ["default"] = false, ["description"] = "if true, read WITHOUT consuming (messages stay pending)" },
                         ["limit"] = new JObject { ["type"] = "integer", ["default"] = 20, ["description"] = "max messages per call (1-100)" }
                     }
