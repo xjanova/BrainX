@@ -757,6 +757,7 @@ internal static partial class Program
                         ["to"] = new JObject { ["type"] = "string", ["description"] = "recipient agent: 'codex', 'claude', or 'all' (= every agent ever seen here except you). agent_peers lists who exists." },
                         ["message"] = new JObject { ["type"] = "string", ["description"] = "the message body (markdown ok, ≤64KB)" },
                         ["topic"] = new JObject { ["type"] = "string", ["description"] = "optional short thread label, e.g. 'review-authcontroller'" },
+                        ["work"] = new JObject { ["type"] = "string", ["description"] = "WHICH JOB this belongs to, e.g. 'iron-ward', 'tetrisvs'. PASS IT whenever the message is part of an ongoing piece of work. Every session of one vendor shares an inbox, so an unlabelled message is delivered to whichever session opens the inbox first — including one working on something else entirely, which consumes it permanently. A labelled message can only be read by a session that asks for that work." },
                         ["reply_to"] = new JObject { ["type"] = "string", ["description"] = "optional id of the message this answers (from agent_inbox)" }
                     },
                     ["required"] = new JArray { "to", "message" }
@@ -776,6 +777,7 @@ internal static partial class Program
                     {
                         ["wait_seconds"] = new JObject { ["type"] = "integer", ["default"] = 0, ["description"] = "0 = return immediately; N>0 = block up to N seconds for mail to arrive (server clamps to max 10; call again to keep waiting)" },
                         ["peek"] = new JObject { ["type"] = "boolean", ["default"] = false, ["description"] = "if true, read WITHOUT consuming (messages stay pending)" },
+                        ["work"] = new JObject { ["type"] = "string", ["description"] = "the JOB you are here for, e.g. 'iron-ward'. Mail labelled with a different work is neither read nor consumed — it is left for the session that is actually on it, and reported back under `otherWork` so you can tell the user which workstream is waiting. Omit and you get unlabelled mail only." },
                         ["limit"] = new JObject { ["type"] = "integer", ["default"] = 20, ["description"] = "max messages per call (1-100)" }
                     }
                 }),

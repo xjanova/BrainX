@@ -249,6 +249,17 @@ internal static partial class Program
 
         var topic = args["topic"]?.ToString();
         var replyTo = args["reply_to"]?.ToString();
+        // Which WORKSTREAM this belongs to. Optional, and the reason it exists
+        // is a real incident: on 2026-08-14 three messages about a music video
+        // were addressed to "claude", and a Claude session working on an
+        // unrelated repo opened the inbox an hour later and consumed all three.
+        // Nothing was broken — every Claude session shares one inbox and
+        // delivery is one-shot, so the mail was delivered to the wrong
+        // workstream and destroyed on arrival. A label is what lets a reader
+        // tell "this is mine" from "this is somebody else's".
+        var work = args["work"]?.ToString() is { Length: > 0 } w
+            ? SanitizeAgentSlug(w)
+            : null;
         var msgId = $"m-{DateTime.UtcNow.Ticks}-{Guid.NewGuid().ToString("N")[..6]}";
         var delivered = new JArray();
         var anyOnline = false;
@@ -272,6 +283,7 @@ internal static partial class Program
             };
             if (!string.IsNullOrWhiteSpace(topic)) payload["topic"] = topic;
             if (!string.IsNullOrWhiteSpace(replyTo)) payload["replyTo"] = replyTo;
+            if (work != null) payload["work"] = work;
 
             var file = $"{DateTime.UtcNow.Ticks:D19}-{me}-{Guid.NewGuid().ToString("N")[..4]}.json";
             AtomicWriteJson(Path.Combine(inbox, file), payload);
@@ -325,11 +337,30 @@ internal static partial class Program
             Thread.Sleep(750);
         }
 
+        // What this reader is here for. Mail labelled with a DIFFERENT work is
+        // not read and — this is the point — not consumed either: it stays
+        // exactly where it is for the session that is actually on that work.
+        // Unlabelled mail is addressed to the agent rather than to a job, so it
+        // is delivered to whoever asks, which is the behaviour every existing
+        // caller already relies on.
+        var myWork = args["work"]?.ToString() is { Length: > 0 } wf ? SanitizeAgentSlug(wf) : null;
+        var skipped = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
         var messages = new JArray();
         var readDir = BusReadDir(me);
         string? lastFrom = null, lastId = null;
         foreach (var f in files.Take(limit))
         {
+            // Peek at the label BEFORE claiming. Claiming first and putting it
+            // back on a mismatch would be a window in which the message exists
+            // in neither folder, and a crash inside that window loses it.
+            var label = PeekWorkLabel(f);
+            if (label != null && !label.Equals(myWork, StringComparison.OrdinalIgnoreCase))
+            {
+                skipped[label] = skipped.GetValueOrDefault(label) + 1;
+                continue;
+            }
+
             var source = f;
             if (!peek)
             {
@@ -358,19 +389,99 @@ internal static partial class Program
         }
 
         var remaining = Directory.Exists(inbox) ? Directory.EnumerateFiles(inbox, "*.json").Count() : 0;
-        return new JObject
+
+        var result = new JObject
         {
             ["agent"] = me,
             ["count"] = messages.Count,
             ["remaining"] = remaining,
             ["waitedMs"] = (int)(DateTime.UtcNow - started).TotalMilliseconds,
             ["messages"] = messages,
-            ["hint"] = messages.Count > 0
-                ? $"Act on the message(s), then reply with agent_send {{to:'{lastFrom ?? "…"}', reply_to:'{lastId ?? "…"}'}}. Surface the exchange to your user — don't hide the conversation."
+        };
+        if (myWork != null) result["work"] = myWork;
+
+        // Say out loud what was left behind, and for whom. Silently skipping
+        // would be its own kind of lost mail: the reader would report an empty
+        // inbox while somebody else's work sat in it unmentioned.
+        if (skipped.Count > 0)
+        {
+            var other = new JObject();
+            foreach (var (k, v) in skipped) other[k] = v;
+            result["otherWork"] = other;
+        }
+
+        result["hint"] = messages.Count > 0
+            ? $"Act on the message(s), then reply with agent_send {{to:'{lastFrom ?? "…"}', reply_to:'{lastId ?? "…"}'}}. Surface the exchange to your user — don't hide the conversation."
+            : skipped.Count > 0
+                ? $"Nothing here for you. {skipped.Values.Sum()} message(s) are waiting under other work ({string.Join(", ", skipped.Keys)}) and were left untouched — "
+                  + "pass work:'<name>' if one of them is yours, and tell the user which workstream is waiting."
                 : (wait > 0
                     ? "No message arrived within the wait window. agent_peers shows who's online; call agent_inbox again to keep waiting — repeat calls are cheap."
-                    : "Inbox empty. Pass wait_seconds (max 10) to wait briefly for a reply after you agent_send, and call again to keep waiting.")
-        };
+                    : "Inbox empty. Pass wait_seconds (max 10) to wait briefly for a reply after you agent_send, and call again to keep waiting.");
+        return result;
+    }
+
+    /// <summary>
+    /// The <c>work</c> label on a queued message, without claiming it.
+    ///
+    /// Reads the file in place and treats every failure as "unlabelled". That
+    /// bias is deliberate: a message whose label cannot be read is still a
+    /// message, and delivering it to a reader who may not want it is recoverable
+    /// (they say so), whereas leaving it permanently unreadable is not.
+    /// </summary>
+    private static string? PeekWorkLabel(string path)
+    {
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(stream);
+            var o = JObject.Parse(reader.ReadToEnd());
+            var w = o["work"]?.ToString();
+            return string.IsNullOrWhiteSpace(w) ? null : w;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Every workstream with mail still queued anywhere on the bus, and who it
+    /// is waiting for. This is the answer to "which jobs are mid-conversation
+    /// and stuck" — the question nobody could ask before, because a pending
+    /// message named a recipient and nothing else.
+    /// </summary>
+    private static JObject WorkSummary()
+    {
+        var byWork = new Dictionary<string, (int Count, HashSet<string> Waiting, DateTime Newest)>(StringComparer.OrdinalIgnoreCase);
+        var root = Path.Combine(BusRoot, "inbox");
+        if (!Directory.Exists(root)) return new JObject();
+
+        foreach (var agentDir in Directory.GetDirectories(root))
+        {
+            var agent = Path.GetFileName(agentDir);
+            foreach (var f in Directory.GetFiles(agentDir, "*.json"))
+            {
+                var label = PeekWorkLabel(f) ?? "(unlabelled)";
+                var stamp = File.GetLastWriteTimeUtc(f);
+                if (byWork.TryGetValue(label, out var cur))
+                {
+                    cur.Waiting.Add(agent);
+                    byWork[label] = (cur.Count + 1, cur.Waiting, stamp > cur.Newest ? stamp : cur.Newest);
+                }
+                else
+                {
+                    byWork[label] = (1, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { agent }, stamp);
+                }
+            }
+        }
+
+        var o = new JObject();
+        foreach (var (work, v) in byWork.OrderByDescending(k => k.Value.Newest))
+            o[work] = new JObject
+            {
+                ["pending"] = v.Count,
+                ["waitingOn"] = new JArray(v.Waiting.OrderBy(x => x).Cast<object>().ToArray()),
+                ["newestAgeMinutes"] = (int)(DateTime.UtcNow - v.Newest).TotalMinutes,
+            };
+        return o;
     }
 
     // ───────────── agent_peers ─────────────
@@ -406,11 +517,16 @@ internal static partial class Program
 
         var myUnread = Directory.Exists(BusInboxDir(me))
             ? Directory.EnumerateFiles(BusInboxDir(me), "*.json").Count() : 0;
+        var work = WorkSummary();
         return new JObject
         {
             ["self"] = me,
             ["myUnread"] = myUnread,
             ["peers"] = peers,
+            // Who is connected answers "who"; this answers "on what, waiting on
+            // whom, and for how long" — the three facts a stalled collaboration
+            // needs and that a roster of names cannot carry.
+            ["work"] = work,
             ["onlineNow"] = new JArray(onlineNow),
             ["hint"] = onlineNow.Count > 0
                 ? $"{string.Join(", ", onlineNow)} is on this brain RIGHT NOW — agent_send reaches them on their next tool call."
