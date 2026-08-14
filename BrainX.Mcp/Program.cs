@@ -95,6 +95,25 @@ internal static partial class Program
             Console.OutputEncoding = new UTF8Encoding(false);
             return await CliInstall.RunAsync(args.Skip(1).ToArray()).ConfigureAwait(false);
         }
+        // Claude Code hooks. Declared before every other subcommand because
+        // these two run on a human's keystroke latency, several times a
+        // session, and because their contract is an EXIT CODE — a hook that
+        // fell through to another branch and printed a banner would be read by
+        // the harness as output for the model.
+        //
+        // Console encoding is set inside a try: a task title is often Thai,
+        // but a hook that throws while configuring its own console is a hook
+        // that Claude Code reports to the owner as broken.
+        if (args.Length > 0 && args[0].Equals("hook-stop", StringComparison.OrdinalIgnoreCase))
+        {
+            try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
+            return RunStopHook(args.Skip(1).ToArray());
+        }
+        if (args.Length > 0 && args[0].Equals("hook-session-start", StringComparison.OrdinalIgnoreCase))
+        {
+            try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
+            return RunSessionStartHook(args.Skip(1).ToArray());
+        }
         if (args.Length > 0 && (args[0].Equals("register-claude", StringComparison.OrdinalIgnoreCase)
                               || args[0].Equals("register", StringComparison.OrdinalIgnoreCase)))
         {

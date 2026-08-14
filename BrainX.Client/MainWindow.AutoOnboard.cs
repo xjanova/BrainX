@@ -109,6 +109,15 @@ public partial class MainWindow
 
             var hookChanged = _autoIngestHookEnabled && EnsureAutoIngestHookInstalledSilent();
 
+            // The Stop + SessionStart hooks that let a hand-off finish itself.
+            // Not gated on _autoIngestHookEnabled: that switch is about
+            // harvesting notes out of Claude's edits, and this is the opposite
+            // direction — it is how work QUEUED for Claude Code reaches it
+            // without the owner poking a session that has already stopped.
+            // It is still under the auto-register opt-out checked above, which
+            // is the switch that means "do not touch my agent configs".
+            hookChanged |= EnsureTaskWakeHooksInstalled();
+
             // Friendly, non-technical confirmation. The status-bar chips
             // (RefreshMcpStatusBar, polled every 3s) flip to green on their own —
             // the user just sees it "already works". Never claim "connected"

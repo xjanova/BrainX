@@ -58,6 +58,13 @@ internal static class CliInstall
         Console.WriteLine("  brainx-mcp embed-probe [options]     Compare the in-process ONNX embedder against Ollama and against");
         Console.WriteLine("                                          the sidecars on disk — the check that says whether the");
         Console.WriteLine("                                          existing vectors survive a backend switch");
+        Console.WriteLine("  brainx-mcp hook-stop --vault PATH    Claude Code Stop hook: if a task is queued for claude-code,");
+        Console.WriteLine("                                          print the instruction to stderr and exit 2, which makes");
+        Console.WriteLine("                                          Claude keep working instead of stopping. Exit 0 = nothing due.");
+        Console.WriteLine("                                          Installed automatically by the Client; run it by hand to debug");
+        Console.WriteLine("                                          (echo {} | brainx-mcp hook-stop --vault G:\\Obsidian).");
+        Console.WriteLine("  brainx-mcp hook-session-start        Claude Code SessionStart hook: print queued tasks as context.");
+        Console.WriteLine("             --vault PATH                 Always exits 0 — it informs a session, it never blocks one.");
         Console.WriteLine("  brainx-mcp --version | -v | version  Print version + binary path + build time");
         Console.WriteLine("  brainx-mcp help                      Show this help");
         Console.WriteLine();
