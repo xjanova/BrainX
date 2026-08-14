@@ -13520,23 +13520,62 @@ public partial class MainWindow : Window
     // Bumped whenever the hook command changes shape, so installers can tell a
     // current hook from a stale one and upgrade it in place. v2: read the tool
     // payload from STDIN — v1 read $env:CLAUDE_TOOL_INPUT, which Claude Code
-    // never sets, so the v1 hook silently never fired.
-    private const string BrainAutoIngestHookVersionTag = BrainAutoIngestHookMarker + " v2";
+    // never sets, so the v1 hook silently never fired. v3: also report the edit
+    // to the agent-bus work feed (see below).
+    private const string BrainAutoIngestHookVersionTag = BrainAutoIngestHookMarker + " v3";
 
     /// <summary>
     /// The PostToolUse hook command. Claude Code hands hooks their payload as
     /// JSON on stdin ({ tool_name, tool_input: { file_path } … }); there is no
     /// CLAUDE_TOOL_INPUT environment variable. The trailing comment doubles as
     /// the install + version marker.
+    ///
+    /// TWO jobs, and the second one is why v3 exists.
+    ///
+    /// INGEST (.md only) — unchanged: a markdown file Claude touched is brain
+    /// material, so it goes to /api/brain/auto-ingest and the policy there
+    /// decides whether it lands.
+    ///
+    /// REPORT (every file) — the brain could see Claude Code's MCP calls and was
+    /// blind to the actual work: editing twenty .cs files produced not one trace,
+    /// because nothing in a repo is vault material. So the agent watching from a
+    /// chat window saw "claude ran brain_search 14 times" and nothing about the
+    /// code. This appends one line per edit to the same work feed the MCP writes
+    /// (agent-bus/activity/claude-code.ndjson), which is what agent_activity
+    /// reads. Reads are skipped — a coding session opens dozens of files and
+    /// nobody is watching for that.
+    ///
+    /// Everything is best-effort inside try/catch: this hook runs after EVERY
+    /// edit Claude makes, and a hook that can fail a tool call is worse than no
+    /// hook at all. Two processes append to this file (this hook and the MCP),
+    /// so a collision drops one line — one missing UI event, never a torn file,
+    /// because each write is a single append.
     /// </summary>
-    private string BuildAutoIngestHookCommand() =>
-        "powershell -NoProfile -Command \"" +
-        "$j = [Console]::In.ReadToEnd() | ConvertFrom-Json; " +
-        "$p = $j.tool_input.file_path; " +
-        "if ($p -and ($p -like '*.md')) { " +
-        "$body = @{ path = $p } | ConvertTo-Json; " +
-        $"try {{ Invoke-RestMethod -Uri '{AiServerBase}/api/brain/auto-ingest' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 3 | Out-Null }} catch {{ }} " +
-        "}\" # " + BrainAutoIngestHookVersionTag;
+    private string BuildAutoIngestHookCommand()
+    {
+        // PowerShell single-quoted string: the only escape that matters is a
+        // literal quote, which doubles. A vault path with an apostrophe would
+        // otherwise end the string and break every hook run.
+        var vaultForPs = _vaultPath.Replace("'", "''");
+
+        return "powershell -NoProfile -Command \"" +
+            "$j = [Console]::In.ReadToEnd() | ConvertFrom-Json; " +
+            "$p = $j.tool_input.file_path; " +
+            "if ($p -and ($p -like '*.md')) { " +
+            "$body = @{ path = $p } | ConvertTo-Json; " +
+            $"try {{ Invoke-RestMethod -Uri '{AiServerBase}/api/brain/auto-ingest' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 3 | Out-Null }} catch {{ }} " +
+            "}; " +
+            "if ($p -and $j.tool_name -ne 'Read') { " +
+            $"try {{ $d = Join-Path '{vaultForPs}' '.obsidianx\\agent-bus\\activity'; " +
+            "if (!(Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }; " +
+            "$e = [ordered]@{ ts = (Get-Date).ToUniversalTime().ToString('o'); agent = 'claude-code'; " +
+            "tool = $j.tool_name; summary = $p; ok = $true } | ConvertTo-Json -Compress; " +
+            "Add-Content -Path (Join-Path $d 'claude-code.ndjson') -Value $e -Encoding utf8 " +
+            // Plain string, NOT interpolated: these braces are PowerShell's, so
+            // they are written once. Doubling belongs only in the $"" segments.
+            "} catch { } " +
+            "}\" # " + BrainAutoIngestHookVersionTag;
+    }
 
     private void InstallClaudeHook_Click(object s, RoutedEventArgs e)
     {

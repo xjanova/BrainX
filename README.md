@@ -106,6 +106,15 @@ A chat client (Claude Desktop, claude.ai connector) has the conversation where t
 - 🔔 **`taskQueue` piggyback** — MCP has no server→model push, so a queued task rides along on the assignee's *next* tool response, the same trick the agent bus uses for mail. One directory listing per call, cached on a folder signature
 - 🧠 **A task is a note, not a queue row** — `brain_search` finds it, `[[wiki-links]]` point at it, and the spec stays the answer to "why does this code exist" long after the conversation is gone
 
+### Watching the agents work (v2.9.0)
+
+The bus card could animate *that* a message crossed and the presence file named *which tool* ran — neither could say what an agent was actually doing, and a chat window can never see a terminal. So the work itself is now a stream:
+
+- 📡 **`agent-bus/activity/<agent>.ndjson`** — one line per tool call, reusing the summary the auto-journal already computed, per-agent so "what is Codex doing" is answerable. **Failed calls are recorded too** — "stuck" and "erroring four times" look identical from outside otherwise
+- 👁️ **`agent_activity {agent?, minutes?, limit?}`** — read the feed. Ask any agent "claude code ทำอะไรอยู่" and get the real answer, not a guess from the presence heartbeat
+- ⌨️ **Coding work is visible for the first time** — the Claude Code PostToolUse hook (v3) reports *every* file it edits, not just `.md`. Editing twenty `.cs` files used to leave the brain with zero trace, because nothing in a repo is vault material
+- 🔓 **The bus reaches chat at last** — `agent_peers` / `agent_inbox` / `agent_activity` (read) and `agent_send` (write) are now allowed over the remote `/mcp` endpoint. They were stdio-only, which made them useless to the one client that has no stdio — the surface the owner actually watches from
+
 ### Search stack (v2.8.0)
 - 🔎 **Hybrid retrieval** — `brain_semantic_search` fuses embedding cosine similarity with keyword ranking via **reciprocal-rank fusion** (the same trick production search engines use), so paraphrases AND exact terms (ids, codenames) both surface
 - 🌏 **Multilingual embeddings** — `bge-m3` via local Ollama; natural-language Thai queries find notes with zero keyword overlap, fully offline

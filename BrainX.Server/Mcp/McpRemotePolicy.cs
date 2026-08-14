@@ -90,6 +90,20 @@ public static class McpRemotePolicy
         // who it is addressed to. That is the same class of disclosure as the
         // notes themselves, which this scope already grants.
         "task_queue",
+        // The collaboration channel, which was stdio-only and therefore useless
+        // to the one client that has no stdio. A chat client could see the brain
+        // but could not see, or reach, the agents working in it — so "the agents
+        // coordinate through BrainX" was true for Claude Code and Codex and false
+        // for the surface the owner actually watches from.
+        //   agent_peers    — who is connected. Names of the owner's own agents.
+        //   agent_inbox    — reads THIS session's mailbox only; the address comes
+        //                    from the handshake, never from an argument, so a
+        //                    remote caller cannot read another agent's mail.
+        //   agent_activity — which tools the agents ran, with the same one-line
+        //                    summaries the vault's own journal already stores.
+        "agent_peers",
+        "agent_inbox",
+        "agent_activity",
     };
 
     /// <summary>Mutating tools — require the write token.</summary>
@@ -107,6 +121,13 @@ public static class McpRemotePolicy
         // which this scope already grants.
         "task_handoff",
         "task_update",
+        // Sending is a write because it puts a file in another agent's inbox and
+        // because the peer is told to ACT on what arrives. The recipient is
+        // slug-validated inside the MCP (a hostile `to` cannot escape the bus
+        // root), the body is capped at 64KB, and the tool's own contract tells
+        // the reader to treat mail as a peer SUGGESTION and never to run
+        // destructive actions on a peer's say-so.
+        "agent_send",
     };
 
     public static bool IsHardBlocked(string tool) => HardBlocked.Contains(tool);

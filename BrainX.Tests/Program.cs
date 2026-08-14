@@ -339,6 +339,26 @@ internal static class Program
         Check("the refusal tells a read-only caller it needs a write token",
               reason.Contains("read-write", StringComparison.OrdinalIgnoreCase), reason);
 
+        // The collaboration channel. Chat is the ONLY client with no stdio, so
+        // if these are not reachable over HTTP then "the agents coordinate
+        // through BrainX" is false for the exact surface the owner watches from.
+        Check("agent_peers is readable with a read token",
+              McpRemotePolicy.IsAllowed("agent_peers", McpScope.Read));
+        Check("agent_inbox is readable with a read token",
+              McpRemotePolicy.IsAllowed("agent_inbox", McpScope.Read));
+        Check("agent_activity is readable with a read token",
+              McpRemotePolicy.IsAllowed("agent_activity", McpScope.Read));
+        Check("agent_send is refused to a read-only token",
+              !McpRemotePolicy.IsAllowed("agent_send", McpScope.Read));
+        Check("agent_send is allowed with a read-write token",
+              McpRemotePolicy.IsAllowed("agent_send", McpScope.ReadWrite));
+
+        // The two the remote endpoint must never grow into. ssh_run is remote
+        // code execution on the owner's servers; a scope has no say in it.
+        Check("ssh_run stays hard-blocked at every scope",
+              McpRemotePolicy.IsHardBlocked("ssh_run")
+              && !McpRemotePolicy.IsAllowed("ssh_run", McpScope.ReadWrite));
+
         // tools/list must hide what it would refuse — advertising task_handoff
         // to a read-only session burns the agent's tokens on a guaranteed 403.
         var list = JObject.Parse("""
