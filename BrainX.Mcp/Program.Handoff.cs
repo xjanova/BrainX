@@ -87,7 +87,42 @@ internal static partial class Program
 
         var tag = SourceTag();
         if (tag == "mcp") return "agent";
-        return tag.EndsWith("-mcp", StringComparison.Ordinal) ? tag[..^4] : tag;
+        var vendor = tag.EndsWith("-mcp", StringComparison.Ordinal) ? tag[..^4] : tag;
+
+        // We got here because clientInfo named the CONNECTION rather than the
+        // product ("local-agent-mode-brainx-brain"), so the vendor came from the
+        // ancestor walk instead. For Claude that vendor is as far as the walk
+        // can see — but it is not as far as we can reason: a chat client
+        // announces itself, as "claude-ai" or with "claude" in the string, and
+        // both were already handled above. Anything left that is Claude and
+        // declined to say so is Claude Code's local-agent host.
+        //
+        // Resolving it to the coarse "claude" is what made task_handoff's own
+        // default unreachable: tasks default to assignee "claude-code", and the
+        // session that is literally Claude Code reported "claude", so nothing
+        // was ever flagged as its own.
+        return vendor == "claude" ? "claude-code" : vendor;
+    }
+
+    /// <summary>
+    /// Is a task addressed to <paramref name="assignee"/> this session's to do?
+    ///
+    /// Exact match is not enough and never was. Identity here is finer than the
+    /// bus's ("claude-code" vs "claude-chat") while a sender may only know the
+    /// vendor, so "claude" must reach a claude-code session and a task left for
+    /// "claude-code" must still be recognised by a session that could only
+    /// resolve itself as far as "claude". Matching in BOTH directions on the
+    /// vendor prefix is the same forgiving rule agent_activity's filter already
+    /// uses, and the alternative — a task nobody claims because two spellings
+    /// of one agent did not compare equal — is the failure this exists to stop.
+    /// </summary>
+    private static bool AssigneeMatches(string assignee, string me)
+    {
+        if (string.IsNullOrWhiteSpace(assignee)) return true;         // unaddressed = anyone's
+        if (assignee.Equals("any", StringComparison.OrdinalIgnoreCase)) return true;
+        if (assignee.Equals(me, StringComparison.OrdinalIgnoreCase)) return true;
+        return assignee.StartsWith(me + "-", StringComparison.OrdinalIgnoreCase)
+            || me.StartsWith(assignee + "-", StringComparison.OrdinalIgnoreCase);
     }
 
     // ───────────── task_handoff ─────────────
@@ -252,7 +287,7 @@ internal static partial class Program
                     ["title"] = TitleOf(text, f.Name),
                     ["status"] = st,
                     ["assignee"] = asg,
-                    ["mine"] = string.Equals(asg, me, StringComparison.OrdinalIgnoreCase) || asg == "any",
+                    ["mine"] = AssigneeMatches(asg, me),
                     ["priority"] = fm.GetValueOrDefault("priority", "normal"),
                     ["handed_off_by"] = fm.GetValueOrDefault("handed_off_by", fm.GetValueOrDefault("source", "unknown")),
                     ["created"] = fm.GetValueOrDefault("created", ""),

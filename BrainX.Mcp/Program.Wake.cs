@@ -157,10 +157,11 @@ internal static partial class Program
             if (!string.Equals(fm.GetValueOrDefault("status", "open"), "open", StringComparison.OrdinalIgnoreCase))
                 continue;
 
+            // Same forgiving rule task_queue uses, against the fixed audience
+            // this hook speaks for. A sender who only knew the vendor wrote
+            // "claude"; the default writes "claude-code"; both are this hook.
             var assignee = fm.GetValueOrDefault("assignee", "any");
-            if (!assignee.Equals("claude-code", StringComparison.OrdinalIgnoreCase)
-                && !assignee.Equals("any", StringComparison.OrdinalIgnoreCase))
-                continue;
+            if (!AssigneeMatches(assignee, "claude-code")) continue;
 
             found.Add(new WakeTask(
                 id,
