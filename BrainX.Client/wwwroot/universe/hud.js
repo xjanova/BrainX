@@ -440,7 +440,7 @@ function renderFlow(d = {}) {
 /** Match the orbit colours exactly, so a name in the ticker and its planet
  *  above are visibly the same agent. */
 const FLOW_COLORS = {
-    claude: '#d97757', codex: '#7dd3fc', cluadex: '#c084fc',
+    claude: '#d97757', codex: '#7dd3fc', cluadex: '#c084fc', grok: '#f5a623',
     brain: '#57e08a', 'local-agent-mode-brainx-brain': '#57e08a',
 };
 /* ── Agent Chat: what the agents actually said ────────────────────

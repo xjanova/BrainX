@@ -82,9 +82,20 @@ public partial class MainWindow
     /// client and its work already appears in the HUD ticker — leaving it off
     /// the allowlist meant a session that was demonstrably live had no node at
     /// all, which is the same class of lie as a dark Unity.
+    ///
+    /// grok is here before it has ever connected, on purpose: the point of an
+    /// allowlist is that adding a node is a decision, and this one has been
+    /// made. It mints presence like any other client whether it arrives over
+    /// stdio (Grok Build, xAI's terminal CLI) or as a remote /mcp session
+    /// driven from grok.com — but ONLY if the name it announces is exactly
+    /// this. If xAI's client calls itself something else, its presence file is
+    /// written and then silently not drawn, which is the same trap the long
+    /// local-agent-mode slug fell into. Check agent_peers before concluding the
+    /// node is broken: the roster there is everything that ever connected,
+    /// allowlisted or not.
     /// </summary>
     private static readonly string[] BusWellKnownAgents =
-        { "claude", "codex", "cluadex", "local-agent-mode-brainx-brain" };
+        { "claude", "codex", "cluadex", "grok", "local-agent-mode-brainx-brain" };
 
     /// <summary>
     /// Agents that are a VARIANT of another agent rather than a peer of it:
@@ -123,6 +134,11 @@ public partial class MainWindow
         ["local-agent-mode-brainx-brain"] = Color.FromRgb(0xE8, 0x82, 0x5A),   // …also Claude
         ["codex"] = Color.FromRgb(0x19, 0xA3, 0x85),   // OpenAI green
         ["cluadex"] = Color.FromRgb(0x8B, 0x7C, 0xF6),   // CluadeX violet
+        // Amber, NOT xAI's black-and-white. A monochrome mark cannot survive on
+        // a starfield — black is invisible and white collides with Unity's light
+        // grey. Separation between nodes is what this palette is for; brand
+        // fidelity that nobody can see is not fidelity.
+        ["grok"] = Color.FromRgb(0xF5, 0xA6, 0x23),   // Grok amber
         ["unity"] = Color.FromRgb(0xC9, 0xCF, 0xD6),   // Unity light grey
         ["unreal"] = Color.FromRgb(0x4F, 0xB3, 0xE8),   // Unreal blue
     };

@@ -22,6 +22,9 @@ const AGENT_COLORS = {
     claude:  0xe8825a,
     codex:   0x19a385,
     cluadex: 0x8b7cf6,
+    // Amber rather than xAI's monochrome: black vanishes on a starfield and
+    // white collides with unity's grey. See the same note in MainWindow.AgentBus.cs.
+    grok:    0xf5a623,
     unity:   0xc9cfd6,
     unreal:  0x4fb3e8,
     brain:   0x6fa8ff,
@@ -741,7 +744,7 @@ function labelTexture(name, color) {
  *  match how the product spells itself — plain capitalisation gave "Cluadex".
  *  Keep in sync with BusDisplayName in MainWindow.AgentBus.cs. */
 const DISPLAY_NAMES = {
-    claude: 'Claude', codex: 'Codex', cluadex: 'CluadeX',
+    claude: 'Claude', codex: 'Codex', cluadex: 'CluadeX', grok: 'Grok',
     unity: 'Unity', unreal: 'Unreal', brain: 'BrainX',
     // The bus identity derives from the provenance tag, so an agent running in
     // local-agent mode announces itself as the whole slug. Twenty-nine
