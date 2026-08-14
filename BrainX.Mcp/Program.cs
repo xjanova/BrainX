@@ -3036,11 +3036,19 @@ internal static partial class Program
         var now = DateTime.Now;
         var dir = Path.Combine(_vaultPath, ".obsidianx", "sessions");
         Directory.CreateDirectory(dir);
-        var path = Path.Combine(dir, $"{now:yyyy-MM-dd}.md");
+        // InvariantCulture, because this string is a FILE NAME. Interpolation
+        // formats in the machine's calendar, and on a Thai-locale box that is
+        // the Buddhist era — so the same day's journal lands in 2569-08-14.md
+        // from one process and 2026-08-14.md from another, and today's vault
+        // has both. A journal that silently forks in half is worse than one
+        // with an odd name, so the name is pinned to the Gregorian form every
+        // other date in this vault already uses.
+        var day = now.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+        var path = Path.Combine(dir, $"{day}.md");
 
         var block = new StringBuilder();
         block.AppendLine();
-        block.AppendLine($"> **REMEMBER** `{now:HH:mm:ss}`  ");
+        block.AppendLine($"> **REMEMBER** `{now.ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)}`  ");
         foreach (var line in text.Split('\n'))
             block.AppendLine($"> {line.TrimEnd()}");
 

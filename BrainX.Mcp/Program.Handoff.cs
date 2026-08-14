@@ -172,7 +172,7 @@ internal static partial class Program
         }
         sb.AppendLine("## Log");
         sb.AppendLine();
-        sb.AppendLine($"- {now:yyyy-MM-dd HH:mm}Z · {me} — handed off to {assignee}");
+        sb.AppendLine($"- {InvariantStamp(now)}Z · {me} — handed off to {assignee}");
 
         File.WriteAllText(fullPath, sb.ToString());
 
@@ -343,7 +343,7 @@ internal static partial class Program
         // every key the owner hand-wrote, and creates nothing it wasn't asked to.
         var updated = updates.Count > 0 ? UpsertFrontmatter(text, updates.ToArray()) : text;
 
-        var entry = new StringBuilder($"- {now:yyyy-MM-dd HH:mm}Z · {me}");
+        var entry = new StringBuilder($"- {InvariantStamp(now)}Z · {me}");
         var transitioned = !string.IsNullOrEmpty(statusRaw)
                            && !string.Equals(statusRaw, prev, StringComparison.OrdinalIgnoreCase);
         if (transitioned) entry.Append($" — {prev} → {statusRaw}");
@@ -505,9 +505,27 @@ internal static partial class Program
     /// collision. UTC, so two machines sharing a synced vault can't mint the
     /// same id from different timezones.
     /// </summary>
+    /// <summary>
+    /// A human-readable timestamp for the Log section, in the Gregorian
+    /// calendar whatever the machine's locale says. The same trap as
+    /// <see cref="NewTaskId"/>: without this a Thai-locale box writes
+    /// "2569-08-14", which is not a date any reader of this vault expects and
+    /// not the one the frontmatter above it carries.
+    /// </summary>
+    private static string InvariantStamp(DateTime t) =>
+        t.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture);
+
     private static string NewTaskId()
     {
-        var stamp = DateTime.UtcNow.ToString("yyMMdd-HHmmss");
+        // InvariantCulture is not decoration. Without it this formats in the
+        // machine's calendar, and on a Thai-locale box that is the Buddhist
+        // era: 2026 becomes 2569, so the id reads T-690814-… instead of
+        // T-260814-…. It still matches TaskIdRx, so nothing rejects it — the
+        // ids are simply wrong by 543 years, they no longer sort against ids
+        // minted anywhere else, and any date read back out of one is fiction.
+        // A vault synced between two machines with different locales would
+        // interleave both forms in the same folder.
+        var stamp = DateTime.UtcNow.ToString("yyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture);
         var id = "T-" + stamp;
         for (var n = 2; FindTaskFile(id) != null && n < 100; n++)
             id = $"T-{stamp}-{n}";

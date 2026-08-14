@@ -48,9 +48,9 @@ internal static class CliInstall
         Console.WriteLine("  brainx-mcp register-claude [--vault] Re-register this binary with Claude Code (auto-includes");
         Console.WriteLine("                                          server name stays \"brainx-brain\"; BRAINX_MCP_VERSION env var is self-healed on every MCP boot)");
         Console.WriteLine("  brainx-mcp register-codex [--vault]  Re-register this binary with the OpenAI Codex CLI");
+        Console.WriteLine("                                          (same stdio MCP binary — `codex mcp add`; verify with `codex mcp list`)");
         Console.WriteLine("  brainx-mcp register-gemini [--vault] Re-register this binary with Google's Gemini CLI");
         Console.WriteLine("                                          (merges into ~/.gemini/settings.json; verify with /mcp)");
-        Console.WriteLine("                                          (same stdio MCP binary — `codex mcp add`; verify with `codex mcp list`)");
         Console.WriteLine("  brainx-mcp bake-bundles [options]    Pre-bake ~500-token context bundles for top topics so");
         Console.WriteLine("                                          brain_bundle <topic> answers in ONE cheap MCP call");
         Console.WriteLine("  brainx-mcp garden [--vault]          Re-bake stale bundles, fill embeddings, audit, write Brain health");
