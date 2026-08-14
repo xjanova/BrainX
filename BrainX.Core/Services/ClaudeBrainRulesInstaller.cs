@@ -16,7 +16,8 @@ namespace BrainX.Core.Services;
 ///   feedback_brain_proactive_save.md     ← write proactively
 ///   feedback_consult_brain_proactively.md ← search BEFORE coding
 ///   feedback_session_handoff_pattern.md  ← write handoff at session end
-///   MEMORY.md                            ← index pointing at all three
+///   feedback_task_queue_pickup.md        ← pick up work chat handed over
+///   MEMORY.md                            ← index pointing at all four
 ///
 /// Slug rule (matches Claude Code's own scheme):
 ///   "G:\Obsidian"          → "G--Obsidian"
@@ -35,7 +36,7 @@ public static class ClaudeBrainRulesInstaller
     // carries this version; the comparator works per-file so adding a
     // new rule mid-cycle doesn't force-clobber existing user edits on
     // unrelated rules.
-    public const string RuleVersion = "1.1";
+    public const string RuleVersion = "1.2";
 
     private const string IndexFileName = "MEMORY.md";
 
@@ -61,7 +62,11 @@ public static class ClaudeBrainRulesInstaller
         new Rule(
             "feedback_session_handoff_pattern.md",
             BuildSessionHandoffBody,
-            "- [Session handoff pattern](feedback_session_handoff_pattern.md) — at end of substantive sessions, save a #session-handoff note; SessionStart hook auto-injects these for next Claude")
+            "- [Session handoff pattern](feedback_session_handoff_pattern.md) — at end of substantive sessions, save a #session-handoff note; SessionStart hook auto-injects these for next Claude"),
+        new Rule(
+            "feedback_task_queue_pickup.md",
+            BuildTaskQueueBody,
+            "- [Task queue pickup](feedback_task_queue_pickup.md) — chat hands coding work to Claude Code through Tasks/; check task_queue at session start and when a taskQueue block appears")
     ];
 
     public static InstallResult EnsureInstalled(string vaultPath)
@@ -229,6 +234,36 @@ At the end of any session where you shipped code, fixed bugs, or made architectu
 - **Open questions** — things you'd ask the user if they came back
 
 Skip the handoff for trivial sessions (< 5 tool calls, or pure conversation with no code change).
+""";
+
+    private static string BuildTaskQueueBody() => $$"""
+---
+name: Pick up coding tasks handed over by chat
+description: Claude Desktop / claude.ai spec work into <vault>/Tasks/ via task_handoff; Claude Code is the one that builds it
+type: project-default
+installedBy: BrainX {{RuleVersion}}
+version: {{RuleVersion}}
+---
+A chat client (Claude Desktop, claude.ai connector) reaches this brain over HTTP and nothing else — no repo, no file tree, no test run, no diff. **You** have all four. So chat writes the SPEC and you write the CODE, and `<vault>/Tasks/` is where the handoff happens.
+
+**Check the queue:**
+- At the start of any coding session on this vault → `task_queue`. Items with `mine:true` are addressed to you.
+- The moment a tool response carries a `taskQueue` block → that is a task the chat just handed you. Read it now; there is no other notification, because MCP cannot interrupt an idle agent.
+- When the user says "ทำ task" / "do the open task" / "what's queued" → `task_queue`.
+
+**Work it:**
+1. `task_queue` → note the `task_id` and `path`.
+2. Read the FULL spec (`brain_get_note` on the path, or open the file) — the queue listing truncates the goal, and the Context section is the half you cannot reconstruct from the repo.
+3. `task_update {task_id, status:'claimed'}` BEFORE you start. Another agent may be looking at the same queue.
+4. Build it. Normal rules apply: search the brain first, cite what you read.
+5. `task_update {task_id, status:'done', note:'…'}` — name the files you changed and anything the spec got wrong. **That note is the only report the chat side will ever see**; it cannot read your session, your diff, or your terminal.
+6. Blocked instead? `task_update {task_id, status:'blocked', note:'what is blocking'}` and tell the user out loud — nobody is polling the file.
+
+**Tell your user what you picked up and from whom.** A handed-off task is never a silent side-channel.
+
+**Going the other way:** if you finish work the chat side is waiting on and the exchange needs to be live rather than queued, `agent_send` reaches an agent that is online right now. Tasks are the durable channel; the bus is the fast one.
+
+Tasks are real notes — `brain_search` finds them, `[[wiki-links]]` point at them, and the spec is the answer to "why does this code exist" long after the conversation is gone.
 """;
 
     private static void EnsureIndexEntry(string indexPath, Rule rule)

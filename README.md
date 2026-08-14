@@ -96,6 +96,16 @@ If any link is missing, the next one to come up resurrects it. **The user never 
 - 🌐 **AI Hub** — single API surface over Ollama (local) + NVIDIA NIM (free tier, Llama 4 / GPT-OSS / DeepSeek / Qwen / Gemma) + OpenRouter + DeepSeek; backend + model picker + per-router stats
 - 🪞 **Claude redirect mode** — toggle Claude Desktop traffic to a local model with full visibility of in/out bytes and request count
 
+### Task handoff — chat specs it, Claude Code builds it (v2.9.0)
+
+A chat client (Claude Desktop, claude.ai connector) has the conversation where the intent was formed but no repo, no file tree, no test run and no diff — so the code it writes is guesswork the coding agent has to verify anyway. Claude Code and Codex have all four and none of the conversation. `<vault>/Tasks/` is the seam between them:
+
+- 📝 **`task_handoff`** — chat writes the SPEC (goal, context, acceptance criteria) as a real note under `Tasks/`, addressed to `claude-code`, `codex`, `cluadex` or `any`. Available over the remote `/mcp` endpoint, which is the only way a browser tab can reach the brain at all
+- 📋 **`task_queue`** — what's waiting, with `mine:true` on the ones addressed to you
+- ✅ **`task_update`** — claim it, ship it, or block it; the note you leave IS the report, because the other side cannot see your session
+- 🔔 **`taskQueue` piggyback** — MCP has no server→model push, so a queued task rides along on the assignee's *next* tool response, the same trick the agent bus uses for mail. One directory listing per call, cached on a folder signature
+- 🧠 **A task is a note, not a queue row** — `brain_search` finds it, `[[wiki-links]]` point at it, and the spec stays the answer to "why does this code exist" long after the conversation is gone
+
 ### Search stack (v2.8.0)
 - 🔎 **Hybrid retrieval** — `brain_semantic_search` fuses embedding cosine similarity with keyword ranking via **reciprocal-rank fusion** (the same trick production search engines use), so paraphrases AND exact terms (ids, codenames) both surface
 - 🌏 **Multilingual embeddings** — `bge-m3` via local Ollama; natural-language Thai queries find notes with zero keyword overlap, fully offline

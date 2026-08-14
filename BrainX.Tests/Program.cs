@@ -52,6 +52,7 @@ internal static class Program
         await Run("a timed-out session is dropped (HTTP end-to-end)", TimedOutSessionIsDroppedOverHttp);
         await Run("a session abandoned mid-call is dropped (HTTP end-to-end)", AbandonedSessionIsDroppedOverHttp);
         await Run("a healthy session still works (HTTP end-to-end)", HealthySessionStillWorksOverHttp);
+        await Run("the task-handoff tools are classified for the remote endpoint", TaskToolsAreClassified);
 
         Console.WriteLine();
         Console.WriteLine(_failed == 0 ? "ALL CHECKS PASSED" : $"{_failed} CHECK(S) FAILED");
@@ -305,6 +306,52 @@ internal static class Program
 
         throw new InvalidOperationException(
             "run the built BrainX.Tests executable, not `dotnet run` — the harness spawns itself as a stub MCP child");
+    }
+
+    /// <summary>
+    /// The task handoff only exists because a chat client cannot reach stdio —
+    /// so it is worth nothing unless the remote policy actually admits it.
+    /// McpRemotePolicy default-denies, which means "forgot to classify it" and
+    /// "deliberately refused it" look identical from the outside; this check is
+    /// what tells them apart, and it also pins task_handoff/task_update to the
+    /// write scope so a read-only token can never queue work.
+    /// </summary>
+    private static Task TaskToolsAreClassified()
+    {
+        Check("task_queue is readable with a read token",
+              McpRemotePolicy.IsAllowed("task_queue", McpScope.Read));
+        Check("task_handoff is refused to a read-only token",
+              !McpRemotePolicy.IsAllowed("task_handoff", McpScope.Read));
+        Check("task_update is refused to a read-only token",
+              !McpRemotePolicy.IsAllowed("task_update", McpScope.Read));
+        Check("task_handoff is allowed with a read-write token",
+              McpRemotePolicy.IsAllowed("task_handoff", McpScope.ReadWrite));
+        Check("task_update is allowed with a read-write token",
+              McpRemotePolicy.IsAllowed("task_update", McpScope.ReadWrite));
+        Check("no task tool survives a missing credential",
+              !McpRemotePolicy.IsAllowed("task_queue", McpScope.None)
+              && !McpRemotePolicy.IsAllowed("task_handoff", McpScope.None)
+              && !McpRemotePolicy.IsAllowed("task_update", McpScope.None));
+
+        // The deny reason is what an agent adapts on, so it has to name the
+        // missing scope rather than read as "this tool does not exist".
+        var reason = McpRemotePolicy.DenyReason("task_handoff", McpScope.Read);
+        Check("the refusal tells a read-only caller it needs a write token",
+              reason.Contains("read-write", StringComparison.OrdinalIgnoreCase), reason);
+
+        // tools/list must hide what it would refuse — advertising task_handoff
+        // to a read-only session burns the agent's tokens on a guaranteed 403.
+        var list = JObject.Parse("""
+            {"result":{"tools":[{"name":"task_queue"},{"name":"task_handoff"},{"name":"task_update"}]}}
+            """);
+        var dropped = McpRemotePolicy.FilterToolsList(list, McpScope.Read);
+        Check("a read-only tools/list drops the two write tools",
+              dropped.Count == 2 && dropped.Contains("task_handoff") && dropped.Contains("task_update"),
+              string.Join(", ", dropped));
+        Check("a read-only tools/list keeps task_queue",
+              (list["result"]?["tools"] as JArray)?.Count == 1, list.ToString());
+
+        return Task.CompletedTask;
     }
 
     private static async Task<Exception?> Throws(Func<Task> action)

@@ -578,7 +578,21 @@ internal static partial class Program
             "A result carrying superseded:true has been retired by a newer note; read supersededBy.id instead of trusting it.\n" +
             "SSH:   ssh_profiles_list (enumerate authorized hosts) · ssh_run (exec a whitelisted command via profile_id) · ssh_tail (last N lines of a remote file) — owner-realm only, NEVER over BrainHub. Use these to grep logs, check status, read config before asking the user. Audit reaches access-log.ndjson with op=ssh_ok|ssh_fail|ssh_denied|ssh_mitm.\n" +
             "REVIEW QUEUE: submit_for_review · fetch_review_queue · post_review_verdict (Co-Pilot Arena bridge)\n" +
-            "AGENT BUS: agent_send · agent_inbox · agent_peers (talk to the OTHER agents on this brain)\n\n" +
+            "AGENT BUS: agent_send · agent_inbox · agent_peers (talk to the OTHER agents on this brain)\n" +
+            "TASK HANDOFF: task_handoff · task_queue · task_update (hand coding work to the agent that can build it)\n\n" +
+            "═══ TASK HANDOFF — chat specs it, Claude Code builds it ══════\n\n" +
+            "A chat client (Claude Desktop, claude.ai, this connector) has the conversation where the intent was formed. It does NOT have the repo, the file tree, a test run, or a diff. Claude Code and Codex have all four and none of the conversation. Handing work across that line is what these three tools are for:\n" +
+            "  • task_handoff {title, goal, context?, acceptance?, files?, assignee?} — write the SPEC into <vault>/Tasks/ and address it to 'claude-code' (default), 'codex', or 'any'.\n" +
+            "  • task_queue {status?} — what is waiting. Items with mine:true are addressed to YOU.\n" +
+            "  • task_update {task_id, status, note?} — claimed → done | blocked. The note IS the report; nobody can see your session.\n\n" +
+            "IF YOU ARE A CHAT CLIENT AND THE USER ASKS FOR CODE IN A REPO YOU CANNOT SEE:\n" +
+            "  → Do NOT write the patch from memory. Call task_handoff, then tell the user it is queued and which agent has it.\n" +
+            "  → Spend your turn on what only you can do: the goal, the constraints, the acceptance criteria, the context behind the request. A precise spec is worth more than a plausible diff.\n" +
+            "  → Still answer questions, explain, design and review inline — the handoff is for WRITING code in a repo, not for thinking.\n\n" +
+            "WHEN ANY TOOL RESPONSE CARRIES A `taskQueue` BLOCK, another agent handed YOU coding work:\n" +
+            "  → call task_queue, read the spec (brain_get_note on its path for the full text), task_update {status:'claimed'}, build it, then task_update {status:'done', note:'…files…'}.\n" +
+            "  → Tell your user what you picked up and from whom. Never work a handed-off task silently.\n" +
+            "A task is a real note in Tasks/ — brain_search finds it, [[wiki-links]] point at it, and six months from now it is the answer to 'why does this code exist'.\n\n" +
             "═══ AGENT BUS — Claude ⇄ Codex middleman ════════════════════\n\n" +
             "Other AI agents (Codex, Claude, …) mount this SAME brain, each through its own brainx-mcp process. BrainX relays mail between you:\n" +
             "  • agent_peers — who's here, who's online right now (presence TTL 90s).\n" +
@@ -1159,6 +1173,76 @@ internal static partial class Program
                     },
                     ["required"] = new JArray { "id", "verdict" }
                 }),
+            // ── Task handoff: chat writes the spec, Claude Code writes the code ──
+            Tool("task_handoff",
+                "Hand a CODING TASK to the agent that can actually build it (Claude Code / Codex), as a spec note " +
+                "in <vault>/Tasks/. USE THIS INSTEAD OF WRITING THE CODE YOURSELF whenever you are a chat client — " +
+                "you have the conversation where the intent was formed, but no repo, no file tree, no test run and no " +
+                "diff, so code you write here is guesswork the coding agent then has to verify. Write down WHAT must " +
+                "be true and WHY, and let the agent that can compile it decide HOW. The task lands in the brain as a " +
+                "real note (searchable, wiki-linkable) and shows up as a `taskQueue` block on the assignee's next tool call.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["title"] = new JObject { ["type"] = "string", ["description"] = "one line naming the OUTCOME, e.g. 'Login redirect loops on expired session'. Becomes the note title." },
+                        ["goal"] = new JObject { ["type"] = "string", ["description"] = "what must be TRUE when this is done, in prose. The outcome, not the patch — 'an expired session lands on /login once and keeps the return url', not a diff." },
+                        ["context"] = new JObject { ["type"] = "string", ["description"] = "why this came up, what the user already tried, constraints, links to related notes ([[wiki-links]] work). This is the half the coding agent cannot reconstruct from the repo." },
+                        ["acceptance"] = new JObject
+                        {
+                            ["description"] = "checkable conditions — how the coding agent knows it is finished. Array of strings, or one string per line.",
+                            ["oneOf"] = new JArray
+                            {
+                                new JObject { ["type"] = "string" },
+                                new JObject { ["type"] = "array", ["items"] = new JObject { ["type"] = "string" } }
+                            }
+                        },
+                        ["files"] = new JObject
+                        {
+                            ["description"] = "known files / areas to start from, if you know them. Saves the coding agent a search; guessing here costs it one.",
+                            ["oneOf"] = new JArray
+                            {
+                                new JObject { ["type"] = "string" },
+                                new JObject { ["type"] = "array", ["items"] = new JObject { ["type"] = "string" } }
+                            }
+                        },
+                        ["repo"] = new JObject { ["type"] = "string", ["description"] = "repo or project this belongs to, when the vault covers several" },
+                        ["priority"] = new JObject { ["type"] = "string", ["enum"] = new JArray { "low", "normal", "high" }, ["default"] = "normal" },
+                        ["assignee"] = new JObject { ["type"] = "string", ["description"] = "who should build it: 'claude-code' (default), 'codex', 'cluadex', or 'any'" }
+                    },
+                    ["required"] = new JArray { "title", "goal" }
+                }),
+            Tool("task_queue",
+                "List coding tasks handed to this brain. Call it when a `taskQueue` block appears on a tool response, " +
+                "when the user says 'ทำ task' / 'what's queued' / 'do the open task', and at the start of a coding " +
+                "session — a task addressed to you is work another agent already specced and is waiting on. " +
+                "Items marked mine:true are addressed to this session's agent.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["status"] = new JObject { ["type"] = "string", ["description"] = "open (default) | claimed | done | blocked | any" },
+                        ["assignee"] = new JObject { ["type"] = "string", ["description"] = "filter to one agent ('claude-code', 'codex', …). Omit to see everything addressed to anyone." },
+                        ["limit"] = new JObject { ["type"] = "integer", ["default"] = 20 }
+                    }
+                }),
+            Tool("task_update",
+                "Move a task along: claim it before you start, mark it done when it ships, mark it blocked when it " +
+                "cannot. The agent that handed it off has no other way to learn what happened — it cannot see your " +
+                "session, only this note — so the `note` you leave IS the report.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["task_id"] = new JObject { ["type"] = "string", ["description"] = "id from task_queue / task_handoff, e.g. 'T-260814-072105'" },
+                        ["status"] = new JObject { ["type"] = "string", ["enum"] = new JArray { "open", "claimed", "done", "blocked" } },
+                        ["note"] = new JObject { ["type"] = "string", ["description"] = "what you did / what is blocking. Required for 'blocked'. Name the files you changed — the other agent cannot see your diff." }
+                    },
+                    ["required"] = new JArray { "task_id" }
+                }),
             // ── Remote diagnostics, declared LAST on purpose ──
             //
             // A client with a small context window admits schemas until its
@@ -1275,6 +1359,9 @@ internal static partial class Program
                 "submit_for_review"         => SubmitForReview(args),
                 "fetch_review_queue"        => FetchReviewQueue(args),
                 "post_review_verdict"       => PostReviewVerdict(args),
+                "task_handoff"              => TaskHandoff(args),
+                "task_queue"                => TaskQueue(args),
+                "task_update"               => TaskUpdate(args),
                 "ssh_profiles_list"         => SshProfilesList(),
                 "ssh_run"                   => SshRun(args),
                 "ssh_tail"                  => SshTail(args),
@@ -1309,6 +1396,17 @@ internal static partial class Program
                 {
                     ["type"] = "text",
                     ["text"] = new JObject { ["agentBus"] = busNotice }.ToString(Formatting.Indented)
+                });
+
+            // Same reasoning, slower clock: a task handed to this agent has no
+            // way to announce itself either. Separate block from agentBus —
+            // mail and queued work want different responses.
+            var taskNotice = TryBuildTaskQueueNotice(name);
+            if (taskNotice != null)
+                content.Add(new JObject
+                {
+                    ["type"] = "text",
+                    ["text"] = new JObject { ["taskQueue"] = taskNotice }.ToString(Formatting.Indented)
                 });
 
             return BuildResult(id, new JObject { ["content"] = content });
@@ -1367,6 +1465,14 @@ internal static partial class Program
                 {
                     ["type"] = "text",
                     ["text"] = new JObject { ["agentBus"] = busNotice }.ToString(Formatting.Indented)
+                });
+
+            var taskNotice = TryBuildTaskQueueNotice(name);
+            if (taskNotice != null)
+                content.Add(new JObject
+                {
+                    ["type"] = "text",
+                    ["text"] = new JObject { ["taskQueue"] = taskNotice }.ToString(Formatting.Indented)
                 });
 
             return BuildResult(id, envelope);

@@ -86,6 +86,10 @@ public static class McpRemotePolicy
         "brain_find_contradictions",
         "brain_audit",
         "fetch_review_queue",
+        // Reading the task queue tells a remote caller what work is waiting and
+        // who it is addressed to. That is the same class of disclosure as the
+        // notes themselves, which this scope already grants.
+        "task_queue",
     };
 
     /// <summary>Mutating tools — require the write token.</summary>
@@ -96,6 +100,13 @@ public static class McpRemotePolicy
         "brain_remember",
         "submit_for_review",
         "post_review_verdict",
+        // The whole point of the handoff: a chat client reaches this brain over
+        // HTTP and nothing else. Both tools write a markdown note under Tasks/
+        // by a path this server derives — a caller never supplies one — so the
+        // blast radius of a leaked write token is the same as brain_create_note,
+        // which this scope already grants.
+        "task_handoff",
+        "task_update",
     };
 
     public static bool IsHardBlocked(string tool) => HardBlocked.Contains(tool);
