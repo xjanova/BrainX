@@ -653,7 +653,15 @@ public partial class MainWindow
                 var taken = 0;
                 for (var i = lines.Length - 1; i >= 0 && taken < HudWorkKeep; i--)
                 {
-                    var raw = lines[i].Trim();
+                    // Trim the BOM as well as the whitespace. char.IsWhiteSpace
+                    // is FALSE for U+FEFF, so a plain Trim() leaves one in
+                    // place, JObject.Parse then throws, and the catch below
+                    // drops the line without a word — which is precisely how
+                    // the v3 hook's first event went missing (5127705).
+                    // StreamReader eats a BOM at offset 0 and can do nothing
+                    // about one a second process appended mid-file, and feeds
+                    // already written by a v3 hook still contain one.
+                    var raw = lines[i].Trim().Trim('\uFEFF').Trim();
                     if (raw.Length == 0) continue;
 
                     Newtonsoft.Json.Linq.JObject o;

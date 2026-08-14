@@ -127,6 +127,25 @@ internal static partial class Program
         File.Move(tmp, path, overwrite: true);
     }
 
+    /// <summary>
+    /// Strip whitespace AND a byte-order mark from a feed line.
+    ///
+    /// <c>Trim()</c> alone is not enough, and the reason is worth writing down:
+    /// <c>char.IsWhiteSpace('\uFEFF')</c> is FALSE, so a BOM survives every
+    /// ordinary trim and then fails <c>JObject.Parse</c> — and this loop skips
+    /// what will not parse, so the line is not mangled, it is silently gone.
+    /// That is exactly how the v3 PostToolUse hook lost the first event every
+    /// agent ever reported (fixed in 5127705 by writing without a BOM).
+    ///
+    /// Fixing the writer does not fix this. StreamReader strips a BOM at
+    /// offset 0 and cannot strip one that a second process appended into the
+    /// MIDDLE of the file, and every feed already written by a v3 hook still
+    /// has one in it. The reader has to be the side that is robust — it has
+    /// many writers, some of them PowerShell, and only one of them is ours.
+    /// </summary>
+    private static string CleanFeedLine(string raw) =>
+        raw.Trim().Trim('\uFEFF').Trim();
+
     private static string? Clip(string? s, int max)
     {
         if (string.IsNullOrEmpty(s)) return s;
@@ -185,7 +204,7 @@ internal static partial class Program
                 var takenHere = 0;
                 for (var i = lines.Length - 1; i >= 0 && takenHere < limit; i--)
                 {
-                    var raw = lines[i].Trim();
+                    var raw = CleanFeedLine(lines[i]);
                     if (raw.Length == 0) continue;
                     JObject o;
                     try { o = JObject.Parse(raw); }
