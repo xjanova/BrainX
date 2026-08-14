@@ -13521,8 +13521,12 @@ public partial class MainWindow : Window
     // current hook from a stale one and upgrade it in place. v2: read the tool
     // payload from STDIN — v1 read $env:CLAUDE_TOOL_INPUT, which Claude Code
     // never sets, so the v1 hook silently never fired. v3: also report the edit
-    // to the agent-bus work feed (see below).
-    private const string BrainAutoIngestHookVersionTag = BrainAutoIngestHookMarker + " v3";
+    // to the agent-bus work feed (see below). v4: write that feed without a
+    // BOM — v3 used `Add-Content -Encoding utf8`, which under PowerShell 5.1
+    // put EF BB BF in front of the first line and made the reader drop it.
+    // The bump is what gets the corrected command onto machines already
+    // carrying v3; without it they keep the broken hook forever.
+    private const string BrainAutoIngestHookVersionTag = BrainAutoIngestHookMarker + " v4";
 
     /// <summary>
     /// The PostToolUse hook command. Claude Code hands hooks their payload as
@@ -13570,7 +13574,17 @@ public partial class MainWindow : Window
             "if (!(Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }; " +
             "$e = [ordered]@{ ts = (Get-Date).ToUniversalTime().ToString('o'); agent = 'claude-code'; " +
             "tool = $j.tool_name; summary = $p; ok = $true } | ConvertTo-Json -Compress; " +
-            "Add-Content -Path (Join-Path $d 'claude-code.ndjson') -Value $e -Encoding utf8 " +
+            // .NET AppendAllText, NOT `Add-Content -Encoding utf8`. This hook
+            // runs under Windows PowerShell 5.1, where `-Encoding utf8` writes
+            // a BOM — and on a file this hook CREATES, those three bytes land
+            // in front of the first JSON object. Program.Activity.cs parses the
+            // feed line by line and skips anything that will not parse, and
+            // string.Trim() does not strip U+FEFF (char.IsWhiteSpace('﻿')
+            // is false), so that first line is not merely mangled: it is
+            // silently dropped, forever, with nothing anywhere saying so.
+            // Measured, not assumed — Add-Content wrote EF BB BF.
+            "[System.IO.File]::AppendAllText((Join-Path $d 'claude-code.ndjson'), " +
+            "($e + [Environment]::NewLine), (New-Object System.Text.UTF8Encoding $false)) " +
             // Plain string, NOT interpolated: these braces are PowerShell's, so
             // they are written once. Doubling belongs only in the $"" segments.
             "} catch { } " +
