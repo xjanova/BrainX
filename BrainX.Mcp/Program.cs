@@ -534,6 +534,13 @@ internal static partial class Program
             ["resources"] = new JObject()
         },
         ["instructions"] =
+            // Lead with the running version. serverInfo.version already carries
+            // it, but no client SHOWS that: `codex mcp list` prints config
+            // columns only (it never starts the server), and Claude's own list
+            // is the same. So the one place an agent can actually read its own
+            // brain version is here — which is exactly what a stale hot-swapped
+            // binary needs, since the drift is invisible from inside the session.
+            $"BrainX MCP v{ServerVersion} (vault: {_vaultPath}). When the owner asks which brain version is running, answer with this.\n\n" +
             "This is the owner's personal brain (BrainX) — a LIVING knowledge graph of 600+ notes, 1M+ words, 3,600+ wiki-links. It is NOT optional context. It is your primary memory.\n\n" +
             "AUTO-JOURNAL — The server AUTOMATICALLY logs every tool call you make to .obsidianx/sessions/<date>.md. You NEVER need to narrate 'I searched for X' — the brain is already tracking it. Focus your output on substance.\n\n" +
             "═══ HARD RULES ═══════════════════════════════════════════════\n\n" +
