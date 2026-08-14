@@ -12,11 +12,18 @@ name: CI
 # answer a question the compiler answers in seconds. Release stays the only
 # thing that builds release artifacts; this is only the gate in front of it.
 on:
+  # pull_request ONLY, and the omission is the point. The first version also
+  # had `push: branches-ignore: [main]`, which looked like it covered branches
+  # nobody had opened a PR for yet — what it actually did was run this workflow
+  # TWICE on every PR branch, once for the push and once for the PR, burning
+  # two windows runners to answer one question. Observed on PR #2: two `build`
+  # check runs, same commit, same result.
+  #
+  # Nothing here reaches main without a PR, so pull_request is full coverage.
+  # A branch with no PR gets no CI, which is correct: it also cannot merge.
   pull_request:
-  push:
-    # main has build-and-release.yml, which builds everything this does and
-    # more. Running both would double the queue for one answer.
-    branches-ignore: [main]
+  # For a branch you want compiled before opening the PR.
+  workflow_dispatch:
 
 # A second push supersedes the first: the older run is answering a question
 # about code that no longer exists.
