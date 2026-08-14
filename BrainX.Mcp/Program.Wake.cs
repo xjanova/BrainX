@@ -77,8 +77,9 @@ internal static partial class Program
 
             if (!TryEnterVault(args)) return 0;
 
-            var tasks = OpenTasksForWake();
-            var mail = UnreadMailForWake();
+            var me = WakeAudience(args);
+            var tasks = OpenTasksForWake(me);
+            var mail = UnreadMailForWake(me);
             if (tasks.Count == 0 && mail.Count == 0) return 0;
 
             // Layer 3. Only tasks/messages that have not woken anyone recently
@@ -114,8 +115,9 @@ internal static partial class Program
             ReadHookPayload();   // drain stdin so the harness never blocks on the pipe
             if (!TryEnterVault(args)) return 0;
 
-            var tasks = OpenTasksForWake();
-            var mail = UnreadMailForWake();
+            var me = WakeAudience(args);
+            var tasks = OpenTasksForWake(me);
+            var mail = UnreadMailForWake(me);
             if (tasks.Count == 0 && mail.Count == 0) return 0;
 
             // No cooldown and no stamp here. Opening a session is the owner
@@ -132,12 +134,32 @@ internal static partial class Program
     private sealed record WakeTask(string Id, string Title, string Assignee, string Priority);
 
     /// <summary>
-    /// Open tasks addressed to the agent this hook is speaking for. Hooks are
-    /// a Claude Code feature and there is no MCP handshake here to read an
-    /// identity from, so the audience is fixed: claude-code, plus anything
-    /// left unaddressed.
+    /// Who this hook run is speaking for, from <c>--agent</c>.
+    ///
+    /// Hooks carry no MCP handshake, so the audience cannot be discovered the
+    /// way a tool call discovers it — it has to be told. Claude Code was the
+    /// only client with hooks when this shipped, so the audience was hardcoded;
+    /// Codex has them too, with the same exit-2-plus-stderr contract, and the
+    /// same binary serves both the moment it knows which inbox to look in.
+    /// Defaults to claude-code so an already-installed hook keeps working
+    /// unchanged.
     /// </summary>
-    private static List<WakeTask> OpenTasksForWake()
+    private static string WakeAudience(string[] args)
+    {
+        for (var i = 0; i < args.Length - 1; i++)
+            if (args[i].Equals("--agent", StringComparison.OrdinalIgnoreCase))
+            {
+                var v = args[i + 1].Trim();
+                if (v.Length > 0) return SanitizeAgentSlug(v);
+            }
+        return "claude-code";
+    }
+
+    /// <summary>
+    /// Open tasks addressed to the agent this hook is speaking for, plus
+    /// anything left unaddressed.
+    /// </summary>
+    private static List<WakeTask> OpenTasksForWake(string me)
     {
         var found = new List<WakeTask>();
         var dir = HandoffDir;
@@ -157,11 +179,11 @@ internal static partial class Program
             if (!string.Equals(fm.GetValueOrDefault("status", "open"), "open", StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            // Same forgiving rule task_queue uses, against the fixed audience
-            // this hook speaks for. A sender who only knew the vendor wrote
+            // Same forgiving rule task_queue uses, against the audience this
+            // hook speaks for. A sender who only knew the vendor wrote
             // "claude"; the default writes "claude-code"; both are this hook.
             var assignee = fm.GetValueOrDefault("assignee", "any");
-            if (!AssigneeMatches(assignee, "claude-code")) continue;
+            if (!AssigneeMatches(assignee, me)) continue;
 
             found.Add(new WakeTask(
                 id,
@@ -242,10 +264,19 @@ internal static partial class Program
     /// Every Claude session shares one "claude" inbox, so BOTH names are
     /// checked: whichever one the sender guessed is the one that holds it.
     /// </summary>
-    private static List<WakeMail> UnreadMailForWake()
+    private static List<WakeMail> UnreadMailForWake(string me)
     {
+        // The agent's own box, plus its vendor box when those differ: the bus
+        // collapses every Claude session into "claude", so a claude-code hook
+        // that only looked at "claude-code" would never see the mail that
+        // actually arrives. For codex the two are the same name and the set
+        // collapses to one.
+        var boxes = new List<string> { me };
+        var dash = me.IndexOf('-');
+        if (dash > 0) boxes.Add(me[..dash]);
+
         var found = new List<WakeMail>();
-        foreach (var box in new[] { "claude", "claude-code" })
+        foreach (var box in boxes.Distinct(StringComparer.OrdinalIgnoreCase))
         {
             var dir = Path.Combine(BusRoot, "inbox", box);
             if (!Directory.Exists(dir)) continue;
