@@ -443,6 +443,130 @@ const FLOW_COLORS = {
     claude: '#d97757', codex: '#7dd3fc', cluadex: '#c084fc',
     brain: '#57e08a', 'local-agent-mode-brainx-brain': '#57e08a',
 };
+/* ── Agent Chat: what the agents actually said ────────────────────
+   The bus card animates that a message crossed and the ticker names the
+   operation; neither can show the content, and when two agents debate
+   through this brain the content IS the event. Messages arrive from the
+   host already merged (pending inbox + consumed audit) and sorted oldest
+   first, so this renders straight down the list.
+
+   Identity is the message id, not its position: the host re-sends the whole
+   window every tick, and keying off the array would re-fire the flight
+   animation for messages that have merely been re-listed. */
+const CHAT_KEEP = 60;
+const _chatSeen = new Set();
+let _chatPrimed = false;
+
+function renderChat(d = {}) {
+    const msgs = d.messages || [];
+    const el = document.getElementById('hud-chat');
+    setText('hud-chat-count', msgs.length ? `${msgs.length}` : '—');
+    if (!el) return;
+
+    // Fly the ones we have not seen before. The first payload is the backlog,
+    // and replaying every historical message as a burst of motes would say
+    // "all this just happened" — so prime silently, exactly like the flow
+    // ticker does.
+    const fresh = msgs.filter(m => m.id && !_chatSeen.has(m.id));
+    for (const m of msgs) if (m.id) _chatSeen.add(m.id);
+    if (_chatPrimed) {
+        fresh.slice(-4).forEach((m, i) =>
+            setTimeout(() => bus?.fireRelay(m.from, m.to), i * 220));
+        if (fresh.length) noteFlowActivity();
+    }
+    _chatPrimed = true;
+
+    // Same stick-to-newest rule as the flow ticker: rebuilding the list resets
+    // scrollTop, which would yank a reader back to the oldest message every
+    // time anything arrived. Measure before the wipe — an emptied list reports
+    // no scroll at all.
+    const stick = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    // Which messages were open stays open across the rebuild; a re-render
+    // every two seconds would otherwise collapse whatever is being read.
+    const open = new Set([...el.querySelectorAll('li.is-open')].map(li => li.dataset.id));
+
+    el.innerHTML = '';
+    for (const m of msgs.slice(-CHAT_KEEP)) {
+        const li = document.createElement('li');
+        li.dataset.id = m.id || '';
+        if (m.pending) li.classList.add('is-pending');
+        if (open.has(m.id)) li.classList.add('is-open');
+        li.style.setProperty('--ch-tint', agentColor(m.from));
+        li.innerHTML =
+            `<div class="ch-head">` +
+            `<span class="ch-from">${esc(agentLabel(m.from))}</span>` +
+            `<span class="ch-arrow">→</span>` +
+            `<span class="ch-to">${esc(agentLabel(m.to))}</span>` +
+            (m.topic ? `<span class="ch-topic">${esc(m.topic)}</span>` : '') +
+            `<span class="ch-t">${esc(m.ts)}</span>` +
+            `</div>` +
+            `<div class="ch-body">${esc(m.body)}</div>`;
+        // Click to expand. Bound per row rather than delegated because the
+        // list is rebuilt wholesale and a delegated handler would have to
+        // re-resolve the row anyway.
+        li.addEventListener('click', () => li.classList.toggle('is-open'));
+        el.appendChild(li);
+    }
+    if (stick) el.scrollTop = el.scrollHeight;
+}
+
+/* ── Card visibility ──────────────────────────────────────────────
+   Eight readouts over a galaxy is a lot of glass. These switches are the
+   answer to "I want to SEE the universe" that does not cost the owner their
+   layout: hiding is per-card, remembered, and reversible from the same
+   panel.
+
+   Its own storage key, deliberately NOT the wallpaper prefs object — that
+   one is round-tripped between the app and the wallpaper renderer, and
+   adding a field to it means touching both sides of a contract that has
+   already broken once. Card visibility is HUD-local, so it stays local. */
+const CARDS_KEY = 'obsidianx.hud.cards.v1';
+const CARD_IDS = ['tl', 'tc', 'tr', 'ml', 'mr', 'br', 'bl', 'bc'];
+
+function loadCardPrefs() {
+    try {
+        const raw = localStorage.getItem(CARDS_KEY);
+        if (!raw) return {};
+        const v = JSON.parse(raw);
+        return (v && typeof v === 'object') ? v : {};
+    } catch { return {}; }
+}
+
+function applyCardPrefs(prefs) {
+    for (const id of CARD_IDS) {
+        const panel = document.querySelector(`.hud-panel.hud-${id}`);
+        // A card that is ON is the default, so anything not explicitly false
+        // shows — a corrupt or partial prefs blob can never blank the HUD.
+        const on = prefs[id] !== false;
+        if (panel) panel.hidden = !on;
+        const btn = document.querySelector(`.card-btn[data-card="${id}"]`);
+        if (btn) {
+            btn.classList.toggle('is-on', on);
+            btn.setAttribute('aria-pressed', String(on));
+        }
+    }
+}
+
+function wireCardToggles() {
+    const prefs = loadCardPrefs();
+    applyCardPrefs(prefs);
+    const save = () => {
+        try { localStorage.setItem(CARDS_KEY, JSON.stringify(prefs)); } catch { /* private mode */ }
+        applyCardPrefs(prefs);
+    };
+    document.querySelectorAll('.card-btn[data-card]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const id = btn.dataset.card;
+            prefs[id] = prefs[id] === false;   // undefined/true → false, false → true
+            save();
+        });
+    });
+    document.getElementById('set-cards-all')?.addEventListener('click', () => {
+        for (const id of CARD_IDS) prefs[id] = true;
+        save();
+    });
+}
+
 const agentColor = (n) => FLOW_COLORS[String(n).toLowerCase()] || '#8e9aa6';
 /* Filled in when agentbus3d loads. Until then the raw name is shown rather
  * than a guess at a shorter one — a wrong short label is worse than a long
@@ -729,6 +853,7 @@ function onHudMessage(evt) {
         case 'hudAgents':    renderAgents(m.payload); break;
         case 'hudBusy':      renderBusy(m.payload); break;
         case 'hudFlow':      renderFlow(m.payload); break;
+        case 'hudChat':      renderChat(m.payload); break;
         case 'hudSystem':    renderSystem(m.payload); break;
         case 'hudRecent':    renderRecent(m.payload); break;
         case 'hudNetwork':   renderNetwork(m.payload); break;
@@ -869,6 +994,10 @@ export function initHud() {
     wireActions();
     wireNotice();
     wireWheelScroll();
+    // Before initHudLayout: a hidden panel must not be measured for its
+    // placed rect, or restoring it later would put it back at a size the
+    // layout took while it was display:none.
+    wireCardToggles();
     initBus();
     // Grid first, then the owner's own arrangement on top of it: the layout
     // module measures the panels where the grid put them, so it has to run
@@ -1016,6 +1145,34 @@ function runDemo() {
         bus?.fireTraffic(who, true);
         setTimeout(() => bus?.fireTraffic(who, false), 700);
     }, 1800);
+
+    /* A real exchange, because the chat card is the one panel whose layout
+       problem is CONTENT: a Thai paragraph, a one-liner and a long argument
+       wrap completely differently, and lorem ipsum would hide all three. */
+    const chatSeed = [
+        { id: 'd1', ts: '11:24', from: 'claude', to: 'codex', topic: 'debate-thai-politics-r1',
+          body: 'ขอถกกันจริงจัง — ผมเสนอว่าตัวแปรหลักไม่ใช่ผลเลือกตั้ง แต่คือสถาปัตยกรรมอำนาจยับยั้งที่กระจายไว้นอกสภา ช่วยแย้งมาอย่างน้อย 1 ข้อ ห้ามเห็นด้วยล้วน' },
+        { id: 'd2', ts: '11:32', from: 'codex', to: 'claude', topic: 'debate-thai-politics-r1-reply',
+          body: 'ผมแย้งสองชั้น ชั้นแรก veto architecture เป็นทั้งสาเหตุและเครื่องมือพร้อมกัน ชั้นที่สอง pattern ของคุณ overfit — รัฐบาลประยุทธ์หลังปี 2562 อยู่เกือบครบวาระภายใต้รัฐธรรมนูญฉบับเดียวกัน' },
+        { id: 'd3', ts: '11:41', from: 'claude', to: 'codex', topic: 'debate-thai-politics-r2',
+          body: 'ยอมรับ — ผมทำ selection on the dependent variable. แต่ข้อมูลคุณผิด: ที่นั่งรวมคือ 192 ต่อ 120 ไม่ใช่เฉพาะบัญชีรายชื่อ' },
+        { id: 'd4', ts: '11:48', from: 'codex', to: 'all', topic: 'debate-thai-politics-r2-reply',
+          body: 'ผมยอมเรื่องที่นั่งรวมและวันโหวต แต่ไม่ยอมเรื่องประชามติ ตัวเลขของคุณเป็น snapshot ระหว่างนับ ไม่ใช่ผลสุดท้าย', pending: true },
+    ];
+    step(2400, () => renderChat({ messages: chatSeed }));
+    // Then keep it moving, so the relay animation and the stick-to-newest
+    // scroll can both be judged against a list that is actually growing.
+    let n = 0;
+    setInterval(() => {
+        n++;
+        const from = n % 2 ? 'codex' : 'claude';
+        chatSeed.push({
+            id: `d${4 + n}`, ts: '11:5' + (n % 10), from, to: from === 'codex' ? 'claude' : 'codex',
+            topic: 'debate-thai-politics-r3',
+            body: `รอบที่ ${n}: ตัวชี้วัดที่ใช้ได้ต้องเป็น leading indicator ไม่ใช่นิยามของปลายทาง`,
+        });
+        renderChat({ messages: chatSeed });
+    }, 6000);
     const demoSystem = (gpu, cpu) => renderSystem({
         gpu, cpu, healthy: true,
         // Temp trails load rather than tracking it instantly — a card does not

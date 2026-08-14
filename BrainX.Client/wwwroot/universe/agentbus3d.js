@@ -113,6 +113,11 @@ export function createAgentBus3D(canvas) {
 
     const planets = new Map();   // name → { pivot, mesh, ring, orbitR, speed, phase, online, everSeen }
     const motes = [];            // in-flight traffic
+    /** Ceiling on in-flight motes. Named because fireRelay has to reserve
+     *  room for BOTH its legs against the same number — a relay that clears
+     *  the check for its first leg and fails it for the second would draw a
+     *  message arriving at the brain and never leaving. */
+    const MOTE_MAX = 60;
     const moteGeo = new THREE.SphereGeometry(0.115, 10, 10);
     /** Points in a comet tail. Long enough to read as motion, short enough
      *  that a burst of traffic is still a burst and not a cobweb. */
@@ -229,15 +234,18 @@ export function createAgentBus3D(canvas) {
     }
 
     /** One request/response round trip on an agent's orbit. */
-    function fireTraffic(name, inbound = true) {
+    function fireTraffic(name, inbound = true, forceColor = null) {
         const p = planets.get(name);
         if (!p) return;
         // Motes are retired by the render loop, and the loop is stopped
         // whenever this canvas is off-screen — so without a ceiling, traffic
         // reported while the panel is scrolled out of view would queue up
         // forever and then all burst at once. 60 is far past what is legible.
-        if (motes.length > 60) return;
-        const color = inbound ? colorOf(name) : AGENT_COLORS.brain;
+        if (motes.length >= MOTE_MAX) return;
+        // forceColor is how a relayed message keeps ONE identity across both
+        // legs: without it the outbound half would repaint itself in the
+        // brain's colour and read as a different message.
+        const color = forceColor ?? (inbound ? colorOf(name) : AGENT_COLORS.brain);
         const mote = new THREE.Mesh(moteGeo, new THREE.MeshBasicMaterial({
             color, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false,
         }));
@@ -262,6 +270,43 @@ export function createAgentBus3D(canvas) {
             mesh: mote, trail, planet: p, t: 0, dur: inbound ? 0.62 : 0.58, inbound,
             head: new THREE.Color(color), history: [],
         });
+    }
+
+    /**
+     * A message from one agent to another, drawn as what it actually is: TWO
+     * legs through the star, never a straight line between two planets.
+     *
+     * The bus is a file mailbox in the vault — codex writes into
+     * inbox/claude/, claude reads it out — so nothing ever travels agent to
+     * agent. Animating a direct hop would draw a peer-to-peer link that does
+     * not exist, and the whole point of this card is that the brain is the
+     * middleman. Leg one carries the SENDER's colour inbound; leg two carries
+     * the same colour back outbound, so the eye can follow one message across
+     * the hand-off instead of seeing two unrelated blips.
+     *
+     * The second leg is scheduled off a timer rather than chained in the
+     * render loop because the loop stops whenever the canvas is off-screen —
+     * a queued leg would otherwise fire the moment the panel came back, long
+     * after its partner, which reads as traffic that never arrived.
+     */
+    function fireRelay(fromName, toName) {
+        const src = planets.get(fromName);
+        const dst = planets.get(toName);
+        if (!src && !dst) return;
+        // All or nothing. fireTraffic drops anything past MOTE_MAX, so near the
+        // ceiling a relay could land its inbound leg and lose the outbound one
+        // — drawing a message that went into the brain and never came out,
+        // which is the one thing this animation must never claim. Reserve the
+        // room for both legs up front, or draw neither.
+        const legs = (src ? 1 : 0) + (dst ? 1 : 0);
+        if (motes.length + legs > MOTE_MAX) return;
+        const color = colorOf(src ? fromName : toName);
+        if (src) fireTraffic(fromName, true, color);
+        if (!dst) return;
+        // Hand-off at the star: leg one's duration, so the outbound mote leaves
+        // exactly as the inbound one lands.
+        const handoff = src ? 620 : 0;
+        setTimeout(() => { if (running) fireTraffic(toName, false, color); }, handoff);
     }
 
     /** Half-extent of the whole system in world units: the outermost orbit,
@@ -638,7 +683,7 @@ export function createAgentBus3D(canvas) {
         };
     }
 
-    return { setAgents, fireTraffic, resize, start, stop, dispose, debugState };
+    return { setAgents, fireTraffic, fireRelay, resize, start, stop, dispose, debugState };
 }
 
 // ── helpers ─────────────────────────────────────────────────────

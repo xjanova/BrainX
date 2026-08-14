@@ -641,6 +641,53 @@ body.bg-nebula {
     font-weight: 600;
 }
 
+/* Card on/off chips. A wrapping grid rather than the .camera-modes row used
+   above: those rows hold 2-4 mutually exclusive choices, these are eight
+   INDEPENDENT switches and a flex row would squeeze eight labels into
+   unreadable slivers on a narrow panel. */
+.panel-title-sub { margin-top: 12px; }
+
+.card-toggles {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 3px;
+    margin-bottom: 6px;
+}
+
+.card-btn {
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: var(--ink-dim);
+    font-size: 10px;
+    letter-spacing: 0.3px;
+    padding: 4px 6px;
+    border-radius: 4px;
+    cursor: pointer;
+    text-align: left;
+    transition: all 0.15s ease;
+    /* Eight names of different lengths in a two-column grid: without this a
+       long one widens its column and the switches stop lining up. */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.card-btn:hover { color: var(--ink); border-color: rgba(255, 255, 255, 0.18); }
+
+/* OFF is the state that needs to be obvious — a card you cannot find is a bug
+   until you remember you switched it off. So the on state is quiet and the off
+   state is struck through: the label still reads, it just reads as disabled. */
+.card-btn.is-on {
+    background: rgba(108, 240, 255, 0.14);
+    border-color: rgba(108, 240, 255, 0.32);
+    color: var(--accent);
+}
+
+.card-btn:not(.is-on) {
+    opacity: 0.5;
+    text-decoration: line-through;
+}
+
 .settings-actions {
     display: flex;
     justify-content: flex-end;

@@ -177,6 +177,7 @@ public partial class MainWindow
                 _hudTick++;
                 PostHudAgents();
                 PostHudFlow();
+                PostHudChat();
                 PostHudActivity();
                 await PostHudSystemAsync();
 
@@ -222,6 +223,7 @@ public partial class MainWindow
             PostHudActivity();
             PostHudAgents();
             PostHudFlow();
+            PostHudChat();
             // Re-sent with every full push so a HUD that reloaded (F5, a
             // WebView2 restart) never comes back offering to Stop a job that
             // ended while it was away.
@@ -506,6 +508,103 @@ public partial class MainWindow
         var undescribed = Math.Max(0, _hudCallsThisTick - events.Count);
         PostHud("hudFlow", new { events, unattributed = skippedNoAgent, undescribed });
     }
+
+    /// <summary>
+    /// What the agents actually SAID to each other.
+    ///
+    /// The bus card animates that a message crossed and the flow ticker names
+    /// the operation, but neither can carry content — and when Claude and
+    /// Codex argue through this brain, the content is the entire event. The
+    /// bodies were always on disk; nothing was reading them.
+    ///
+    /// Both folders, on purpose:
+    ///   inbox/  — sent, not yet consumed. Shown as pending, because "they
+    ///             talked" and "one of them has not looked yet" are different
+    ///             facts and only this folder can tell them apart.
+    ///   read/   — consumed. This is the transcript; agent_inbox MOVES a
+    ///             message here on delivery, so reading only inbox/ would show
+    ///             a conversation that empties itself as it happens.
+    ///
+    /// Sent whole every tick rather than as a delta: the JS keys off message
+    /// id, the window is small, and a delta would lose messages whenever the
+    /// HUD reloaded.
+    /// </summary>
+    private void PostHudChat()
+    {
+        var root = Path.Combine(_vaultPath, ".obsidianx", "agent-bus");
+        if (!Directory.Exists(root)) return;
+
+        var msgs = new List<(DateTime Ts, object Payload)>();
+        try
+        {
+            foreach (var (sub, pending) in new[] { ("read", false), ("inbox", true) })
+            {
+                var dir = Path.Combine(root, sub);
+                if (!Directory.Exists(dir)) continue;
+
+                // Newest files only. A vault that has been talking for months
+                // holds thousands of these and the panel shows ~60; ordering by
+                // write time first means the cost is bounded by what we keep,
+                // not by everything that was ever said.
+                var files = new DirectoryInfo(dir)
+                    .EnumerateFiles("*.json", SearchOption.AllDirectories)
+                    .OrderByDescending(f => f.LastWriteTimeUtc)
+                    .Take(HudChatKeep);
+
+                foreach (var f in files)
+                {
+                    Newtonsoft.Json.Linq.JObject obj;
+                    try { obj = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(f.FullName)); }
+                    catch { continue; }   // half-written or hand-edited: skip, never crash the tick
+
+                    if (!DateTime.TryParse(obj["ts"]?.ToString(), null,
+                            System.Globalization.DateTimeStyles.AssumeUniversal |
+                            System.Globalization.DateTimeStyles.AdjustToUniversal,
+                            out var ts))
+                        ts = f.LastWriteTimeUtc;
+
+                    var body = obj["body"]?.ToString() ?? "";
+                    msgs.Add((ts, new
+                    {
+                        id = obj["id"]?.ToString() ?? f.Name,
+                        ts = ts.ToLocalTime().ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture),
+                        from = obj["from"]?.ToString() ?? "?",
+                        // The recipient is the folder, not a field: a message
+                        // addressed to "all" is fanned out as one file per
+                        // inbox, and each copy belongs to the agent whose
+                        // folder it is sitting in.
+                        to = obj["to"]?.ToString() is { Length: > 0 } t
+                            ? t
+                            : (f.Directory?.Name ?? "?"),
+                        topic = obj["topic"]?.ToString() ?? "",
+                        // 900 chars, not the full 64KB an agent may send: the
+                        // card clamps to three lines and expands to about
+                        // forty, and shipping a megabyte of transcript through
+                        // a WebView message every two seconds to render 3% of
+                        // it is a cost with no reader.
+                        body = Trim(body, 900),
+                        pending,
+                    }));
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"PostHudChat read: {ex.Message}");
+            return;
+        }
+
+        // Oldest first — the panel reads downward like any chat.
+        var ordered = msgs.OrderBy(m => m.Ts).Select(m => m.Payload).ToList();
+        if (ordered.Count > HudChatKeep) ordered = ordered.Skip(ordered.Count - HudChatKeep).ToList();
+        PostHud("hudChat", new { messages = ordered });
+    }
+
+    /// <summary>How much conversation the chat card holds. Matches CHAT_KEEP
+    /// in hud.js: the host trimming to a different depth than the panel keeps
+    /// would either waste the payload or truncate history the panel promised
+    /// to scroll through.</summary>
+    private const int HudChatKeep = 60;
 
     /// <summary>Ops that change the vault, as opposed to reading it. Drives the
     /// colour of the mote, so a write is never mistaken for a read.</summary>

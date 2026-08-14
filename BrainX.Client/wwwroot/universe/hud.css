@@ -650,6 +650,118 @@ body.hud-active #settings-toggle {
    a 30% base the same rule would be a licence to grow — the one shape where
    the render can least afford it. */
 
+/* A card switched off in Settings ▸ Cards. `hidden` alone is not enough:
+   the UA rule for [hidden] is display:none at specificity 0,0,1, and every
+   .hud-panel rule that sets display:flex outranks it — the panel would go
+   on painting with the attribute set, which reads as a switch that does
+   nothing. */
+#hud-layer > .hud-panel[hidden] { display: none !important; }
+
+/* ── Agent Chat ───────────────────────────────────────────────────
+   The bus card animates THAT a message crossed; this one carries what it
+   said. Bottom-centre, which the layout had been holding empty as the
+   landing zone for #info-card — the two can now overlap, which is exactly
+   why this card ships with a switch in Settings ▸ Cards. A note you opened
+   deliberately outranks a transcript, so the info card paints over it
+   (#info-card already carries a higher z-index) instead of the chat
+   stealing the click. */
+#hud-layer > .hud-panel.hud-bc.hud-panel-chat {
+    /* Wider than the 30vw shared cap: these are sentences, and a 300px
+       column turns a two-line message into eight. Still bounded, because a
+       chat that spans the viewport buries the galaxy it sits on. */
+    max-width: min(46vw, 620px);
+    max-height: calc(34vh - var(--hud-gap) * 2);
+}
+
+.hud-chat {
+    list-style: none;
+    margin: 0;
+    padding: 0 2px;
+    /* Newest at the bottom like every chat anyone has used; hud.js pins the
+       scroll there unless the reader has scrolled back to re-read. */
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    box-sizing: border-box;
+}
+
+.hud-chat > li {
+    /* border-box, because #hud-layer's box-sizing does NOT cascade here (see
+       the .hud-flow note above) and these carry both padding and a border —
+       a percentage-free rule today, but the trap is one edit away. */
+    box-sizing: border-box;
+    padding: 4px 7px;
+    border-radius: 5px;
+    border-left: 2px solid var(--ch-tint, rgba(255, 255, 255, 0.25));
+    background: rgba(10, 12, 26, 0.55);
+    line-height: 1.35;
+}
+
+/* The sender's own colour, set inline by hud.js from the same palette the
+   orbits use — so the planet that just lit up and the line that just
+   appeared are recognisably the same agent. */
+.hud-chat .ch-head {
+    display: flex;
+    align-items: baseline;
+    gap: 5px;
+    font-size: 9.5px;
+    letter-spacing: 0.3px;
+}
+
+.hud-chat .ch-from { font-weight: 600; color: var(--ch-tint, var(--ink)); }
+.hud-chat .ch-arrow { color: var(--ink-faint); }
+.hud-chat .ch-to { color: var(--ink-dim); }
+.hud-chat .ch-topic {
+    color: var(--ink-faint);
+    /* A long topic must never push the timestamp off the row. */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.hud-chat .ch-t { margin-left: auto; color: var(--ink-faint); flex: none; }
+
+.hud-chat .ch-body {
+    font-size: 10.5px;
+    color: var(--ink);
+    white-space: pre-wrap;
+    /* An agent can send 64KB. Three lines is the preview; the card scrolls
+       for history and the full text lives in the vault, so this clamp hides
+       nothing that cannot be reached. */
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+}
+
+/* Click to open a message out. -webkit-line-clamp is undone by resetting the
+   display, not by raising the clamp — a large clamp still truncates. */
+.hud-chat > li.is-open .ch-body {
+    display: block;
+    max-height: 40vh;
+    overflow-y: auto;
+}
+
+.hud-chat > li { cursor: pointer; }
+
+/* Unread mail — still sitting in inbox/, nobody has consumed it. Worth its
+   own state: it is the difference between "they talked" and "one of them has
+   not looked yet". */
+.hud-chat > li.is-pending { border-style: dashed; }
+.hud-chat > li.is-pending .ch-to::after {
+    content: ' · unread';
+    color: var(--ink-faint);
+}
+
+.hud-chat:empty::after {
+    content: 'No messages between agents yet.';
+    color: var(--ink-faint);
+    font-size: 10px;
+}
+
 /* ── Feed ─────────────────────────────────────────────────────── */
 
 .hud-feed {

@@ -328,7 +328,25 @@
                 <button type="button" class="cam-btn" data-legend="off">Hide</button>
             </div>
         </div>
+        <!-- Which HUD cards are on screen. Separate from the sliders above
+             because this is the only settings group that changes WHAT is shown
+             rather than how it looks — and because the owner asked to be able
+             to clear the glass without losing the readouts permanently. Each
+             chip is the card's own name, so the list reads as the HUD does. -->
+        <div class="panel-title panel-title-sub">Cards</div>
+        <div class="card-toggles" id="card-toggles">
+            <button type="button" class="card-btn is-on" data-card="tl">Brain</button>
+            <button type="button" class="card-btn is-on" data-card="tc">Actions</button>
+            <button type="button" class="card-btn is-on" data-card="tr">Activity</button>
+            <button type="button" class="card-btn is-on" data-card="ml">Expertise</button>
+            <button type="button" class="card-btn is-on" data-card="mr">System</button>
+            <button type="button" class="card-btn is-on" data-card="br">MCP</button>
+            <button type="button" class="card-btn is-on" data-card="bl">Agent Bus</button>
+            <button type="button" class="card-btn is-on" data-card="bc">Agent Chat</button>
+        </div>
         <div class="settings-actions">
+            <button id="set-cards-all" type="button" class="text-btn"
+                    title="Turn every card back on.">All cards</button>
             <button id="set-showcase" type="button" class="text-btn">Show Case</button>
             <button id="set-fullscreen" type="button" class="text-btn">Fullscreen</button>
             <button id="set-wallpaper" type="button" class="text-btn">Wallpaper</button>
@@ -458,6 +476,18 @@
                  picture can always be checked against the words — which is the
                  only reason to trust the picture. -->
             <ol class="hud-flow" id="hud-flow" aria-label="Live agent traffic"></ol>
+        </section>
+
+        <!-- Agent Chat: the words themselves. The bus card next to it animates
+             THAT a message crossed and the ticker names the operation, but
+             neither could ever show what was said — and two agents debating
+             through this brain is the one kind of traffic where the content is
+             the whole point. Reads bottom-up like any chat: newest last. -->
+        <section class="hud-panel hud-bc hud-panel-chat">
+            <div class="hud-title"><span class="hud-dot"></span>Agent Chat
+                <span class="hud-sub" id="hud-chat-count">—</span>
+            </div>
+            <ol class="hud-chat" id="hud-chat" aria-label="Messages between agents"></ol>
         </section>
 
         <!-- bottom-centre is deliberately EMPTY. It is the landing zone for
