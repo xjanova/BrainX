@@ -1,0 +1,76 @@
+name: CI
+
+# Does it compile, and do the checks pass? That is the whole job.
+#
+# build-and-release.yml only fires on push to main, which means a pull request
+# had NO build at all: the first time anything got compiled was after it was
+# merged, on the branch that publishes releases. A compile error found there
+# costs a red release build and a revert; found here it costs a re-push.
+#
+# Deliberately NOT the release pipeline. That one publishes three
+# self-contained runtimes and packs a Velopack installer — minutes of work to
+# answer a question the compiler answers in seconds. Release stays the only
+# thing that builds release artifacts; this is only the gate in front of it.
+on:
+  pull_request:
+  push:
+    # main has build-and-release.yml, which builds everything this does and
+    # more. Running both would double the queue for one answer.
+    branches-ignore: [main]
+
+# A second push supersedes the first: the older run is answering a question
+# about code that no longer exists.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # windows-latest is not a preference. BrainX.Client is WPF and does not
+    # compile anywhere else, and the solution builds as one unit.
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # BrainX.Mcp.csproj derives its version from `git rev-list --count
+          # HEAD`. A shallow clone makes that count wrong (and on some runners,
+          # fail), so the build would stamp a version nobody can compare.
+          fetch-depth: 0
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore BrainX.slnx
+
+      - name: Build
+        run: dotnet build BrainX.slnx -c Release --no-restore
+
+      # The harness spawns ITSELF as a stub MCP child, so it has to be the
+      # built executable — `dotnet run` puts the SDK's host in the middle and
+      # the harness refuses to run that way (see BrainX.Tests/Program.cs).
+      - name: Verification harness
+        run: .\BrainX.Tests\bin\Release\net10.0\BrainX.Tests.exe
+
+      # The HUD is plain ES modules loaded straight into WebView2 — no bundler,
+      # so nothing else would ever catch a syntax error in them. A broken
+      # module does not degrade one panel, it stops the file parsing and takes
+      # the entire HUD dark (which has happened once already, see the note in
+      # hud.js about a redeclared `esc`).
+      - name: Parse HUD modules
+        shell: bash
+        run: |
+          fail=0
+          for f in BrainX.Client/wwwroot/universe/*.js; do
+            if node --input-type=module --check < "$f"; then
+              echo "ok   $f"
+            else
+              echo "FAIL $f"
+              fail=1
+            fi
+          done
+          exit $fail
