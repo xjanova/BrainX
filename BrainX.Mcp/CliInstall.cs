@@ -48,6 +48,8 @@ internal static class CliInstall
         Console.WriteLine("  brainx-mcp register-claude [--vault] Re-register this binary with Claude Code (auto-includes");
         Console.WriteLine("                                          server name stays \"brainx-brain\"; BRAINX_MCP_VERSION env var is self-healed on every MCP boot)");
         Console.WriteLine("  brainx-mcp register-codex [--vault]  Re-register this binary with the OpenAI Codex CLI");
+        Console.WriteLine("  brainx-mcp register-gemini [--vault] Re-register this binary with Google's Gemini CLI");
+        Console.WriteLine("                                          (merges into ~/.gemini/settings.json; verify with /mcp)");
         Console.WriteLine("                                          (same stdio MCP binary — `codex mcp add`; verify with `codex mcp list`)");
         Console.WriteLine("  brainx-mcp bake-bundles [options]    Pre-bake ~500-token context bundles for top topics so");
         Console.WriteLine("                                          brain_bundle <topic> answers in ONE cheap MCP call");
@@ -317,6 +319,23 @@ internal static class CliInstall
         Console.WriteLine($"── {title} ──────────────────────────────");
     }
 
+    /// <summary>
+    /// Where the brain lives, for a command that is about to write that path
+    /// into somebody's config.
+    ///
+    /// The last resort used to be the current directory, full stop — and that
+    /// is how `register-gemini`, run from a checkout, registered the SOURCE
+    /// REPO as the vault and then installed AGENTS.md into it. A wrong vault is
+    /// worse than no vault: the agent connects, finds an empty brain, and
+    /// reports that everything is fine.
+    ///
+    /// So an existing registration is consulted before the cwd is trusted. The
+    /// owner already told Claude where the vault is; asking that file is more
+    /// reliable than guessing from wherever a terminal happens to be sitting.
+    /// The cwd remains the final fallback for a genuinely first-time install,
+    /// but a directory that carries a .obsidianx folder is preferred over one
+    /// that does not, so "I ran it from the wrong place" stops being silent.
+    /// </summary>
     private static string ResolveVault(string? explicitVault)
     {
         if (!string.IsNullOrWhiteSpace(explicitVault) && Directory.Exists(explicitVault))
@@ -324,7 +343,41 @@ internal static class CliInstall
         var env = Environment.GetEnvironmentVariable("BRAINX_VAULT");
         if (!string.IsNullOrWhiteSpace(env) && Directory.Exists(env))
             return Path.GetFullPath(env);
-        return Path.GetFullPath(Environment.CurrentDirectory);
+
+        var cwd = Path.GetFullPath(Environment.CurrentDirectory);
+        if (LooksLikeVault(cwd)) return cwd;
+
+        var registered = VaultFromExistingRegistration();
+        if (registered != null) return registered;
+
+        return cwd;
+    }
+
+    /// <summary>A vault is a directory the brain has already indexed — which
+    /// is exactly the directory carrying its <c>.obsidianx</c> state.</summary>
+    private static bool LooksLikeVault(string dir) =>
+        Directory.Exists(Path.Combine(dir, ".obsidianx"));
+
+    /// <summary>
+    /// BRAINX_VAULT from whatever registration already exists in
+    /// <c>~/.claude.json</c>. Read-only and best-effort: a missing or
+    /// unparseable file just means we learned nothing, never an error.
+    /// </summary>
+    private static string? VaultFromExistingRegistration()
+    {
+        try
+        {
+            var path = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude.json");
+            if (!File.Exists(path)) return null;
+
+            var root = JObject.Parse(File.ReadAllText(path));
+            var vault = root["mcpServers"]?[McpServerName]?["env"]?["BRAINX_VAULT"]?.ToString();
+            return !string.IsNullOrWhiteSpace(vault) && Directory.Exists(vault)
+                ? Path.GetFullPath(vault)
+                : null;
+        }
+        catch { return null; }
     }
 
     /// <summary>
@@ -608,6 +661,142 @@ internal static class CliInstall
     /// ~/.claude.json directly). See note "BrainX MCP → third-party agents
     /// (Codex/Chrome/ChatGPT) — two-track exposure design".
     /// </summary>
+    // ── Google Gemini CLI registration ───────────────────────────────────
+
+    /// <summary>
+    /// `brainx-mcp register-gemini` — register THIS binary with Google's
+    /// Gemini CLI, which reads stdio MCP servers from a top-level
+    /// <c>mcpServers</c> object in <c>~/.gemini/settings.json</c>.
+    ///
+    /// WHY THIS ONE EDITS JSON DIRECTLY instead of shelling out the way the
+    /// Codex path does: Gemini CLI has no `mcp add` subcommand to delegate to,
+    /// and it reads that file at startup rather than owning it as live state.
+    /// So the file is merged, never rewritten — every unrelated key the owner
+    /// has set (theme, model, telemetry) is preserved, and only keys that are
+    /// ours are touched.
+    ///
+    /// AND IT DOES NOT REQUIRE THE CLI TO BE INSTALLED YET. That is deliberate:
+    /// registering first and installing second is a perfectly ordinary order,
+    /// and refusing to write a config for an absent binary would mean the owner
+    /// has to remember to come back. The file is inert until something reads it.
+    /// </summary>
+    public static Task<int> RegisterGeminiAsync(string[] args)
+    {
+        string? vaultArg = null;
+        bool showHelp = false;
+        for (int i = 0; i < args.Length; i++)
+        {
+            switch (args[i])
+            {
+                case "--vault" when i + 1 < args.Length: vaultArg = args[++i]; break;
+                case "-h" or "--help" or "help": showHelp = true; break;
+            }
+        }
+        if (showHelp)
+        {
+            Console.WriteLine("Usage: brainx-mcp register-gemini [--vault PATH]");
+            Console.WriteLine();
+            Console.WriteLine("Adds this binary to ~/.gemini/settings.json under mcpServers, which is");
+            Console.WriteLine("where Google's Gemini CLI looks for stdio MCP servers. Everything else in");
+            Console.WriteLine("that file is left exactly as it was.");
+            Console.WriteLine();
+            Console.WriteLine("Gemini speaks the same stdio MCP protocol as Claude and Codex, so the same");
+            Console.WriteLine("brainx-mcp binary serves it with no server change and nothing on a network.");
+            Console.WriteLine("Verify with `/mcp` inside the Gemini CLI after restarting it.");
+            return Task.FromResult(0);
+        }
+
+        var vault = ResolveVault(vaultArg);
+        var exePath = ResolveSelfPath();
+        var pathQuality = ClassifyExePath(exePath);
+        Console.WriteLine($"brainx-mcp register-gemini · v{Program.ServerVersion}");
+        Console.WriteLine($"  exe:   {exePath}");
+        Console.WriteLine($"  vault: {vault}");
+        Console.WriteLine();
+        if (pathQuality != ExePathQuality.Ok)
+        {
+            Console.WriteLine($"  ⚠  {DescribePathQuality(pathQuality)}");
+            Console.WriteLine("     Run this command from the published Release exe instead.");
+            return Task.FromResult(2);
+        }
+
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var dir = Path.Combine(home, ".gemini");
+        var path = Path.Combine(dir, "settings.json");
+
+        JObject json;
+        if (File.Exists(path))
+        {
+            try
+            {
+                json = JObject.Parse(File.ReadAllText(path));
+            }
+            catch (Exception ex)
+            {
+                // Refuse rather than overwrite. A settings file that will not
+                // parse is either hand-edited or half-written, and replacing it
+                // with our one key would silently delete the owner's config.
+                Console.WriteLine($"  ✗ {path} exists but is not valid JSON: {ex.Message}");
+                Console.WriteLine("     Fix or move that file, then re-run. Nothing was written.");
+                return Task.FromResult(4);
+            }
+        }
+        else
+        {
+            json = new JObject();
+            Console.WriteLine($"  ⓘ  no settings file yet — creating {path}");
+        }
+
+        if (json["mcpServers"] is not JObject servers)
+        {
+            servers = new JObject();
+            json["mcpServers"] = servers;
+        }
+
+        // Same stale-key sweep as the Desktop path: a version-suffixed key from
+        // an older build must not survive as a second, dead entry.
+        foreach (var k in servers.Properties()
+                     .Where(p => p.Name.StartsWith(McpServerName, StringComparison.OrdinalIgnoreCase))
+                     .Select(p => p.Name).ToList())
+            servers.Remove(k);
+
+        servers[McpServerName] = new JObject
+        {
+            ["command"] = exePath,
+            ["args"] = new JArray(),
+            ["env"] = new JObject
+            {
+                ["BRAINX_VAULT"] = vault,
+                ["BRAINX_MCP_VERSION"] = Program.ServerVersion,
+            },
+        };
+
+        try
+        {
+            Directory.CreateDirectory(dir);
+            // File.WriteAllText is UTF-8 WITHOUT a BOM on .NET, which is what
+            // this file needs: a BOM in front of `{` is a parse error for every
+            // JSON reader that does not special-case it.
+            File.WriteAllText(path, json.ToString(Newtonsoft.Json.Formatting.Indented));
+            Console.WriteLine($"  ✓ registered \"{McpServerName}\"");
+            Console.WriteLine($"  → {path}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  ✗ failed to write {path}: {ex.Message}");
+            return Task.FromResult(5);
+        }
+
+        var rules = CodexAgentsRulesInstaller.EnsureInstalled(vault);
+        Console.WriteLine($"  brain-first rules (AGENTS.md): {rules} (v{CodexAgentsRulesInstaller.RuleVersion})");
+
+        Console.WriteLine();
+        Console.WriteLine("✓ Done. Start the Gemini CLI and run /mcp to confirm it sees the brain.");
+        Console.WriteLine("  Not installed yet? `npm install -g @google/gemini-cli` — this registration");
+        Console.WriteLine("  is already in place and will be picked up the first time it starts.");
+        return Task.FromResult(0);
+    }
+
     public static async Task<int> RegisterCodexAsync(string[] args)
     {
         string? vaultArg = null;

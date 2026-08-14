@@ -106,6 +106,11 @@ internal static partial class Program
             Console.OutputEncoding = new UTF8Encoding(false);
             return await CliInstall.RegisterCodexAsync(args.Skip(1).ToArray()).ConfigureAwait(false);
         }
+        if (args.Length > 0 && args[0].Equals("register-gemini", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.OutputEncoding = new UTF8Encoding(false);
+            return await CliInstall.RegisterGeminiAsync(args.Skip(1).ToArray()).ConfigureAwait(false);
+        }
         if (args.Length > 0 && (args[0].Equals("bake-bundles", StringComparison.OrdinalIgnoreCase)
                               || args[0].Equals("bake", StringComparison.OrdinalIgnoreCase)))
         {

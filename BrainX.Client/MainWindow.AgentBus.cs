@@ -95,7 +95,7 @@ public partial class MainWindow
     /// allowlisted or not.
     /// </summary>
     private static readonly string[] BusWellKnownAgents =
-        { "claude", "codex", "cluadex", "grok", "local-agent-mode-brainx-brain" };
+        { "claude", "codex", "cluadex", "grok", "gemini", "local-agent-mode-brainx-brain" };
 
     /// <summary>
     /// Agents that are a VARIANT of another agent rather than a peer of it:
@@ -139,6 +139,7 @@ public partial class MainWindow
         // grey. Separation between nodes is what this palette is for; brand
         // fidelity that nobody can see is not fidelity.
         ["grok"] = Color.FromRgb(0xF5, 0xA6, 0x23),   // Grok amber
+        ["gemini"] = Color.FromRgb(0x4E, 0x8C, 0xFF),   // Gemini blue
         ["unity"] = Color.FromRgb(0xC9, 0xCF, 0xD6),   // Unity light grey
         ["unreal"] = Color.FromRgb(0x4F, 0xB3, 0xE8),   // Unreal blue
     };

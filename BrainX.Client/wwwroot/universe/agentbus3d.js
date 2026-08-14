@@ -25,6 +25,10 @@ const AGENT_COLORS = {
     // Amber rather than xAI's monochrome: black vanishes on a starfield and
     // white collides with unity's grey. See the same note in MainWindow.AgentBus.cs.
     grok:    0xf5a623,
+    // Gemini blue. Close to the brain's own 0x6fa8ff, but the brain is the
+    // star at the centre and Gemini is a planet on an orbit — they are never
+    // adjacent, and no other agent owns this hue.
+    gemini:  0x4e8cff,
     unity:   0xc9cfd6,
     unreal:  0x4fb3e8,
     brain:   0x6fa8ff,
@@ -744,7 +748,7 @@ function labelTexture(name, color) {
  *  match how the product spells itself — plain capitalisation gave "Cluadex".
  *  Keep in sync with BusDisplayName in MainWindow.AgentBus.cs. */
 const DISPLAY_NAMES = {
-    claude: 'Claude', codex: 'Codex', cluadex: 'CluadeX', grok: 'Grok',
+    claude: 'Claude', codex: 'Codex', cluadex: 'CluadeX', grok: 'Grok', gemini: 'Gemini',
     unity: 'Unity', unreal: 'Unreal', brain: 'BrainX',
     // The bus identity derives from the provenance tag, so an agent running in
     // local-agent mode announces itself as the whole slug. Twenty-nine
