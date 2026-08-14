@@ -78,14 +78,18 @@ internal static partial class Program
             if (!TryEnterVault(args)) return 0;
 
             var tasks = OpenTasksForWake();
-            if (tasks.Count == 0) return 0;
+            var mail = UnreadMailForWake();
+            if (tasks.Count == 0 && mail.Count == 0) return 0;
 
-            // Layer 3. Only tasks that have not woken anyone recently count.
+            // Layer 3. Only tasks/messages that have not woken anyone recently
+            // count. Mail shares the stamp space because its id is unique too.
             var fresh = tasks.Where(t => !WakeIsCoolingDown(t.Id)).ToList();
-            if (fresh.Count == 0) return 0;
+            var freshMail = mail.Where(m => !WakeIsCoolingDown(m.Id)).ToList();
+            if (fresh.Count == 0 && freshMail.Count == 0) return 0;
             foreach (var t in fresh) StampWake(t.Id);
+            foreach (var m in freshMail) StampWake(m.Id);
 
-            Console.Error.WriteLine(BuildWakeMessage(fresh, forStop: true));
+            Console.Error.WriteLine(BuildWakeMessage(fresh, freshMail, forStop: true));
             return 2;
         }
         catch
@@ -111,12 +115,13 @@ internal static partial class Program
             if (!TryEnterVault(args)) return 0;
 
             var tasks = OpenTasksForWake();
-            if (tasks.Count == 0) return 0;
+            var mail = UnreadMailForWake();
+            if (tasks.Count == 0 && mail.Count == 0) return 0;
 
             // No cooldown and no stamp here. Opening a session is the owner
             // asking "what is there", and the answer must not depend on
             // whether some earlier session was told the same thing.
-            Console.WriteLine(BuildWakeMessage(tasks, forStop: false));
+            Console.WriteLine(BuildWakeMessage(tasks, mail, forStop: false));
             return 0;
         }
         catch { return 0; }
@@ -173,29 +178,98 @@ internal static partial class Program
     /// notification: the Stop hook's stderr is the model's next input, and
     /// "you have 1 task" without a next step just produces a sentence back.
     /// </summary>
-    private static string BuildWakeMessage(List<WakeTask> tasks, bool forStop)
+    private static string BuildWakeMessage(List<WakeTask> tasks, List<WakeMail> mail, bool forStop)
     {
+        var what = new List<string>();
+        if (tasks.Count > 0) what.Add($"{tasks.Count} task(s) queued");
+        if (mail.Count > 0) what.Add($"{mail.Count} unread message(s)");
+
         var lines = new List<string>
         {
-            forStop
-                ? $"BrainX: do not stop yet — {tasks.Count} task(s) are queued for you on this brain."
-                : $"BrainX: {tasks.Count} task(s) are queued for you on this brain."
+            (forStop ? "BrainX: do not stop yet — " : "BrainX: ")
+                + string.Join(" and ", what) + " for you on this brain."
         };
-        foreach (var t in tasks)
-            lines.Add($"  • {t.Id} — {t.Title}" + (t.Priority == "high" ? "  [HIGH]" : ""));
 
-        lines.Add("");
-        lines.Add("Another agent specced this work and cannot build it. Continue with it now:");
-        lines.Add("  1. task_queue, then read the full spec (brain_get_note on its path) — the Context");
-        lines.Add("     section is the half you cannot reconstruct from the repo.");
-        lines.Add("  2. task_update {task_id, status:'claimed'} BEFORE you touch code.");
-        lines.Add("  3. Build it, then task_update {task_id, status:'done', note:'…files changed…'}.");
-        lines.Add("     That note is the only report the other side will ever see.");
-        lines.Add("Tell your user which task you picked up and from whom.");
-        lines.Add("If it is genuinely not yours to do, task_update {status:'blocked', note:'why'} —");
-        lines.Add("do not leave it open, or it will wake the next session too.");
+        if (mail.Count > 0)
+        {
+            lines.Add("");
+            foreach (var m in mail)
+                lines.Add($"  ✉ from {m.From}" + (m.Topic.Length > 0 ? $" — {m.Topic}" : ""));
+            lines.Add("Call agent_inbox NOW to read them, act on what they say, and reply with");
+            lines.Add("agent_send. A peer that gets no answer assumes the work is still moving.");
+        }
+
+        if (tasks.Count > 0)
+        {
+            lines.Add("");
+            foreach (var t in tasks)
+                lines.Add($"  • {t.Id} — {t.Title}" + (t.Priority == "high" ? "  [HIGH]" : ""));
+            lines.Add("");
+            lines.Add("Another agent specced this work and cannot build it. Continue with it now:");
+            lines.Add("  1. task_queue, then read the full spec (brain_get_note on its path) — the Context");
+            lines.Add("     section is the half you cannot reconstruct from the repo.");
+            lines.Add("  2. task_update {task_id, status:'claimed'} BEFORE you touch code.");
+            lines.Add("  3. Build it, then task_update {task_id, status:'done', note:'…files changed…'}.");
+            lines.Add("     That note is the only report the other side will ever see.");
+            lines.Add("Tell your user which task you picked up and from whom.");
+            lines.Add("If it is genuinely not yours to do, task_update {status:'blocked', note:'why'} —");
+            lines.Add("do not leave it open, or it will wake the next session too.");
+        }
+        else
+        {
+            lines.Add("Tell your user what arrived and from whom — never work a peer's message silently.");
+        }
         return string.Join('\n', lines);
     }
+
+    // ───────────── unread mail ─────────────
+
+    /// <summary>
+    /// Peer mail sitting unread in this brain's inbox.
+    ///
+    /// A queued task was only half the problem. The Iron Ward MV stalled for an
+    /// hour on 2026-08-14 with no task anywhere: Claude finished a turn saying
+    /// "shot_001 is done, come pick a frame", Codex answered three times, and
+    /// nobody ever saw it — a session that has answered makes no further tool
+    /// call, and the agentBus notice can only ride on one. The work was done and
+    /// on disk; the only thing missing was somebody being told.
+    ///
+    /// So mail wakes too. This deliberately does NOT consume anything — reading
+    /// is agent_inbox's job and consuming here would destroy the message on the
+    /// way to announcing it. The hook says "you have mail"; the model reads it.
+    ///
+    /// Every Claude session shares one "claude" inbox, so BOTH names are
+    /// checked: whichever one the sender guessed is the one that holds it.
+    /// </summary>
+    private static List<WakeMail> UnreadMailForWake()
+    {
+        var found = new List<WakeMail>();
+        foreach (var box in new[] { "claude", "claude-code" })
+        {
+            var dir = Path.Combine(BusRoot, "inbox", box);
+            if (!Directory.Exists(dir)) continue;
+
+            foreach (var file in new DirectoryInfo(dir).GetFiles("*.json"))
+            {
+                try
+                {
+                    var o = JObject.Parse(File.ReadAllText(file.FullName));
+                    var id = o["id"]?.ToString();
+                    if (string.IsNullOrWhiteSpace(id)) continue;
+                    found.Add(new WakeMail(
+                        id!,
+                        o["from"]?.ToString() ?? "another agent",
+                        o["topic"]?.ToString() ?? ""));
+                }
+                catch { /* a half-written message is next tick's problem */ }
+
+                if (found.Count >= 5) return found;
+            }
+        }
+        return found;
+    }
+
+    private sealed record WakeMail(string Id, string From, string Topic);
 
     // ───────────── cooldown ─────────────
 
