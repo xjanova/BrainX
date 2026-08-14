@@ -568,6 +568,11 @@ public partial class MainWindow
                     {
                         id = obj["id"]?.ToString() ?? f.Name,
                         ts = ts.ToLocalTime().ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture),
+                        // Sortable twin of ts. The display string is "HH:mm",
+                        // which cannot order a merge with the work feed — and
+                        // across midnight it would order it wrongly, which is
+                        // worse than not ordering it at all.
+                        at = new DateTimeOffset(DateTime.SpecifyKind(ts, DateTimeKind.Utc)).ToUnixTimeMilliseconds(),
                         from = obj["from"]?.ToString() ?? "?",
                         // The recipient is the folder, not a field: a message
                         // addressed to "all" is fanned out as one file per
@@ -597,8 +602,106 @@ public partial class MainWindow
         // Oldest first — the panel reads downward like any chat.
         var ordered = msgs.OrderBy(m => m.Ts).Select(m => m.Payload).ToList();
         if (ordered.Count > HudChatKeep) ordered = ordered.Skip(ordered.Count - HudChatKeep).ToList();
-        PostHud("hudChat", new { messages = ordered });
+        PostHud("hudChat", new { messages = ordered, work = ReadHudWork() });
     }
+
+    /// <summary>
+    /// What the agents were DOING, for the same panel that shows what they
+    /// SAID — because "claude and codex talked twice in an hour" was never the
+    /// question. The owner's ask (2026-08-14): "ทำให้การทำงานหรือเขียนโค๊ด
+    /// แสดงในหน้าต่างแชทฝั่งนี้ด้วย เพื่อให้ฉันดูการทำงานของพวกคุณได้ถูกต้อง".
+    ///
+    /// Source is the MCP's own work feed, agent-bus/activity/&lt;agent&gt;.ndjson:
+    /// one line per tool call, plus one line per file Claude Code edits (its
+    /// PostToolUse hook writes to the same feed). Deliberately NOT the flow
+    /// ticker's source — presence counters can say a call happened and never
+    /// what it did.
+    ///
+    /// Merged into the chat stream rather than given a card of its own: the
+    /// nine-th HUD zone does not exist, and more to the point the interleaving
+    /// IS the information. "codex asked claude to check the policy" followed by
+    /// "claude-code edited McpRemotePolicy.cs" is a conversation; the same two
+    /// facts in two panels are trivia.
+    ///
+    /// Read backwards from the tail of each file — the head of a long feed is
+    /// history nobody is scrolling to, and the panel keeps 40.
+    /// </summary>
+    private List<object> ReadHudWork()
+    {
+        var items = new List<(DateTime Ts, object Payload)>();
+        var dir = Path.Combine(_vaultPath, ".obsidianx", "agent-bus", "activity");
+        if (!Directory.Exists(dir)) return [];
+
+        try
+        {
+            foreach (var file in Directory.GetFiles(dir, "*.ndjson"))
+            {
+                var agent = Path.GetFileNameWithoutExtension(file);
+
+                string[] lines;
+                // FileShare.ReadWrite: the MCP appends to this file while we
+                // read it, and an exclusive open would throw on every tick that
+                // happened to land mid-write.
+                try
+                {
+                    using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                    using var reader = new StreamReader(stream);
+                    lines = reader.ReadToEnd().Split('\n');
+                }
+                catch { continue; }
+
+                var taken = 0;
+                for (var i = lines.Length - 1; i >= 0 && taken < HudWorkKeep; i--)
+                {
+                    var raw = lines[i].Trim();
+                    if (raw.Length == 0) continue;
+
+                    Newtonsoft.Json.Linq.JObject o;
+                    try { o = Newtonsoft.Json.Linq.JObject.Parse(raw); }
+                    catch { continue; }   // a torn append is skipped, never fatal
+
+                    if (!DateTime.TryParse(o["ts"]?.ToString(), null,
+                            System.Globalization.DateTimeStyles.AssumeUniversal |
+                            System.Globalization.DateTimeStyles.AdjustToUniversal,
+                            out var ts))
+                        continue;
+
+                    var tool = o["tool"]?.ToString() ?? "";
+                    var ok = o["ok"]?.ToObject<bool?>() ?? true;
+
+                    items.Add((ts, new
+                    {
+                        // Stable identity so the panel can keep a row's open
+                        // state across the two-second rebuild. Nothing in a
+                        // line is unique on its own; the triple is.
+                        id = $"w|{agent}|{ts.Ticks}|{tool}",
+                        at = new DateTimeOffset(DateTime.SpecifyKind(ts, DateTimeKind.Utc)).ToUnixTimeMilliseconds(),
+                        ts = ts.ToLocalTime().ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture),
+                        agent = o["agent"]?.ToString() is { Length: > 0 } a ? a : agent,
+                        tool,
+                        summary = Trim(o["summary"]?.ToString() ?? "", 200),
+                        ok,
+                        error = ok ? "" : Trim(o["error"]?.ToString() ?? "", 200),
+                        write = IsWriteOp(tool),
+                    }));
+                    taken++;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"ReadHudWork: {ex.Message}");
+            return [];
+        }
+
+        return items.OrderBy(i => i.Ts).TakeLast(HudWorkKeep).Select(i => i.Payload).ToList();
+    }
+
+    /// <summary>How many work events ride along with the chat window. Smaller
+    /// than HudChatKeep on purpose: an agent emits work far faster than it
+    /// emits words, and a feed where every message is buried under forty tool
+    /// calls has hidden the thing the panel is named after.</summary>
+    private const int HudWorkKeep = 40;
 
     /// <summary>How much conversation the chat card holds. Matches CHAT_KEEP
     /// in hud.js: the host trimming to a different depth than the panel keeps

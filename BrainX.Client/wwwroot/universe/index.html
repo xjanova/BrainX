@@ -485,6 +485,13 @@
              the whole point. Reads bottom-up like any chat: newest last. -->
         <section class="hud-panel hud-bc hud-panel-chat">
             <div class="hud-title"><span class="hud-dot"></span>Agent Chat
+                <!-- Work rows share this timeline: what the agents DID, in
+                     between what they said. On by default — seeing the work is
+                     the point — but an agent emits tool calls far faster than
+                     it emits words, so the words stay findable behind one
+                     click. The choice is remembered. -->
+                <button type="button" class="hud-chip" id="hud-chat-work"
+                        title="Show what the agents are doing, not only what they said">WORK</button>
                 <span class="hud-sub" id="hud-chat-count">—</span>
             </div>
             <ol class="hud-chat" id="hud-chat" aria-label="Messages between agents"></ol>

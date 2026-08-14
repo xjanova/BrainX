@@ -762,6 +762,91 @@ body.hud-active #settings-toggle {
     font-size: 10px;
 }
 
+/* ── Work rows ────────────────────────────────────────────────────
+   What an agent DID, sharing the timeline with what it said. Rendered
+   deliberately quieter than a message: no card background, no border-left
+   block, one line — the eye should be able to skim past forty tool calls to
+   find the two sentences between them, and still be able to read the forty
+   when that is what it came for. */
+
+.hud-chat > li.ch-work {
+    display: flex;
+    align-items: baseline;
+    gap: 5px;
+    padding: 1px 7px;
+    background: none;
+    border-left: 2px solid transparent;
+    border-radius: 0;
+    font-size: 9.5px;
+    /* Not clickable: a work row has nothing folded away to open. */
+    cursor: default;
+}
+
+/* The tint appears as a dot rather than a bar — enough to tie the row to its
+   planet without giving a tool call the visual weight of a sentence. */
+.hud-chat > li.ch-work::before {
+    content: '';
+    flex: none;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: var(--ch-tint, var(--ink-faint));
+    opacity: 0.75;
+}
+
+.hud-chat .cw-t { color: var(--ink-faint); flex: none; }
+.hud-chat .cw-who { color: var(--ch-tint, var(--ink-dim)); font-weight: 600; flex: none; }
+.hud-chat .cw-tool { color: var(--ink-dim); flex: none; }
+.hud-chat .cw-sum {
+    color: var(--ink-faint);
+    /* The summary is the first thing that may run long, so it is the first
+       thing that gives — the timestamp, agent and tool all stay readable. */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* A write is not a read. Same distinction the flow motes already make, so a
+   glance can tell "it looked at the brain" from "it changed something". */
+.hud-chat > li.ch-work.is-write .cw-tool { color: var(--ink); }
+
+/* A failed call is the most interesting row in the feed and the only one
+   allowed to shout — "it is stuck" and "it errored four times" are different
+   facts, and the second one is actionable. */
+.hud-chat > li.ch-work.is-failed .cw-tool,
+.hud-chat > li.ch-work.is-failed .cw-err { color: #e86c5a; }
+.hud-chat > li.ch-work.is-failed::before { background: #e86c5a; opacity: 1; }
+.hud-chat .cw-err {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* The WORK chip in the panel title. Off state stays legible rather than
+   fading out — a switch nobody can find is a switch nobody turns back on. */
+.hud-title .hud-chip {
+    font: inherit;
+    font-size: 8.5px;
+    letter-spacing: 0.5px;
+    line-height: 1;
+    padding: 2px 5px;
+    margin-left: 4px;
+    border-radius: 3px;
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--ink-dim);
+    cursor: pointer;
+    /* .hud-sub carries margin-left:auto and pushes the count to the right
+       edge; the chip must not be what gives when the title runs out of room. */
+    flex: none;
+}
+.hud-title .hud-chip:hover { border-color: rgba(255, 255, 255, 0.4); color: var(--ink); }
+.hud-title .hud-chip.is-off {
+    background: none;
+    color: var(--ink-faint);
+    border-style: dashed;
+}
+
 /* ── Feed ─────────────────────────────────────────────────────── */
 
 .hud-feed {

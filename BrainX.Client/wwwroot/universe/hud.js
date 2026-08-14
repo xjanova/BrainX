@@ -457,8 +457,22 @@ const CHAT_KEEP = 60;
 const _chatSeen = new Set();
 let _chatPrimed = false;
 
+/* Work rows share the chat's timeline. The owner's ask was to see the agents
+   WORKING here, not only talking — "codex asked claude to check the policy"
+   followed by "claude-code edited McpRemotePolicy.cs" is one conversation, and
+   splitting it across two panels turns it back into two pieces of trivia.
+
+   Toggleable and remembered, because an agent emits work far faster than it
+   emits words: on a busy day the words need to be findable again. Its own key
+   (not the card prefs blob) for the same reason card prefs got their own —
+   an unrelated write must never be able to blank someone's HUD. */
+const CHAT_WORK_KEY = 'obsidianx.hud.chat.work.v1';
+let _chatShowWork = localStorage.getItem(CHAT_WORK_KEY) !== '0';
+
 function renderChat(d = {}) {
+    _chatLast = d;
     const msgs = d.messages || [];
+    const work = _chatShowWork ? (d.work || []) : [];
     const el = document.getElementById('hud-chat');
     setText('hud-chat-count', msgs.length ? `${msgs.length}` : '—');
     if (!el) return;
@@ -485,12 +499,44 @@ function renderChat(d = {}) {
     // every two seconds would otherwise collapse whatever is being read.
     const open = new Set([...el.querySelectorAll('li.is-open')].map(li => li.dataset.id));
 
+    // One timeline. Sorting on `at` (epoch ms) rather than the displayed
+    // "HH:mm" — that string cannot order a merge, and across midnight it
+    // orders it wrongly, which is worse than leaving it unordered. Rows with
+    // no `at` (an older host build that predates the field) keep their arrival
+    // order at the end rather than being dropped.
+    const rows = [
+        ...msgs.map(m => ({ kind: 'msg', at: m.at ?? Number.MAX_SAFE_INTEGER, d: m })),
+        ...work.map(w => ({ kind: 'work', at: w.at ?? Number.MAX_SAFE_INTEGER, d: w })),
+    ].sort((a, b) => a.at - b.at).slice(-(CHAT_KEEP + WORK_KEEP));
+
     el.innerHTML = '';
-    for (const m of msgs.slice(-CHAT_KEEP)) {
+    for (const row of rows) {
         const li = document.createElement('li');
-        li.dataset.id = m.id || '';
+        li.dataset.id = row.d.id || '';
+        if (open.has(row.d.id)) li.classList.add('is-open');
+
+        if (row.kind === 'work') {
+            const w = row.d;
+            li.classList.add('ch-work');
+            if (!w.ok) li.classList.add('is-failed');
+            if (w.write) li.classList.add('is-write');
+            li.style.setProperty('--ch-tint', agentColor(w.agent));
+            // No expand affordance: a work row is already one line of the two
+            // facts it has. The failure text is the exception, and it is shown
+            // inline rather than hidden behind a click — an error nobody opens
+            // is an error nobody sees.
+            li.innerHTML =
+                `<span class="cw-t">${esc(w.ts)}</span>` +
+                `<span class="cw-who">${esc(agentLabel(w.agent))}</span>` +
+                `<span class="cw-tool">${esc(w.tool)}</span>` +
+                (w.summary ? `<span class="cw-sum">${esc(w.summary)}</span>` : '') +
+                (!w.ok && w.error ? `<span class="cw-err">${esc(w.error)}</span>` : '');
+            el.appendChild(li);
+            continue;
+        }
+
+        const m = row.d;
         if (m.pending) li.classList.add('is-pending');
-        if (open.has(m.id)) li.classList.add('is-open');
         li.style.setProperty('--ch-tint', agentColor(m.from));
         li.innerHTML =
             `<div class="ch-head">` +
@@ -509,6 +555,31 @@ function renderChat(d = {}) {
     }
     if (stick) el.scrollTop = el.scrollHeight;
 }
+
+/** Work rows the panel keeps alongside the conversation. Matches HudWorkKeep
+ *  on the host — trimming to a different depth than the host sends would
+ *  either waste the payload or cut history the panel promised to scroll. */
+const WORK_KEEP = 40;
+
+/** The WORK chip in the chat title. Re-renders from the last payload rather
+ *  than waiting for the next tick, so the toggle feels like a switch and not
+ *  like a request. */
+function initChatWorkToggle() {
+    const btn = document.getElementById('hud-chat-work');
+    if (!btn) return;
+    const paint = () => btn.classList.toggle('is-off', !_chatShowWork);
+    paint();
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        _chatShowWork = !_chatShowWork;
+        try { localStorage.setItem(CHAT_WORK_KEY, _chatShowWork ? '1' : '0'); } catch { }
+        paint();
+        if (_chatLast) renderChat(_chatLast);
+    });
+}
+
+/** Last chat payload, kept only so the WORK chip can repaint without one. */
+let _chatLast = null;
 
 /* ── Card visibility ──────────────────────────────────────────────
    Eight readouts over a galaxy is a lot of glass. These switches are the
@@ -567,7 +638,17 @@ function wireCardToggles() {
     });
 }
 
-const agentColor = (n) => FLOW_COLORS[String(n).toLowerCase()] || '#8e9aa6';
+/* Exact name first, then the vendor before the first dash. The work feed
+ * names its agents finer than the bus does — claude-code and claude-chat are
+ * two surfaces of one vendor, and telling them apart is the entire reason that
+ * feed exists — but they are still Claude, and both must wear Claude's colour
+ * or the tint stops tying a row to the planet that produced it. Exact-first
+ * matters: 'local-agent-mode-brainx-brain' is a whole name, not a prefixed
+ * one, and splitting it would paint it as an unknown 'local'. */
+const agentColor = (n) => {
+    const k = String(n).toLowerCase();
+    return FLOW_COLORS[k] || FLOW_COLORS[k.split('-')[0]] || '#8e9aa6';
+};
 /* Filled in when agentbus3d loads. Until then the raw name is shown rather
  * than a guess at a shorter one — a wrong short label is worse than a long
  * right one. */
@@ -998,6 +1079,9 @@ export function initHud() {
     // placed rect, or restoring it later would put it back at a size the
     // layout took while it was display:none.
     wireCardToggles();
+    // Before the first payload lands, so the chip is already painted in the
+    // owner's remembered state rather than flipping once data arrives.
+    initChatWorkToggle();
     initBus();
     // Grid first, then the owner's own arrangement on top of it: the layout
     // module measures the panels where the grid put them, so it has to run
