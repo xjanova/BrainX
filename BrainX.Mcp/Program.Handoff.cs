@@ -236,9 +236,11 @@ internal static partial class Program
             ["path"] = relPath.Replace("\\", "/"),
             ["id"] = ComputeStableId(fullPath),
             ["warning"] = warning,
-            ["hint"] = $"Task {taskId} is queued for '{assignee}'. It sees a `taskQueue` block on its next tool call — "
-                     + "there is no way to interrupt an idle agent, so if it is not working right now, tell the owner to "
-                     + "open it and say 'ทำ task' / 'do the open task'. Do NOT write the code yourself."
+            ["hint"] = $"Task {taskId} is queued for '{assignee}'. It sees a `taskQueue` block on its next tool call, "
+                     + "its Stop hook re-opens its turn with the task the moment it finishes what it is doing, and "
+                     + "SessionStart shows it on open — but nothing can START a process that is not running, so if it "
+                     + "is not open at all, tell the owner to open it. When it finishes, task_update sends the result "
+                     + "back to YOUR inbox. Do NOT write the code yourself."
         };
     }
 
@@ -405,6 +407,17 @@ internal static partial class Program
         LogAccess(ComputeStableId(path), "write", taskId);
         InvalidateSearchMemo();
 
+        // The half of the loop that was missing: "done" used to be something
+        // the requester had to POLL for (the hint literally said "the next
+        // time it reads this task"). Now finishing is something the requester
+        // is TOLD — the notice lands in its inbox, and unread mail already
+        // wakes an agent (Stop hook, SessionStart, agentBus piggyback).
+        string? notified = null;
+        if (transitioned && statusRaw is "done" or "blocked")
+            notified = TryNotifyHandoffOrigin(
+                taskId, TitleOf(text, Path.GetFileName(path)), prev, statusRaw!, note,
+                fm.GetValueOrDefault("handed_off_by", ""), me);
+
         var newStatus = statusRaw ?? prev;
         return new JObject
         {
@@ -413,15 +426,102 @@ internal static partial class Program
             ["status"] = newStatus,
             ["previous_status"] = prev,
             ["by"] = me,
+            ["notified"] = notified,
             ["path"] = (HandoffFolder + "/" + Path.GetFileName(path)),
             ["hint"] = newStatus switch
             {
                 "claimed" => "Claimed. Read the whole spec before touching code, and task_update {status:'done'} with a note naming the files you changed — that note is the only report the agent that handed this off will ever see.",
-                "done" => "Marked done. Tell your user what shipped; the handing-off agent sees the Log the next time it reads this task.",
-                "blocked" => "Marked blocked. Say the same thing to your user — nobody is polling this file.",
+                "done" => notified != null
+                    ? $"Marked done, and a bus notice went to '{notified}' — the agent that handed this off wakes with your note on its next turn or session. That notice is addressed to it, not to you: do NOT consume it from your own inbox. Tell your user what shipped."
+                    : "Marked done. Tell your user what shipped; the handing-off agent sees the Log the next time it reads this task.",
+                "blocked" => notified != null
+                    ? $"Marked blocked, and a bus notice went to '{notified}' so the agent that handed this off learns it must unblock you. Say the same thing to your user."
+                    : "Marked blocked. Say the same thing to your user — nobody is polling this file.",
                 _ => "Updated."
             }
         };
+    }
+
+    /// <summary>
+    /// Tell the agent that handed a task off that the task just finished (or
+    /// hit a wall), by dropping a message in its bus inbox.
+    ///
+    /// Why mail and not a new mechanism: unread mail already wakes an agent —
+    /// the Stop hook re-opens its turn, SessionStart announces it, and every
+    /// tool response piggybacks an agentBus notice. Writing one file into the
+    /// right inbox therefore buys the whole return path, and it costs nothing
+    /// while nobody is running (unlike a watcher that would spend credits).
+    ///
+    /// The message is work-labelled with the task id, so a Claude session on
+    /// an unrelated repo cannot consume it in passing (the 2026-08-14 Iron
+    /// Ward failure) — agent_inbox leaves foreign-work mail in place and says
+    /// which work it belongs to.
+    ///
+    /// Best-effort by contract: the task file is the source of truth and was
+    /// already written; a notification that cannot be delivered must never
+    /// fail the update that it is only announcing.
+    /// </summary>
+    private static string? TryNotifyHandoffOrigin(
+        string taskId, string title, string prevStatus, string newStatus, string? note,
+        string handedOffBy, string me)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(handedOffBy) || handedOffBy.Equals("unknown", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            string origin;
+            try { origin = SanitizeAgentSlug(handedOffBy); }
+            catch { return null; }
+
+            // Same forgiving vendor-prefix rule the queue uses, here as a SELF
+            // test: legacy tasks minted before the identity fix carry
+            // handed_off_by "claude" while the session completing them is
+            // "claude-code" — that is one workplace talking to itself, not a
+            // requester waiting to hear back. ("claude-chat" does NOT prefix-
+            // match "claude-code", so the chat→code flow still notifies.)
+            if (AssigneeMatches(origin, me)) return null;
+
+            // Mailboxes are vendor-coarse (every Claude flavour reads "claude");
+            // handed_off_by is handoff-fine ("claude-chat"). Address the box the
+            // recipient actually reads — a "claude-chat" directory would be mail
+            // nobody can ever open.
+            var box = origin.StartsWith("claude-", StringComparison.Ordinal) ? "claude" : origin;
+
+            var inbox = BusInboxDir(box);
+            Directory.CreateDirectory(inbox);
+            if (Directory.EnumerateFiles(inbox, "*.json").Count() >= MaxInboxPending) return null;
+
+            var verb = newStatus == "done" ? "done" : "BLOCKED";
+            var body = new StringBuilder();
+            body.AppendLine($"Task **{taskId} — {title}** is now **{verb}** ({prevStatus} → {newStatus}, by {me}).");
+            body.AppendLine();
+            body.AppendLine(string.IsNullOrEmpty(note) ? "(no note was left)" : $"Report: {note}");
+            body.AppendLine();
+            body.AppendLine($"Full spec + Log: `{HandoffFolder}/{taskId} ….md` (task_queue {{status:'any'}} lists it).");
+            body.AppendLine();
+            body.AppendLine(newStatus == "done"
+                ? "You handed this off, so the next step is yours: tell your user it shipped, hand off a follow-up with task_handoff, or reply via agent_send if something needs clarifying."
+                : "You handed this off and it is now waiting on YOU: read the note, unblock it (answer via agent_send or update the spec), or tell your user why it stops here.");
+
+            var now = DateTime.UtcNow;
+            var payload = new JObject
+            {
+                ["id"] = $"m-{now.Ticks}-{Guid.NewGuid().ToString("N")[..6]}",
+                ["ts"] = now.ToString("o"),
+                ["from"] = BusIdentity(),
+                ["fromClient"] = _clientName ?? "unknown",
+                ["to"] = box,
+                ["topic"] = $"task {taskId} {newStatus} — {title}",
+                ["work"] = SanitizeAgentSlug(taskId),
+                ["body"] = body.ToString()
+            };
+
+            var file = $"{now.Ticks:D19}-{BusIdentity()}-{Guid.NewGuid().ToString("N")[..4]}.json";
+            AtomicWriteJson(Path.Combine(inbox, file), payload);
+            return box;
+        }
+        catch { return null; }
     }
 
     // ───────────── piggyback notice ─────────────

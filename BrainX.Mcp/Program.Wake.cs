@@ -131,7 +131,7 @@ internal static partial class Program
 
     // ───────────── the queue read ─────────────
 
-    private sealed record WakeTask(string Id, string Title, string Assignee, string Priority);
+    private sealed record WakeTask(string Id, string Title, string Assignee, string Priority, string HandedOffBy);
 
     /// <summary>
     /// Who this hook run is speaking for, from <c>--agent</c>.
@@ -189,7 +189,8 @@ internal static partial class Program
                 id,
                 TitleOf(head, file.Name),
                 assignee,
-                fm.GetValueOrDefault("priority", "normal")));
+                fm.GetValueOrDefault("priority", "normal"),
+                fm.GetValueOrDefault("handed_off_by", "")));
 
             if (found.Count >= 5) break;
         }
@@ -225,8 +226,13 @@ internal static partial class Program
         if (tasks.Count > 0)
         {
             lines.Add("");
+            // Who ordered the work rides on the wake line itself: "tell your
+            // user which task you picked up and from whom" only works if the
+            // hook says from whom.
             foreach (var t in tasks)
-                lines.Add($"  • {t.Id} — {t.Title}" + (t.Priority == "high" ? "  [HIGH]" : ""));
+                lines.Add($"  • {t.Id} — {t.Title}"
+                    + (t.HandedOffBy.Length > 0 ? $"  (from {t.HandedOffBy})" : "")
+                    + (t.Priority == "high" ? "  [HIGH]" : ""));
             lines.Add("");
             lines.Add("Another agent specced this work and cannot build it. Continue with it now:");
             lines.Add("  1. task_queue, then read the full spec (brain_get_note on its path) — the Context");

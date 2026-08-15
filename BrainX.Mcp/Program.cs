@@ -608,7 +608,9 @@ internal static partial class Program
             "A chat client (Claude Desktop, claude.ai, this connector) has the conversation where the intent was formed. It does NOT have the repo, the file tree, a test run, or a diff. Claude Code and Codex have all four and none of the conversation. Handing work across that line is what these three tools are for:\n" +
             "  • task_handoff {title, goal, context?, acceptance?, files?, assignee?} — write the SPEC into <vault>/Tasks/ and address it to 'claude-code' (default), 'codex', or 'any'.\n" +
             "  • task_queue {status?} — what is waiting. Items with mine:true are addressed to YOU.\n" +
-            "  • task_update {task_id, status, note?} — claimed → done | blocked. The note IS the report; nobody can see your session.\n\n" +
+            "  • task_update {task_id, status, note?} — claimed → done | blocked. The note IS the report; nobody can see your session. " +
+            "Marking done/blocked also drops a bus notice (work-labelled with the task id) into the inbox of the agent that handed it off, " +
+            "so finishing WAKES the requester — read yours with agent_inbox {work:'<task id>'} when a notice names a task you handed off.\n\n" +
             "IF YOU ARE A CHAT CLIENT AND THE USER ASKS FOR CODE IN A REPO YOU CANNOT SEE:\n" +
             "  → Do NOT write the patch from memory. Call task_handoff, then tell the user it is queued and which agent has it.\n" +
             "  → Spend your turn on what only you can do: the goal, the constraints, the acceptance criteria, the context behind the request. A precise spec is worth more than a plausible diff.\n" +
@@ -1276,8 +1278,10 @@ internal static partial class Program
                 }),
             Tool("task_update",
                 "Move a task along: claim it before you start, mark it done when it ships, mark it blocked when it " +
-                "cannot. The agent that handed it off has no other way to learn what happened — it cannot see your " +
-                "session, only this note — so the `note` you leave IS the report.",
+                "cannot. The agent that handed it off cannot see your session, only this note — so the `note` you " +
+                "leave IS the report. Marking done or blocked also auto-sends that report to the hander-off's bus " +
+                "inbox (work-labelled with the task id), which wakes it on its next turn or session — finishing is " +
+                "told, not polled for.",
                 new JObject
                 {
                     ["type"] = "object",

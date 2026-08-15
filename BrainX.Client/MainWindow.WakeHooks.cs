@@ -42,8 +42,11 @@ public partial class MainWindow
 
     /// <summary>Bump when either command below changes shape. The tag is part
     /// of the command string, so "is the installed hook current" is a substring
-    /// test on the file — the same scheme the auto-ingest hook uses.</summary>
-    private const string BrainWakeHookVersionTag = BrainWakeHookMarker + "-v1";
+    /// test on the file — the same scheme the auto-ingest hook uses.
+    /// v2: carries --agent claude-code, matching the hand-installed 2026-08-14
+    /// entries; without it the binary still defaults to claude-code, but the
+    /// audience should be stated, not defaulted, now that Codex shares it.</summary>
+    private const string BrainWakeHookVersionTag = BrainWakeHookMarker + "-v2";
 
     /// <summary>
     /// Install (or upgrade) the Stop + SessionStart hooks. Idempotent: returns
@@ -105,6 +108,9 @@ public partial class MainWindow
     /// ours. Matching on the marker rather than the whole command is what makes
     /// an upgrade replace instead of stack: the exe path changes between builds
     /// and the version tag changes between releases, but the marker does not.
+    /// A brainx-mcp wake command WITHOUT the marker is also ours — that is what
+    /// a hand-installed entry looks like (2026-08-14 left two per event), and
+    /// leaving it in place is how an upgrade stacks a duplicate.
     /// </summary>
     private static JArray UpsertWakeHook(JArray? existing, string command)
     {
@@ -112,7 +118,11 @@ public partial class MainWindow
         for (var i = arr.Count - 1; i >= 0; i--)
         {
             var cmd = arr[i]["hooks"]?[0]?["command"]?.ToString() ?? "";
-            if (cmd.Contains(BrainWakeHookMarker, StringComparison.Ordinal)) arr.RemoveAt(i);
+            var ours = cmd.Contains(BrainWakeHookMarker, StringComparison.Ordinal)
+                || (cmd.Contains("brainx-mcp", StringComparison.OrdinalIgnoreCase)
+                    && (cmd.Contains(" hook-stop", StringComparison.Ordinal)
+                        || cmd.Contains(" hook-session-start", StringComparison.Ordinal)));
+            if (ours) arr.RemoveAt(i);
         }
 
         // No `matcher`: Stop and SessionStart are not tool events, and a
@@ -149,5 +159,5 @@ public partial class MainWindow
     /// leaves the version greppable in settings.json.
     /// </summary>
     private string BuildWakeHookCommand(string mcpExe, string subcommand) =>
-        $"\"{mcpExe}\" {subcommand} --vault \"{_vaultPath}\" --tag {BrainWakeHookVersionTag}";
+        $"\"{mcpExe}\" {subcommand} --vault \"{_vaultPath}\" --agent claude-code --tag {BrainWakeHookVersionTag}";
 }
