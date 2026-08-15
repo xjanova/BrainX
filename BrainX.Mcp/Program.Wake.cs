@@ -53,6 +53,15 @@ internal static partial class Program
     /// </summary>
     private static readonly TimeSpan WakeCooldown = TimeSpan.FromHours(2);
 
+    /// <summary>
+    /// Age past which waiting work stops being "in flight" and becomes a
+    /// BACKLOG. A session that opens onto day-old items must not silently
+    /// resume them — the owner gets asked first: clear for a clean start, or
+    /// continue. One day, because the failure this answers is "opened the
+    /// program the next day and it charged into yesterday's stale orders".
+    /// </summary>
+    private static readonly TimeSpan StaleBacklogAge = TimeSpan.FromHours(24);
+
     private static string WakeStampDir => Path.Combine(BusRoot, "wake");
 
     /// <summary>
@@ -131,7 +140,7 @@ internal static partial class Program
 
     // ───────────── the queue read ─────────────
 
-    private sealed record WakeTask(string Id, string Title, string Assignee, string Priority, string HandedOffBy);
+    private sealed record WakeTask(string Id, string Title, string Assignee, string Priority, string HandedOffBy, double AgeHours);
 
     /// <summary>
     /// Who this hook run is speaking for, from <c>--agent</c>.
@@ -190,7 +199,8 @@ internal static partial class Program
                 TitleOf(head, file.Name),
                 assignee,
                 fm.GetValueOrDefault("priority", "normal"),
-                fm.GetValueOrDefault("handed_off_by", "")));
+                fm.GetValueOrDefault("handed_off_by", ""),
+                (DateTime.UtcNow - file.LastWriteTimeUtc).TotalHours));
 
             if (found.Count >= 5) break;
         }
@@ -218,7 +228,7 @@ internal static partial class Program
         {
             lines.Add("");
             foreach (var m in mail)
-                lines.Add($"  ✉ from {m.From}" + (m.Topic.Length > 0 ? $" — {m.Topic}" : ""));
+                lines.Add($"  ✉ from {m.From}" + (m.Topic.Length > 0 ? $" — {m.Topic}" : "") + AgeSuffix(m.AgeHours));
             lines.Add("Call agent_inbox NOW to read them, act on what they say, and reply with");
             lines.Add("agent_send. A peer that gets no answer assumes the work is still moving.");
         }
@@ -232,7 +242,8 @@ internal static partial class Program
             foreach (var t in tasks)
                 lines.Add($"  • {t.Id} — {t.Title}"
                     + (t.HandedOffBy.Length > 0 ? $"  (from {t.HandedOffBy})" : "")
-                    + (t.Priority == "high" ? "  [HIGH]" : ""));
+                    + (t.Priority == "high" ? "  [HIGH]" : "")
+                    + AgeSuffix(t.AgeHours));
             lines.Add("");
             lines.Add("Another agent specced this work and cannot build it. Continue with it now:");
             lines.Add("  1. task_queue, then read the full spec (brain_get_note on its path) — the Context");
@@ -248,8 +259,34 @@ internal static partial class Program
         {
             lines.Add("Tell your user what arrived and from whom — never work a peer's message silently.");
         }
+
+        // The clean-start question. A session OPENING onto day-old work must
+        // not silently resume it — yesterday's orders may be done, superseded,
+        // or plain wrong by now, and only the owner knows which. Stop-hook
+        // wakes skip this on purpose: mid-session, waiting work is by
+        // definition fresh enough to act on.
+        if (!forStop && (mail.Any(m => m.AgeHours >= StaleBacklogAge.TotalHours)
+                         || tasks.Any(t => t.AgeHours >= StaleBacklogAge.TotalHours)))
+        {
+            lines.Add("");
+            lines.Add("⚠ Part of this backlog is more than a day old. Do NOT charge into it.");
+            lines.Add("FIRST ask your user: clear the stale items for a clean start, or continue them?");
+            lines.Add("  • clear mail   → agent_inbox, then one line per message (reading consumes it);");
+            lines.Add("    never act on stale instructions without the user's yes.");
+            lines.Add("  • clear a task → task_update {status:'blocked', note:'cleared as stale'} so it");
+            lines.Add("    stops waking every future session.");
+            lines.Add("  • continue     → work it exactly as listed above.");
+            lines.Add("Never clear silently — the sender assumes delivered mail was read.");
+        }
         return string.Join('\n', lines);
     }
+
+    /// <summary>"  [waiting 3d]" — old enough to mention, or nothing at all.
+    /// Under an hour rounds to nothing because "waiting 0h" reads as a bug.</summary>
+    private static string AgeSuffix(double hours) =>
+        hours < 1 ? ""
+        : hours < 48 ? $"  [waiting {(int)hours}h]"
+        : $"  [waiting {(int)(hours / 24)}d]";
 
     // ───────────── unread mail ─────────────
 
@@ -297,7 +334,8 @@ internal static partial class Program
                     found.Add(new WakeMail(
                         id!,
                         o["from"]?.ToString() ?? "another agent",
-                        o["topic"]?.ToString() ?? ""));
+                        o["topic"]?.ToString() ?? "",
+                        (DateTime.UtcNow - file.LastWriteTimeUtc).TotalHours));
                 }
                 catch { /* a half-written message is next tick's problem */ }
 
@@ -307,7 +345,7 @@ internal static partial class Program
         return found;
     }
 
-    private sealed record WakeMail(string Id, string From, string Topic);
+    private sealed record WakeMail(string Id, string From, string Topic, double AgeHours);
 
     // ───────────── cooldown ─────────────
 
