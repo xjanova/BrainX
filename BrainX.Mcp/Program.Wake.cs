@@ -318,6 +318,15 @@ internal static partial class Program
         var dash = me.IndexOf('-');
         if (dash > 0) boxes.Add(me[..dash]);
 
+        // Heal before announcing. agent_send collapses recipients now, but a
+        // session on an older binary can still park mail under the fine name —
+        // and an older binary's agent_inbox only reads the vendor box, so a
+        // hook that merely REPORTED the fine box would nag every cooldown
+        // while the tool it points at keeps coming up empty. Moving (not
+        // consuming) is fair game for a hook: the message stays unread, in
+        // the one directory every reader actually opens.
+        AdoptStrayFineBoxMail(boxes[^1]);
+
         var found = new List<WakeMail>();
         foreach (var box in boxes.Distinct(StringComparer.OrdinalIgnoreCase))
         {

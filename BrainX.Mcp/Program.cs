@@ -747,6 +747,8 @@ internal static partial class Program
                 "Send a message to ANOTHER AI agent connected to this same brain (Claude Code, Codex, …). " +
                 "BrainX is the middleman: every agent mounts this vault through its own brainx-mcp process, " +
                 "and this drops mail into the recipient's inbox on disk. to='codex'|'claude'|'all'. " +
+                "Finer names collapse to the box that vendor actually reads ('claude-code' → 'claude'); " +
+                "every session of one vendor shares that box, so label ongoing work with work:'…'. " +
                 "The recipient sees an `agentBus` unread notice piggybacked on its NEXT tool response and " +
                 "reads via agent_inbox. After sending, call agent_inbox {wait_seconds:60} to wait for the " +
                 "reply. Response includes whether each recipient is online right now (presence TTL 90s). " +
@@ -756,7 +758,7 @@ internal static partial class Program
                     ["type"] = "object",
                     ["properties"] = new JObject
                     {
-                        ["to"] = new JObject { ["type"] = "string", ["description"] = "recipient agent: 'codex', 'claude', or 'all' (= every agent ever seen here except you). agent_peers lists who exists." },
+                        ["to"] = new JObject { ["type"] = "string", ["description"] = "recipient agent: 'codex', 'claude', or 'all' (= every agent ever seen here except you). agent_peers lists who exists. A finer name is delivered to the box its vendor reads ('claude-code' → 'claude')." },
                         ["message"] = new JObject { ["type"] = "string", ["description"] = "the message body (markdown ok, ≤64KB)" },
                         ["topic"] = new JObject { ["type"] = "string", ["description"] = "optional short thread label, e.g. 'review-authcontroller'" },
                         ["work"] = new JObject { ["type"] = "string", ["description"] = "WHICH JOB this belongs to, e.g. 'iron-ward', 'tetrisvs'. PASS IT whenever the message is part of an ongoing piece of work. Every session of one vendor shares an inbox, so an unlabelled message is delivered to whichever session opens the inbox first — including one working on something else entirely, which consumes it permanently. A labelled message can only be read by a session that asks for that work." },

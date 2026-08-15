@@ -99,6 +99,74 @@ internal static partial class Program
     }
 
     /// <summary>
+    /// The inbox the addressed agent will actually READ, given whatever name
+    /// the sender knew it by.
+    ///
+    /// Senders address agents by their fine names — "claude-code",
+    /// "codex-cli" — but agent_inbox only ever reads <see cref="BusIdentity"/>,
+    /// which is vendor-coarse ("claude", "codex"). Mail written under the finer
+    /// name is a ZOMBIE: the wake hooks see it (they check both spellings) and
+    /// re-wake the agent every cooldown forever, while the one tool that could
+    /// consume it never looks there. Observed live on 2026-08-15 with a message
+    /// to 'claude-code'.
+    ///
+    /// Most specific rule wins:
+    ///   1. a name that IS a known identity (it has heartbeated on this vault)
+    ///      is already a box somebody reads — keep it;
+    ///   2. a name extending a known identity ("codex-cli" where "codex" has
+    ///      been seen) collapses to the LONGEST such identity;
+    ///   3. "claude-*" collapses to "claude" even on a vault no Claude has
+    ///      visited yet — the same constant TryNotifyHandoffOrigin uses,
+    ///      because Claude flavours are the family known to share one box.
+    /// Anything else is delivered as addressed; if that agent later connects
+    /// under a coarser identity, AdoptStrayFineBoxMail recovers the mail.
+    /// </summary>
+    private static string CollapseToReadableBox(string slug)
+    {
+        var known = KnownAgents();
+        if (known.Contains(slug, StringComparer.OrdinalIgnoreCase)) return slug;
+        var vendor = known
+            .Where(k => slug.StartsWith(k + "-", StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(k => k.Length)
+            .FirstOrDefault();
+        if (vendor != null) return vendor;
+        return slug.StartsWith("claude-", StringComparison.Ordinal) ? "claude" : slug;
+    }
+
+    /// <summary>
+    /// Move mail parked under finer spellings of an identity into the box that
+    /// identity reads — inbox/claude-code/*.json into inbox/claude/ when
+    /// adopting for "claude". Two writers can still park mail there: any
+    /// binary older than <see cref="CollapseToReadableBox"/>, and a sender
+    /// naming a never-seen agent that later connects under a coarser identity.
+    /// The reader heals the split the moment it reads; a lost race on any one
+    /// file just means another session adopted it first. Best-effort by
+    /// contract — neither an inbox read nor a hook may fail over housekeeping.
+    /// </summary>
+    private static void AdoptStrayFineBoxMail(string me)
+    {
+        try
+        {
+            var root = Path.Combine(BusRoot, "inbox");
+            if (!Directory.Exists(root)) return;
+            foreach (var dir in Directory.GetDirectories(root, me + "-*"))
+            {
+                var mine = BusInboxDir(me);
+                Directory.CreateDirectory(mine);
+                foreach (var f in Directory.GetFiles(dir, "*.json"))
+                {
+                    try { File.Move(f, Path.Combine(mine, Path.GetFileName(f))); }
+                    catch { /* another adopter won this file */ }
+                }
+                // Only an emptied box disappears: Delete on a non-empty
+                // directory throws, which is exactly the retry-later we want.
+                try { Directory.Delete(dir); } catch { }
+            }
+        }
+        catch { }
+    }
+
+    /// <summary>
     /// Start the presence heartbeat for this session. Idempotent; called
     /// from the initialize handshake and defensively from every bus tool.
     /// The timer keeps beating while a long-poll blocks the stdio loop,
@@ -233,18 +301,27 @@ internal static partial class Program
         if (string.IsNullOrWhiteSpace(toRaw)) throw new ArgumentException("to is required — 'codex', 'claude', or 'all' (agent_peers lists who's here)");
 
         List<string> recipients;
+        string? requestedAs = null;
         if (toRaw.Trim().Equals("all", StringComparison.OrdinalIgnoreCase))
         {
+            // Presence names ARE identities, so these boxes are readable as-is.
             recipients = KnownAgents().Where(a => a != me).ToList();
             if (recipients.Count == 0)
                 throw new InvalidOperationException("no other agent has ever connected to this brain — open the other agent (with brainx-mcp registered) first, or address it explicitly by name");
         }
         else
         {
+            // Deliver to the box the recipient READS, not the name the sender
+            // used — writing to a 'claude-code' directory is mail nobody can
+            // ever open, and the wake hooks nag about it forever.
             var slug = SanitizeAgentSlug(toRaw);
-            if (slug == me)
-                throw new ArgumentException($"'{slug}' is YOU — send to the other agent (agent_peers lists who's here) or to='all'");
-            recipients = new List<string> { slug };
+            var box = CollapseToReadableBox(slug);
+            if (box == me)
+                throw new ArgumentException(slug == box
+                    ? $"'{slug}' is YOU — send to the other agent (agent_peers lists who's here) or to='all'"
+                    : $"'{slug}' collapses into '{me}', your OWN shared box — every {me} session reads the same inbox, so this mail could only come back to you. To reach a specific {me} flavour, hand the work off instead (task_handoff addresses '{slug}' directly).");
+            if (box != slug) requestedAs = slug;
+            recipients = new List<string> { box };
         }
 
         var topic = args["topic"]?.ToString();
@@ -284,6 +361,10 @@ internal static partial class Program
             if (!string.IsNullOrWhiteSpace(topic)) payload["topic"] = topic;
             if (!string.IsNullOrWhiteSpace(replyTo)) payload["replyTo"] = replyTo;
             if (work != null) payload["work"] = work;
+            // Keep the sender's finer address as provenance: any session of
+            // the vendor can consume this, and "toRequested" is how a reader
+            // tells mail meant for its flavour from mail meant for the vendor.
+            if (requestedAs != null) payload["toRequested"] = requestedAs;
 
             var file = $"{DateTime.UtcNow.Ticks:D19}-{me}-{Guid.NewGuid().ToString("N")[..4]}.json";
             AtomicWriteJson(Path.Combine(inbox, file), payload);
@@ -291,13 +372,15 @@ internal static partial class Program
             var age = PresenceAgeSeconds(to);
             var online = IsOnline(age);
             anyOnline |= online;
-            delivered.Add(new JObject
+            var entry = new JObject
             {
                 ["to"] = to,
                 ["online"] = online,
                 ["everSeen"] = everSeen.Contains(to),
                 ["lastSeenSecondsAgo"] = age is double a ? Math.Round(a) : null
-            });
+            };
+            if (requestedAs != null) entry["requested"] = requestedAs;
+            delivered.Add(entry);
         }
 
         return new JObject
@@ -319,6 +402,10 @@ internal static partial class Program
         StartPresenceHeartbeat();
         try { WritePresence(); } catch { }
         var me = BusIdentity();
+
+        // Mail an old binary parked under a finer spelling ("claude-code")
+        // becomes readable the moment its actual reader shows up.
+        AdoptStrayFineBoxMail(me);
 
         var wait = Math.Clamp(args["wait_seconds"]?.ToObject<int>() ?? 0, 0, MaxWaitSeconds);
         var peek = args["peek"]?.ToObject<bool>() ?? false;

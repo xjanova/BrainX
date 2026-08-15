@@ -485,8 +485,9 @@ internal static partial class Program
             // Mailboxes are vendor-coarse (every Claude flavour reads "claude");
             // handed_off_by is handoff-fine ("claude-chat"). Address the box the
             // recipient actually reads — a "claude-chat" directory would be mail
-            // nobody can ever open.
-            var box = origin.StartsWith("claude-", StringComparison.Ordinal) ? "claude" : origin;
+            // nobody can ever open. Same rule agent_send applies to explicit
+            // recipients, in the one shared helper.
+            var box = CollapseToReadableBox(origin);
 
             var inbox = BusInboxDir(box);
             Directory.CreateDirectory(inbox);
