@@ -114,6 +114,11 @@ internal static partial class Program
             try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
             return RunSessionStartHook(args.Skip(1).ToArray());
         }
+        if (args.Length > 0 && args[0].Equals("reap", StringComparison.OrdinalIgnoreCase))
+        {
+            try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
+            return ReapCli(args.Skip(1).ToArray());
+        }
         if (args.Length > 0 && (args[0].Equals("register-claude", StringComparison.OrdinalIgnoreCase)
                               || args[0].Equals("register", StringComparison.OrdinalIgnoreCase)))
         {
@@ -7630,17 +7635,141 @@ internal static partial class Program
                 Log("client launch: no BrainX.Client.exe found (installed or dev)");
                 return;
             }
-            var psi = new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = pick,
-                WorkingDirectory = Path.GetDirectoryName(pick)!,
-                UseShellExecute = true,    // detach from our stdin/stdout
-                CreateNoWindow = false
-            };
-            System.Diagnostics.Process.Start(psi);
+            StartDetached(pick);
             Log($"launched client: {pick}");
         }
         catch (Exception ex) { Log($"client launch failed: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// `brainx-mcp reap` — show every MCP server on this machine and close the
+    /// ones nobody is talking to.
+    ///
+    /// The automatic sweep (Launcher, on every session start) deliberately
+    /// touches only servers that have a heartbeat proving they are idle. This
+    /// command exists for the case that rule cannot cover: servers left by a
+    /// build from before heartbeats existed, which have no record at all and so
+    /// can never be proven either way. `--legacy` takes those too, and it is a
+    /// separate flag precisely because "no evidence" is not "evidence of none".
+    /// </summary>
+    private static int ReapCli(string[] args)
+    {
+        var dryRun = args.Any(a => a is "--dry-run" or "-n");
+        var listOnly = args.Any(a => a is "--list" or "-l");
+
+        // Heartbeat-less servers are reaped on AGE alone, so the cutoff is the
+        // only thing standing between this command and a live session. Default
+        // is deliberately far above any working session's lifetime; `--legacy`
+        // accepts it, `--older-than=<hours>` overrides it, and neither exists
+        // by default.
+        TimeSpan? unknownCutoff = null;
+        var hoursArg = args.FirstOrDefault(a => a.StartsWith("--older-than", StringComparison.OrdinalIgnoreCase));
+        if (hoursArg != null)
+        {
+            var raw = hoursArg.Split('=', 2).ElementAtOrDefault(1)
+                   ?? args.SkipWhile(a => a != hoursArg).ElementAtOrDefault(1);
+            if (!double.TryParse(raw, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var h) || h <= 0)
+            {
+                Console.Error.WriteLine("reap: --older-than needs a positive number of hours, e.g. --older-than=12");
+                return 2;
+            }
+            unknownCutoff = TimeSpan.FromHours(h);
+        }
+        else if (args.Any(a => a is "--legacy" or "--all"))
+        {
+            unknownCutoff = TimeSpan.FromHours(12);
+        }
+
+        var all = McpInstances.Scan();
+        if (all.Count == 0) { Console.WriteLine("No brainx-mcp processes running."); return 0; }
+
+        long total = 0;
+        Console.WriteLine($"{"PID",-8}{"ROLE",-9}{"CLIENT",-22}{"UP",-8}{"IDLE",-9}{"RAM",-9}STATE");
+        foreach (var i in all)
+        {
+            total += i.WorkingSet;
+            var state = i.Verdict switch
+            {
+                McpInstances.Verdict.Self => "this process",
+                McpInstances.Verdict.Worker => "our worker",
+                McpInstances.Verdict.Active => "in use",
+                McpInstances.Verdict.Idle => "IDLE — reapable",
+                McpInstances.Verdict.Orphan => "ORPHAN — client gone",
+                McpInstances.Verdict.TooYoung => "just started",
+                _ when unknownCutoff is { } c && i.Age >= c && !i.IsWorker => "no heartbeat, past cutoff — reapable",
+                _ => "no heartbeat (old build) — needs --legacy",
+            };
+            Console.WriteLine(
+                $"{i.Pid,-8}{(i.IsWorker ? "worker" : "launcher"),-9}"
+              + $"{(i.Client.Length > 0 ? i.Client : "-"),-22}"
+              + $"{(i.Age is { } a ? McpInstances.Human(a) : "?"),-8}"
+              + $"{(i.Idle is { } d ? McpInstances.Human(d) : "-"),-9}"
+              + $"{i.WorkingSet / (1024 * 1024) + " MB",-9}{state}");
+        }
+        Console.WriteLine($"\n{all.Count} process(es), {total / (1024 * 1024)} MB total · "
+                        + $"idle threshold {McpInstances.Human(McpInstances.IdleThreshold)} · "
+                        + $"housekeeping {(McpInstances.ReaperEnabled ? "ON" : "OFF")}"
+                        + (unknownCutoff is { } cut
+                            ? $" · heartbeat-less cutoff {McpInstances.Human(cut)}" : ""));
+        if (listOnly) return 0;
+
+        Console.WriteLine();
+        var r = McpInstances.Sweep(dryRun, unknownCutoff, m => Console.WriteLine("  " + m));
+        Console.WriteLine(r.Reaped == 0
+            ? "\nNothing to reap."
+            : $"\n{(dryRun ? "Would free" : "Freed")} ~{r.FreedBytes / (1024 * 1024)} MB "
+            + $"from {r.Reaped} server(s). {r.Skipped} left alone"
+            + (r.RecordsPruned > 0 ? $", {r.RecordsPruned} stale record(s) pruned" : "") + ".");
+        if (unknownCutoff is null && all.Any(i => i.Verdict == McpInstances.Verdict.Unknown && !i.IsWorker))
+            Console.WriteLine("Servers from before heartbeats existed are left alone. "
+                            + "`reap --legacy` takes the ones over 12h old "
+                            + "(`--older-than=<hours>` to choose).");
+        return 0;
+    }
+
+    /// <summary>
+    /// Start the GUI so that NOTHING in this MCP's process tree points at it.
+    ///
+    /// `UseShellExecute = true` was chosen to detach the client from our
+    /// stdin/stdout, and it does that — but it leaves the parent/child link
+    /// intact, so BrainX.Client sat in the worker's process tree. The launcher
+    /// ends a session with `_child.Kill(entireProcessTree: true)` (correct: the
+    /// worker's MCP bridges must not outlive it), and on 2026-08-23 that took
+    /// the owner's window down with it every time a client hung up — silently,
+    /// because TerminateProcess writes no crash log. The next session's MCP
+    /// then re-opened it, which read from the outside as "the brain restarts
+    /// itself".
+    ///
+    /// `cmd /c start` breaks the link: cmd exits immediately, so by the time
+    /// anyone walks the tree the GUI's recorded parent is already gone.
+    /// </summary>
+    private static void StartDetached(string exe)
+    {
+        var dir = Path.GetDirectoryName(exe)!;
+        if (OperatingSystem.IsWindows())
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                // The empty "" is start's title argument. Without it, start
+                // treats a quoted path as the title and opens nothing.
+                Arguments = $"/c start \"\" \"{exe}\"",
+                WorkingDirectory = dir,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            System.Diagnostics.Process.Start(psi);
+            return;
+        }
+
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = exe,
+            WorkingDirectory = dir,
+            UseShellExecute = true,
+            CreateNoWindow = false,
+        });
     }
 
     private static string? FindSolutionRoot(string startDir)

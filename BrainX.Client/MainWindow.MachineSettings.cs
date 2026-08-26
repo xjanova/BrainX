@@ -78,6 +78,16 @@ public partial class MainWindow
         // Machine-scoped: whether THIS PC is allowed to spend its GPU on the
         // gardener is not a property of the notes.
         if (m["GardenerAutoEnabled"] is { Type: JTokenType.Boolean } ga) _gardenerAutoEnabled = ga.Value<bool>();
+        // Same reasoning, and read by brainx-mcp itself (McpInstances.Settings):
+        // which processes this machine is allowed to close is a fact about this
+        // machine's RAM, and a vault carried to another PC must not decide it.
+        if (m["McpReaperEnabled"] is { Type: JTokenType.Boolean } mre) _mcpReaperEnabled = mre.Value<bool>();
+        // Round-tripped rather than merely read. SaveMachineSettings rewrites
+        // this file from a fixed key list, so a key the client does not know
+        // about is a key the next toggle DELETES — and the one setting that
+        // governs how long a server may sit idle is not one to lose silently.
+        if (m["McpReaperIdleHours"] is { Type: JTokenType.Integer } or { Type: JTokenType.Float })
+            _mcpReaperIdleHours = Math.Clamp(m["McpReaperIdleHours"]!.Value<double>(), 0.5, 24 * 14);
         if (m["StorageProvider"]?.ToString() is { Length: > 0 } sp) _storageProvider = sp;
         if (m["ScanWholeMachine"] is { Type: JTokenType.Boolean } sw) _scanWholeMachine = sw.Value<bool>();
         if (m["AutoScanOnStartup"] is { Type: JTokenType.Boolean } asos) _autoScanOnStartup = asos.Value<bool>();
@@ -109,6 +119,8 @@ public partial class MainWindow
                 ["McpAutoRegisterEnabled"] = _mcpAutoRegisterEnabled,
                 ["AutoIngestHookEnabled"] = _autoIngestHookEnabled,
                 ["GardenerAutoEnabled"] = _gardenerAutoEnabled,
+                ["McpReaperEnabled"] = _mcpReaperEnabled,
+                ["McpReaperIdleHours"] = _mcpReaperIdleHours,
                 ["StorageProvider"] = _storageProvider,
                 ["ScanWholeMachine"] = _scanWholeMachine,
                 ["AutoScanOnStartup"] = _autoScanOnStartup,

@@ -7971,6 +7971,7 @@ public partial class MainWindow : Window
             PopulateSettings();
             RefreshMcpCardForBuildKind();
             RefreshGardenerCard();
+            RefreshMcpReaperCard();
         }
     }
 

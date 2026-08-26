@@ -76,6 +76,11 @@ internal static class McpLauncher
         ResolveSpawn(args);
         Log($"launcher up · watching {_watchPath}");
 
+        // Announce ourselves before spawning anything: the record is what makes
+        // this pair reapable later, and a pair that leaked before it registered
+        // is a pair nothing can ever prove is dead.
+        McpInstances.Register(VaultArg(args));
+
         try
         {
             await ChildGate.WaitAsync().ConfigureAwait(false);
@@ -85,9 +90,14 @@ internal static class McpLauncher
         catch (Exception ex)
         {
             Log($"cannot start worker: {ex.Message}");
+            McpInstances.Unregister();
             return 1;
         }
 
+        // Every client session is a chance to take out the trash. Off the hot
+        // path — the handshake is already in flight and must not wait on a
+        // process enumeration.
+        _ = Task.Run(SweepIdleInstances);
         _ = Task.Run(WatchBinaryAsync);
 
         // Main loop: client → child. Runs until the client closes stdin, which
@@ -97,6 +107,10 @@ internal static class McpLauncher
         while ((line = await stdin.ReadLineAsync().ConfigureAwait(false)) != null)
         {
             if (line.Length == 0) continue;
+            // Proof of life, stamped before we do anything with the line — the
+            // only signal that separates "client is attached and quiet" from
+            // "client hung up and Windows never told us".
+            McpInstances.Touch();
             TrackClientLine(line);
             await ChildGate.WaitAsync().ConfigureAwait(false);
             try
@@ -113,8 +127,40 @@ internal static class McpLauncher
         }
 
         Log("client closed stdin — shutting down");
+        McpInstances.Unregister();
+        // entireProcessTree is for the worker's OWN children — the MCP bridges
+        // it spawned (Unity, Unreal), which have no reason to outlive it. It is
+        // safe again only because TryLaunchClientIfNotRunning now starts the GUI
+        // detached; while the GUI was a direct child of the worker, this line
+        // closed the owner's BrainX window every time a client hung up.
         try { _child?.Kill(entireProcessTree: true); } catch { }
         return 0;
+    }
+
+    /// <summary>The vault this session was pointed at, for the reap report.
+    /// Best-effort: an unrecognised argv shape costs a label, not a launch.</summary>
+    private static string VaultArg(string[] args)
+    {
+        for (var i = 0; i < args.Length - 1; i++)
+            if (args[i].Equals("--vault", StringComparison.OrdinalIgnoreCase))
+                return args[i + 1];
+        return Environment.GetEnvironmentVariable("BRAINX_VAULT") ?? "";
+    }
+
+    private static void SweepIdleInstances()
+    {
+        try
+        {
+            if (!McpInstances.ReaperEnabled) return;
+            // null = never guess. The automatic pass closes only servers whose
+            // own heartbeat proves they are idle; anything without one is left
+            // for `brainx-mcp reap --legacy`, where a human names the cutoff.
+            var r = McpInstances.Sweep(dryRun: false, reapUnknownOlderThan: null, Log);
+            if (r.Reaped > 0)
+                Log($"reaped {r.Reaped} idle server(s), ~{r.FreedBytes / (1024 * 1024)} MB "
+                  + $"(idle > {McpInstances.Human(McpInstances.IdleThreshold)})");
+        }
+        catch (Exception ex) { Log($"sweep skipped: {ex.Message}"); }
     }
 
     // ── client-side bookkeeping ──────────────────────────────────────
@@ -130,7 +176,11 @@ internal static class McpLauncher
             // The handshake is the only client state a stdio server holds;
             // capture it verbatim so a future child can be brought to the same
             // place without the client's help.
-            if (method == "initialize") { InitLines.Clear(); InitLines.Add(line); }
+            if (method == "initialize")
+            {
+                InitLines.Clear(); InitLines.Add(line);
+                McpInstances.SetClient(msg["params"]?["clientInfo"]?["name"]?.ToString() ?? "");
+            }
             else if (method == "notifications/initialized" && InitLines.Count == 1) InitLines.Add(line);
 
             // A request has BOTH id and method. id-without-method is the
@@ -190,6 +240,7 @@ internal static class McpLauncher
         _lastSpawn = DateTime.UtcNow;
         _ = Task.Run(() => PumpChildAsync(proc));
         _ = Task.Run(() => PumpChildStderrAsync(proc));
+        McpInstances.SetWorker(proc.Id);
         Log($"worker pid {proc.Id} spawned ({(replayInit ? "swap" : "initial")})");
 
         if (replayInit && InitLines.Count > 0)
@@ -331,7 +382,19 @@ internal static class McpLauncher
     {
         while (true)
         {
+            // Wall-clock, not the delay we asked for: a suspended machine
+            // returns from a 10-second Delay fifteen hours later, and every
+            // one of those hours would otherwise read as client silence.
+            var before = DateTime.UtcNow;
             await Task.Delay(WatchInterval).ConfigureAwait(false);
+            var slept = DateTime.UtcNow - before - WatchInterval;
+            if (slept > TimeSpan.FromMinutes(2))
+            {
+                Log($"woke after a {McpInstances.Human(slept)} gap — not counting it as idle");
+                McpInstances.NoteSleepGap(slept);
+            }
+
+            if (ShouldRetire()) return;
             try
             {
                 var now = SafeMtime(_watchPath);
@@ -343,6 +406,54 @@ internal static class McpLauncher
             }
             catch (Exception ex) { Log($"watch: {ex.Message}"); }
         }
+    }
+
+    /// <summary>
+    /// Close ourselves when the client has said nothing for the whole threshold.
+    ///
+    /// This is the half of the reaper that needs no permission and no pid
+    /// table: we are the only process that KNOWS whether a byte has arrived,
+    /// and we are judging ourselves. Everything the sweep does across processes
+    /// is a fallback for the cases where this could not run.
+    ///
+    /// Cost of being wrong: a client that comes back after the threshold sees a
+    /// disconnected server. Claude Desktop respawns one immediately (its own
+    /// log shows it doing exactly that); Claude Code picks one up on the next
+    /// session. Cost of never firing: a gigabyte of workers holding SQLite
+    /// handles on the vault, which is the state this was written in.
+    /// </summary>
+    private static bool ShouldRetire()
+    {
+        try
+        {
+            if (_swapping || _swapPending) return false;      // mid-swap is not idle
+            if (!InflightEmpty()) return false;               // somebody is waiting on an answer
+            if (!McpInstances.ReaperEnabled) return false;
+
+            // The client process itself is gone. No threshold applies to that —
+            // there is provably nobody to answer, and waiting six hours to say
+            // so is six hours of a worker holding the vault open for a corpse.
+            if (McpInstances.ParentGone())
+            {
+                Log("client process is gone — retiring immediately");
+                McpInstances.Unregister();
+                try { _child?.Kill(entireProcessTree: true); } catch { }
+                Environment.Exit(0);
+                return true;
+            }
+
+            var idle = McpInstances.IdleFor;
+            if (idle < McpInstances.IdleThreshold) return false;
+
+            Log($"idle {McpInstances.Human(idle)} with no client traffic — retiring "
+              + $"(threshold {McpInstances.Human(McpInstances.IdleThreshold)}; "
+              + "untick MCP housekeeping in BrainX ▸ Settings to keep idle servers alive)");
+            McpInstances.Unregister();
+            try { _child?.Kill(entireProcessTree: true); } catch { }
+            Environment.Exit(0);
+            return true;
+        }
+        catch { return false; }
     }
 
     private static async Task TrySwapAsync()

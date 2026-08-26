@@ -6435,6 +6435,39 @@
                                             </StackPanel>
                                         </Border>
 
+                                        <!-- MCP HOUSEKEEPING — the other thing that acts on its
+                                             own, and the one that costs RAM. Claude Desktop closes
+                                             an MCP connection without closing the pipe, so the
+                                             server never sees EOF and never exits; they stack up
+                                             one pair per reconnect (40 processes / 1.19 GB on this
+                                             machine on 2026-08-23). Anything that closes processes
+                                             by itself has to be visible and tickable where the
+                                             other unattended jobs live. -->
+                                        <Border x:Name="SettingsAnchorMcpReaper"
+                                                Style="{StaticResource NeuralCard}"
+                                                Padding="22" Margin="0,0,0,14">
+                                            <StackPanel>
+                                                <StackPanel Margin="0,0,0,16">
+                                                    <TextBlock Text="MCP housekeeping" FontSize="16" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText}"/>
+                                                    <TextBlock Text="Every Claude session starts its own brain server. Some clients drop the connection without closing it, and those servers stay resident holding the vault open. This closes the ones no client is talking to."
+                                                               FontSize="12.5" FontWeight="Medium" TextWrapping="Wrap"
+                                                               Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0"/>
+                                                </StackPanel>
+                                                <CheckBox x:Name="McpReaperToggle" IsChecked="True"
+                                                          Click="McpReaperToggle_Click" FontSize="12" Margin="0,0,0,10"
+                                                          Foreground="{StaticResource NeuralText}"
+                                                          Content="Close a brain server that has had no client traffic for 6 hours"/>
+                                                <TextBlock x:Name="McpReaperStatus" FontSize="11.5" TextWrapping="Wrap"
+                                                           Margin="0,0,0,12" Foreground="{StaticResource NeuralText3}"/>
+                                                <StackPanel Orientation="Horizontal">
+                                                    <Button x:Name="McpReaperSweepBtn" Content="Clean up now"
+                                                            Style="{StaticResource NeuralBtnPrimary}"
+                                                            Click="McpReaperSweep_Click" Padding="16,8" Margin="0,0,8,0"/>
+                                                </StackPanel>
+                                            </StackPanel>
+                                        </Border>
+
                                         <Border x:Name="SettingsAnchorAbout"
                                                 Style="{StaticResource NeuralCard}"
                                                 Padding="22" Margin="0,0,0,14">
