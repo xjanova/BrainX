@@ -7695,6 +7695,7 @@ internal static partial class Program
                 McpInstances.Verdict.Worker => "our worker",
                 McpInstances.Verdict.Active => "in use",
                 McpInstances.Verdict.Idle => "IDLE — reapable",
+                McpInstances.Verdict.IdleExempt => "idle, exempt (client would not reconnect)",
                 McpInstances.Verdict.Orphan => "ORPHAN — client gone",
                 McpInstances.Verdict.TooYoung => "just started",
                 _ when unknownCutoff is { } c && i.Age >= c && !i.IsWorker => "no heartbeat, past cutoff — reapable",

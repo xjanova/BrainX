@@ -445,6 +445,13 @@ internal static class McpLauncher
             var idle = McpInstances.IdleFor;
             if (idle < McpInstances.IdleThreshold) return false;
 
+            // Silence is only evidence of abandonment for a client that
+            // abandons servers this way. Claude Code closes its pipe when a
+            // session ends, so a quiet one is a session someone still has open
+            // — and it will not re-attach a server we close. See
+            // McpInstances.IdleReapableClients.
+            if (!McpInstances.IdleReapable) return false;
+
             Log($"idle {McpInstances.Human(idle)} with no client traffic — retiring "
               + $"(threshold {McpInstances.Human(McpInstances.IdleThreshold)}; "
               + "untick MCP housekeeping in BrainX ▸ Settings to keep idle servers alive)");

@@ -39,6 +39,12 @@
 //     and a tree kill here is precisely the bug that took the GUI down.
 //   • A process younger than the grace period is never touched: it may simply
 //     not have registered yet.
+//   • The IDLE rule applies only to clients that both leak and recover — see
+//     IdleReapableClients. Silence means "abandoned" for Claude Desktop and
+//     means "the human stepped away" for Claude Code, and closing the second
+//     kind costs a live session its brain. The ORPHAN rule ignores that
+//     exemption: a client process that no longer exists is a fact, not a
+//     reading of silence.
 
 using System.Diagnostics;
 using System.Globalization;
@@ -69,7 +75,7 @@ internal static class McpInstances
     /// it, two launchers booting together could reap each other.</summary>
     private static readonly TimeSpan Grace = TimeSpan.FromMinutes(5);
 
-    public const double DefaultIdleHours = 6.0;
+    public const double DefaultIdleHours = 24.0;
 
     // ── this process's own record ────────────────────────────────────
 
@@ -83,6 +89,14 @@ internal static class McpInstances
     /// <summary>Our parent's start time at registration — the half of its
     /// identity that a recycled pid cannot forge. See ParentGone.</summary>
     private static DateTime? _parentStartUtc;
+    /// <summary>False until a client on the allowlist identifies itself, so a
+    /// server is exempt from the idle rule for the whole window before the
+    /// handshake — and stays exempt if we never recognise the client.</summary>
+    private static bool _idleReapable;
+
+    /// <summary>May the idle rule close THIS server? See IdleReapableClients.
+    /// The orphan rule ignores this: a dead client is a dead client.</summary>
+    public static bool IdleReapable { get { lock (Gate) return _idleReapable; } }
 
     public static TimeSpan IdleFor
     {
@@ -143,9 +157,48 @@ internal static class McpInstances
     public static void SetClient(string name)
     {
         if (string.IsNullOrWhiteSpace(name)) return;
-        lock (Gate) { if (_registered) _rec["client"] = name.Trim(); }
+        var client = name.Trim();
+        lock (Gate)
+        {
+            if (!_registered) return;
+            _rec["client"] = client;
+            _idleReapable = IsIdleReapableClient(client);
+            _rec["idleReapable"] = _idleReapable;
+        }
         Flush(force: true);
     }
+
+    /// <summary>
+    /// Clients the idle rule is allowed to close.
+    ///
+    /// An allowlist of one, and it earns the place by answering BOTH halves of
+    /// the question with evidence:
+    ///
+    ///   does it leak?     Claude Desktop logs "Closing brainx-brain" and then
+    ///                     leaves the helper holding the pipe, so stdin never
+    ///                     reaches EOF and the pair lives forever. Every one of
+    ///                     the 20 abandoned pairs came from there.
+    ///   does it recover?  When a retired server disconnects, Desktop spawns a
+    ///                     replacement unprompted — measured at 36 seconds on
+    ///                     2026-08-26 (pid 42552 replacing the one that retired).
+    ///
+    /// Claude Code fails the first half, which settles it: its sessions close
+    /// the pipe properly and never leak, so the idle rule has nothing to gain
+    /// there and everything to lose — Claude Code does not re-attach a
+    /// disconnected server mid-session, so closing one costs that session its
+    /// brain until a human restarts it. Five of the six launchers running when
+    /// this was written were exactly that shape, and one was 1.2 hours from
+    /// being closed for no benefit at all.
+    ///
+    /// Anything unrecognised is treated as Claude Code rather than as Desktop.
+    /// Being wrong in that direction costs RAM; being wrong in the other costs
+    /// somebody's work.
+    /// </summary>
+    private static readonly string[] IdleReapableClients = { "claude-ai" };
+
+    internal static bool IsIdleReapableClient(string client) =>
+        !string.IsNullOrWhiteSpace(client)
+        && IdleReapableClients.Any(c => client.StartsWith(c, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>One line arrived from the client. Cheap on purpose: the clock
     /// moves in memory on every call, the file at most twice a minute.</summary>
@@ -310,7 +363,7 @@ internal static class McpInstances
 
     // ── what is out there ────────────────────────────────────────────
 
-    internal enum Verdict { Self, Worker, Active, Idle, Orphan, Unknown, TooYoung }
+    internal enum Verdict { Self, Worker, Active, Idle, IdleExempt, Orphan, Unknown, TooYoung }
 
     internal sealed class Instance
     {
@@ -328,6 +381,8 @@ internal static class McpInstances
         public long PairBytes;
         /// <summary>The process that spawned this launcher is gone.</summary>
         public bool ClientGone;
+        /// <summary>This client is on the idle-rule allowlist.</summary>
+        public bool IdleReapable;
         public Verdict Verdict;
 
         public TimeSpan? Idle => LastActivityUtc is { } t ? DateTime.UtcNow - t : null;
@@ -367,6 +422,10 @@ internal static class McpInstances
                 inst.Client = rec["client"]?.ToString() ?? "";
                 inst.ClientGone = IsGone(rec["parentPid"]?.Value<int>() ?? 0,
                                          ParseIso(rec["parentStartedUtc"]?.ToString()));
+                // Absent key (a record from before the exemption shipped) reads
+                // as false, which is the safe direction: exempt.
+                inst.IdleReapable = rec["idleReapable"]?.Type == JTokenType.Boolean
+                                 && rec["idleReapable"]!.Value<bool>();
             }
 
             inst.Verdict =
@@ -377,8 +436,13 @@ internal static class McpInstances
                 // longer exists" is a fact, and a fact outranks a timer.
                 : inst.ClientGone                               ? Verdict.Orphan
                 : inst.LastActivityUtc is null                  ? Verdict.Unknown
-                : inst.Idle >= IdleThreshold                    ? Verdict.Idle
-                :                                                 Verdict.Active;
+                : inst.Idle < IdleThreshold                     ? Verdict.Active
+                // Past the threshold, but only the allowlisted clients may be
+                // closed for it. Reported as its own state rather than folded
+                // into Active, so `reap --list` never hides the fact that a
+                // server is idle and being left alone on purpose.
+                : inst.IdleReapable                             ? Verdict.Idle
+                :                                                 Verdict.IdleExempt;
 
             list.Add(inst);
             p.Dispose();

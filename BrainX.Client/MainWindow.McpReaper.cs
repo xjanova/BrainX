@@ -32,7 +32,7 @@ public partial class MainWindow
     /// .DefaultIdleHours). There is no UI for it — it is here so the card can
     /// state the real number instead of a hardcoded one, and so a hand-edited
     /// value survives the next time this file is rewritten.</summary>
-    private double _mcpReaperIdleHours = 6.0;
+    private double _mcpReaperIdleHours = 24.0;
 
     private bool _mcpReaperBusy;
 
@@ -60,10 +60,10 @@ public partial class MainWindow
                 ? "No MCP servers running right now."
                 : $"{procs.Length} MCP process(es) · {mb} MB · oldest started {age}. "
                 + (_mcpReaperEnabled
-                    ? $"Servers whose client has gone, or that have had no traffic for {McpIdleLabel}, close themselves; the rest are left alone."
+                    ? $"A server closes itself once its client process is gone. Going quiet for {McpIdleLabel} also closes it, but only for clients that drop connections without closing them and start a fresh server when they need one — Claude Desktop today. Claude Code sessions are never closed for being idle."
                     : "Automatic cleanup is OFF — nothing closes itself, including servers no client is attached to.");
             McpReaperToggle.Content =
-                $"Close a brain server once its client is gone, or after {McpIdleLabel} with no traffic";
+                $"Close a brain server once its client is gone, or after {McpIdleLabel} idle (Claude Desktop only)";
         }
         catch (Exception ex) { McpReaperStatus.Text = $"Could not read the process list: {ex.Message}"; }
     }
