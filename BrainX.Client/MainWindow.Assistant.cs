@@ -18,6 +18,8 @@ using System.IO;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
 using Newtonsoft.Json.Linq;
 
 namespace BrainX.Client;
@@ -139,6 +141,115 @@ public partial class MainWindow
             return false;
         }
         finally { _assistantSpeaking = false; }
+    }
+
+    // ── Settings panel ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The shortlist offered in Settings. Kept in step with
+    /// Program.Speak.OfferedVoices by hand, because the client cannot
+    /// reference the MCP project — a mismatch shows up immediately as a face
+    /// whose gender disagrees with the voice, which is the loudest possible
+    /// symptom and the reason this list is short enough to eyeball.
+    /// edge-tts publishes hundreds; a picker needs five.
+    /// </summary>
+    private static readonly (string Id, string Label)[] AssistantVoices =
+    {
+        ("th-TH-PremwadeeNeural", "ไทย · หญิง (Premwadee)"),
+        ("th-TH-NiwatNeural",     "ไทย · ชาย (Niwat)"),
+        ("en-US-AriaNeural",      "English · female (Aria)"),
+        ("en-US-GuyNeural",       "English · male (Guy)"),
+        ("en-GB-SoniaNeural",     "English UK · female (Sonia)"),
+    };
+
+    private bool _assistantSettingsLoading;
+
+    /// <summary>Fill the name box and voice list from the vault settings.</summary>
+    private void PopulateAssistantSettings()
+    {
+        try
+        {
+            _assistantSettingsLoading = true;      // suppress the change handlers
+            var id = AssistantIdentity();
+
+            if (AssistantNameBox != null) AssistantNameBox.Text = id.Name;
+            if (AssistantVoiceCombo != null)
+            {
+                AssistantVoiceCombo.Items.Clear();
+                foreach (var (vid, label) in AssistantVoices)
+                    AssistantVoiceCombo.Items.Add(new ComboBoxItem { Content = label, Tag = vid });
+
+                var idx = Array.FindIndex(AssistantVoices,
+                    v => v.Id.Equals(id.Voice, StringComparison.OrdinalIgnoreCase));
+                // A voice set by hand outside the shortlist must not silently
+                // become Premwadee the moment this panel is opened.
+                if (idx < 0)
+                {
+                    AssistantVoiceCombo.Items.Add(new ComboBoxItem { Content = $"{id.Voice} (custom)", Tag = id.Voice });
+                    idx = AssistantVoiceCombo.Items.Count - 1;
+                }
+                AssistantVoiceCombo.SelectedIndex = idx;
+            }
+        }
+        catch { }
+        finally { _assistantSettingsLoading = false; }
+    }
+
+    /// <summary>Merge one key into the vault settings without disturbing the rest.</summary>
+    private void SaveAssistantSetting(string key, string value)
+    {
+        try
+        {
+            var p = Path.Combine(_vaultPath, ".obsidianx", "settings.json");
+            var o = File.Exists(p) ? JObject.Parse(File.ReadAllText(p)) : new JObject();
+            o[key] = value;
+            Directory.CreateDirectory(Path.GetDirectoryName(p)!);
+            // No BOM: the MCP and the hooks both read this with plain JSON
+            // parsers, and a BOM here has broken config files before.
+            File.WriteAllText(p, o.ToString(Newtonsoft.Json.Formatting.Indented), new UTF8Encoding(false));
+        }
+        catch (Exception ex) { Debug.WriteLine($"[assistant] save {key} failed: {ex.Message}"); }
+    }
+
+    private void AssistantName_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_assistantSettingsLoading) return;
+        var n = AssistantNameBox?.Text?.Trim();
+        // Empty means "use the default", not "she has no name" — an assistant
+        // with a blank name cannot be addressed at all.
+        SaveAssistantSetting("AssistantName", string.IsNullOrWhiteSpace(n) ? "มายด์" : n!);
+        if (string.IsNullOrWhiteSpace(n) && AssistantNameBox != null) AssistantNameBox.Text = "มายด์";
+    }
+
+    private async void AssistantVoice_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (_assistantSettingsLoading) return;
+        if (AssistantVoiceCombo?.SelectedItem is not ComboBoxItem it || it.Tag is not string vid) return;
+        SaveAssistantSetting("VoiceName", vid);
+        // Push the new face immediately: the whole point of the voice picking
+        // the face is that they are never seen disagreeing.
+        try
+        {
+            var female = !(vid.Contains("Niwat", StringComparison.OrdinalIgnoreCase)
+                        || vid.Contains("Guy", StringComparison.OrdinalIgnoreCase));
+            var core = UniverseWebView?.CoreWebView2;
+            if (core != null)
+                await core.ExecuteScriptAsync(
+                    $"window.brainxAssistant && window.brainxAssistant.configure({{female:{(female ? "true" : "false")}}})");
+        }
+        catch { }
+    }
+
+    private async void AssistantPreview_Click(object sender, RoutedEventArgs e)
+    {
+        if (AssistantPreviewStatus != null) AssistantPreviewStatus.Text = "synthesising…";
+        var name = string.IsNullOrWhiteSpace(AssistantNameBox?.Text) ? "มายด์" : AssistantNameBox!.Text.Trim();
+        var ok = await AssistantSayAsync(
+            $"สวัสดีค่ะ {name} เองค่ะ ทดสอบเสียงและการขยับปากนะคะ", "happy");
+        if (AssistantPreviewStatus != null)
+            AssistantPreviewStatus.Text = ok
+                ? "playing in the Universe view"
+                : "could not speak — open the Universe tab, and check the network";
     }
 
     /// <summary>Change her expression without saying anything.</summary>

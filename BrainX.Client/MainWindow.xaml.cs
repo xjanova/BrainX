@@ -2469,6 +2469,7 @@ public partial class MainWindow : Window
         PopulateMcpCommands();
         PopulateAutoLinkerSettings();
         PopulateStorageSettings();
+        PopulateAssistantSettings();
         PopulateGraphPerfSettings();
         PopulateCustomCategories();
         StartAccessLogWatcher();

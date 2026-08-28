@@ -6218,6 +6218,45 @@
                                             </StackPanel>
                                         </Border>
 
+                                        <!-- Assistant: her name, and the voice that decides her face -->
+                                        <Border Style="{StaticResource NeuralCard}"
+                                                Padding="22" Margin="0,0,0,14">
+                                            <StackPanel>
+                                                <StackPanel Margin="0,0,0,16">
+                                                    <TextBlock Text="Assistant voice" FontSize="16" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText}"/>
+                                                    <TextBlock FontSize="12.5" FontWeight="Medium"
+                                                               Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0" TextWrapping="Wrap">
+                                                        She reads reports aloud and her wireframe face in the Universe moves with
+                                                        what she says. Voices come from Edge read-aloud — free, no key, no credit,
+                                                        needs network. Windows' own voices are en-US only, so Thai cannot use them.
+                                                    </TextBlock>
+                                                </StackPanel>
+
+                                                <TextBlock Text="Name — what she answers to" FontSize="11"
+                                                           Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
+                                                <TextBox x:Name="AssistantNameBox" Style="{StaticResource NeonTextBox}"
+                                                         FontSize="12" Margin="0,0,0,12" MaxLength="24"
+                                                         LostFocus="AssistantName_Changed"/>
+
+                                                <TextBlock Text="Voice — also decides whether the face is female or male" FontSize="11"
+                                                           Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
+                                                <ComboBox x:Name="AssistantVoiceCombo" Margin="0,0,0,12"
+                                                          Background="{StaticResource SurfaceBrush}"
+                                                          Foreground="{StaticResource TextPrimaryBrush}"
+                                                          SelectionChanged="AssistantVoice_Changed"/>
+
+                                                <StackPanel Orientation="Horizontal">
+                                                    <Button x:Name="AssistantPreviewBtn" Content="🔊  Preview"
+                                                            Style="{StaticResource NeuralBtn}" Padding="14,6"
+                                                            Click="AssistantPreview_Click"/>
+                                                    <TextBlock x:Name="AssistantPreviewStatus" Margin="12,0,0,0"
+                                                               VerticalAlignment="Center" FontSize="11"
+                                                               Foreground="{StaticResource TextSecondaryBrush}"/>
+                                                </StackPanel>
+                                            </StackPanel>
+                                        </Border>
+
                                         <!-- AutoLinker -->
                                         <Border Style="{StaticResource NeuralCard}"
                                                 Padding="22" Margin="0,0,0,14">
