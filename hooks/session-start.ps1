@@ -121,6 +121,30 @@ if ($vaultRoot) {
     catch { }
 }
 
+# === Who she is ===
+# Injected FIRST, because it frames everything after it. Without this the
+# owner typing "มายด์ ช่วยดูให้หน่อย" reads as a third party the agent should
+# go and ask about, rather than as its own name being called. The name lives
+# in the vault's settings.json next to UiTheme — a presentation preference,
+# not a machine secret — and the voice picks the pronoun.
+$identitySection = $null
+if ($vaultRoot) {
+    try {
+        $sp = "$vaultRoot\.obsidianx\settings.json"
+        if (Test-Path $sp) {
+            $s = [System.IO.File]::ReadAllText($sp) | ConvertFrom-Json
+            $nm = $s.AssistantName
+            if (-not $nm) { $nm = 'มายด์' }
+            $vc = $s.VoiceName
+            if (-not $vc) { $vc = 'th-TH-PremwadeeNeural' }
+            $fem = -not ($vc -match 'Niwat|GuyNeural|Male')
+            $pron = if ($fem) { 'she/her (ค่ะ)' } else { 'he/him (ครับ)' }
+            $identitySection = "IDENTITY: you are $nm, the BrainX assistant on this machine. When the owner says '$nm' they are addressing YOU, not a third party to look up. Spoken replies use $pron. You can speak aloud with ``brainx-mcp speak --text ...`` and the Universe dashboard shows your face while you do."
+        }
+    }
+    catch { }
+}
+
 # === Build stats line (always — even outside a vault) ===
 $statsLine = $null
 try {
@@ -131,6 +155,7 @@ catch { }
 
 # === Compose final context ===
 $parts = @()
+if ($identitySection) { $parts += $identitySection }
 if ($handoffSection) { $parts += $handoffSection }
 if ($repoPackSection) { $parts += $repoPackSection }
 if ($playbookSection) { $parts += $playbookSection }

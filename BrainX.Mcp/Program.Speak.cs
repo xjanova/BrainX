@@ -125,7 +125,7 @@ internal static partial class Program
     internal static async Task<int> SpeakCliAsync(string[] args)
     {
         string? text = null, outPath = null, voice = null, rate = null, vaultArg = null;
-        bool play = false, quiet = false, stdin = false;
+        bool play = false, quiet = false, stdin = false, json = false;
         for (int i = 0; i < args.Length; i++)
         {
             switch (args[i])
@@ -139,6 +139,13 @@ internal static partial class Program
                 case "--vault" when i + 1 < args.Length: vaultArg = args[++i]; break;
                 case "--play": play = true; break;
                 case "--quiet": quiet = true; break;
+                // Machine-readable, for the WPF host. Without it the caller has
+                // to GUESS which file was produced, and "newest mp3 in the
+                // folder" is wrong exactly when the cache HITS — the file it
+                // wants then has an old timestamp and some unrelated mp3 is
+                // newer. A command whose output cannot be parsed forces its
+                // callers to invent a heuristic that is wrong on the happy path.
+                case "--json": json = true; quiet = true; break;
                 case "--list-voices" or "--voices":
                 {
                     if (!string.IsNullOrWhiteSpace(vaultArg) && Directory.Exists(vaultArg))
@@ -194,6 +201,21 @@ internal static partial class Program
         }
 
         var bytes = new FileInfo(path).Length;
+        if (json)
+        {
+            Console.WriteLine(new Newtonsoft.Json.Linq.JObject
+            {
+                ["path"] = path,
+                ["file"] = Path.GetFileName(path),
+                ["cached"] = cached,
+                ["bytes"] = bytes,
+                ["voice"] = voice,
+                ["rate"] = rate,
+                ["female"] = IsFemaleVoice(voice),
+                ["name"] = AssistantName(_vaultPath),
+            }.ToString(Newtonsoft.Json.Formatting.None));
+            return 0;
+        }
         Say($"brainx-mcp speak · v{ServerVersion}");
         Say($"  {AssistantName(_vaultPath)} · {voice} @ {rate} · {(IsFemaleVoice(voice) ? "female" : "male")}");
         Say($"  {(cached ? "cache hit" : "synthesised")}: {path} ({bytes:n0} bytes)");

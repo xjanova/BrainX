@@ -8301,6 +8301,28 @@ public partial class MainWindow : Window
             core.SetVirtualHostNameToFolderMapping(
                 "universe.local", wwwroot,
                 CoreWebView2HostResourceAccessKind.Allow);
+
+            // The assistant's audio lives in the VAULT, not in wwwroot: it is
+            // cached output keyed by text+voice, and wwwroot is inside the
+            // install directory that Velopack replaces wholesale on update.
+            // A second virtual host lets the page fetch it by URL, which
+            // streams — the alternative (a base64 data: URL through
+            // ExecuteScriptAsync) would push a whole MP3 through a script
+            // string on every sentence.
+            try
+            {
+                var voiceDir = Path.Combine(_vaultPath, ".obsidianx", "voice");
+                Directory.CreateDirectory(voiceDir);
+                core.SetVirtualHostNameToFolderMapping(
+                    "voice.local", voiceDir,
+                    CoreWebView2HostResourceAccessKind.Allow);
+            }
+            catch (Exception vex)
+            {
+                // Never fatal: no voice folder means she cannot speak, which is
+                // a missing feature, not a broken dashboard.
+                System.Diagnostics.Debug.WriteLine($"[assistant] voice host mapping skipped: {vex.GetType().Name}");
+            }
             core.WebMessageReceived += OnUniverseMessage;
             core.Settings.AreDevToolsEnabled = true;
             core.Settings.AreDefaultContextMenusEnabled = true;
