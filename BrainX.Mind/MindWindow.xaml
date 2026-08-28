@@ -6,9 +6,21 @@
         Width="400" Height="680" MinWidth="320" MinHeight="440"
         WindowStyle="None" Background="#070A1E"
         ShowInTaskbar="True" WindowStartupLocation="Manual">
-    <!-- Frameless: the page draws its own strip and asks the host to
-         DragMove(). A chrome titlebar above a WebView that already has one is
-         two titlebars. -->
+    <!-- Frameless: the page draws its own strip and asks the host to move the
+         window. A chrome titlebar above a WebView that already has one is two
+         titlebars.
+
+         WindowStyle="None" alone is not frameless. It drops WPF's chrome but
+         leaves the DWM frame — a ~7px band around the window that Windows 11
+         paints light, which is the pale strip along the top edge. Killing the
+         glass frame here removes the band itself; DWMWA_BORDER_COLOR in
+         MindWindow.xaml.cs removes the hairline DWM still draws around it.
+         CaptionHeight="0" because the page does the dragging, and
+         ResizeBorderThickness keeps the window resizable without it. -->
+    <WindowChrome.WindowChrome>
+        <WindowChrome CaptionHeight="0" GlassFrameThickness="0" CornerRadius="0"
+                      ResizeBorderThickness="6" UseAeroCaptionButtons="False"/>
+    </WindowChrome.WindowChrome>
     <Border BorderBrush="#3335E08A" BorderThickness="1">
         <wv2:WebView2 x:Name="Web" />
     </Border>

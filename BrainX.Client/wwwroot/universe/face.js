@@ -186,6 +186,119 @@ function band(data, [a, b]) {
     return s / Math.max(1, Math.min(b, data.length) - a) / 255;
 }
 
+/**
+ * The sound behind her — overlapping sine curves whose height follows the
+ * loudness of what she is saying.
+ *
+ * A 2D canvas rather than more three.js geometry: this is a flat backdrop that
+ * never rotates with the head, and rebuilding a line mesh every frame to draw
+ * four curves would cost more than the whole face does.
+ *
+ * It stays faint on purpose. The face is what you look at; this is the room it
+ * sits in, and a backdrop that competes for attention with the thing in front
+ * of it is just noise. It also never stops moving — a visualiser that goes
+ * flat between sentences reads as broken rather than as quiet.
+ */
+class WaveField {
+    constructor(host) {
+        this.host = host;
+        const c = document.createElement('canvas');
+        Object.assign(c.style, {
+            position: 'absolute', left: '0', top: '0',
+            width: '100%', height: '100%',
+            pointerEvents: 'none',          // never steal a click from the face
+        });
+        // First child, so it sits under the WebGL canvas without either of
+        // them needing a z-index.
+        host.insertBefore(c, host.firstChild);
+        this.canvas = c;
+        this.g = c.getContext('2d');
+        this.phase = 0;
+        this.level = 0;
+        this.fit();
+    }
+
+    fit() {
+        const w = this.host.clientWidth || 260, h = this.host.clientHeight || 300;
+        const d = Math.min(2, window.devicePixelRatio || 1);
+        this.w = w; this.h = h;
+        this.canvas.width = Math.round(w * d);
+        this.canvas.height = Math.round(h * d);
+        this.g.setTransform(d, 0, 0, d, 0, 0);
+    }
+
+    /** @param {number} level 0..1 loudness right now. */
+    draw(level) {
+        // Rises with the voice, falls slowly. Falling at the attack rate makes
+        // the curves flick between syllables instead of riding the sentence.
+        this.level += (level - this.level) * (level > this.level ? 0.5 : 0.06);
+        this.phase += 0.016 + this.level * 0.05;
+
+        const g = this.g, w = this.w, h = this.h, cy = h * 0.5;
+        g.clearRect(0, 0, w, h);
+        g.globalCompositeOperation = 'lighter';   // overlaps brighten, like light
+
+        // Idle amplitude has to be big enough to LOOK like a wave. Set small
+        // "so it stays subtle", four curves of different frequency all flatten
+        // onto the same pixel row and add up under `lighter` into one bright
+        // horizontal line drawn straight across her eyes — subtlety belongs in
+        // the alpha, not in the amplitude.
+        const amp = 16 + Math.sin(this.phase * 0.7) * 5 + this.level * (h * 0.24);
+        const LINES = [
+            { k: 1.0, spd: 1.00, off: 0.0, a: 0.17, lw: 1.4 },
+            { k: 1.6, spd: -0.70, off: 1.1, a: 0.12, lw: 1.1 },
+            { k: 2.4, spd: 1.40, off: 2.3, a: 0.08, lw: 1.0 },
+            { k: 3.6, spd: -1.85, off: 3.7, a: 0.05, lw: 0.9 },
+        ];
+
+        // Fade the ink out at both ends as well as flattening the curve.
+        // Amplitude alone is not enough: where the envelope reaches zero all
+        // four curves land on the same row and add up under `lighter` into a
+        // hard horizontal line running off both edges — the exact artifact the
+        // envelope was supposed to prevent.
+        const fade = g.createLinearGradient(0, 0, w, 0);
+        fade.addColorStop(0.00, 'rgba(53,224,138,0)');
+        fade.addColorStop(0.22, 'rgba(53,224,138,1)');
+        fade.addColorStop(0.78, 'rgba(53,224,138,1)');
+        fade.addColorStop(1.00, 'rgba(53,224,138,0)');
+
+        const step = Math.max(2, Math.round(w / 150));
+        for (const L of LINES) {
+            g.beginPath();
+            for (let x = 0; x <= w; x += step) {
+                const u = x / w;
+                // Taper to nothing at both edges so the curves read as a band
+                // of sound rather than as lines running off the sides.
+                const env = Math.pow(Math.sin(u * Math.PI), 2.1);
+                // `off` staggers the curves so they do not all cross zero at
+                // the same x — without it they pinch into one line four times
+                // across the width and the stack is visible as a defect.
+                const y = cy + Math.sin(u * Math.PI * 2 * L.k + this.phase * L.spd + L.off)
+                             * amp * env * (1 - L.k * 0.08);
+                x === 0 ? g.moveTo(x, y) : g.lineTo(x, y);
+            }
+            g.strokeStyle = fade;
+            g.globalAlpha = L.a;      // per-curve weight; the gradient carries the shape
+            g.lineWidth = L.lw;
+            g.stroke();
+            g.globalAlpha = 1;
+        }
+
+        // One soft pulse behind the curves, so loud passages glow rather than
+        // only growing taller.
+        if (this.level > 0.02) {
+            const r = g.createRadialGradient(w / 2, cy, 0, w / 2, cy, Math.max(w, h) * 0.42);
+            r.addColorStop(0, `rgba(53,224,138,${0.055 * this.level})`);
+            r.addColorStop(1, 'rgba(53,224,138,0)');
+            g.fillStyle = r;
+            g.fillRect(0, 0, w, h);
+        }
+        g.globalCompositeOperation = 'source-over';
+    }
+
+    dispose() { this.canvas.remove(); }
+}
+
 export class AssistantFace {
     constructor(host, female = true) {
         this.host = host;
@@ -202,6 +315,8 @@ export class AssistantFace {
         this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
         this.renderer.setSize(w, h, false);
         host.appendChild(this.renderer.domElement);
+        // After the renderer, so insertBefore(firstChild) puts it underneath.
+        this.wave = new WaveField(host);
 
         this.scene = new THREE.Scene();
         this.camera = new THREE.PerspectiveCamera(32, w / h, 0.1, 100);
@@ -307,7 +422,7 @@ export class AssistantFace {
             this._mood[k] += ((this.mood[k] ?? 0) - this._mood[k]) * 0.08;
         const M = this._mood;
 
-        let open = 0, wide = 0;
+        let open = 0, wide = 0, level = 0;
         if (this.speaking && this.analyser) {
             // Opening: RMS of the raw waveform, gated by a noise floor so room
             // tone and codec hiss do not hold the mouth permanently ajar.
@@ -319,6 +434,10 @@ export class AssistantFace {
             }
             const rms = Math.sqrt(sum / this.time.length);
             open = Math.min(1, Math.max(0, (rms - 0.012) * 6.2));
+            // The backdrop takes the loudness ungated: the mouth needs a noise
+            // floor so hiss does not hold it ajar, but the waves are allowed to
+            // shimmer on the quiet parts.
+            level = Math.min(1, rms * 3.6);
 
             // Shape: which way the energy leans. High spreads the lips ("ee"),
             // low with little high rounds them ("oo").
@@ -362,6 +481,7 @@ export class AssistantFace {
         // rather than as a blank stare.
         H.group.rotation.z = -M.browTilt * 0.05 + (M.eyeOpen < 0.85 ? 0.06 : 0);
 
+        this.wave.draw(level);
         this.renderer.render(this.scene, this.camera);
     }
 
@@ -369,6 +489,9 @@ export class AssistantFace {
         this.camera.aspect = w / h;
         this.camera.updateProjectionMatrix();
         this.renderer.setSize(w, h, false);
+        // The face is clamped narrower than the panel; the waves are not, so
+        // they measure the host rather than taking w/h.
+        this.wave.fit();
     }
 
     dispose() {
@@ -376,6 +499,7 @@ export class AssistantFace {
         this.stop();
         try { this.ctx?.close(); } catch {}
         this.head.geo.dispose();
+        this.wave.dispose();
         this.renderer.dispose();
         this.renderer.domElement.remove();
     }

@@ -38,6 +38,21 @@ public partial class MindWindow : Window
     private const int HTCAPTION = 0x0002;
     private const int VK_LBUTTON = 0x01;
 
+    // The pale line across the top edge.
+    //
+    // WindowStyle="None" removes WPF's chrome but not the frame DWM draws
+    // around every window, and on Windows 11 that frame is light — so a dark
+    // frameless window wears a white hairline along its top that no amount of
+    // XAML can reach, because nothing inside the window paints it. These
+    // attributes are the only way to say "no border" and "this window is
+    // dark"; both are no-ops on older Windows, which is why the return value
+    // is ignored rather than checked.
+    [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(
+        IntPtr hwnd, int attr, ref int value, int size);
+    private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+    private const int DWMWA_BORDER_COLOR = 34;
+    private const int DWMWA_COLOR_NONE = unchecked((int)0xFFFFFFFE);
+
     private AssistantService _svc = null!;
     private AssistantConfig _cfg = new();
     private string _vault = "";
@@ -54,8 +69,25 @@ public partial class MindWindow : Window
         // what is configurable.
         _svc.SaveConfig(_cfg);
         RestorePlacement();
+        // SourceInitialized, not Loaded: the HWND has to exist before DWM will
+        // take an attribute for it, and Loaded is too late to stop the light
+        // frame being drawn once first.
+        SourceInitialized += (_, _) => StripSystemBorder();
         Loaded += async (_, _) => await InitAsync();
         Closing += (_, _) => SavePlacement();
+    }
+
+    private void StripSystemBorder()
+    {
+        try
+        {
+            var h = new WindowInteropHelper(this).Handle;
+            if (h == IntPtr.Zero) return;
+            int none = DWMWA_COLOR_NONE, dark = 1;
+            DwmSetWindowAttribute(h, DWMWA_BORDER_COLOR, ref none, sizeof(int));
+            DwmSetWindowAttribute(h, DWMWA_USE_IMMERSIVE_DARK_MODE, ref dark, sizeof(int));
+        }
+        catch { }
     }
 
     /// <summary>
