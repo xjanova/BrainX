@@ -22,6 +22,15 @@ if ($mode -eq 'off') { exit 0 }
 $toolLog = "$root\tool-log.ndjson"
 $markerFile = "$root\.last-stop-marker"
 
+# The Stop payload carries transcript_path — the file Claude Code writes
+# itself, ahead of any hook. It is the only race-free record of what this turn
+# actually did; see the note beside the brain-write check below.
+$transcript = $null
+try {
+    $stdin = [Console]::In.ReadToEnd()
+    if ($stdin) { $transcript = ($stdin | ConvertFrom-Json).transcript_path }
+} catch { }
+
 # Cutoff = previous Stop timestamp, or 10 min ago as fallback
 $cutoff = (Get-Date).AddMinutes(-10)
 if (Test-Path $markerFile) {
@@ -145,11 +154,47 @@ catch { }
 # Look for create/append/remember calls in the same window.
 $brainWriteHappened = $false
 try {
-    $brainWriteHappened = ($recent | Where-Object {
-        # Suffix match — same rebrand trap as brain-prompt-gate.ps1 and brain-stats.ps1:
-        # the server prefix changes, the tool name identifies the call.
-        $_.tool -match '__(brain_create_note|brain_append_note|brain_remember)$'
-    }).Count -gt 0
+    # Suffix match — same rebrand trap as brain-prompt-gate.ps1 and brain-stats.ps1:
+    # the server prefix changes, the tool name identifies the call.
+    $brainRx = '__(brain_create_note|brain_append_note|brain_remember)$'
+    $brainWriteHappened = ($recent | Where-Object { $_.tool -match $brainRx }).Count -gt 0
+
+    # THE TOOL LOG RACES AND THE TRANSCRIPT DOES NOT.
+    #
+    # Measured 2026-08-28: the hook logged inWindow=43 / brainWrite=false at
+    # 18:51:06 while a brain_append_note had run at 18:50:29. Eight seconds
+    # after a later write the line was STILL missing. The cause is structural,
+    # not timing luck: tool-log.ndjson is written by a PostToolUse hook, every
+    # tool call now spawns up to three PowerShell processes for the three
+    # PostToolUse matchers, and Stop fires while that queue is still draining.
+    # The turn's LAST tool call is the one most likely to be missing — and it
+    # is a brain write more often than anything else, because saving is the
+    # last thing a turn does. So the nudge fired "you saved nothing" at the
+    # exact moment saving had just happened.
+    #
+    # A longer sleep would only widen a window that has no correct width. The
+    # transcript is written by Claude Code itself, before any hook runs, so it
+    # is both authoritative and already complete when Stop reads it.
+    # tool-log stays the source for the EDIT count, which is not time-critical
+    # in the same way and would cost a second parse of a large file.
+    if (-not $brainWriteHappened -and $transcript -and (Test-Path $transcript)) {
+        try {
+            foreach ($line in (Get-Content $transcript -Tail 400 -ErrorAction SilentlyContinue)) {
+                if ($line -notmatch 'brain_create_note|brain_append_note|brain_remember') { continue }
+                $o = $null
+                try { $o = $line | ConvertFrom-Json } catch { continue }
+                if (-not $o.timestamp) { continue }
+                try { if ((Get-Date $o.timestamp) -le $cutoff) { continue } } catch { continue }
+                foreach ($b in @($o.message.content)) {
+                    if ($b.type -eq 'tool_use' -and
+                        $b.name -match '__(brain_create_note|brain_append_note|brain_remember)$') {
+                        $brainWriteHappened = $true; break
+                    }
+                }
+                if ($brainWriteHappened) { break }
+            }
+        } catch { }
+    }
 } catch { }
 
 # Count how many file-modifying calls happened so we can scale the nudge.
