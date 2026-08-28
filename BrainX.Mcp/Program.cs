@@ -196,6 +196,11 @@ internal static partial class Program
             Console.OutputEncoding = new UTF8Encoding(false);
             return InstallHooksCli(args.Skip(1).ToArray());
         }
+        if (args.Length > 0 && args[0].Equals("speak", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.OutputEncoding = new UTF8Encoding(false);
+            return await SpeakCliAsync(args.Skip(1).ToArray()).ConfigureAwait(false);
+        }
         if (args.Length > 0 && (args[0] == "--version" || args[0] == "-v" || args[0].Equals("version", StringComparison.OrdinalIgnoreCase)))
         {
             Console.OutputEncoding = new UTF8Encoding(false);
