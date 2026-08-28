@@ -78,6 +78,15 @@ public partial class MainWindow
             await w.EvalAsync(
                 $"window.brainxAssistant.configure({{name:{JsonSerializer.Serialize(id.Name)}," +
                 $"female:{(id.Female ? "true" : "false")}}})");
+            // Warm the model the moment her window opens.
+            //
+            // Measured on this machine: the FIRST question took 67.9 s and
+            // every one after it 2.8 s — the whole gap is Ollama loading the
+            // weights, not thinking. Paying that while the owner is still
+            // reading the window costs nothing; paying it on their first
+            // question makes her look broken exactly once, which is the once
+            // that decides whether anyone opens this again.
+            _ = WarmAssistantModelAsync();
         };
         _assistantWindow = w;
         w.Show();
@@ -269,48 +278,54 @@ public partial class MainWindow
         {
             var id = AssistantIdentity();
 
-            // Who she is, then the recent turns, then the question. The
-            // persona line is short on purpose: a long one eats the context a
-            // small local model needs for the brain notes underneath it.
-            var sb = new StringBuilder();
-            sb.AppendLine($"You are {id.Name}, the owner's BrainX assistant. Answer briefly and in the language the question was asked in.");
-            foreach (var (role, msg) in _mindHistory)
-                sb.AppendLine($"{(role == "user" ? "User" : id.Name)}: {msg}");
-            sb.AppendLine($"User: {text}");
-            sb.Append($"{id.Name}:");
-
-            using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromMinutes(2));
+            using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromMinutes(3));
             string? answer = null;
             try
             {
-                answer = (await CallLocalLlmRawAsync(sb.ToString(), cts.Token))?.Trim();
+                // Retrieval FIRST, then the model. Two deliberate choices:
+                //
+                // 1. Straight to Ollama, not through BrainX.Server. The server
+                //    is a separate process this client never launches, is not
+                //    shipped in the install directory, and the owner's real
+                //    node is remote behind a bearer token this client sends on
+                //    no request. Measured: nothing listening on 5142 while
+                //    Ollama sat on 11434 with four chat models.
+                //
+                // 2. Context from `brainx-mcp context`, NOT from
+                //    AiHubService.BuildBrainContext. That method scores notes by
+                //    counting query terms in Title + Preview + Tags — it never
+                //    reads a note body, has no embeddings and no fusion, and
+                //    then hands the model a ~280-char preview instead of the
+                //    passage that matched. On this vault's own gold set that is
+                //    hit@5 8.7% against the shipped hybrid's 54.4%. The CLI runs
+                //    the real ranker and returns the winning SECTION.
+                var ctx = await AssistantContextAsync(text, cts.Token);
+                answer = CleanModelReply(await AskOllamaAsync(text, ctx, id.Name, cts.Token));
             }
-            catch (HttpRequestException)
+            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
             {
-                // BrainX.Server runs as a SEPARATE process and is routinely not
-                // running — the app already says so elsewhere ("Start
-                // BrainX.Server (it runs separately)"). Falling back to Ollama
-                // directly keeps her answering instead of handing the owner a
-                // socket error, at the cost of the server's brain-context
-                // injection. The reply says which path answered, because a
-                // grounded answer and an ungrounded one are not the same thing
-                // and the difference must not be invisible.
-                answer = await AskOllamaDirectAsync(sb.ToString(), cts.Token);
-                if (!string.IsNullOrWhiteSpace(answer))
-                    answer += "\n\n— (ตอบโดยไม่ผ่าน BrainX.Server จึงยังไม่ได้ดึงบริบทจาก brain)";
+                await ReplyToPage(
+                    "ยังตอบไม่ได้ค่ะ — ต่อ Ollama ที่ localhost:11434 ไม่สำเร็จ\n"
+                  + "ตรวจว่า Ollama เปิดอยู่ (`ollama serve`) แล้วลองใหม่นะคะ", false);
+                return;
             }
 
             if (string.IsNullOrWhiteSpace(answer))
             {
-                await ReplyToPage(
-                    "ยังตอบไม่ได้ค่ะ — BrainX.Server (พอร์ต 5142) ไม่ได้เปิด และต่อ Ollama ตรงก็ไม่สำเร็จ\n"
-                  + "เปิด BrainX.Server หรือตรวจว่า Ollama รันอยู่ที่ 11434", false);
+                await ReplyToPage("โมเดลตอบกลับมาว่าง ๆ ค่ะ ลองถามใหม่อีกครั้ง", false);
                 return;
             }
 
             _mindHistory.Add(("user", text));
             _mindHistory.Add(("assistant", answer));
             while (_mindHistory.Count > MindHistoryTurns * 2) _mindHistory.RemoveRange(0, 2);
+
+            // Every few exchanges, not every turn — see LearnAboutOwnerAsync.
+            if (++_mindTurnsSinceLearn >= 3)
+            {
+                _mindTurnsSinceLearn = 0;
+                _ = LearnAboutOwnerAsync();
+            }
 
             // Text first, voice second. Reading is faster than listening, and
             // a reply that only exists as audio cannot be re-read, copied, or
@@ -325,22 +340,272 @@ public partial class MainWindow
         }
     }
 
+    // ── who she is, and who she is talking to ─────────────────────────────
+
+    private string MindDir => Path.Combine(_vaultPath, "Mind");
+    private string PersonaPath => Path.Combine(MindDir, "persona.md");
+    private string OwnerProfilePath => Path.Combine(MindDir, "owner-profile.md");
+
     /// <summary>
-    /// Talk to Ollama directly, bypassing BrainX.Server. Used only when the
-    /// server refuses the connection.
+    /// Her character, as a file the owner can open and rewrite.
     ///
-    /// Model choice is deliberate and NOT the biggest one installed: this path
-    /// answers a chat box someone is waiting in front of, and gemma3:27b takes
-    /// tens of seconds per reply on this machine. Preference order is
-    /// smallest-useful first, and whatever is actually present wins.
+    /// A persona hardcoded in C# is a persona nobody can adjust without a
+    /// rebuild, and this one is meant to be argued with. Seeded once and never
+    /// overwritten afterwards — if the owner edits it, that edit is the point.
     /// </summary>
-    private async Task<string?> AskOllamaDirectAsync(string prompt, CancellationToken ct)
+    private string AssistantPersona(string name)
     {
         try
         {
+            if (File.Exists(PersonaPath)) return File.ReadAllText(PersonaPath).Trim();
+            Directory.CreateDirectory(MindDir);
+            var seed = $"""
+                # {name}
+
+                ผู้ช่วยประจำ BrainX ของเจ้าของเครื่องนี้
+
+                ## นิสัย
+                - ตอบตรงประเด็น สั้น และไม่อ้อมค้อม — เจ้าของอ่านเร็วและไม่ชอบคำฟุ่มเฟือย
+                - พูดจากสิ่งที่มีในโน้ตเสมอ ถ้าไม่มีให้บอกว่าไม่มี ห้ามเดาแล้วพูดเหมือนรู้
+                - อ้างชื่อโน้ตที่ใช้ เพื่อให้ตรวจสอบย้อนได้
+                - ถ้าเจ้าของกำลังจะทำสิ่งที่โน้ตบันทึกว่าเคยพังมาก่อน ให้เตือนก่อนเสมอ
+                - ใช้ภาษาเดียวกับที่ถูกถาม
+
+                ## ห้าม
+                - อย่าขึ้นต้นทุกประโยคด้วยชื่อเจ้าของ มันฟังเป็นสคริปต์
+                - อย่าขอโทษยืดยาว บอกสิ่งที่ทำได้แทน
+                - อย่าแต่งตัวเลขหรือชื่อไฟล์ที่ไม่ได้อยู่ในโน้ต
+
+                _ไฟล์นี้แก้ได้ตามใจ — {name} อ่านทุกครั้งที่ตอบ_
+                """;
+            File.WriteAllText(PersonaPath, seed, new UTF8Encoding(false));
+            return seed.Trim();
+        }
+        catch { return $"You are {name}, the owner's BrainX assistant."; }
+    }
+
+    /// <summary>What she has learned about the owner. Small enough to send every turn.</summary>
+    private string OwnerProfile()
+    {
+        try { return File.Exists(OwnerProfilePath) ? File.ReadAllText(OwnerProfilePath).Trim() : ""; }
+        catch { return ""; }
+    }
+
+    private int _mindTurnsSinceLearn;
+
+    /// <summary>
+    /// Learn something durable about the owner from the recent conversation.
+    ///
+    /// Runs every few exchanges rather than every turn: it costs a second model
+    /// call, and habits are not visible in one message anyway. The extractor is
+    /// told to return NONE far more often than not — this vault's own Gardener
+    /// rule is that a janitor which quietly reorganises is worse than one that
+    /// does nothing, and a profile that grows on every turn is noise that
+    /// crowds out the few observations worth keeping.
+    /// </summary>
+    private async Task LearnAboutOwnerAsync()
+    {
+        try
+        {
+            if (_mindHistory.Count < 4) return;
+            var existing = OwnerProfile();
+            var convo = string.Join("\n", _mindHistory.TakeLast(8)
+                .Select(h => $"{(h.Role == "user" ? "OWNER" : "ASSISTANT")}: {h.Text}"));
+
+            var prompt = $"""
+                From the conversation below, list ONLY durable facts about the OWNER:
+                how they like to work, what they are building, what they dislike,
+                how they want to be answered. One short line each, no bullets.
+                Write each line in the SAME LANGUAGE the owner speaks — this file
+                is theirs to read and edit, not only the model's to consume.
+
+                Ignore one-off task details, anything about the assistant, and
+                anything already listed under ALREADY KNOWN. If there is nothing
+                new and durable, reply with exactly: NONE
+
+                ALREADY KNOWN:
+                {(existing.Length > 0 ? existing : "(nothing yet)")}
+
+                CONVERSATION:
+                {convo}
+                """;
+
+            using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromMinutes(2));
+            var body = new JObject
+            {
+                ["model"] = await AssistantModelAsync(cts.Token),
+                ["messages"] = new JArray { new JObject { ["role"] = "user", ["content"] = prompt } },
+                ["stream"] = false,
+                ["keep_alive"] = "30m",
+                ["options"] = new JObject { ["num_predict"] = 200, ["temperature"] = 0.2 },
+            }.ToString(Newtonsoft.Json.Formatting.None);
+
             using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(2) };
-            var tagsJson = await http.GetStringAsync("http://localhost:11434/api/tags", ct);
-            var models = (JObject.Parse(tagsJson)["models"] as JArray)?
+            using var resp = await http.PostAsync("http://localhost:11434/api/chat",
+                new StringContent(body, new UTF8Encoding(false), "application/json"), cts.Token);
+            if (!resp.IsSuccessStatusCode) return;
+            var raw = CleanModelReply(
+                JObject.Parse(await resp.Content.ReadAsStringAsync(cts.Token))["message"]?["content"]?.ToString());
+
+            if (raw.Length == 0 || raw.Contains("NONE", StringComparison.OrdinalIgnoreCase)) return;
+
+            var known = existing.ToLowerInvariant();
+            var fresh = raw.Split('\n')
+                .Select(l => l.Trim().TrimStart('-', '*', '•', ' '))
+                .Where(l => l.Length >= 8 && l.Length <= 200)
+                // Cheap dedup on the first few words. Not clever, but it stops
+                // the same observation being appended in five rewordings, which
+                // is what an LLM does when asked the same question repeatedly.
+                .Where(l => !known.Contains(l.ToLowerInvariant()[..Math.Min(24, l.Length)]))
+                .Take(4)
+                .ToList();
+            if (fresh.Count == 0) return;
+
+            Directory.CreateDirectory(MindDir);
+            var stamp = DateTime.Now.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+            var sb = new StringBuilder();
+            if (existing.Length == 0)
+                sb.AppendLine("# สิ่งที่มายด์สังเกตเห็นเกี่ยวกับเจ้าของ\n\n_สะสมจากบทสนทนา แก้หรือลบบรรทัดไหนก็ได้_\n");
+            foreach (var f in fresh) sb.AppendLine($"- {f}  _({stamp})_");
+            File.AppendAllText(OwnerProfilePath, sb.ToString(), new UTF8Encoding(false));
+            Debug.WriteLine($"[assistant] learned {fresh.Count} thing(s) about the owner");
+        }
+        catch (Exception ex) { Debug.WriteLine($"[assistant] learn failed: {ex.GetType().Name}"); }
+    }
+
+    /// <summary>
+    /// Ask the brain what it knows about this question, using the real
+    /// retrieval — hybrid ranking, section vectors, the winning passage rather
+    /// than the note's opening paragraph. Empty string when nothing matched;
+    /// the prompt then says so explicitly rather than leaving a silence the
+    /// model will fill by inventing.
+    /// </summary>
+    private async Task<string> AssistantContextAsync(string question, CancellationToken ct)
+    {
+        try
+        {
+            var mcp = ResolveBestMcpExe();
+            if (mcp == null) return "";
+            var psi = new ProcessStartInfo(mcp)
+            {
+                RedirectStandardOutput = true, RedirectStandardError = true,
+                UseShellExecute = false, CreateNoWindow = true,
+                StandardOutputEncoding = new UTF8Encoding(false),
+            };
+            foreach (var a in new[] { "context", "--vault", _vaultPath,
+                                      "--query", question, "--limit", "5", "--chars", "900" })
+                psi.ArgumentList.Add(a);
+            using var p = Process.Start(psi);
+            if (p == null) return "";
+            var outp = await p.StandardOutput.ReadToEndAsync(ct);
+            await p.WaitForExitAsync(ct);
+            return p.ExitCode == 0 ? outp.Trim() : "";
+        }
+        catch { return ""; }
+    }
+
+    /// <summary>
+    /// One chat turn against Ollama, with the retrieved notes as system
+    /// context. Uses /api/chat (not /api/generate) so the history stays real
+    /// messages rather than a flattened transcript the model has to re-parse.
+    /// </summary>
+    private async Task<string?> AskOllamaAsync(string question, string context, string name, CancellationToken ct)
+    {
+        var sys = new StringBuilder();
+        sys.AppendLine(AssistantPersona(name));
+        var owner = OwnerProfile();
+        if (owner.Length > 0)
+        {
+            // What she has learned about the OWNER, above the notes: it changes
+            // HOW she answers, where the notes change WHAT she answers.
+            sys.AppendLine();
+            sys.AppendLine("## What you know about the owner");
+            sys.AppendLine(owner);
+        }
+        sys.AppendLine();
+        if (context.Length > 0)
+        {
+            sys.AppendLine("Use these notes from the owner's brain. Cite the note titles you rely on.");
+            sys.AppendLine("If they do not answer the question, say so plainly instead of guessing.");
+            sys.AppendLine();
+            sys.AppendLine(context);
+        }
+        else
+        {
+            // Naming the absence matters: without it the model treats an empty
+            // context as permission to answer from pretraining and states
+            // project facts it cannot possibly know.
+            sys.AppendLine("The brain returned NO matching notes for this question. Say that you could not find it in the notes rather than answering from general knowledge.");
+        }
+
+        var msgs = new JArray { new JObject { ["role"] = "system", ["content"] = sys.ToString() } };
+        foreach (var (role, msg) in _mindHistory)
+            msgs.Add(new JObject { ["role"] = role, ["content"] = msg });
+        msgs.Add(new JObject { ["role"] = "user", ["content"] = question });
+
+        var body = new JObject
+        {
+            ["model"] = await AssistantModelAsync(ct),
+            ["messages"] = msgs,
+            ["stream"] = false,
+            ["options"] = new JObject { ["num_predict"] = 500, ["temperature"] = 0.6 },
+        }.ToString(Newtonsoft.Json.Formatting.None);
+
+        using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(3) };
+        using var resp = await http.PostAsync("http://localhost:11434/api/chat",
+            new StringContent(body, new UTF8Encoding(false), "application/json"), ct);
+        resp.EnsureSuccessStatusCode();
+        var json = await resp.Content.ReadAsStringAsync(ct);
+        return JObject.Parse(json)["message"]?["content"]?.ToString();
+    }
+
+    /// <summary>
+    /// Load the model's weights ahead of the first question, and keep them
+    /// resident. `keep_alive: 30m` matters as much as the warm-up: Ollama
+    /// evicts an idle model after five minutes by default, so a window left
+    /// open over lunch would pay the full cold-load again on the next question
+    /// and look exactly as broken as it did the first time.
+    /// </summary>
+    private async Task WarmAssistantModelAsync()
+    {
+        try
+        {
+            using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromMinutes(4));
+            var body = new JObject
+            {
+                ["model"] = await AssistantModelAsync(cts.Token),
+                ["messages"] = new JArray { new JObject { ["role"] = "user", ["content"] = "hi" } },
+                ["stream"] = false,
+                ["keep_alive"] = "30m",
+                ["options"] = new JObject { ["num_predict"] = 1 },
+            }.ToString(Newtonsoft.Json.Formatting.None);
+            using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(4) };
+            await http.PostAsync("http://localhost:11434/api/chat",
+                new StringContent(body, new UTF8Encoding(false), "application/json"), cts.Token);
+            Debug.WriteLine("[assistant] model warmed");
+        }
+        catch (Exception ex) { Debug.WriteLine($"[assistant] warm failed: {ex.GetType().Name}"); }
+    }
+
+    private string? _assistantModel;
+
+    /// <summary>
+    /// Which Ollama model answers her.
+    ///
+    /// Deliberately NOT the biggest one installed: this answers a chat box
+    /// with someone waiting in front of it, and gemma3:27b takes tens of
+    /// seconds per reply on this machine. Preference is smallest-useful first,
+    /// and whatever is actually present wins. Embedding models are excluded —
+    /// asking bge-m3 to chat returns nothing and looks like a hang.
+    /// </summary>
+    private async Task<string> AssistantModelAsync(CancellationToken ct)
+    {
+        if (_assistantModel != null) return _assistantModel;
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+            var tags = await http.GetStringAsync("http://localhost:11434/api/tags", ct);
+            var models = (JObject.Parse(tags)["models"] as JArray)?
                 .Select(m => m["name"]?.ToString() ?? "")
                 .Where(n => n.Length > 0
                          && !n.Contains("embed", StringComparison.OrdinalIgnoreCase)
@@ -348,37 +613,26 @@ public partial class MainWindow
                          && !n.Contains("nomic", StringComparison.OrdinalIgnoreCase)
                          && !n.Contains("rerank", StringComparison.OrdinalIgnoreCase))
                 .ToList() ?? new List<string>();
-            if (models.Count == 0) return null;
-
-            string? pick = null;
             foreach (var want in new[] { "llama3.2", "gemma3:4b", "qwen", "phi", "mistral" })
             {
-                pick = models.FirstOrDefault(m => m.StartsWith(want, StringComparison.OrdinalIgnoreCase));
-                if (pick != null) break;
+                var hit = models.FirstOrDefault(m => m.StartsWith(want, StringComparison.OrdinalIgnoreCase));
+                if (hit != null) return _assistantModel = hit;
             }
-            pick ??= models[0];
-
-            var body = new JObject
-            {
-                ["model"] = pick,
-                ["prompt"] = prompt,
-                ["stream"] = false,
-                ["options"] = new JObject { ["num_predict"] = 400 },
-            }.ToString(Newtonsoft.Json.Formatting.None);
-
-            using var resp = await http.PostAsync("http://localhost:11434/api/generate",
-                new StringContent(body, new UTF8Encoding(false), "application/json"), ct);
-            if (!resp.IsSuccessStatusCode) return null;
-            var json = await resp.Content.ReadAsStringAsync(ct);
-            var text = JObject.Parse(json)["response"]?.ToString();
-            // A reasoning model narrates inside <think>…</think>; that is
-            // scratch work, not an answer, and reading it aloud is worse.
-            text = System.Text.RegularExpressions.Regex.Replace(
-                text ?? "", "<think>[\\s\\S]*?</think>", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-            return text.Trim();
+            if (models.Count > 0) return _assistantModel = models[0];
         }
-        catch { return null; }
+        catch { }
+        return _assistantModel = "llama3.2:3b";
     }
+
+    /// <summary>
+    /// A reasoning model narrates inside &lt;think&gt;…&lt;/think&gt;. That is
+    /// scratch work, not an answer — showing it is noise and reading it aloud
+    /// is worse.
+    /// </summary>
+    private static string CleanModelReply(string? s)
+        => System.Text.RegularExpressions.Regex.Replace(
+               s ?? "", "<think>[\\s\\S]*?</think>", "",
+               System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
 
     /// <summary>
     /// Strip a written answer down to something worth hearing. Markdown
