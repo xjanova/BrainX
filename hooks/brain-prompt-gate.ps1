@@ -1,4 +1,4 @@
-# UserPromptSubmit gate for brain-first protocol
+﻿# UserPromptSubmit gate for brain-first protocol
 # Decides whether to inject brain-first protocol message based on prompt characteristics
 # Logs all decisions to brain-decisions.ndjson for measurement
 

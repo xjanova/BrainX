@@ -1,4 +1,4 @@
-# PostToolUse logger for tool calls
+﻿# PostToolUse logger for tool calls
 # Maintains tool-log.ndjson AND captures brain_search queries to brain-search-log.ndjson
 # Tracks response size (chars) as a proxy for token cost.
 

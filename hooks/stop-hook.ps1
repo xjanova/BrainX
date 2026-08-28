@@ -1,6 +1,14 @@
-# Stop hook: inject brain-end reminder ONLY when turn was substantive.
+﻿# Stop hook: inject brain-end reminder ONLY when turn was substantive.
 # A turn is "substantive" if it included an Edit/Write/MultiEdit/NotebookEdit/Task call
 # since the previous Stop. Trivial Q&A turns get NO reminder (saves ~85t/turn).
+
+# -NoMarker: run the hook diagnostically WITHOUT moving .last-stop-marker.
+# Running this hook by hand otherwise advances the very state that defines
+# "this turn", so the next real Stop sees an empty window and reports no
+# brain write when there was one. That cost a diagnosis on 2026-08-28 and is
+# the same self-contamination class as writing test rows into tool-log.ndjson
+# or leaving probe peers on the agent bus.
+param([switch]$NoMarker)
 
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
 $ErrorActionPreference = 'SilentlyContinue'
@@ -23,8 +31,32 @@ if (Test-Path $markerFile) {
     } catch { }
 }
 
-# Update marker (best-effort)
-try { (Get-Date).ToString('o') | Set-Content $markerFile -Encoding utf8 } catch { }
+# Update marker (best-effort). Skipped for a diagnostic run so the next real
+# Stop still sees the turn it is supposed to judge.
+if (-not $NoMarker) {
+    try { (Get-Date).ToString('o') | Set-Content $markerFile -Encoding utf8 } catch { }
+}
+
+# Why this hook logs at all: brain-prompt-gate.ps1 writes every decision to
+# brain-decisions.ndjson and is therefore answerable ("why did it nudge?").
+# This one wrote nothing, so "it said I never saved, but I did" could only be
+# investigated by re-deriving its inputs by hand -- and by then the marker had
+# moved and the evidence was gone. One line per decision makes it a lookup.
+function Write-StopDecision($verdict, $extra) {
+    try {
+        ([ordered]@{
+            ts        = (Get-Date).ToString('o')
+            cutoff    = $cutoff.ToString('o')
+            verdict   = $verdict
+            edits     = $extra.edits
+            brainWrite= $extra.brainWrite
+            inWindow  = $extra.inWindow
+            auditAge  = $extra.auditAge
+            probe     = [bool]$NoMarker
+        } | ConvertTo-Json -Compress) |
+            Add-Content -Path "$root\brain-stop-log.ndjson" -Encoding utf8
+    } catch { }
+}
 
 if (-not (Test-Path $toolLog)) { exit 0 }
 
@@ -44,7 +76,10 @@ try {
 }
 catch { }
 
-if (-not $substantive) { exit 0 }
+if (-not $substantive) {
+    Write-StopDecision 'quiet-turn' @{ edits = 0; brainWrite = $null; inWindow = @($recent).Count; auditAge = $null }
+    exit 0
+}
 
 # ── Brain audit due check ────────────────────────────────────────
 # Find any vault under .obsidianx/last-audit.json from the cwd up the tree
@@ -156,6 +191,12 @@ if ($auditDue) {
         " Last brain_audit was $([math]::Floor($auditAge)) days ago. Re-run brain_audit (cheap, ~2s) before relying on stale health stats."
     }
     $msg += $auditMsg
+}
+
+$verdict = if ($brainWriteHappened) { 'saved' } else { 'no-save' }
+Write-StopDecision $verdict @{
+    edits = $editCount; brainWrite = $brainWriteHappened
+    inWindow = @($recent).Count; auditAge = $auditAge
 }
 
 @{

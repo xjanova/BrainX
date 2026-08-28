@@ -1,4 +1,4 @@
-# Measurement script — brain-first cost, hit rates, waste signals.
+﻿# Measurement script — brain-first cost, hit rates, waste signals.
 # Usage: powershell -File ~/.claude/scripts/brain-stats.ps1 [-Days 1]
 #
 # Chars are converted to tokens with the coefficients fitted in
