@@ -1,0 +1,64 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>AssistantFace harness</title>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three/three.module.js" } }
+</script>
+<style>
+  body { margin:0; background:#05070d; color:#9fb3c8; font:13px/1.5 system-ui,sans-serif;
+         display:flex; gap:24px; padding:24px; align-items:flex-start; }
+  #stage { width:260px; height:300px; border:1px solid #1b2b3a; border-radius:10px;
+           background:radial-gradient(60% 60% at 50% 40%, #0b1622 0%, #05070d 100%); }
+  button { background:#0d1b2a; color:#67e8f9; border:1px solid #1e3a4a; border-radius:6px;
+           padding:7px 12px; font:inherit; cursor:pointer; }
+  button:hover { border-color:#67e8f9; }
+  #log { white-space:pre-wrap; font-family:ui-monospace,monospace; font-size:12px; color:#7f9bb3; }
+  label { display:block; margin:10px 0 4px; }
+</style>
+<div id="stage"></div>
+<div>
+  <label>audio url</label>
+  <input id="url" size="52" value=""  placeholder="mp3 url (or use the synthetic sweep)">
+  <label>head</label>
+  <button id="f">female</button> <button id="m">male</button>
+  <label>drive</label>
+  <button id="play">play + lipsync</button> <button id="stop">stop</button>
+  <button id="tone">synthetic sweep (no file)</button>
+  <div id="log"></div>
+</div>
+<script type="module">
+import { AssistantFace } from './face.js';
+const log = (m) => document.getElementById('log').textContent += m + '\n';
+const face = new AssistantFace(document.getElementById('stage'), true);
+window.face = face;
+log('face mounted (female)');
+
+document.getElementById('f').onclick = () => { face.setFemale(true);  log('head -> female'); };
+document.getElementById('m').onclick = () => { face.setFemale(false); log('head -> male'); };
+document.getElementById('stop').onclick = () => { face.stop(); log('stopped'); };
+document.getElementById('play').onclick = async () => {
+  const u = document.getElementById('url').value;
+  log('playing ' + u);
+  try { await face.speak(u); log('ended'); }
+  catch (e) { log('ERROR ' + e.message); }
+};
+
+// Drives the mouth from a generated sweep so the animation can be verified
+// with no audio file and no network — the check that separates "the face is
+// broken" from "the mp3 never arrived".
+document.getElementById('tone').onclick = async () => {
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  const ctx = face.ctx = face.ctx || new Ctx();
+  if (ctx.state === 'suspended') await ctx.resume();
+  const osc = ctx.createOscillator(), gain = ctx.createGain(), an = ctx.createAnalyser();
+  an.fftSize = 512; gain.gain.value = 0.06;
+  osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(120, ctx.currentTime);
+  osc.frequency.exponentialRampToValueAtTime(2400, ctx.currentTime + 3);
+  osc.connect(gain); gain.connect(an); an.connect(ctx.destination);
+  face.analyser = an; face.freq = new Uint8Array(an.frequencyBinCount); face.speaking = true;
+  osc.start(); log('sweep 120Hz -> 2.4kHz over 3s (watch mouth go tall -> wide)');
+  osc.stop(ctx.currentTime + 3);
+  osc.onended = () => { face.speaking = false; log('sweep done'); };
+};
+</script>

@@ -42,6 +42,86 @@ internal static partial class Program
 
     private static readonly Regex WsRx = new(@"\s+", RegexOptions.Compiled);
 
+    /// <summary>
+    /// The owner's chosen voice, from the vault's settings.json.
+    ///
+    /// VAULT, not machine-settings: a voice is a presentation preference like
+    /// UiTheme, carries no secret and no absolute path, and someone who moves
+    /// their vault to another machine wants the same voice waiting there. The
+    /// machine-settings file exists for the four things that are actively
+    /// harmful in a vault (a password, an install decision, this filesystem's
+    /// paths, the storage engine) and a voice name is none of them.
+    /// </summary>
+    private static (string Voice, string Rate) VoicePrefs(string vaultPath)
+    {
+        try
+        {
+            var p = Path.Combine(vaultPath, ".obsidianx", "settings.json");
+            if (File.Exists(p))
+            {
+                var o = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(p));
+                var v = o["VoiceName"]?.ToString();
+                var r = o["VoiceRate"]?.ToString();
+                return (string.IsNullOrWhiteSpace(v) ? DefaultVoice : v!,
+                        string.IsNullOrWhiteSpace(r) ? DefaultRate : r!);
+            }
+        }
+        catch { }   // a broken settings file must not make the brain mute
+        return (DefaultVoice, DefaultRate);
+    }
+
+    /// <summary>Thai + the English voices worth offering, for the Settings
+    /// dropdown and `speak --list-voices`. edge-tts publishes hundreds; this is
+    /// the shortlist a picker can actually be used with. `Female` drives the
+    /// face: a feminine voice with a masculine wireframe reads as a bug.</summary>
+    internal static readonly (string Id, string Label, bool Female)[] OfferedVoices =
+    {
+        ("th-TH-PremwadeeNeural", "ไทย · หญิง (Premwadee)",      true),
+        ("th-TH-NiwatNeural",     "ไทย · ชาย (Niwat)",           false),
+        ("en-US-AriaNeural",      "English · female (Aria)",     true),
+        ("en-US-GuyNeural",       "English · male (Guy)",        false),
+        ("en-GB-SoniaNeural",     "English UK · female (Sonia)", true),
+    };
+
+    /// <summary>
+    /// What she is called. The assistant knowing its own name is not decoration:
+    /// the SessionStart hook injects it, so "มายด์ ช่วยดูให้หน่อย" resolves to
+    /// this agent instead of being read as a third party it should ask about.
+    /// Settable, because a name the owner did not choose is not a name.
+    /// </summary>
+    private const string DefaultAssistantName = "มายด์";
+
+    /// <summary>
+    /// Which face to draw. The wireframe follows the VOICE, not a separate
+    /// setting: a feminine voice over a masculine head is the kind of mismatch
+    /// nobody reads as a style choice. Unknown voices fall back to the id's own
+    /// convention rather than guessing female, so a hand-set voice outside the
+    /// shortlist still lands somewhere sane.
+    /// </summary>
+    internal static bool IsFemaleVoice(string voice)
+    {
+        foreach (var (id, _, female) in OfferedVoices)
+            if (id.Equals(voice, StringComparison.OrdinalIgnoreCase)) return female;
+        // Microsoft's neural ids carry no gender marker, so for anything off the
+        // shortlist the honest default is the one the app ships with: female.
+        return true;
+    }
+
+    internal static string AssistantName(string vaultPath)
+    {
+        try
+        {
+            var p = Path.Combine(vaultPath, ".obsidianx", "settings.json");
+            if (File.Exists(p))
+            {
+                var n = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(p))["AssistantName"]?.ToString();
+                if (!string.IsNullOrWhiteSpace(n)) return n!.Trim();
+            }
+        }
+        catch { }
+        return DefaultAssistantName;
+    }
+
     internal static async Task<int> SpeakCliAsync(string[] args)
     {
         string? text = null, outPath = null, voice = null, rate = null, vaultArg = null;
@@ -59,6 +139,21 @@ internal static partial class Program
                 case "--vault" when i + 1 < args.Length: vaultArg = args[++i]; break;
                 case "--play": play = true; break;
                 case "--quiet": quiet = true; break;
+                case "--list-voices" or "--voices":
+                {
+                    if (!string.IsNullOrWhiteSpace(vaultArg) && Directory.Exists(vaultArg))
+                        _vaultPath = Path.GetFullPath(vaultArg);
+                    var (curV, curR) = VoicePrefs(_vaultPath);
+                    Console.WriteLine($"assistant : {AssistantName(_vaultPath)}");
+                    Console.WriteLine($"voice     : {curV} @ {curR}");
+                    Console.WriteLine();
+                    foreach (var (id, label, female) in OfferedVoices)
+                        Console.WriteLine($"  {(id == curV ? "*" : " ")} {id,-24} {label}{(female ? "" : "")}");
+                    Console.WriteLine();
+                    Console.WriteLine("Set VoiceName / VoiceRate / AssistantName in <vault>/.obsidianx/settings.json,");
+                    Console.WriteLine("or from the BrainX client's Settings panel.");
+                    return 0;
+                }
                 case "-h" or "--help" or "help":
                     Console.WriteLine("Usage: brainx-mcp speak (--text TEXT | --file PATH | --stdin) [options]");
                     Console.WriteLine();
@@ -83,8 +178,15 @@ internal static partial class Program
 
         void Say(string s) { if (!quiet) Console.WriteLine(s); }
 
+        // Explicit argument wins; otherwise the owner's setting; otherwise the
+        // built-in. A CLI flag that a config file could silently override is a
+        // flag nobody can trust.
+        var (prefVoice, prefRate) = VoicePrefs(_vaultPath);
+        voice ??= prefVoice;
+        rate  ??= prefRate;
+
         var (path, cached, err) = await SynthesizeAsync(
-            text!, voice ?? DefaultVoice, rate ?? DefaultRate, outPath, _vaultPath).ConfigureAwait(false);
+            text!, voice, rate, outPath, _vaultPath).ConfigureAwait(false);
         if (path == null)
         {
             Console.Error.WriteLine($"speak failed: {err}");
@@ -93,7 +195,7 @@ internal static partial class Program
 
         var bytes = new FileInfo(path).Length;
         Say($"brainx-mcp speak · v{ServerVersion}");
-        Say($"  voice: {voice ?? DefaultVoice} @ {rate ?? DefaultRate}");
+        Say($"  {AssistantName(_vaultPath)} · {voice} @ {rate} · {(IsFemaleVoice(voice) ? "female" : "male")}");
         Say($"  {(cached ? "cache hit" : "synthesised")}: {path} ({bytes:n0} bytes)");
         if (play)
         {

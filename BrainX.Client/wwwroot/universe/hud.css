@@ -1387,3 +1387,41 @@ body.hud-active.has-notice #hud-layer {
    and dashboard-embed modes render this same strip and have no HUD to place. */
 #hud-bottom .hint-hud { display: none; }
 body.hud-active #hud-bottom .hint-hud { display: inline; }
+
+/* ── Assistant face ──────────────────────────────────────────────────────
+   Bottom-right, above the HUD chrome but below any modal. Hidden until she
+   is actually given something to say (assistant.js unhides on first say()),
+   because an idle face in the corner of a dashboard is a distraction.
+   pointer-events:none — she is a readout, not a control, and must never eat
+   a click meant for the graph behind her. */
+.assistant-face {
+    position: fixed;
+    right: 22px;
+    bottom: 22px;
+    width: 190px;
+    z-index: 40;
+    pointer-events: none;
+    animation: assistant-in .45s ease-out both;
+}
+.assistant-face-stage {
+    width: 190px;
+    height: 220px;
+    border-radius: 12px;
+    background: radial-gradient(58% 58% at 50% 38%,
+                rgba(11, 22, 34, .82) 0%, rgba(5, 7, 13, .55) 70%, transparent 100%);
+}
+.assistant-face-stage canvas { display: block; }
+.assistant-face-name {
+    margin-top: -6px;
+    text-align: center;
+    font-size: 11px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: #67e8f9;
+    opacity: .72;
+    text-shadow: 0 0 12px rgba(103, 232, 249, .45);
+}
+@keyframes assistant-in {
+    from { opacity: 0; transform: translateY(14px) scale(.96); }
+    to   { opacity: 1; transform: none; }
+}

@@ -523,7 +523,17 @@
         </div>
     </div>
 
+    <!-- The assistant. Hidden until the host actually gives her something to
+         say, because an idle face staring out of the corner of a dashboard is
+         a distraction, not a feature. `assistant.js` unhides it on the first
+         speak() and the wireframe follows the configured VOICE's gender. -->
+    <div id="assistant-face" class="assistant-face" hidden>
+        <div class="assistant-face-stage" id="assistant-face-stage"></div>
+        <div class="assistant-face-name" id="assistant-face-name"></div>
+    </div>
+
     <script type="module" src="app.js"></script>
     <script type="module" src="hud.js"></script>
+    <script type="module" src="assistant.js"></script>
 </body>
 </html>
