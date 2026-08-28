@@ -69,8 +69,31 @@ try {
         if ($parent -eq $probe) { break }
         $probe = $parent
     }
+    # Fallback, and it is the case that actually happens: a session started in a
+    # CODE repo (D:\BrainX) is not inside the vault (G:\Obsidian), so the walk-up
+    # above finds nothing and $auditAge stays null — which this hook then reports
+    # as "the brain has never been audited", every single session, forever.
+    # Measured 2026-08-28: last-audit.json existed with brainHealth 0.988 written
+    # hours earlier while the nudge insisted no audit had ever run.
+    # session-start.ps1 already carries this exact fallback; stop-hook.ps1 was
+    # written from the same walk-up and never got it.
     if ($null -eq $auditAge) {
-        # Never audited — definitely due.
+        foreach ($cand in @($env:BRAINX_VAULT, '__BRAINX_VAULT__')) {
+            if (-not $cand) { continue }
+            $candidate = Join-Path $cand ".obsidianx\last-audit.json"
+            if (Test-Path $candidate) {
+                $audit = Get-Content $candidate -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
+                if ($audit -and $audit.scannedAt) {
+                    $auditAge = ((Get-Date) - (Get-Date $audit.scannedAt)).TotalDays
+                    $brainHealth = $audit.brainHealth
+                }
+                break
+            }
+        }
+    }
+    if ($null -eq $auditAge) {
+        # Genuinely never audited — both the walk-up and the vault fallback
+        # came up empty.
         $auditDue = $true
     }
     elseif ($auditAge -gt 7) {
