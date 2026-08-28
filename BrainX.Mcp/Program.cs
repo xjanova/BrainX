@@ -186,6 +186,11 @@ internal static partial class Program
             Console.OutputEncoding = new UTF8Encoding(false);
             return ExportCli(args.Skip(1).ToArray());
         }
+        if (args.Length > 0 && args[0].Equals("push-pack", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.OutputEncoding = new UTF8Encoding(false);
+            return PushPackCli(args.Skip(1).ToArray());
+        }
         if (args.Length > 0 && (args[0] == "--version" || args[0] == "-v" || args[0].Equals("version", StringComparison.OrdinalIgnoreCase)))
         {
             Console.OutputEncoding = new UTF8Encoding(false);
@@ -1715,17 +1720,26 @@ internal static partial class Program
             ?? throw new InvalidOperationException("brain-export.json not found — open BrainX → Settings → Export Brain Now");
 
         var ql = query.ToLowerInvariant();
-        var matches = export.Nodes
-            .Where(n => ScopeMatches(n, scope))
-            .Select(n => new
-            {
-                Node = n,
-                Score = ScoreNode(n, ql, GetContentLower(export, n))
-            })
-            .Where(x => x.Score > 0)
-            .OrderByDescending(x => x.Score)
-            .Take(limit)
-            .ToList();
+        List<T> Rank<T>(Func<NodeSummary, bool> pred, Func<NodeSummary, double, T> make) =>
+            export.Nodes.Where(pred)
+                .Select(n => (n, s: ScoreNode(n, ql, GetContentLower(export, n))))
+                .Where(x => x.s > 0)
+                .OrderByDescending(x => x.s)
+                .Take(limit)
+                .Select(x => make(x.n, x.s))
+                .ToList();
+        var matches = Rank(n => ScopeMatches(n, scope), (n, s) => new { Node = n, Score = s });
+
+        // Same fallback rule as brain_semantic_search: a scope filter that
+        // produced ZERO hits is far more often a wrong scope than an empty
+        // brain, and the agent reads an empty result as the latter. Retry
+        // unscoped and say so.
+        var scopeFallback = false;
+        if (scope.Length > 0 && matches.Count == 0)
+        {
+            scopeFallback = true;
+            matches = Rank(_ => true, (n, s) => new { Node = n, Score = s });
+        }
 
         // Log access for each hit so the 3D graph can pulse the matching nodes
         foreach (var m in matches) LogAccess(m.Node.Id, "search", query);
@@ -1747,12 +1761,18 @@ internal static partial class Program
         // follow-up brain_get_note on any of them is a guaranteed hit.
         PrefetchNoteShas(matches.Select(m => m.Node.Id), export);
 
-        return new JObject
+        var ret = new JObject
         {
             ["query"] = query,
             ["count"] = matches.Count,
             ["results"] = resultsArr
         };
+        if (scopeFallback)
+        {
+            ret["scopeFallback"] = true;
+            ret["scopeFallbackNote"] = $"scope '{scope}' matched 0 notes; results are UNSCOPED";
+        }
+        return ret;
     }
 
     private static JObject BuildSearchResult(NodeSummary n, double score, int previewChars, bool compact)
@@ -3437,6 +3457,28 @@ internal static partial class Program
             candidates = candidates.Where(n => ScopeMatches(n, scope));
         var filtered = candidates.ToList();
 
+        // Scope fallback: a scope that matches NOTHING hides the whole vault
+        // behind a typo or a stale project name, and the caller reads the
+        // empty result as "the brain doesn't know" — the exact wrong-scope
+        // trap the search instructions warn agents about. Retrying without
+        // the filter is what a careful caller would do next anyway; doing it
+        // server-side makes the answer arrive one round-trip sooner, and the
+        // response says so instead of silently pretending the scope worked.
+        var scopeFallback = false;
+        if (scope.Length > 0 && filtered.Count == 0)
+        {
+            scopeFallback = true;
+            candidates = export.Nodes.AsEnumerable();
+            if (!string.IsNullOrEmpty(category))
+                candidates = candidates.Where(n =>
+                    n.PrimaryCategory.Equals(category, StringComparison.OrdinalIgnoreCase)
+                    || n.SecondaryCategories.Any(c => c.Equals(category, StringComparison.OrdinalIgnoreCase)));
+            if (!string.IsNullOrEmpty(tag))
+                candidates = candidates.Where(n =>
+                    n.Tags.Any(t => t.Equals(tag, StringComparison.OrdinalIgnoreCase)));
+            filtered = candidates.ToList();
+        }
+
         using var _lens = AsOfScope(args["asOf"]);
         EnsureValidityIndex(export);
 
@@ -3450,13 +3492,27 @@ internal static partial class Program
         // brain_recall arrived — it must rank by EXACTLY these rules, and a
         // copy-paste of 60 lines of fusion is how two tools start answering
         // the same question differently. Behaviour here is unchanged.
-        var (ranked, mode, _, _) = HybridRank(export, filtered, ql, limit, queryVec);
+        var bestSection = new Dictionary<string, int>(StringComparer.Ordinal);
+        var (ranked, mode, _, _) = HybridRank(export, filtered, ql, limit, queryVec,
+                                              bestSectionOut: bestSection);
 
         foreach (var (n, _) in ranked) LogAccess(n.Id, "semantic_search", query);
         var resultsArr = new JArray(ranked.Select(x =>
         {
             var o = BuildSearchResult(x.Node, Math.Round(x.Score, 4), previewChars, compact);
             var ctx = ExtractMatchContext(export, x.Node, ql);
+            // Section hand-off: when the note's score came from a SECTION
+            // vector, name that section and show ITS text. Without this the
+            // caller sees the note head — and the 2026-08-13 brain-on/off
+            // benchmark measured what happens next: retrieval succeeds, the
+            // model reads an opening paragraph that lacks the answer, and
+            // reports "the notes do not contain that information".
+            if (bestSection.TryGetValue(x.Node.Id, out var si))
+            {
+                var (heading, snippet) = ResolveSection(export, x.Node, si, previewChars);
+                if (heading != null) o["section"] = heading;   // pass to brain_get_note section:
+                if (ctx == null && snippet != null) ctx = snippet;
+            }
             if (ctx != null) o["matchContext"] = ctx;
             // Carried even in compact mode: "this stopped being true in May"
             // is not a detail to drop for token economy.
@@ -3468,7 +3524,7 @@ internal static partial class Program
         // Phase D (v2.6.0): prefetch top-3 for the inevitable get_note
         PrefetchNoteShas(ranked.Select(r => r.Node.Id), export);
 
-        return new JObject
+        var ret = new JObject
         {
             ["query"] = query,
             ["mode"] = mode,
@@ -3478,6 +3534,52 @@ internal static partial class Program
             ["asOf"] = Iso(_asOf),
             ["results"] = resultsArr
         };
+        if (scopeFallback)
+        {
+            ret["scopeFallback"] = true;
+            ret["scopeFallbackNote"] = $"scope '{scope}' matched 0 notes; results are UNSCOPED";
+        }
+        return ret;
+    }
+
+    /// <summary>
+    /// Section index → (heading, snippet) for a hit whose score came from a
+    /// section vector. Re-runs the SAME split the sidecar was built from, so
+    /// index i here is the text that produced vector i — the two can only
+    /// disagree if the note changed since embedding, in which case the mtime
+    /// rule already forces a re-embed. Runs only for returned hits (≤10 file
+    /// reads per query, only on notes that carry a sections sidecar).
+    /// </summary>
+    private static (string? Heading, string? Snippet) ResolveSection(
+        BrainExport export, NodeSummary n, int sectionIndex, int previewChars)
+    {
+        try
+        {
+            var path = Path.Combine(export.VaultPath, n.RelativePath);
+            if (!File.Exists(path)) return (null, null);
+            var texts = SectionEmbeddings.Split(n.Title, File.ReadAllText(path));
+            if (sectionIndex < 0 || sectionIndex >= texts.Count) return (null, null);
+
+            // Split() prefixes every section with "{title}\n\n" so its vector
+            // knows its note; strip that back off for display.
+            var body = texts[sectionIndex];
+            var prefix = n.Title + "\n\n";
+            if (body.StartsWith(prefix, StringComparison.Ordinal)) body = body[prefix.Length..];
+            body = body.Trim();
+
+            // The first line is the "## heading" for every section except the
+            // preamble before the first heading — that one gets a snippet but
+            // no addressable section name.
+            string? heading = null;
+            if (body.StartsWith("## ", StringComparison.Ordinal))
+            {
+                var nl = body.IndexOf('\n');
+                heading = (nl > 0 ? body[..nl] : body).Trim();
+            }
+            var snippet = body.Length > previewChars ? body[..previewChars] + "…" : body;
+            return (heading, snippet);
+        }
+        catch { return (null, null); }
     }
 
     /// <summary>
@@ -6209,6 +6311,16 @@ internal static partial class Program
             if (sectExit != 0) Say("  sections:   FAILED — see lines above");
         }
         catch (Exception ex) { Say($"  sections:   skipped ({ex.GetType().Name})"); }
+
+        // ── 2c. Push-pack lookup tables. Pure file reads + regex + writes,
+        // so it cannot fail the run — and rebuilding here means the hooks'
+        // file→lesson and error→fix tables can never quietly outlive the
+        // notes they point at.
+        try
+        {
+            BuildPushPack(_vaultPath, Say);
+        }
+        catch (Exception ex) { Say($"  push-pack:  skipped ({ex.GetType().Name})"); }
 
         // ── 3. Audit + report. Near-dupe detection is the expensive part and
         // this runs unattended, so it stays on — an overnight job is exactly

@@ -310,7 +310,7 @@ internal static partial class Program
         HybridRank(BrainExport export, List<NodeSummary> filtered, string ql, int limit,
                    float[]? queryVec, Fusion? fusion = null, double? kwCeiling = null,
                    bool? lexRerank = null, bool? autoScope = null, int? lexDepth = null,
-                   bool? sectionMax = null)
+                   bool? sectionMax = null, Dictionary<string, int>? bestSectionOut = null)
     {
         var fuse = fusion ?? CurrentFusion;
         var doLex = lexRerank ?? LexRerankEnabled;
@@ -345,10 +345,23 @@ internal static partial class Program
                 {
                     var secs = LoadSectionEmbeddings(n.Id);
                     if (secs != null)
-                        foreach (var sv in secs)
+                        for (int si = 0; si < secs.Count; si++)
                         {
-                            var sc = Cosine(queryVec, sv);
-                            if (sc > cos) cos = sc;
+                            var sc = Cosine(queryVec, secs[si]);
+                            if (sc > cos)
+                            {
+                                cos = sc;
+                                // WHICH section won is the half of this max()
+                                // that retrieval was throwing away: the
+                                // 2026-08-13 benchmark showed a hit whose
+                                // preview shows the note's HEAD reads as a
+                                // miss to the caller ("the notes do not
+                                // contain that"), because the answer sits
+                                // mid-note. Callers that pass a dictionary
+                                // get the winning index; everyone else pays
+                                // nothing.
+                                if (bestSectionOut != null) bestSectionOut[n.Id] = si;
+                            }
                         }
                 }
                 cosines[n.Id] = cos;
@@ -1036,7 +1049,9 @@ internal static partial class Program
         EnsureValidityIndex(export);
 
         var ql = query.ToLowerInvariant();
-        var (ranked, mode, cosines, agree) = HybridRank(export, filtered, ql, limit, EmbedQuery(query));
+        var bestSection = new Dictionary<string, int>(StringComparer.Ordinal);
+        var (ranked, mode, cosines, agree) = HybridRank(export, filtered, ql, limit, EmbedQuery(query),
+                                                        bestSectionOut: bestSection);
 
         if (ranked.Count == 0)
         {
@@ -1132,6 +1147,17 @@ internal static partial class Program
 
         var answer = BuildSearchResult(top, Math.Round(ranked[0].Score, 4), previewChars, compact: false);
         answer["path"] = top.RelativePath;
+        // Same section hand-off as brain_semantic_search: when the citation's
+        // score came from a section vector, name the section and quote IT —
+        // recall's whole job is to be quoted, and quoting the head of a
+        // day-wide note is the measured path to "the notes do not contain
+        // that" (brain-on/off benchmark, bug 2).
+        if (bestSection.TryGetValue(top.Id, out var topSection))
+        {
+            var (heading, snippet) = ResolveSection(export, top, topSection, previewChars);
+            if (heading != null) answer["section"] = heading;
+            if (matchCtx == null && snippet != null) matchCtx = snippet;
+        }
         if (matchCtx != null) answer["matchContext"] = matchCtx;
         // A cited note whose window has closed is the single most dangerous
         // thing this tool can return, so the fact travels WITH the answer
