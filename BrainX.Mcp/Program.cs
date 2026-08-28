@@ -191,6 +191,11 @@ internal static partial class Program
             Console.OutputEncoding = new UTF8Encoding(false);
             return PushPackCli(args.Skip(1).ToArray());
         }
+        if (args.Length > 0 && args[0].Equals("install-hooks", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.OutputEncoding = new UTF8Encoding(false);
+            return InstallHooksCli(args.Skip(1).ToArray());
+        }
         if (args.Length > 0 && (args[0] == "--version" || args[0] == "-v" || args[0].Equals("version", StringComparison.OrdinalIgnoreCase)))
         {
             Console.OutputEncoding = new UTF8Encoding(false);

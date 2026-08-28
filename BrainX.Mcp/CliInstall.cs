@@ -53,6 +53,10 @@ internal static class CliInstall
         Console.WriteLine("                                          (merges into ~/.gemini/settings.json; verify with /mcp)");
         Console.WriteLine("  brainx-mcp bake-bundles [options]    Pre-bake ~500-token context bundles for top topics so");
         Console.WriteLine("                                          brain_bundle <topic> answers in ONE cheap MCP call");
+        Console.WriteLine("  brainx-mcp install-hooks [--vault]   Write the brain-first Claude Code hooks to ~/.claude/scripts and");
+        Console.WriteLine("                                          register them in settings.json (merged, idempotent, --dry-run)");
+        Console.WriteLine("  brainx-mcp push-pack [--vault]       Build the exact-match lookup tables the hooks read");
+        Console.WriteLine("                                          (file->lesson, error->fix, per-repo warm start; also a garden step)");
         Console.WriteLine("  brainx-mcp garden [--vault]          Re-bake stale bundles, fill embeddings, audit, write Brain health");
         Console.WriteLine("  brainx-mcp eval [options]            Score retrieval on a labelled query set (writes Retrieval benchmark)");
         Console.WriteLine("  brainx-mcp embed-probe [options]     Compare the in-process ONNX embedder against Ollama and against");
@@ -267,6 +271,27 @@ internal static class CliInstall
         {
             Console.WriteLine("  → Skipped. Re-run with --precompute to populate.");
             Console.WriteLine("    (Without embeddings, brain_semantic_search falls back to keyword.)");
+        }
+        Console.WriteLine();
+
+        // Hooks. Until 2026-08-28 this step did not exist and the summary
+        // below still pointed at ~/.claude/scripts/brain-stats.ps1 — a file
+        // nothing had ever installed. The brain-first protocol, the push
+        // layer and the session hand-off all live in those hooks; without
+        // them a fresh machine gets an MCP server and none of the behaviour.
+        Section(opts, "Claude Code hooks");
+        try
+        {
+            var rc = Program.InstallHooks(Program.VaultPath, dryRun: false,
+                                          say: opts.Quiet ? null : s => Console.WriteLine("  " + s.TrimStart()));
+            if (rc != 0)
+                Console.WriteLine("  ⚠  hooks not installed — run `brainx-mcp install-hooks` for the reason.");
+        }
+        catch (Exception ex)
+        {
+            // Never fail the whole install over hooks: the MCP registration
+            // above is the part that cannot be redone by hand.
+            Console.WriteLine($"  ⚠  hooks skipped ({ex.GetType().Name}) — run `brainx-mcp install-hooks` separately.");
         }
         Console.WriteLine();
 

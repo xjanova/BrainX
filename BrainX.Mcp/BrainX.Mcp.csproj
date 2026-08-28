@@ -27,6 +27,19 @@
     <ProjectReference Include="..\BrainX.Core\BrainX.Core.csproj" />
   </ItemGroup>
 
+  <!-- The Claude Code hook scripts, carried INSIDE the binary.
+       They cannot ship as loose files beside the exe: brainx-mcp is
+       published self-contained and installed by Velopack into a versioned
+       folder, so anything not embedded is not there on a user's machine.
+       Embedding also means `brainx-mcp install-hooks` works from a single
+       downloaded exe with no repo checkout. Link path keeps the resource
+       name short and stable: BrainX.Mcp.hooks.<file>. -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\hooks\*.ps1;..\hooks\*.json">
+      <Link>hooks\%(Filename)%(Extension)</Link>
+    </EmbeddedResource>
+  </ItemGroup>
+
   <!-- Stamp a MONOTONIC patch number (2.8.<git commit count>) so every build
        carries a comparable ProductVersion. The client's self-heal uses this
        to detect "Claude is registered against an OUTDATED brainx-mcp.exe"
