@@ -37,7 +37,15 @@ function show() {
 const api = {
     /** name + which head to draw. The head follows the VOICE's gender. */
     configure({ name, female } = {}) {
-        if (typeof name === 'string') { cfg.name = name; if (label) label.textContent = name; }
+        if (typeof name === 'string') {
+            cfg.name = name;
+            if (label) label.textContent = name;
+            // The chat panel is a conversation with HER, so it carries her
+            // name rather than the word "CHAT". Set from the same place the
+            // face label is, so the two can never show different names.
+            const title = document.getElementById('mind-chat-title');
+            if (title) title.textContent = name;
+        }
         if (typeof female === 'boolean') {
             cfg.female = female;
             if (face) face.setFemale(female);

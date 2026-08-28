@@ -8457,6 +8457,16 @@ public partial class MainWindow : Window
                 // a page that somehow never reports a HUD at all.
                 ScheduleUniverseLoaderHandover(4000, isFallback: true);
             }
+            else if (msg?.type == "mind.ask")
+            {
+                // Chat with the assistant, typed or dictated. Deliberately
+                // fire-and-forget: the answer can take a minute on a local
+                // model and this handler runs on the UI thread.
+                var ask = Newtonsoft.Json.JsonConvert.DeserializeAnonymousType(
+                    json, new { type = "", text = "" });
+                if (!string.IsNullOrWhiteSpace(ask?.text))
+                    _ = HandleMindAskAsync(ask!.text);
+            }
             else if (msg?.type == "toggleFullscreen")
             {
                 // JS settings panel button → fullscreen-with-taskbar-cover.

@@ -532,8 +532,26 @@
         <div class="assistant-face-name" id="assistant-face-name"></div>
     </div>
 
+    <!-- Chat with her: typed, or spoken. Sits above the face in the same
+         corner so the answer and the mouth saying it are one object. -->
+    <div id="mind-chat" class="mind-chat" hidden>
+        <div class="mind-chat-head">
+            <span class="mind-chat-title" id="mind-chat-title">CHAT</span>
+            <span class="mind-chat-status" id="mind-chat-status"></span>
+            <button class="mind-chat-close" id="mind-chat-close" title="Close">×</button>
+        </div>
+        <div class="mind-chat-log" id="mind-chat-log"></div>
+        <div class="mind-chat-row">
+            <button class="mind-mic" id="mind-mic-btn" title="Speak">🎤</button>
+            <textarea id="mind-chat-input" class="mind-chat-input" rows="1"
+                      placeholder="พิมพ์ หรือกดไมค์…"></textarea>
+            <button class="mind-send" id="mind-chat-send" title="Send">➤</button>
+        </div>
+    </div>
+
     <script type="module" src="app.js"></script>
     <script type="module" src="hud.js"></script>
     <script type="module" src="assistant.js"></script>
+    <script type="module" src="chat.js"></script>
 </body>
 </html>

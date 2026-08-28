@@ -143,6 +143,102 @@ public partial class MainWindow
         finally { _assistantSpeaking = false; }
     }
 
+    // ── Chat ──────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Rolling conversation, kept here rather than server-side because
+    /// /api/ai/chat is stateless. Capped hard: a local model's context is
+    /// small, and an unbounded history turns a fast chat into a slow one
+    /// after a dozen turns with nothing visibly changing to explain it.
+    /// </summary>
+    private readonly List<(string Role, string Text)> _mindHistory = new();
+    private const int MindHistoryTurns = 8;
+
+    /// <summary>
+    /// A question from the chat panel — typed or spoken.
+    ///
+    /// Goes through the SAME /api/ai/chat the rest of the app uses
+    /// (CallLocalLlmRawAsync), so it inherits the server's AiHubService
+    /// grounding: brain context is retrieved and injected there, and the
+    /// notes used are written to the access log. Re-implementing retrieval
+    /// on this side would be a second, quietly diverging answer to the same
+    /// question.
+    /// </summary>
+    private async Task HandleMindAskAsync(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return;
+        var core = UniverseWebView?.CoreWebView2;
+        if (core == null) return;
+
+        async Task ReplyToPage(string body, bool ok)
+        {
+            try
+            {
+                await core.ExecuteScriptAsync(
+                    $"window.brainxChat && window.brainxChat.reply({JsonSerializer.Serialize(body)},{(ok ? "true" : "false")})");
+            }
+            catch { }
+        }
+
+        try
+        {
+            var id = AssistantIdentity();
+
+            // Who she is, then the recent turns, then the question. The
+            // persona line is short on purpose: a long one eats the context a
+            // small local model needs for the brain notes underneath it.
+            var sb = new StringBuilder();
+            sb.AppendLine($"You are {id.Name}, the owner's BrainX assistant. Answer briefly and in the language the question was asked in.");
+            foreach (var (role, msg) in _mindHistory)
+                sb.AppendLine($"{(role == "user" ? "User" : id.Name)}: {msg}");
+            sb.AppendLine($"User: {text}");
+            sb.Append($"{id.Name}:");
+
+            using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromMinutes(2));
+            var answer = (await CallLocalLlmRawAsync(sb.ToString(), cts.Token))?.Trim();
+
+            if (string.IsNullOrWhiteSpace(answer))
+            {
+                await ReplyToPage("ไม่มีคำตอบกลับมา — โมเดลอาจยังไม่ได้เปิด (Settings → AI)", false);
+                return;
+            }
+
+            _mindHistory.Add(("user", text));
+            _mindHistory.Add(("assistant", answer));
+            while (_mindHistory.Count > MindHistoryTurns * 2) _mindHistory.RemoveRange(0, 2);
+
+            // Text first, voice second. Reading is faster than listening, and
+            // a reply that only exists as audio cannot be re-read, copied, or
+            // scrolled back to.
+            await ReplyToPage(answer, true);
+            await AssistantSayAsync(SpeakableOf(answer), "neutral");
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[assistant] ask failed: {ex.GetType().Name}: {ex.Message}");
+            await ReplyToPage($"something went wrong: {ex.Message}", false);
+        }
+    }
+
+    /// <summary>
+    /// Strip a written answer down to something worth hearing. Markdown
+    /// syntax, code fences and URLs are all read aloud literally by a TTS
+    /// engine — "asterisk asterisk important asterisk asterisk" — and a long
+    /// answer spoken in full outlasts anyone's patience, so this also caps it.
+    /// </summary>
+    private static string SpeakableOf(string s)
+    {
+        var t = System.Text.RegularExpressions.Regex.Replace(s, "```[\\s\\S]*?```", " ");
+        t = System.Text.RegularExpressions.Regex.Replace(t, @"https?://\S+", " ");
+        t = System.Text.RegularExpressions.Regex.Replace(t, @"[*_`#>\[\]|]", " ");
+        t = System.Text.RegularExpressions.Regex.Replace(t, @"\s+", " ").Trim();
+        const int cap = 600;
+        if (t.Length <= cap) return t;
+        // Cut at a sentence end rather than mid-word.
+        var cut = t.LastIndexOfAny(new[] { '.', '!', '?', '。', 'ๆ' }, Math.Min(cap, t.Length - 1));
+        return (cut > 200 ? t[..(cut + 1)] : t[..cap]) + " …";
+    }
+
     // ── Settings panel ────────────────────────────────────────────────────
 
     /// <summary>
