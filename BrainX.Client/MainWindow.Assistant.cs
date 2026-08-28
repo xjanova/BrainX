@@ -15,6 +15,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -28,6 +29,96 @@ public partial class MainWindow
 {
     /// <summary>Guards against two reports talking over each other.</summary>
     private bool _assistantSpeaking;
+
+    /// <summary>Her own window, when it is open. Null when closed.</summary>
+    private AssistantWindow? _assistantWindow;
+
+    /// <summary>
+    /// Where her face and chat currently live. The standalone window wins
+    /// whenever it is open: it is the surface the owner deliberately opened,
+    /// and talking to the HUD copy instead would answer into a panel nobody
+    /// is looking at.
+    /// </summary>
+    private async Task<string?> AssistantEvalAsync(string js)
+    {
+        if (_assistantWindow is { PageIsReady: true } w)
+            return await w.EvalAsync(js);
+        try
+        {
+            var core = UniverseWebView?.CoreWebView2;
+            if (core == null) return null;
+            return await core.ExecuteScriptAsync(js);
+        }
+        catch { return null; }
+    }
+
+    private bool AssistantSurfaceExists =>
+        (_assistantWindow is { PageIsReady: true }) || UniverseWebView?.CoreWebView2 != null;
+
+    /// <summary>Open her window, or focus it if it is already open.</summary>
+    public void OpenAssistantWindow()
+    {
+        if (_assistantWindow != null)
+        {
+            if (_assistantWindow.WindowState == WindowState.Minimized)
+                _assistantWindow.WindowState = WindowState.Normal;
+            _assistantWindow.Activate();
+            return;
+        }
+
+        var w = new AssistantWindow(_vaultPath, text => _ = HandleMindAskAsync(text)) { Owner = null };
+        // Owner is deliberately NOT the main window: an owned window is always
+        // on top of its owner and minimises with it, and the whole point of
+        // this one is to sit beside other applications while the dashboard is
+        // put away.
+        w.Closed += (_, _) => _assistantWindow = null;
+        w.PageReady += async (_, _) =>
+        {
+            var id = AssistantIdentity();
+            await w.EvalAsync(
+                $"window.brainxAssistant.configure({{name:{JsonSerializer.Serialize(id.Name)}," +
+                $"female:{(id.Female ? "true" : "false")}}})");
+        };
+        _assistantWindow = w;
+        w.Show();
+    }
+
+    public void CloseAssistantWindow() => _assistantWindow?.Close();
+
+    public bool AssistantWindowOpen => _assistantWindow != null;
+
+    private void AssistantWindowToggle_Click(object sender, RoutedEventArgs e)
+    {
+        if (_assistantWindow != null) CloseAssistantWindow();
+        else OpenAssistantWindow();
+        UpdateAssistantWindowButton();
+    }
+
+    /// <summary>Keep the button honest about what it will do next.</summary>
+    private void UpdateAssistantWindowButton()
+    {
+        if (AssistantWindowBtn != null)
+            AssistantWindowBtn.Content = _assistantWindow != null
+                ? "🪟  Close assistant window"
+                : "🪟  Open assistant window";
+    }
+
+    private void AssistantTopmost_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_assistantSettingsLoading) return;
+        var on = AssistantTopmostCheck?.IsChecked == true;
+        // Applies live AND persists: a window that only obeys the setting after
+        // a restart teaches people the checkbox is broken.
+        if (_assistantWindow != null) _assistantWindow.Topmost = on;
+        try
+        {
+            var p = Path.Combine(_vaultPath, ".obsidianx", "settings.json");
+            var o = File.Exists(p) ? JObject.Parse(File.ReadAllText(p)) : new JObject();
+            o["AssistantWinTopmost"] = on;
+            File.WriteAllText(p, o.ToString(Newtonsoft.Json.Formatting.Indented), new UTF8Encoding(false));
+        }
+        catch (Exception ex) { Debug.WriteLine($"[assistant] topmost save failed: {ex.Message}"); }
+    }
 
     /// <summary>
     /// Read once per call rather than cached: the owner can change her name or
@@ -75,8 +166,7 @@ public partial class MainWindow
     {
         if (string.IsNullOrWhiteSpace(text)) return false;
         if (_assistantSpeaking) return false;
-        var core = UniverseWebView?.CoreWebView2;
-        if (core == null) return false;
+        if (!AssistantSurfaceExists) return false;
 
         _assistantSpeaking = true;
         try
@@ -132,7 +222,7 @@ public partial class MainWindow
                 $"window.brainxAssistant.say('https://voice.local/{Uri.EscapeDataString(mp3)}'," +
                 $"{{mood:{JsonSerializer.Serialize(mood)}}})";
 
-            await core.ExecuteScriptAsync(js);
+            await AssistantEvalAsync(js);
             return true;
         }
         catch (Exception ex)
@@ -167,17 +257,12 @@ public partial class MainWindow
     private async Task HandleMindAskAsync(string text)
     {
         if (string.IsNullOrWhiteSpace(text)) return;
-        var core = UniverseWebView?.CoreWebView2;
-        if (core == null) return;
+        if (!AssistantSurfaceExists) return;
 
         async Task ReplyToPage(string body, bool ok)
         {
-            try
-            {
-                await core.ExecuteScriptAsync(
-                    $"window.brainxChat && window.brainxChat.reply({JsonSerializer.Serialize(body)},{(ok ? "true" : "false")})");
-            }
-            catch { }
+            await AssistantEvalAsync(
+                $"window.brainxChat && window.brainxChat.reply({JsonSerializer.Serialize(body)},{(ok ? "true" : "false")})");
         }
 
         try
@@ -195,11 +280,31 @@ public partial class MainWindow
             sb.Append($"{id.Name}:");
 
             using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromMinutes(2));
-            var answer = (await CallLocalLlmRawAsync(sb.ToString(), cts.Token))?.Trim();
+            string? answer = null;
+            try
+            {
+                answer = (await CallLocalLlmRawAsync(sb.ToString(), cts.Token))?.Trim();
+            }
+            catch (HttpRequestException)
+            {
+                // BrainX.Server runs as a SEPARATE process and is routinely not
+                // running — the app already says so elsewhere ("Start
+                // BrainX.Server (it runs separately)"). Falling back to Ollama
+                // directly keeps her answering instead of handing the owner a
+                // socket error, at the cost of the server's brain-context
+                // injection. The reply says which path answered, because a
+                // grounded answer and an ungrounded one are not the same thing
+                // and the difference must not be invisible.
+                answer = await AskOllamaDirectAsync(sb.ToString(), cts.Token);
+                if (!string.IsNullOrWhiteSpace(answer))
+                    answer += "\n\n— (ตอบโดยไม่ผ่าน BrainX.Server จึงยังไม่ได้ดึงบริบทจาก brain)";
+            }
 
             if (string.IsNullOrWhiteSpace(answer))
             {
-                await ReplyToPage("ไม่มีคำตอบกลับมา — โมเดลอาจยังไม่ได้เปิด (Settings → AI)", false);
+                await ReplyToPage(
+                    "ยังตอบไม่ได้ค่ะ — BrainX.Server (พอร์ต 5142) ไม่ได้เปิด และต่อ Ollama ตรงก็ไม่สำเร็จ\n"
+                  + "เปิด BrainX.Server หรือตรวจว่า Ollama รันอยู่ที่ 11434", false);
                 return;
             }
 
@@ -218,6 +323,61 @@ public partial class MainWindow
             Debug.WriteLine($"[assistant] ask failed: {ex.GetType().Name}: {ex.Message}");
             await ReplyToPage($"something went wrong: {ex.Message}", false);
         }
+    }
+
+    /// <summary>
+    /// Talk to Ollama directly, bypassing BrainX.Server. Used only when the
+    /// server refuses the connection.
+    ///
+    /// Model choice is deliberate and NOT the biggest one installed: this path
+    /// answers a chat box someone is waiting in front of, and gemma3:27b takes
+    /// tens of seconds per reply on this machine. Preference order is
+    /// smallest-useful first, and whatever is actually present wins.
+    /// </summary>
+    private async Task<string?> AskOllamaDirectAsync(string prompt, CancellationToken ct)
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(2) };
+            var tagsJson = await http.GetStringAsync("http://localhost:11434/api/tags", ct);
+            var models = (JObject.Parse(tagsJson)["models"] as JArray)?
+                .Select(m => m["name"]?.ToString() ?? "")
+                .Where(n => n.Length > 0
+                         && !n.Contains("embed", StringComparison.OrdinalIgnoreCase)
+                         && !n.Contains("bge", StringComparison.OrdinalIgnoreCase)
+                         && !n.Contains("nomic", StringComparison.OrdinalIgnoreCase)
+                         && !n.Contains("rerank", StringComparison.OrdinalIgnoreCase))
+                .ToList() ?? new List<string>();
+            if (models.Count == 0) return null;
+
+            string? pick = null;
+            foreach (var want in new[] { "llama3.2", "gemma3:4b", "qwen", "phi", "mistral" })
+            {
+                pick = models.FirstOrDefault(m => m.StartsWith(want, StringComparison.OrdinalIgnoreCase));
+                if (pick != null) break;
+            }
+            pick ??= models[0];
+
+            var body = new JObject
+            {
+                ["model"] = pick,
+                ["prompt"] = prompt,
+                ["stream"] = false,
+                ["options"] = new JObject { ["num_predict"] = 400 },
+            }.ToString(Newtonsoft.Json.Formatting.None);
+
+            using var resp = await http.PostAsync("http://localhost:11434/api/generate",
+                new StringContent(body, new UTF8Encoding(false), "application/json"), ct);
+            if (!resp.IsSuccessStatusCode) return null;
+            var json = await resp.Content.ReadAsStringAsync(ct);
+            var text = JObject.Parse(json)["response"]?.ToString();
+            // A reasoning model narrates inside <think>…</think>; that is
+            // scratch work, not an answer, and reading it aloud is worse.
+            text = System.Text.RegularExpressions.Regex.Replace(
+                text ?? "", "<think>[\\s\\S]*?</think>", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            return text.Trim();
+        }
+        catch { return null; }
     }
 
     /// <summary>
@@ -286,9 +446,25 @@ public partial class MainWindow
                 }
                 AssistantVoiceCombo.SelectedIndex = idx;
             }
+
+            var s = ReadVaultSettings();
+            if (AssistantTopmostCheck != null)
+                AssistantTopmostCheck.IsChecked = (bool?)s["AssistantWinTopmost"] ?? false;
+            UpdateAssistantWindowButton();
         }
         catch { }
         finally { _assistantSettingsLoading = false; }
+    }
+
+    private JObject ReadVaultSettings()
+    {
+        try
+        {
+            var p = Path.Combine(_vaultPath, ".obsidianx", "settings.json");
+            if (File.Exists(p)) return JObject.Parse(File.ReadAllText(p));
+        }
+        catch { }
+        return new JObject();
     }
 
     /// <summary>Merge one key into the vault settings without disturbing the rest.</summary>
@@ -328,10 +504,8 @@ public partial class MainWindow
         {
             var female = !(vid.Contains("Niwat", StringComparison.OrdinalIgnoreCase)
                         || vid.Contains("Guy", StringComparison.OrdinalIgnoreCase));
-            var core = UniverseWebView?.CoreWebView2;
-            if (core != null)
-                await core.ExecuteScriptAsync(
-                    $"window.brainxAssistant && window.brainxAssistant.configure({{female:{(female ? "true" : "false")}}})");
+            await AssistantEvalAsync(
+                $"window.brainxAssistant && window.brainxAssistant.configure({{female:{(female ? "true" : "false")}}})");
         }
         catch { }
     }
@@ -353,9 +527,7 @@ public partial class MainWindow
     {
         try
         {
-            var core = UniverseWebView?.CoreWebView2;
-            if (core == null) return;
-            await core.ExecuteScriptAsync(
+            await AssistantEvalAsync(
                 $"window.brainxAssistant && window.brainxAssistant.mood({JsonSerializer.Serialize(mood)})");
         }
         catch { }

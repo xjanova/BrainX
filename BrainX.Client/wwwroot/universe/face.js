@@ -1,137 +1,169 @@
-// face.js — the assistant's wireframe head, and the mouth that moves with her.
+// face.js — the assistant's face: a deformed quad mesh, and a mouth that
+// moves with what she says.
+//
+// THE MESH IS THE POINT. An earlier version drew sparse contour rings, which
+// read as a stack of hoops rather than a face. This builds a parametric
+// surface over a (u,v) grid and draws every grid line, so the wires bunch and
+// stretch around the brow, the eye sockets, the nose and the mouth — the
+// deformation IS the likeness, which is why the grid has to be dense enough
+// to bend visibly (26x32) and why the features are cut into the SURFACE
+// rather than drawn on top of it.
 //
 // WHY THE AUDIO IS A FILE AND NOT speechSynthesis. This machine has no Thai
-// voice installed at the OS level (SAPI and WinRT expose David / Zira / Mark,
-// all en-US), and the WebView2 reads that same empty list. So Thai TTS happens
-// server-side via `brainx-mcp speak`, and this module is handed an mp3 URL.
-// Everything here is playback + analysis; nothing here synthesises.
+// voice at the OS level (SAPI and WinRT expose David / Zira / Mark, all
+// en-US), and the WebView2 reads that same empty list. Thai TTS therefore
+// happens server-side via `brainx-mcp speak`, and this module is handed an
+// mp3 URL. Nothing here synthesises.
 //
-// WHY BANDS AND NOT AMPLITUDE. Driving a jaw from overall loudness gives a
-// puppet that flaps in time with the volume — recognisably wrong, because
-// human mouth SHAPE is set by formants, not level. Splitting the spectrum into
-// low / mid / high and mapping those to mouth HEIGHT vs WIDTH gets visibly
-// different "ah" / "ee" / "oo" shapes out of nothing but an FFT, with no
-// phoneme data and no per-language work — which matters when the language is
-// Thai and viseme tables are scarce.
-//
-// The head follows the VOICE's gender, never a separate toggle: a feminine
-// voice over a masculine wireframe reads as a bug, not a style.
+// WHY BANDS AND NOT AMPLITUDE. Driving a jaw from loudness gives a puppet
+// that flaps with the volume — recognisably wrong, because mouth SHAPE is set
+// by formants, not level. Splitting the spectrum into low / mid / high and
+// mapping those to mouth HEIGHT vs WIDTH produces genuinely different vowel
+// shapes from nothing but an FFT, with no phoneme table and no per-language
+// work — which matters when the language is Thai and viseme data is scarce.
 
 import * as THREE from 'three';
 
-const LOW = [0, 8], MID = [8, 40], HIGH = [40, 120];   // FFT bin ranges
+const COLS = 26;   // across the face
+const ROWS = 32;   // crown to chin
 
-/** Average magnitude over a bin range, 0..1. */
-function band(data, [a, b]) {
-    let s = 0;
-    for (let i = a; i < b && i < data.length; i++) s += data[i];
-    return s / Math.max(1, Math.min(b, data.length) - a) / 255;
+/** Smooth bump, 1 at the centre, 0 by `r`. Used for every facial feature. */
+function bump(d, r) {
+    if (d >= r) return 0;
+    const t = 1 - d / r;
+    return t * t * (3 - 2 * t);          // smoothstep, so features blend
 }
 
 /**
- * Build a head as a set of horizontal contour rings plus feature curves —
- * an outline, not a solid. A wireframe SPHERE would read as a planet, and this
- * scene is already full of planets; a face has to be recognisable at a glance
- * in the corner of a busy HUD.
+ * The face surface. Given grid coordinates u (-1 left .. 1 right) and
+ * v (-1 chin .. 1 crown), return the 3D point.
+ *
+ * Feature depths are subtractive or additive bumps on a base dome. Sockets
+ * pull the surface IN, the nose and brow push it OUT — the same thing a real
+ * face does to a mesh laid over it, which is why the wires read correctly
+ * without any texture.
  */
+function facePoint(u, v, P, mouth) {
+    // Outline: widest at the cheekbones (v ~ 0.1), tapering to the chin and,
+    // less sharply, to the crown. Anything wider at the jaw than the cheek
+    // reads as masculine, so this curve carries most of the gender.
+    const vv = (v - 0.10) / 1.18;
+    const halfW = P.width * Math.sqrt(Math.max(0, 1 - vv * vv)) *
+                  (v < -0.55 ? 1 - P.jawTaper * ((-0.55 - v) / 0.45) ** 1.6 : 1);
+    const x = u * halfW;
+    const y = v * P.height;
+
+    // Base dome.
+    const rr = Math.min(1, u * u * 0.85 + vv * vv * 0.9);
+    let z = P.depth * Math.sqrt(Math.max(0, 1 - rr));
+
+    const ax = Math.abs(x), du = Math.abs(u);
+
+    // Brow ridge — a horizontal swell above the eyes.
+    z += 0.085 * bump(Math.hypot((v - 0.30) * 2.6, (du - 0.44) * 1.5), 1);
+
+    // Eye sockets — the deepest recess on a face, and the feature the grid
+    // bends around most visibly.
+    const eye = bump(Math.hypot((du - 0.44) * 2.3, (v - 0.16) * 2.9), 1);
+    z -= 0.185 * eye;
+
+    // Nose: a ridge down the midline that flares into the tip and nostrils.
+    const ridge = bump(du * 7.0, 1) * bump(Math.abs(v - 0.02) * 1.9, 1);
+    z += 0.105 * ridge;
+    z += 0.075 * bump(Math.hypot(du * 5.2, (v + 0.20) * 4.2), 1);   // tip
+    z -= 0.045 * bump(Math.hypot((du - 0.14) * 6.5, (v + 0.24) * 6.0), 1); // nostril crease
+
+    // Mouth: a recess that the audio widens and opens. The mesh itself
+    // deforms — a separate mouth object floating on the surface is what makes
+    // a talking head look pasted together.
+    const mw = 0.30 + mouth.wide * 0.13;
+    const mh = 0.055 + mouth.open * 0.16;
+    const md = bump(Math.hypot((du / mw), ((v + 0.46 + mouth.open * 0.05) / mh)), 1);
+    z -= (0.055 + mouth.open * 0.090) * md;
+    // Lips part: pull the upper edge up and the lower edge down so the
+    // opening is a hole in the grid rather than a dent in it.
+    const lip = md * mouth.open * 0.10;
+    const yOut = y + (v > -0.46 ? lip : -lip);
+
+    // Chin and cheekbones — small, but they stop the lower face reading flat.
+    z += 0.030 * bump(Math.hypot(du * 2.4, (v + 0.80) * 3.0), 1);
+    z += 0.022 * bump(Math.hypot((du - 0.62) * 2.2, (v - 0.02) * 2.2), 1);
+
+    return [x, yOut, z];
+}
+
+/** Radial-gradient sprite used for the glowing eyes. */
+function glowTexture() {
+    const c = document.createElement('canvas');
+    c.width = c.height = 128;
+    const g = c.getContext('2d');
+    const grd = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+    grd.addColorStop(0.00, 'rgba(190,255,210,1)');
+    grd.addColorStop(0.25, 'rgba(60,240,140,0.95)');
+    grd.addColorStop(0.55, 'rgba(20,200,110,0.45)');
+    grd.addColorStop(1.00, 'rgba(0,120,70,0)');
+    g.fillStyle = grd;
+    g.fillRect(0, 0, 128, 128);
+    return new THREE.CanvasTexture(c);
+}
+
 function buildHead(female) {
     const g = new THREE.Group();
 
-    // Jaw width and cheek taper are the two proportions that actually carry
-    // the read at this size. Everything else is shared.
-    const jawW = female ? 0.72 : 0.88;
-    const chinY = female ? -1.02 : -1.08;
-    const browY = female ? 0.46 : 0.42;
+    // Proportions carry the gender; the feature maths above is shared.
+    const P = female
+        ? { width: 0.86, height: 1.16, depth: 0.62, jawTaper: 0.34 }
+        : { width: 0.98, height: 1.18, depth: 0.66, jawTaper: 0.18 };
 
-    const mat = (o = 1) => new THREE.LineBasicMaterial({
-        color: 0x67e8f9, transparent: true, opacity: o,
+    const N = COLS * ROWS;
+    const pos = new Float32Array(N * 3);
+
+    // One geometry, drawn as LineSegments: every horizontal and vertical grid
+    // edge. Cheaper and crisper than a Line per row, and it is what gives the
+    // even mesh of the reference rather than a set of independent curves.
+    const idx = [];
+    const at = (c, r) => r * COLS + c;
+    for (let r = 0; r < ROWS; r++)
+        for (let c = 0; c < COLS; c++) {
+            if (c < COLS - 1) idx.push(at(c, r), at(c + 1, r));
+            if (r < ROWS - 1) idx.push(at(c, r), at(c, r + 1));
+        }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setIndex(idx);
+
+    const mat = new THREE.LineBasicMaterial({
+        color: 0x35e08a, transparent: true, opacity: 0.72,
     });
+    const mesh = new THREE.LineSegments(geo, mat);
+    g.add(mesh);
 
-    // ── skull contours: stacked ellipses, narrowing toward the chin ────────
-    const rings = new THREE.Group();
-    for (let i = 0; i <= 10; i++) {
-        const t = i / 10;                       // 0 = crown, 1 = chin
-        const y = 0.95 - t * (0.95 - chinY);
-        // Widest at the cheekbones (t~0.45), tapering both ways.
-        const taper = Math.sin(Math.min(1, t * 1.25) * Math.PI * 0.85);
-        const rx = (0.30 + 0.62 * taper) * jawW;
-        const rz = (0.26 + 0.50 * taper);
-        const pts = [];
-        for (let a = 0; a <= 48; a++) {
-            const th = (a / 48) * Math.PI * 2;
-            pts.push(new THREE.Vector3(Math.cos(th) * rx, y, Math.sin(th) * rz));
-        }
-        rings.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
-                                 mat(0.18 + 0.30 * (1 - Math.abs(t - 0.45) * 1.6))));
-    }
-    g.add(rings);
-
-    // ── vertical profile lines, so it reads as a head and not a stack ─────
-    for (const off of [-0.62, -0.3, 0, 0.3, 0.62]) {
-        const pts = [];
-        for (let i = 0; i <= 20; i++) {
-            const t = i / 20;
-            const y = 0.95 - t * (0.95 - chinY);
-            const taper = Math.sin(Math.min(1, t * 1.25) * Math.PI * 0.85);
-            const rx = (0.30 + 0.62 * taper) * jawW;
-            const rz = (0.26 + 0.50 * taper);
-            const a = off * Math.PI;
-            pts.push(new THREE.Vector3(Math.cos(a) * rx, y, Math.sin(a) * rz));
-        }
-        g.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mat(0.22)));
-    }
-
-    // ── eyes: two rings that blink by scaling to zero ─────────────────────
+    // Eyes: additive glow sprites sitting just inside the sockets, so the
+    // light reads as coming from within the mesh rather than floating on it.
+    const tex = glowTexture();
     const eyes = [];
     for (const sx of [-1, 1]) {
-        const pts = [];
-        for (let a = 0; a <= 24; a++) {
-            const th = (a / 24) * Math.PI * 2;
-            pts.push(new THREE.Vector3(Math.cos(th) * 0.13, Math.sin(th) * 0.085, 0));
-        }
-        const e = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mat(0.95));
-        e.position.set(sx * 0.30 * jawW, 0.16, 0.46);
-        g.add(e); eyes.push(e);
+        const s = new THREE.Sprite(new THREE.SpriteMaterial({
+            map: tex, color: 0x4bff9b, transparent: true,
+            blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.95,
+        }));
+        s.scale.set(0.40, 0.26, 1);
+        const [ex, ey, ez] = facePoint(sx * 0.44, 0.16, P, { open: 0, wide: 0 });
+        s.position.set(ex, ey, ez + 0.06);
+        g.add(s); eyes.push(s);
     }
 
-    // Brows — a couple of strokes, but they carry more emotion than the rest of
-    // the face combined. Kept as objects so the loop can tilt and raise them:
-    // inner-end DOWN reads stern/focused, inner-end UP reads worried, both up
-    // reads surprised. That single axis is most of what "showing emotion"
-    // needs at this size.
-    const brows = [];
-    for (const sx of [-1, 1]) {
-        const pts = [];
-        for (let i = 0; i <= 8; i++) {
-            const t = i / 8;
-            pts.push(new THREE.Vector3((-0.16 + t * 0.32), Math.sin(t * Math.PI) * 0.035, 0));
-        }
-        const b = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mat(0.55));
-        b.position.set(sx * 0.30 * jawW, browY - 0.12, 0.45);
-        b.userData.sx = sx;
-        b.userData.baseY = browY - 0.12;
-        g.add(b); brows.push(b);
-    }
-
-    // ── mouth: a closed loop rebuilt every frame from the audio ───────────
-    const mouthGeo = new THREE.BufferGeometry();
-    const MOUTH_PTS = 40;
-    mouthGeo.setAttribute('position',
-        new THREE.BufferAttribute(new Float32Array((MOUTH_PTS + 1) * 3), 3));
-    const mouth = new THREE.Line(mouthGeo, mat(1.0));
-    mouth.position.set(0, -0.52, 0.44);
-    g.add(mouth);
-
-    return { group: g, eyes, brows, mouth, mouthGeo, MOUTH_PTS, jawW };
+    return { group: g, mesh, geo, pos, P, eyes };
 }
 
 /**
- * Emotions as four continuous dials rather than a set of poses, so they blend:
- * a face can be 60% pleased and still opening its mouth to speak, which a
- * swap-the-sprite approach cannot do.
+ * Emotions as four continuous dials rather than a set of poses, so they
+ * blend: a face can be 60% pleased and still opening its mouth to speak,
+ * which a swap-the-pose approach cannot do.
  *
- *   smile     -1 frown .. +1 smile   (mouth corner lift)
- *   browTilt  -1 stern .. +1 worried (inner brow end down / up)
+ *   smile     -1 frown .. +1 smile
+ *   browTilt  -1 stern .. +1 worried
  *   browRaise -1 lowered .. +1 raised
  *   eyeOpen    0 squint .. 1.4 wide
  */
@@ -146,71 +178,83 @@ export const MOODS = {
     sorry:     { smile: -0.55, browTilt:  0.85, browRaise: -0.05, eyeOpen: 0.88 },
 };
 
+const LOW = [0, 8], MID = [8, 40], HIGH = [40, 120];
+
+function band(data, [a, b]) {
+    let s = 0;
+    for (let i = a; i < b && i < data.length; i++) s += data[i];
+    return s / Math.max(1, Math.min(b, data.length) - a) / 255;
+}
+
 export class AssistantFace {
-    /**
-     * @param {HTMLElement} host   element to mount the canvas into
-     * @param {boolean}     female which head to build (follows the voice)
-     */
     constructor(host, female = true) {
         this.host = host;
         this.female = female;
         this.speaking = false;
-        this._open = 0;      // smoothed mouth opening
-        this._wide = 0;      // smoothed mouth width
-        this._raf = null;
+        this._open = 0;
+        this._wide = 0;
         this._blinkAt = 0;
+        this.mood = { ...MOODS.neutral };
+        this._mood = { ...MOODS.neutral };
 
-        const w = host.clientWidth || 220, h = host.clientHeight || 260;
+        const w = host.clientWidth || 260, h = host.clientHeight || 320;
         this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
         this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
         this.renderer.setSize(w, h, false);
         host.appendChild(this.renderer.domElement);
 
         this.scene = new THREE.Scene();
-        this.camera = new THREE.PerspectiveCamera(34, w / h, 0.1, 100);
-        this.camera.position.set(0, -0.05, 4.3);
+        this.camera = new THREE.PerspectiveCamera(32, w / h, 0.1, 100);
+        this.camera.position.set(0, 0, 4.6);
 
         this.head = buildHead(female);
         this.scene.add(this.head.group);
-
-        // Current vs target, lerped every frame. Snapping between moods looks
-        // mechanical; the travel time is most of what sells it as a face.
-        this.mood = { ...MOODS.neutral };
-        this._mood = { ...MOODS.neutral };
+        this._rebuild(0, 0);
 
         this._loop = this._loop.bind(this);
         this._raf = requestAnimationFrame(this._loop);
     }
 
-    /**
-     * @param {string|object} m  a MOODS key, or partial dials to blend toward.
-     * Unknown names fall back to neutral rather than throwing — a caller that
-     * invents a mood should get a calm face, not a broken one.
-     */
+    /** @param {string|object} m a MOODS key, or partial dials to blend toward. */
     setMood(m) {
         const target = typeof m === 'string' ? (MOODS[m] ?? MOODS.neutral) : m;
         this.mood = { ...this.mood, ...target };
         return this;
     }
 
-    /** Rebuild for the other gender without tearing down the canvas. */
     setFemale(female) {
         if (female === this.female) return;
         this.female = female;
         this.scene.remove(this.head.group);
-        this.head.group.traverse(o => { o.geometry?.dispose?.(); o.material?.dispose?.(); });
+        this.head.geo.dispose();
+        this.head.mesh.material.dispose();
         this.head = buildHead(female);
         this.scene.add(this.head.group);
+        this._rebuild(this._open, this._wide);
+    }
+
+    /** Recompute every grid vertex for the current mouth shape. */
+    _rebuild(open, wide) {
+        const H = this.head, m = { open, wide };
+        let i = 0;
+        for (let r = 0; r < ROWS; r++) {
+            const v = 1 - (r / (ROWS - 1)) * 2;
+            for (let c = 0; c < COLS; c++) {
+                const u = (c / (COLS - 1)) * 2 - 1;
+                const [x, y, z] = facePoint(u, v, H.P, m);
+                H.pos[i++] = x; H.pos[i++] = y; H.pos[i++] = z;
+            }
+        }
+        H.geo.attributes.position.needsUpdate = true;
+        H.geo.computeBoundingSphere();
     }
 
     /**
-     * Play an mp3 and drive the mouth from it. Returns a promise that settles
-     * when playback ends.
-     *
-     * The AudioContext is created on this call, not in the constructor:
-     * browsers refuse to start one outside a user gesture, and a context
-     * created at load time arrives already suspended and silently stays that
-     * way — audible as "the face never moves" with no error anywhere.
+     * Play an mp3 and drive the mouth from it. The AudioContext is created on
+     * this call, not in the constructor: browsers refuse to start one outside
+     * a user gesture, and one created at load time arrives suspended and
+     * silently stays that way — audible as "the face never moves", with no
+     * error anywhere.
      */
     async speak(url) {
         this.stop();
@@ -246,67 +290,50 @@ export class AssistantFace {
         this._raf = requestAnimationFrame(this._loop);
         const H = this.head;
 
-        let open = 0, wide = 0;
-        if (this.speaking && this.analyser) {
-            this.analyser.getByteFrequencyData(this.freq);
-            const lo = band(this.freq, LOW), mid = band(this.freq, MID), hi = band(this.freq, HIGH);
-            // Low energy opens the jaw ("ah"); high energy spreads the lips
-            // ("ee"); a low-heavy frame with little high rounds them ("oo").
-            open = Math.min(1, lo * 1.9 + mid * 0.7);
-            wide = Math.min(1, hi * 2.2 + mid * 0.6 - lo * 0.5);
-        }
-        // Asymmetric smoothing: mouths open faster than they close, and equal
-        // rates read as mush.
-        this._open += (open - this._open) * (open > this._open ? 0.55 : 0.22);
-        this._wide += (wide - this._wide) * 0.28;
-
-        // Ease the mood dials toward their target.
         for (const k of Object.keys(this._mood))
             this._mood[k] += ((this.mood[k] ?? 0) - this._mood[k]) * 0.08;
         const M = this._mood;
 
-        // Rebuild the mouth loop: an ellipse whose height is the opening and
-        // whose width spreads with the high band, plus a corner LIFT from the
-        // mood. The lift is a cos² term so it acts on the corners and leaves
-        // the centre alone — apply it uniformly and a smile just slides the
-        // whole mouth up the face.
-        const pos = H.mouthGeo.attributes.position;
-        const rx = (0.16 + this._wide * 0.13 + Math.max(0, M.smile) * 0.05) * H.jawW;
-        const ry = 0.012 + this._open * 0.20;
-        for (let i = 0; i <= H.MOUTH_PTS; i++) {
-            const a = (i / H.MOUTH_PTS) * Math.PI * 2;
-            const ca = Math.cos(a);
-            const x = ca * rx;
-            const lift = M.smile * 0.075 * (ca * ca) * Math.sign(ca === 0 ? 1 : 1);
-            const y = Math.sin(a) * ry - 0.02 * (1 - this._open) + lift;
-            pos.setXYZ(i, x, y, ca * 0.02);
+        let open = 0, wide = 0;
+        if (this.speaking && this.analyser) {
+            this.analyser.getByteFrequencyData(this.freq);
+            const lo = band(this.freq, LOW), mid = band(this.freq, MID), hi = band(this.freq, HIGH);
+            // Low energy opens the jaw ("ah"); high spreads the lips ("ee"); a
+            // low-heavy frame with little high rounds them ("oo").
+            open = Math.min(1, lo * 1.9 + mid * 0.7);
+            wide = Math.min(1, hi * 2.2 + mid * 0.6 - lo * 0.5);
         }
-        pos.needsUpdate = true;
-        H.mouthGeo.computeBoundingSphere();
+        // A smile widens the mouth even in silence, so the mood is visible on
+        // a closed face.
+        wide = Math.max(wide, Math.max(0, M.smile) * 0.5);
 
-        // Brows: raise both, and tilt the INNER ends. Mirrored via userData.sx
-        // so the pair stays symmetric about the nose.
-        for (const b of H.brows) {
-            b.position.y = b.userData.baseY + M.browRaise * 0.07;
-            b.rotation.z = -b.userData.sx * M.browTilt * 0.42;
-        }
+        // Asymmetric smoothing: mouths open faster than they close, and equal
+        // rates read as mush.
+        const po = this._open, pw = this._wide;
+        this._open += (open - this._open) * (open > this._open ? 0.55 : 0.22);
+        this._wide += (wide - this._wide) * 0.28;
+        // Only rebuild when the shape actually moved — this is 832 vertices of
+        // trigonometry and it does not need to run on a still face.
+        if (Math.abs(this._open - po) > 0.002 || Math.abs(this._wide - pw) > 0.002)
+            this._rebuild(this._open, this._wide);
 
-        // Blink on a random-ish cadence; a face that never blinks is unsettling
-        // in a way people notice without being able to say why.
-        if (t > this._blinkAt) {
-            this._blinkAt = t + 2200 + Math.random() * 3200;
-            this._blinkStart = t;
-        }
+        // Eyes: mood sets the aperture, blinks scale it to nothing. A face
+        // that never blinks is unsettling in a way people notice without
+        // being able to say why.
+        if (t > this._blinkAt) { this._blinkAt = t + 2200 + Math.random() * 3200; this._blinkStart = t; }
         const bp = (t - (this._blinkStart ?? -1e9)) / 130;
         const blink = bp >= 0 && bp <= 1 ? Math.abs(Math.sin(bp * Math.PI)) : 0;
-        for (const e of H.eyes) e.scale.y = Math.max(0.05, M.eyeOpen - blink);
+        for (const e of H.eyes) {
+            e.scale.y = Math.max(0.02, 0.26 * (M.eyeOpen - blink));
+            e.scale.x = 0.40 * (0.9 + M.browRaise * 0.12);
+            e.material.opacity = 0.55 + 0.45 * Math.max(0, M.eyeOpen - blink);
+        }
 
-        // Idle drift, a lean toward the viewer while speaking, and a head TILT
-        // that comes from the mood — the cocked head is half of what makes
-        // "thinking" read as thinking rather than as a blank stare.
         const s = t / 1000;
-        H.group.rotation.y = Math.sin(s * 0.4) * 0.16;
-        H.group.rotation.x = Math.sin(s * 0.31) * 0.06 + (this.speaking ? 0.03 : 0);
+        H.group.rotation.y = Math.sin(s * 0.4) * 0.15;
+        H.group.rotation.x = Math.sin(s * 0.31) * 0.05 + (this.speaking ? 0.03 : 0);
+        // The cocked head is half of what makes "thinking" read as thinking
+        // rather than as a blank stare.
         H.group.rotation.z = -M.browTilt * 0.05 + (M.eyeOpen < 0.85 ? 0.06 : 0);
 
         this.renderer.render(this.scene, this.camera);
@@ -322,6 +349,7 @@ export class AssistantFace {
         cancelAnimationFrame(this._raf);
         this.stop();
         try { this.ctx?.close(); } catch {}
+        this.head.geo.dispose();
         this.renderer.dispose();
         this.renderer.domElement.remove();
     }

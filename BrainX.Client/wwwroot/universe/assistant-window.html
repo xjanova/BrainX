@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<title>Assistant</title>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three/three.module.js" } }
+</script>
+<style>
+  /* Standalone window: the face and the chat are ONE object here, unlike the
+     HUD overlay where they float over a busy galaxy. Deep navy behind a green
+     mesh, matching the reference the owner gave. */
+  :root { --wire:#35e08a; --bg:#131a4a; --bg2:#0b1030; --ink:#d7e3ee; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: radial-gradient(120% 90% at 50% 22%, var(--bg) 0%, var(--bg2) 70%, #070a1e 100%);
+    color: var(--ink);
+    font: 13px/1.55 "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+    -webkit-user-select: none; user-select: none;
+  }
+
+  /* Whole strip is the drag handle — a frameless window with no way to move
+     it is a window nobody can put anywhere. `-webkit-app-region: drag` is a
+     browser/PWA feature and does NOT move a WebView2's host window, so the
+     strip asks the host to DragMove() on mousedown instead. */
+  #bar {
+    cursor: default;
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 12px; flex: none;
+    border-bottom: 1px solid rgba(53,224,138,.16);
+    background: rgba(7,10,30,.55);
+  }
+  #who { font-size: 12px; letter-spacing: .14em; color: var(--wire); text-transform: uppercase; }
+  #state { flex: 1; font-size: 11px; opacity: .7; }
+  #bar button {
+    background: none; border: none; color: #93a6bd;
+    font-size: 15px; line-height: 1; cursor: pointer; padding: 2px 6px; border-radius: 6px;
+  }
+  #bar button:hover { color: var(--wire); background: rgba(53,224,138,.12); }
+
+  #stage { flex: none; height: 300px; position: relative; }
+  #stage canvas { display: block; margin: 0 auto; }
+
+  #log {
+    flex: 1; min-height: 0; overflow-y: auto;
+    padding: 10px 12px; display: flex; flex-direction: column; gap: 7px;
+    -webkit-user-select: text; user-select: text;
+  }
+  .msg { padding: 7px 10px; border-radius: 9px; max-width: 86%; white-space: pre-wrap; word-break: break-word; }
+  .me  { align-self: flex-end; background: rgba(53,224,138,.14); color: #d9ffe9; }
+  .her { align-self: flex-start; background: rgba(255,255,255,.055); }
+  .pending { opacity: .5; animation: pulse 1.1s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{opacity:.3} 50%{opacity:.75} }
+
+  #row { flex: none; display: flex; gap: 6px; align-items: flex-end;
+         padding: 8px; border-top: 1px solid rgba(53,224,138,.16); }
+  #input {
+    flex: 1; resize: none; max-height: 96px;
+    background: rgba(255,255,255,.05); color: var(--ink);
+    border: 1px solid rgba(53,224,138,.2); border-radius: 8px;
+    padding: 7px 9px; font: inherit;
+    -webkit-user-select: text; user-select: text;
+  }
+  #input:focus { outline: none; border-color: rgba(53,224,138,.55); }
+  #mic, #send {
+    background: rgba(53,224,138,.10); border: 1px solid rgba(53,224,138,.24);
+    border-radius: 8px; color: var(--wire); padding: 6px 10px; cursor: pointer; font-size: 14px;
+  }
+  #mic:hover, #send:hover { background: rgba(53,224,138,.2); }
+  /* A mic that is recording and does not look like it is recording is a
+     privacy problem, not a styling one. */
+  #mic.listening {
+    background: rgba(248,113,113,.22); border-color: #f87171; color: #fecaca;
+    animation: rec 1s ease-in-out infinite;
+  }
+  @keyframes rec { 0%,100%{box-shadow:0 0 0 0 rgba(248,113,113,.45)} 50%{box-shadow:0 0 0 7px rgba(248,113,113,0)} }
+</style>
+</head>
+<body>
+  <div id="bar">
+    <span id="who">—</span>
+    <span id="state"></span>
+    <button id="min" title="ย่อ">–</button>
+    <button id="close" title="ปิด">×</button>
+  </div>
+
+  <div id="stage"></div>
+
+  <div id="log"></div>
+
+  <div id="row">
+    <button id="mic" title="พูด">🎤</button>
+    <textarea id="input" rows="1" placeholder="พิมพ์ หรือกดไมค์…"></textarea>
+    <button id="send" title="ส่ง">➤</button>
+  </div>
+
+<script type="module">
+import { AssistantFace } from './face.js';
+
+const $ = (id) => document.getElementById(id);
+const post = (m) => { try { window.chrome?.webview?.postMessage(m); } catch {} };
+
+const face = new AssistantFace($('stage'), true);
+let busy = false, pending = null, recog = null, listening = false;
+
+const fit = () => face.resize(Math.min($('stage').clientWidth, 320), $('stage').clientHeight);
+fit(); window.addEventListener('resize', fit);
+
+function bubble(cls, text, isPending) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + cls + (isPending ? ' pending' : '');
+  d.textContent = text;
+  $('log').appendChild(d);
+  $('log').scrollTop = $('log').scrollHeight;
+  return d;
+}
+
+function send(text) {
+  text = (text || '').trim();
+  if (!text || busy) return;
+  busy = true;
+  bubble('me', text);
+  $('input').value = '';
+  pending = bubble('her', '…', true);
+  face.setMood('thinking');       // the only progress indicator this window has
+  post({ type: 'mind.ask', text });
+}
+
+// ── mic ─────────────────────────────────────────────────────────────────
+function initRecog() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return null;
+  const r = new SR();
+  r.lang = 'th-TH'; r.continuous = false; r.interimResults = true; r.maxAlternatives = 1;
+  r.onresult = (ev) => {
+    let fin = '', interim = '';
+    for (let i = ev.resultIndex; i < ev.results.length; i++)
+      ev.results[i].isFinal ? (fin += ev.results[i][0].transcript)
+                            : (interim += ev.results[i][0].transcript);
+    $('input').value = fin || interim;
+    // FINAL only — sending interim text makes her answer half a sentence.
+    if (fin) { stopMic(); send(fin); }
+  };
+  r.onerror = (ev) => {
+    stopMic();
+    $('state').textContent = ev.error === 'not-allowed' ? 'ไมค์ถูกบล็อก'
+                           : ev.error === 'no-speech'   ? 'ไม่ได้ยินเสียง' : 'ไมค์: ' + ev.error;
+  };
+  r.onend = () => stopMic();
+  return r;
+}
+function startMic() {
+  recog = recog || initRecog();
+  if (!recog) { $('state').textContent = 'เครื่องนี้ไม่รองรับไมค์'; return; }
+  try { recog.start(); } catch { return; }
+  listening = true; $('mic').classList.add('listening'); $('state').textContent = 'กำลังฟัง…';
+}
+function stopMic() {
+  listening = false; $('mic').classList.remove('listening');
+  if ($('state').textContent === 'กำลังฟัง…') $('state').textContent = '';
+  try { recog?.stop(); } catch {}
+}
+
+// ── host → page ─────────────────────────────────────────────────────────
+window.brainxAssistant = {
+  configure({ name, female } = {}) {
+    if (typeof name === 'string') $('who').textContent = name;
+    if (typeof female === 'boolean') face.setFemale(female);
+    return true;
+  },
+  async say(url, { mood = null } = {}) {
+    if (mood) face.setMood(mood);
+    try { await face.speak(url); }
+    finally { setTimeout(() => face.setMood('neutral'), 1200); }
+    return true;
+  },
+  mood(m) { face.setMood(m); return true; },
+  stop() { face.stop(); return true; },
+  get face() { return face; },
+};
+
+window.brainxChat = {
+  reply(text, ok = true) {
+    busy = false;
+    if (pending) { pending.textContent = text; pending.classList.remove('pending'); pending = null; }
+    else bubble('her', text);
+    if (!ok) face.setMood('sorry');
+    $('log').scrollTop = $('log').scrollHeight;
+    return true;
+  },
+  status(s) { $('state').textContent = s || ''; return true; },
+  get busy() { return busy; },
+};
+
+$('send').onclick = () => send($('input').value);
+$('input').addEventListener('keydown', (e) => {
+  // Enter sends, Shift+Enter is a newline — the convention every chat box has.
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(e.target.value); }
+});
+$('mic').onclick = () => listening ? stopMic() : startMic();
+// Drag the frameless window by its strip. Buttons are excluded, or clicking
+// close would start a drag and swallow the click.
+$('bar').addEventListener('mousedown', (e) => {
+  if (e.button !== 0 || e.target.closest('button')) return;
+  post({ type: 'mind.drag' });
+});
+
+$('close').onclick = () => post({ type: 'mind.window', action: 'close' });
+$('min').onclick   = () => post({ type: 'mind.window', action: 'minimize' });
+
+post({ type: 'mind.ready' });
+</script>
+</body>
+</html>

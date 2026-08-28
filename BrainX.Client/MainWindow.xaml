@@ -6246,13 +6246,27 @@
                                                           Foreground="{StaticResource TextPrimaryBrush}"
                                                           SelectionChanged="AssistantVoice_Changed"/>
 
-                                                <StackPanel Orientation="Horizontal">
+                                                <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
                                                     <Button x:Name="AssistantPreviewBtn" Content="🔊  Preview"
                                                             Style="{StaticResource NeuralBtn}" Padding="14,6"
                                                             Click="AssistantPreview_Click"/>
                                                     <TextBlock x:Name="AssistantPreviewStatus" Margin="12,0,0,0"
                                                                VerticalAlignment="Center" FontSize="11"
                                                                Foreground="{StaticResource TextSecondaryBrush}"/>
+                                                </StackPanel>
+
+                                                <TextBlock Text="Her own window — face and chat together, separate from this one"
+                                                           FontSize="11" Foreground="{StaticResource TextSecondaryBrush}"
+                                                           Margin="0,0,0,4" TextWrapping="Wrap"/>
+                                                <StackPanel Orientation="Horizontal">
+                                                    <Button x:Name="AssistantWindowBtn" Content="🪟  Open assistant window"
+                                                            Style="{StaticResource NeuralBtn}" Padding="14,6"
+                                                            Click="AssistantWindowToggle_Click"/>
+                                                    <CheckBox x:Name="AssistantTopmostCheck" Content="Always on top"
+                                                              Margin="14,0,0,0" VerticalAlignment="Center"
+                                                              Foreground="{StaticResource TextPrimaryBrush}"
+                                                              Checked="AssistantTopmost_Changed"
+                                                              Unchecked="AssistantTopmost_Changed"/>
                                                 </StackPanel>
                                             </StackPanel>
                                         </Border>
