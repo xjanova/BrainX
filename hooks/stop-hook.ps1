@@ -67,26 +67,66 @@ function Write-StopDecision($verdict, $extra) {
     } catch { }
 }
 
-if (-not (Test-Path $toolLog)) { exit 0 }
+# THE TOOL LOG IS SHARED BY EVERY SESSION ON THIS MACHINE.
+#
+# ~/.claude/tool-log.ndjson is one global file that every concurrent Claude
+# Code session appends to, and the logger records no session id — only
+# {ts, tool, mode, resp_size, resp_nonascii}. So "edits in the last window"
+# silently counts OTHER sessions' edits as this turn's.
+#
+# Measured 2026-08-28 19:39: this turn ran read-only git and gh commands and
+# nothing else, yet the hook reported edits=2 and nudged about unsaved work.
+# The two Edit calls belonged to a session working in D--Code-TPIX-ThaiXTrade,
+# whose transcript was being written at the same moment. An ssh_run this
+# session never issued was in the same window.
+#
+# The transcript is per-session and race-free (Claude Code writes it before
+# any hook runs), so it answers both problems at once and the tool log is no
+# longer consulted for what THIS turn did.
+$transcriptLines = @()
+if ($transcript -and (Test-Path $transcript)) {
+    try { $transcriptLines = Get-Content $transcript -Tail 400 -ErrorAction SilentlyContinue } catch { }
+}
 
+function Get-TurnToolUses {
+    param([string[]]$Lines, [datetime]$Since)
+    $names = New-Object System.Collections.Generic.List[string]
+    foreach ($line in $Lines) {
+        if ($line -notmatch '"tool_use"') { continue }
+        $o = $null
+        try { $o = $line | ConvertFrom-Json } catch { continue }
+        if (-not $o.timestamp) { continue }
+        try { if ((Get-Date $o.timestamp) -le $Since) { continue } } catch { continue }
+        foreach ($b in @($o.message.content)) {
+            if ($b.type -eq 'tool_use' -and $b.name) { $names.Add([string]$b.name) }
+        }
+    }
+    return $names
+}
+
+$turnTools = @()
 $substantive = $false
 try {
-    $recent = Get-Content $toolLog -Tail 500 -ErrorAction SilentlyContinue | ForEach-Object {
-        try { $_ | ConvertFrom-Json } catch { $null }
-    } | Where-Object {
-        $_ -and $_.ts -and ((Get-Date $_.ts) -gt $cutoff)
+    $turnTools = Get-TurnToolUses -Lines $transcriptLines -Since $cutoff
+    foreach ($n in $turnTools) {
+        if ($n -match '^(Edit|MultiEdit|Write|NotebookEdit|Task)$') { $substantive = $true; break }
     }
-    foreach ($t in $recent) {
-        if ($t.tool -match '^(Edit|MultiEdit|Write|NotebookEdit|Task)$') {
-            $substantive = $true
-            break
+    # Fallback ONLY when there is no transcript to read (an older Claude Code,
+    # or a payload without transcript_path). Cross-session contamination is
+    # better than no nudge at all, but it must never be the primary path.
+    if (-not $transcriptLines -and (Test-Path $toolLog)) {
+        $recent = Get-Content $toolLog -Tail 500 -ErrorAction SilentlyContinue | ForEach-Object {
+            try { $_ | ConvertFrom-Json } catch { $null }
+        } | Where-Object { $_ -and $_.ts -and ((Get-Date $_.ts) -gt $cutoff) }
+        foreach ($t in $recent) {
+            if ($t.tool -match '^(Edit|MultiEdit|Write|NotebookEdit|Task)$') { $substantive = $true; break }
         }
     }
 }
 catch { }
 
 if (-not $substantive) {
-    Write-StopDecision 'quiet-turn' @{ edits = 0; brainWrite = $null; inWindow = @($recent).Count; auditAge = $null }
+    Write-StopDecision 'quiet-turn' @{ edits = 0; brainWrite = $null; inWindow = @($turnTools).Count; auditAge = $null }
     exit 0
 }
 
@@ -157,7 +197,7 @@ try {
     # Suffix match — same rebrand trap as brain-prompt-gate.ps1 and brain-stats.ps1:
     # the server prefix changes, the tool name identifies the call.
     $brainRx = '__(brain_create_note|brain_append_note|brain_remember)$'
-    $brainWriteHappened = ($recent | Where-Object { $_.tool -match $brainRx }).Count -gt 0
+    foreach ($n in $turnTools) { if ($n -match $brainRx) { $brainWriteHappened = $true; break } }
 
     # THE TOOL LOG RACES AND THE TRANSCRIPT DOES NOT.
     #
@@ -198,11 +238,13 @@ try {
 } catch { }
 
 # Count how many file-modifying calls happened so we can scale the nudge.
+# From the TRANSCRIPT, for the same reason as everything above: the shared
+# tool log would count another session's edits as this turn's, and did.
 $editCount = 0
 try {
-    $editCount = ($recent | Where-Object {
-        $_.tool -match '^(Edit|MultiEdit|Write|NotebookEdit)$'
-    }).Count
+    foreach ($n in $turnTools) {
+        if ($n -match '^(Edit|MultiEdit|Write|NotebookEdit)$') { $editCount++ }
+    }
 } catch { }
 
 # Compose context: gentle reminder if a save happened, firm nudge if not.
@@ -241,7 +283,7 @@ if ($auditDue) {
 $verdict = if ($brainWriteHappened) { 'saved' } else { 'no-save' }
 Write-StopDecision $verdict @{
     edits = $editCount; brainWrite = $brainWriteHappened
-    inWindow = @($recent).Count; auditAge = $auditAge
+    inWindow = @($turnTools).Count; auditAge = $auditAge
 }
 
 @{
