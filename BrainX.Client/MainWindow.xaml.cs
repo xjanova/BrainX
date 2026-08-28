@@ -2470,6 +2470,7 @@ public partial class MainWindow : Window
         PopulateAutoLinkerSettings();
         PopulateStorageSettings();
         PopulateAssistantSettings();
+        MaybeAutoOpenAssistantWindow();
         PopulateGraphPerfSettings();
         PopulateCustomCategories();
         StartAccessLogWatcher();

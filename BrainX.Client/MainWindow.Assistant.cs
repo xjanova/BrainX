@@ -112,6 +112,42 @@ public partial class MainWindow
                 : "🪟  Open assistant window";
     }
 
+    /// <summary>
+    /// Open her window at startup when the owner asked for that.
+    ///
+    /// Deferred to Background priority rather than run inline: this creates a
+    /// second WebView2, and doing that while the main window is still painting
+    /// its first frame competes with the splash for the GPU — the boot path
+    /// this app has already been burned by twice.
+    /// </summary>
+    private void MaybeAutoOpenAssistantWindow()
+    {
+        try
+        {
+            if ((bool?)ReadVaultSettings()["AssistantWinAutoOpen"] != true) return;
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                try { OpenAssistantWindow(); UpdateAssistantWindowButton(); }
+                catch (Exception ex) { Debug.WriteLine($"[assistant] auto-open failed: {ex.Message}"); }
+            }), System.Windows.Threading.DispatcherPriority.Background);
+        }
+        catch { }
+    }
+
+    private void AssistantAutoOpen_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_assistantSettingsLoading) return;
+        var on = AssistantAutoOpenCheck?.IsChecked == true;
+        // A real JSON bool, not the string "true": AssistantWinTopmost beside
+        // it is written as a bool, and two settings of the same kind stored as
+        // different types is how one of them silently stops being read.
+        SaveAssistantFlag("AssistantWinAutoOpen", on);
+        // Ticking it is also a request to see her now — waiting for the next
+        // launch to find out whether the checkbox did anything is a bad way to
+        // learn that it did.
+        if (on && _assistantWindow == null) { OpenAssistantWindow(); UpdateAssistantWindowButton(); }
+    }
+
     private void AssistantTopmost_Changed(object sender, RoutedEventArgs e)
     {
         if (_assistantSettingsLoading) return;
@@ -119,14 +155,7 @@ public partial class MainWindow
         // Applies live AND persists: a window that only obeys the setting after
         // a restart teaches people the checkbox is broken.
         if (_assistantWindow != null) _assistantWindow.Topmost = on;
-        try
-        {
-            var p = Path.Combine(_vaultPath, ".obsidianx", "settings.json");
-            var o = File.Exists(p) ? JObject.Parse(File.ReadAllText(p)) : new JObject();
-            o["AssistantWinTopmost"] = on;
-            File.WriteAllText(p, o.ToString(Newtonsoft.Json.Formatting.Indented), new UTF8Encoding(false));
-        }
-        catch (Exception ex) { Debug.WriteLine($"[assistant] topmost save failed: {ex.Message}"); }
+        SaveAssistantFlag("AssistantWinTopmost", on);
     }
 
     /// <summary>
@@ -704,6 +733,8 @@ public partial class MainWindow
             var s = ReadVaultSettings();
             if (AssistantTopmostCheck != null)
                 AssistantTopmostCheck.IsChecked = (bool?)s["AssistantWinTopmost"] ?? false;
+            if (AssistantAutoOpenCheck != null)
+                AssistantAutoOpenCheck.IsChecked = (bool?)s["AssistantWinAutoOpen"] ?? false;
             UpdateAssistantWindowButton();
         }
         catch { }
@@ -719,6 +750,20 @@ public partial class MainWindow
         }
         catch { }
         return new JObject();
+    }
+
+    /// <summary>Merge one boolean into the vault settings, as a real JSON bool.</summary>
+    private void SaveAssistantFlag(string key, bool value)
+    {
+        try
+        {
+            var p = Path.Combine(_vaultPath, ".obsidianx", "settings.json");
+            var o = File.Exists(p) ? JObject.Parse(File.ReadAllText(p)) : new JObject();
+            o[key] = value;
+            Directory.CreateDirectory(Path.GetDirectoryName(p)!);
+            File.WriteAllText(p, o.ToString(Newtonsoft.Json.Formatting.Indented), new UTF8Encoding(false));
+        }
+        catch (Exception ex) { Debug.WriteLine($"[assistant] save {key} failed: {ex.Message}"); }
     }
 
     /// <summary>Merge one key into the vault settings without disturbing the rest.</summary>

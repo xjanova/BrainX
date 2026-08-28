@@ -6267,6 +6267,11 @@
                                                               Foreground="{StaticResource TextPrimaryBrush}"
                                                               Checked="AssistantTopmost_Changed"
                                                               Unchecked="AssistantTopmost_Changed"/>
+                                                    <CheckBox x:Name="AssistantAutoOpenCheck" Content="Open at startup"
+                                                              Margin="14,0,0,0" VerticalAlignment="Center"
+                                                              Foreground="{StaticResource TextPrimaryBrush}"
+                                                              Checked="AssistantAutoOpen_Changed"
+                                                              Unchecked="AssistantAutoOpen_Changed"/>
                                                 </StackPanel>
                                             </StackPanel>
                                         </Border>

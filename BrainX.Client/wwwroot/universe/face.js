@@ -268,11 +268,24 @@ export class AssistantFace {
 
         const src = this.ctx.createMediaElementSource(audio);
         const an = this.ctx.createAnalyser();
-        an.fftSize = 512;
-        an.smoothingTimeConstant = 0.55;
+        // SMALL WINDOW, ALMOST NO SMOOTHING. The analyser's
+        // smoothingTimeConstant is an exponential average over frames: at 0.55
+        // each frame was 55% history, which is two or three frames of lag on
+        // top of the FFT window and enough to blur consecutive syllables into
+        // one long vowel. Thai is syllable-timed, so that blur is exactly the
+        // thing that made the mouth look out of step with the words.
+        an.fftSize = 256;
+        an.smoothingTimeConstant = 0.1;
         src.connect(an); an.connect(this.ctx.destination);
         this.analyser = an;
         this.freq = new Uint8Array(an.frequencyBinCount);
+        // Time-domain samples drive HOW OPEN the mouth is. An amplitude
+        // envelope read straight from the waveform has no analysis lag at all,
+        // where the same envelope derived from FFT magnitudes inherits the
+        // window and the smoothing. Shape stays on the FFT — vowel colour
+        // changes far slower than loudness, so it can afford the latency that
+        // the opening cannot.
+        this.time = new Uint8Array(an.fftSize);
 
         this.speaking = true;
         try { await audio.play(); } catch (e) { this.speaking = false; throw e; }
@@ -296,12 +309,22 @@ export class AssistantFace {
 
         let open = 0, wide = 0;
         if (this.speaking && this.analyser) {
+            // Opening: RMS of the raw waveform, gated by a noise floor so room
+            // tone and codec hiss do not hold the mouth permanently ajar.
+            this.analyser.getByteTimeDomainData(this.time);
+            let sum = 0;
+            for (let i = 0; i < this.time.length; i++) {
+                const v = (this.time[i] - 128) / 128;
+                sum += v * v;
+            }
+            const rms = Math.sqrt(sum / this.time.length);
+            open = Math.min(1, Math.max(0, (rms - 0.012) * 6.2));
+
+            // Shape: which way the energy leans. High spreads the lips ("ee"),
+            // low with little high rounds them ("oo").
             this.analyser.getByteFrequencyData(this.freq);
             const lo = band(this.freq, LOW), mid = band(this.freq, MID), hi = band(this.freq, HIGH);
-            // Low energy opens the jaw ("ah"); high spreads the lips ("ee"); a
-            // low-heavy frame with little high rounds them ("oo").
-            open = Math.min(1, lo * 1.9 + mid * 0.7);
-            wide = Math.min(1, hi * 2.2 + mid * 0.6 - lo * 0.5);
+            wide = Math.min(1, hi * 2.4 + mid * 0.7 - lo * 0.6);
         }
         // A smile widens the mouth even in silence, so the mood is visible on
         // a closed face.
@@ -310,11 +333,14 @@ export class AssistantFace {
         // Asymmetric smoothing: mouths open faster than they close, and equal
         // rates read as mush.
         const po = this._open, pw = this._wide;
-        this._open += (open - this._open) * (open > this._open ? 0.55 : 0.22);
-        this._wide += (wide - this._wide) * 0.28;
+        // Attack near-instant, release merely quick. A mouth that closes as
+        // fast as it opens chatters between syllables; one that opens slowly
+        // is always a beat behind the word.
+        this._open += (open - this._open) * (open > this._open ? 0.90 : 0.38);
+        this._wide += (wide - this._wide) * 0.34;
         // Only rebuild when the shape actually moved — this is 832 vertices of
         // trigonometry and it does not need to run on a still face.
-        if (Math.abs(this._open - po) > 0.002 || Math.abs(this._wide - pw) > 0.002)
+        if (Math.abs(this._open - po) > 0.0012 || Math.abs(this._wide - pw) > 0.0012)
             this._rebuild(this._open, this._wide);
 
         // Eyes: mood sets the aperture, blinks scale it to nothing. A face
