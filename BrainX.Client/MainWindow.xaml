@@ -6227,8 +6227,10 @@
                                                                Foreground="{StaticResource NeuralText}"/>
                                                     <TextBlock FontSize="12.5" FontWeight="Medium"
                                                                Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0" TextWrapping="Wrap">
-                                                        She reads reports aloud and her wireframe face in the Universe moves with
-                                                        what she says. Voices come from Edge read-aloud — free, no key, no credit,
+                                                        She lives in her own window — Mind — with her wireframe face and her chat.
+                                                        The voice set here decides three things at once: how she sounds, whether
+                                                        that face is female or male, and which Thai pronoun and particle she
+                                                        speaks with. Voices come from Edge read-aloud — free, no key, no credit,
                                                         needs network. Windows' own voices are en-US only, so Thai cannot use them.
                                                     </TextBlock>
                                                 </StackPanel>
@@ -6239,7 +6241,7 @@
                                                          FontSize="12" Margin="0,0,0,12" MaxLength="24"
                                                          LostFocus="AssistantName_Changed"/>
 
-                                                <TextBlock Text="Voice — also decides whether the face is female or male" FontSize="11"
+                                                <TextBlock Text="Voice — also sets the face, the pronoun and the particle" FontSize="11"
                                                            Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
                                                 <ComboBox x:Name="AssistantVoiceCombo" Margin="0,0,0,12"
                                                           Background="{StaticResource SurfaceBrush}"
@@ -6255,11 +6257,11 @@
                                                                Foreground="{StaticResource TextSecondaryBrush}"/>
                                                 </StackPanel>
 
-                                                <TextBlock Text="Her own window — face and chat together, separate from this one"
+                                                <TextBlock Text="Mind is its own program — it keeps running when this window closes"
                                                            FontSize="11" Foreground="{StaticResource TextSecondaryBrush}"
                                                            Margin="0,0,0,4" TextWrapping="Wrap"/>
                                                 <StackPanel Orientation="Horizontal">
-                                                    <Button x:Name="AssistantWindowBtn" Content="🪟  Open assistant window"
+                                                    <Button x:Name="AssistantWindowBtn" Content="🪟  Launch Mind"
                                                             Style="{StaticResource NeuralBtn}" Padding="14,6"
                                                             Click="AssistantWindowToggle_Click"/>
                                                     <CheckBox x:Name="AssistantTopmostCheck" Content="Always on top"
@@ -6267,11 +6269,6 @@
                                                               Foreground="{StaticResource TextPrimaryBrush}"
                                                               Checked="AssistantTopmost_Changed"
                                                               Unchecked="AssistantTopmost_Changed"/>
-                                                    <CheckBox x:Name="AssistantAutoOpenCheck" Content="Open at startup"
-                                                              Margin="14,0,0,0" VerticalAlignment="Center"
-                                                              Foreground="{StaticResource TextPrimaryBrush}"
-                                                              Checked="AssistantAutoOpen_Changed"
-                                                              Unchecked="AssistantAutoOpen_Changed"/>
                                                 </StackPanel>
                                             </StackPanel>
                                         </Border>

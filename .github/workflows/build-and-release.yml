@@ -91,6 +91,24 @@ jobs:
             -p:PublishSingleFile=false `
             -o publish/win-x64/mcp
 
+      - name: Publish Mind (the assistant) into the client package
+        # Mind is its own exe — closing the dashboard must not close her — but
+        # it ships inside the same install so the dashboard's "Launch Mind"
+        # button has something to launch. Its own subfolder, not the install
+        # root: both are self-contained WPF apps and publishing them over each
+        # other would have them trading identical runtime files for no reason.
+        # MainWindow.Assistant.cs looks here (baseDir\Mind\BrainX.Mind.exe).
+        env:
+          BUILD_VERSION: ${{ steps.ver.outputs.version }}
+          BUILD_COMMIT:  ${{ steps.ver.outputs.sha }}
+        run: |
+          dotnet publish BrainX.Mind/BrainX.Mind.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=false `
+            -o publish/win-x64/Mind
+
       - name: Zip artifact
         shell: bash
         run: |

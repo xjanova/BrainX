@@ -105,6 +105,11 @@ const post = (m) => { try { window.chrome?.webview?.postMessage(m); } catch {} }
 
 const face = new AssistantFace($('stage'), true);
 let busy = false, pending = null, recog = null, listening = false;
+// Thai marks the speaker's gender, so every line this page writes in her voice
+// has to follow the configured voice too — not just the ones the model writes.
+// Defaults match the default (female) voice and are replaced by configure().
+let self_ = 'ฉัน', particle = 'ค่ะ';
+const askParticle = () => (particle === 'ค่ะ' ? 'คะ' : particle);
 
 const fit = () => face.resize(Math.min($('stage').clientWidth, 320), $('stage').clientHeight);
 fit(); window.addEventListener('resize', fit);
@@ -166,9 +171,16 @@ function stopMic() {
 
 // ── host → page ─────────────────────────────────────────────────────────
 window.brainxAssistant = {
-  configure({ name, female } = {}) {
+  configure({ name, female, self, particle: p } = {}) {
     if (typeof name === 'string') $('who').textContent = name;
     if (typeof female === 'boolean') face.setFemale(female);
+    if (typeof self === 'string' && self) self_ = self;
+    if (typeof p === 'string' && p) particle = p;
+    // Greet once, in her own voice. It also proves the wiring end to end: if
+    // the particle is wrong here it is wrong everywhere, before you have to
+    // wait on a model to find out.
+    if (!$('log').children.length && typeof name === 'string')
+      bubble('her', `${self_}ชื่อ${name}${particle} ถามได้เลย${particle}`);
     return true;
   },
   async say(url, { mood = null } = {}) {

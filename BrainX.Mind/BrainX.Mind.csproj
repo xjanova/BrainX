@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>BrainX.Mind</AssemblyName>
+    <RootNamespace>BrainX.Mind</RootNamespace>
+    <Product>Mind — BrainX assistant</Product>
+    <Version>1.0.0</Version>
+    <!-- Its own app, launched on its own. The dashboard is not required to be
+         running, and closing the dashboard must not close her. -->
+    <!-- no .ico in the repo; the exe keeps the default until one is added -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\BrainX.Core\BrainX.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2792.45" />
+  </ItemGroup>
+
+  <!-- The page she renders. Copied beside the exe so this app is standalone —
+       it must not reach into the dashboard's install directory, which Velopack
+       replaces wholesale on update. -->
+  <ItemGroup>
+    <Content Include="..\BrainX.Client\wwwroot\universe\assistant-window.html"
+             Link="wwwroot\universe\assistant-window.html" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\BrainX.Client\wwwroot\universe\face.js"
+             Link="wwwroot\universe\face.js" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\BrainX.Client\wwwroot\universe\vendor\three\three.module.js"
+             Link="wwwroot\universe\vendor\three\three.module.js" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

@@ -2470,7 +2470,6 @@ public partial class MainWindow : Window
         PopulateAutoLinkerSettings();
         PopulateStorageSettings();
         PopulateAssistantSettings();
-        MaybeAutoOpenAssistantWindow();
         PopulateGraphPerfSettings();
         PopulateCustomCategories();
         StartAccessLogWatcher();
@@ -8304,27 +8303,10 @@ public partial class MainWindow : Window
                 "universe.local", wwwroot,
                 CoreWebView2HostResourceAccessKind.Allow);
 
-            // The assistant's audio lives in the VAULT, not in wwwroot: it is
-            // cached output keyed by text+voice, and wwwroot is inside the
-            // install directory that Velopack replaces wholesale on update.
-            // A second virtual host lets the page fetch it by URL, which
-            // streams — the alternative (a base64 data: URL through
-            // ExecuteScriptAsync) would push a whole MP3 through a script
-            // string on every sentence.
-            try
-            {
-                var voiceDir = Path.Combine(_vaultPath, ".obsidianx", "voice");
-                Directory.CreateDirectory(voiceDir);
-                core.SetVirtualHostNameToFolderMapping(
-                    "voice.local", voiceDir,
-                    CoreWebView2HostResourceAccessKind.Allow);
-            }
-            catch (Exception vex)
-            {
-                // Never fatal: no voice folder means she cannot speak, which is
-                // a missing feature, not a broken dashboard.
-                System.Diagnostics.Debug.WriteLine($"[assistant] voice host mapping skipped: {vex.GetType().Name}");
-            }
+            // No voice.local host here any more: the assistant's audio is
+            // fetched by BrainX.Mind, which maps that host in its own WebView2.
+            // The dashboard's only remaining audio is the settings preview, and
+            // that plays through MediaPlayer straight off disk.
             core.WebMessageReceived += OnUniverseMessage;
             core.Settings.AreDevToolsEnabled = true;
             core.Settings.AreDefaultContextMenusEnabled = true;
@@ -8457,16 +8439,6 @@ public partial class MainWindow : Window
                 // is the hole this overlay exists to close. Four seconds is for
                 // a page that somehow never reports a HUD at all.
                 ScheduleUniverseLoaderHandover(4000, isFallback: true);
-            }
-            else if (msg?.type == "mind.ask")
-            {
-                // Chat with the assistant, typed or dictated. Deliberately
-                // fire-and-forget: the answer can take a minute on a local
-                // model and this handler runs on the UI thread.
-                var ask = Newtonsoft.Json.JsonConvert.DeserializeAnonymousType(
-                    json, new { type = "", text = "" });
-                if (!string.IsNullOrWhiteSpace(ask?.text))
-                    _ = HandleMindAskAsync(ask!.text);
             }
             else if (msg?.type == "toggleFullscreen")
             {
