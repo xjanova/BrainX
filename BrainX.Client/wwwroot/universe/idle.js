@@ -50,8 +50,23 @@ const POSE = {
     leftShoulder:  [0, 0, -0.06],
     rightShoulder: [0, 0, 0.06],
     // z drops the arm, y swings it a touch forward of the seam, x rolls it in.
-    leftUpperArm:  [0.10, 0.14, -1.24],
-    rightUpperArm: [0.10, -0.14, 1.24],
+    //
+    // WHY THE ARMS ARE THIS WIDE AND THIS FAR FORWARD. Her skirt flares, and at
+    // the Mixamo idle's arm position her gloves sat 30mm INSIDE the cloth —
+    // the scalloped hem cut straight across them.
+    //
+    // The measurement that matters is the FINGERTIP against the skirt at the
+    // fingertip's own height, not the hand against the hip. The hand is above
+    // the widest part of the flare and looks clear; the fingers hang down into
+    // it. Comparing hand-to-hip said 9-12cm of room and was answering a
+    // different question entirely.
+    //
+    // Swinging the arms forward alone does nothing (-2mm). Out alone stalls,
+    // because the hand's own COLLIDER pushes the skirt outward as it
+    // approaches, so the two track each other. Forward AND out clears it:
+    // measured +35mm at the fingertip.
+    leftUpperArm:  [0.10, 0.26, -0.96],
+    rightUpperArm: [0.10, -0.26, 0.96],
     leftLowerArm:  [0, -0.28, -0.14],
     rightLowerArm: [0, 0.28, 0.14],
     leftHand:      [0, 0, -0.12],
@@ -86,6 +101,22 @@ const POSE = {
 const LEGS = new Set([
     'leftUpperLeg', 'rightUpperLeg', 'leftLowerLeg', 'rightLowerLeg',
     'leftFoot', 'rightFoot', 'leftToes', 'rightToes',
+]);
+
+/**
+ * The arms, which get a weight of their own for the same reason the legs do.
+ *
+ * A Mixamo idle hangs the arms close to the body, which is right for a
+ * character in trousers and wrong for one in a flared skirt: her hands ended up
+ * inside the cloth. The correction has to reach the arms even while a clip is
+ * playing, so it cannot ride on the general procedural weight of 0.18 — but it
+ * must NOT apply during a gesture, or waving and clapping would be flattened
+ * into a stand. The caller decides, and only ever turns it on for an idle.
+ */
+const ARMS = new Set([
+    'leftShoulder', 'rightShoulder',
+    'leftUpperArm', 'rightUpperArm', 'leftLowerArm', 'rightLowerArm',
+    'leftHand', 'rightHand',
 ]);
 
 /** A hand at rest is not flat. Every finger joint curls a little. */
@@ -158,12 +189,15 @@ export class Idle {
      * @param {number} legWeight how hard to pull the legs back toward standing.
      *   The caller decides, because it is only right while she is on her feet —
      *   applied to a sitting clip it would stand her up through the chair.
+     * @param {number} armWeight how hard to hold the arms clear of her skirt.
+     *   Zero during a gesture, or a wave becomes a stand.
      */
-    apply(t, weight = 1, speech = 0, dt = 1 / 60, legWeight = 0) {
+    apply(t, weight = 1, speech = 0, dt = 1 / 60, legWeight = 0, armWeight = 0) {
         this._accents(t, speech, dt);
         if (!this.bones.length) return;
         const legW = Math.max(weight, legWeight);
-        if (weight <= 0.001 && legW <= 0.001) return;
+        const armW = Math.max(weight, armWeight);
+        if (weight <= 0.001 && legW <= 0.001 && armW <= 0.001) return;
 
         // Oscillators, deliberately not harmonically related, so the pose never
         // returns to exactly where it was. Breathing is the fastest and the only
@@ -225,7 +259,8 @@ export class Idle {
             b.target.setFromEuler(this._e).premultiply(b.base);
             // Slerp rather than assign: at weight 1 this lands exactly on the
             // pose, and below it the clip underneath keeps its say.
-            b.node.quaternion.slerp(b.target, LEGS.has(b.name) ? legW : weight);
+            b.node.quaternion.slerp(b.target,
+                LEGS.has(b.name) ? legW : ARMS.has(b.name) ? armW : weight);
         }
 
         // Weight shifts from one foot to the other, and breathing lifts her a

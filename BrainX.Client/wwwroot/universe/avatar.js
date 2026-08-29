@@ -172,9 +172,14 @@ export class Avatar {
         // would stand her up through the chair.
         const onFeet = !this.motion?.ready
             || ['idle', 'gesture'].includes(this.motion.current?.meta.role ?? 'idle');
+        // Her arms are held clear of the skirt only while she is idling on her
+        // feet. During a gesture they belong to the clip — holding them out
+        // through a wave would flatten it back into a stand.
+        const armsFree = !!this.motion?.gesture
+            || (this.motion?.current?.meta.role ?? 'idle') !== 'idle';
         this.lip.update(dt);
         this.idle.apply(this._t, w, this.lip.speaking ? this.lip.level : 0, dt,
-                        onFeet ? 0.82 : 0);
+                        onFeet ? 0.82 : 0, armsFree ? 0 : 0.75);
 
         // 3 — face.
         this._face(dt);
