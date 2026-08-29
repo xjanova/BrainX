@@ -79,3 +79,9 @@ t2/
 
 # Personal ops runbook — contains real host/domain/email/paths; keep local
 BrainX.Server/DEPLOY.md
+
+# The avatar's binaries are tens of MB (a VRM, plus an .fbx per motion) and are
+# not committed until we decide how they ship. The manifest that describes them
+# IS source, so it stays.
+BrainX.Client/wwwroot/universe/avatar/*
+!BrainX.Client/wwwroot/universe/avatar/clips.json
