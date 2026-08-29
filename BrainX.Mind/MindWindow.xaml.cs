@@ -1,4 +1,4 @@
-// MindWindow — the whole application.
+﻿// MindWindow — the whole application.
 //
 // She is her own program on purpose. Inside the dashboard she competed with
 // the galaxy for a corner, her chat covered the cards it was reporting on, and
@@ -192,6 +192,19 @@ public partial class MindWindow : Window
             core.SetVirtualHostNameToFolderMapping(
                 "voice.local", voiceDir, CoreWebView2HostResourceAccessKind.Allow);
 
+            // Her body is fetched once and kept beside `current`, not shipped
+            // inside it — see AvatarPackService for why. The folder is mapped
+            // whether or not the pack is there yet: mapping a missing folder is
+            // harmless, and doing it here means the download can finish while
+            // the page is already up rather than blocking the window on it.
+            var pack = new AvatarPackService();
+            Directory.CreateDirectory(pack.Root);
+            core.SetVirtualHostNameToFolderMapping(
+                "avatar.local", pack.Root, CoreWebView2HostResourceAccessKind.Allow);
+            // Runs before any page script, so the page never has to guess.
+            await core.AddScriptToExecuteOnDocumentCreatedAsync(
+                "window.__mindAvatarBase='https://avatar.local/';");
+
             // The mic is the point of this app, and a frameless window has
             // nowhere sensible to show a permission prompt.
             core.PermissionRequested += (_, e) =>
@@ -204,6 +217,12 @@ public partial class MindWindow : Window
             core.WebMessageReceived += OnMessage;
             core.Settings.AreDefaultContextMenusEnabled = false;
             Web.Source = new Uri("https://universe.local/universe/assistant-window.html");
+
+            // Not awaited: on a first run this is 33 MB, and blocking the
+            // window on it would show nothing at all for the length of the
+            // download. The page copes with an absent pack and is told when it
+            // lands.
+            _ = EnsureAvatarAsync(pack);
         }
         catch (Exception ex)
         {
@@ -212,6 +231,33 @@ public partial class MindWindow : Window
             Close();
         }
     }
+
+    /// <summary>
+    /// Fetch her body if it is not already here, telling the page how far along
+    /// it is. Silent when it is already installed — which is every run after
+    /// the first, and the entire point of the exercise.
+    /// </summary>
+    private async Task EnsureAvatarAsync(AvatarPackService pack)
+    {
+        if (pack.IsInstalled) return;
+        var progress = new Progress<(string stage, double fraction)>(p =>
+            _ = Eval($"window.brainxChat?.status?.({Js(Describe(p))})"));
+        var dir = await pack.EnsureAsync(progress);
+        await Eval(dir != null
+            ? "window.brainxAssistant?.reload?.()"
+            : $"window.brainxChat?.status?.({Js("โหลดตัวมายด์ไม่สำเร็จ — ลองเปิดใหม่อีกครั้ง")})");
+    }
+
+    private static string Describe((string stage, double fraction) p) => p.stage switch
+    {
+        "connecting" => "กำลังเชื่อมต่อ…",
+        "downloading" => $"กำลังโหลดตัวมายด์ {p.fraction * 100:0}%",
+        "unpacking" => "กำลังแตกไฟล์…",
+        "ready" => "",
+        _ => p.stage,
+    };
+
+    private static string Js(string s) => System.Text.Json.JsonSerializer.Serialize(s);
 
     private async void OnMessage(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
     {

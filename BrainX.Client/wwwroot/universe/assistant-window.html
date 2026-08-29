@@ -184,7 +184,11 @@ import { Avatar } from './avatar.js';
 const $ = (id) => document.getElementById(id);
 const post = (m) => { try { window.chrome?.webview?.postMessage(m); } catch {} };
 
-const face = new Avatar($('stage'), { base: './avatar/' });
+// Her body is fetched once and cached outside the install directory, so the
+// host maps it to its own virtual origin and tells us where. Falling back to
+// './avatar/' keeps the plain static-server flow working for development.
+const AVATAR_BASE = window.__mindAvatarBase ?? './avatar/';
+const face = new Avatar($('stage'), { base: AVATAR_BASE });
 let busy = false, pending = null, recog = null, listening = false;
 // Thai marks the speaker's gender, so every line this page writes in her voice
 // has to follow the configured voice too — not just the ones the model writes.
@@ -390,6 +394,10 @@ window.brainxAssistant = {
     return true;
   },
   mood(m) { face.setMood(m); return true; },
+  // Called by the host when the avatar pack finishes downloading on a first
+  // run. Reloading is honest and cheap here: nothing has been said yet, and
+  // hot-swapping a model mid-scene is a lot of machinery for a path taken once.
+  reload() { location.reload(); return true; },
   stop() { face.stop(); return true; },
   sit() { return face.sit(); },
   stand() { return face.stand(); },

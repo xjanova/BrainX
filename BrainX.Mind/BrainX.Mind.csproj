@@ -47,10 +47,12 @@
                       ..\BrainX.Client\wwwroot\universe\vendor\vrm-mixamo\**\*.js"
              Link="wwwroot\universe\vendor\%(RecursiveDir)%(Filename)%(Extension)"
              CopyToOutputDirectory="PreserveNewest" />
-    <!-- The model and its clips. Not in git (tens of MB); present on a dev
-         machine, and produced by the packaging step for a release. -->
-    <Content Include="..\BrainX.Client\wwwroot\universe\avatar\**\*.*"
-             Link="wwwroot\universe\avatar\%(RecursiveDir)%(Filename)%(Extension)"
+    <!-- The MANIFEST only. The model and its clips are 33 MB that change
+         almost never, and shipping them inside the package would re-send the
+         lot on every Velopack update. They are fetched once at run time and
+         cached beside `current` — see AvatarPackService. -->
+    <Content Include="..\BrainX.Client\wwwroot\universe\avatar\clips.json"
+             Link="wwwroot\universe\avatar\clips.json"
              CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
