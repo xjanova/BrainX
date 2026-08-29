@@ -1,34 +1,40 @@
-// framing.js — the camera moves with what she is doing.
+// framing.js — the camera. Picks a shot on its own, and gets out of the way
+// when the owner takes hold of it.
 //
-// WHY THE CAMERA MOVES AT ALL. A fixed wide shot wastes the thing that took the
-// most work: when she talks, the expression, the visemes and the eyes are all
-// happening in a face that is forty pixels tall. A fixed close shot throws away
-// the other thing — the body, the walk, the fidgeting. Neither framing is right
-// for both states, so the camera picks.
+// WHY THE CAMERA MOVES BY ITSELF. A fixed wide shot wastes the thing that took
+// the most work: while she talks, the expression, the visemes and the eyes are
+// all happening in a face forty pixels tall. A fixed close shot throws away the
+// other thing — the body, the walk, the fidgeting. Neither framing is right for
+// both states, so it picks.
 //
-// WHY IT IS MEASURED, NOT TYPED IN. Every target here is derived from her own
-// bones at run time: the head node's world height, the model's bounding box.
-// Hard-coded distances were wrong the moment the model changed, and they hide
-// the reason a number is what it is. `fit` says "get this many metres of
-// subject into the frame" and the distance falls out of the field of view.
+// AND WHY THE OWNER STILL WINS. Automatic framing that cannot be overridden is
+// a camera that argues with you. Drag orbits, right-drag (or shift-drag) pans,
+// the wheel zooms, and all three are OFFSETS layered on whatever shot the state
+// machine chose — so she can be put anywhere in frame and the push-in when she
+// starts talking still happens, from wherever you left her.
 //
-// WHY CRITICAL DAMPING AND NOT A LERP. An exponential lerp toward a target
-// never quite arrives and has no notion of speed, so a shot change either
-// snaps or drifts. A critically damped spring reaches the target in a
-// predictable time and — the part that matters on a face — arrives without
-// overshooting, so she never rocks back at the end of a push-in.
+// WHY EVERYTHING IS MEASURED. Every base target is derived from her own bones
+// at run time: the head node's world height, the model's bounding box. Hard
+// numbers were wrong the moment the model changed and hid the reason they were
+// what they were. `fit` says "get this many metres of subject in frame" and the
+// distance falls out of the field of view.
+//
+// WHY CRITICAL DAMPING. An exponential lerp toward a target never quite arrives
+// and has no notion of speed, so a shot change either snaps or drifts. A
+// critically damped spring arrives in a predictable time and — the part that
+// matters on a face — without overshooting, so she never rocks back at the end
+// of a push-in.
 
 import * as THREE from 'three';
 
 /** How much subject to fit vertically, and where to aim, per shot. */
 const SHOTS = {
-    // Whole of her, with headroom, standing on the bottom edge.
-    full: { fit: 1.85, aimY: 0.52, offY: 0.00, offZ: 0 },
-    // Chest up. The default while she speaks.
-    bust: { fit: 0.62, aimY: 'head', offY: -0.10, offZ: 0 },
-    // Closer still, for a mood worth seeing.
-    face: { fit: 0.34, aimY: 'head', offY: -0.02, offZ: 0 },
+    full: { fit: 1.85, aimY: 0.52, offY: 0.00 },   // all of her, with headroom
+    bust: { fit: 0.62, aimY: 'head', offY: -0.10 },  // chest up; while speaking
+    face: { fit: 0.34, aimY: 'head', offY: -0.02 },  // for a mood worth seeing
 };
+
+const PITCH_LIMIT = 1.05;   // ~60 degrees; past it she is a floor plan
 
 export class Framing {
     /**
@@ -39,6 +45,17 @@ export class Framing {
         this.camera = camera;
         this.vrm = vrm;
         this.shot = 'full';
+
+        /** Fraction of the visible width to push her off-centre. */
+        this.lateral = 0;
+        /** Wheel zoom. 1 is the shot as designed; smaller is closer. */
+        this.zoom = 1;
+        /** Owner's orbit, radians. */
+        this.yaw = 0;
+        this.pitch = 0;
+        /** Owner's pan, metres, in the camera's own plane. */
+        this.panX = 0;
+        this.panY = 0;
 
         const box = new THREE.Box3().setFromObject(vrm.scene);
         this.height = box.getSize(new THREE.Vector3()).y;
@@ -58,7 +75,7 @@ export class Framing {
         this._commit();
     }
 
-    /** Where the camera and its aim point WANT to be for the current shot. */
+    /** Where the camera and its aim point WANT to be, right now. */
     target(name) {
         const s = SHOTS[name] ?? SHOTS.full;
         const aimY = (s.aimY === 'head' ? this.headY : this.height * s.aimY) + s.offY;
@@ -66,9 +83,24 @@ export class Framing {
         // view. Derived, so changing the fov or the model does not silently
         // reframe her.
         const half = THREE.MathUtils.degToRad(this.camera.fov) / 2;
-        const dist = (s.fit / 2) / Math.tan(half);
-        this._a.set(0, aimY, 0);
-        this._t.set(0, aimY, dist + s.offZ);
+        const dist = (s.fit * this.zoom / 2) / Math.tan(half);
+
+        // Sideways is a DOLLY, not a turn: rotating to look past her skews the
+        // perspective across her face, which on a close shot reads immediately
+        // as a lens artefact. Moving the camera and its aim together is a pure
+        // slide. The owner's pan rides in the same place.
+        const visW = 2 * dist * Math.tan(half) * this.camera.aspect;
+        const cy = Math.cos(this.yaw), sy = Math.sin(this.yaw);
+        const ax = visW * this.lateral + this.panX * cy;
+        const az = -this.panX * sy;
+        this._a.set(ax, aimY + this.panY, az);
+
+        // Orbit around the aim point.
+        const cp = Math.cos(this.pitch);
+        this._t.set(
+            ax + dist * sy * cp,
+            this._a.y + dist * Math.sin(this.pitch),
+            az + dist * cy * cp);
         return this;
     }
 
@@ -79,18 +111,51 @@ export class Framing {
         return this;
     }
 
+    /** Drag to orbit. Pixels in, radians out. */
+    orbit(dx, dy) {
+        this.yaw -= dx * 0.006;
+        this.pitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, this.pitch + dy * 0.005));
+        return this;
+    }
+
+    /**
+     * Drag to slide her around the frame. Scaled by the visible height so a
+     * given drag moves her the same distance ON SCREEN whatever the zoom —
+     * pixels of pan that mean different amounts at different distances feel
+     * broken even when the maths is right.
+     */
+    pan(dx, dy, viewportH) {
+        const half = THREE.MathUtils.degToRad(this.camera.fov) / 2;
+        const dist = this.pos.distanceTo(this.aim) || 1;
+        const perPixel = (2 * dist * Math.tan(half)) / Math.max(1, viewportH);
+        this.panX -= dx * perPixel;
+        this.panY += dy * perPixel;
+        return this;
+    }
+
+    /** Wheel. Clamped: past either end she is a speck or a pair of nostrils. */
+    dolly(delta) {
+        const z = this.zoom * (delta > 0 ? 1.12 : 1 / 1.12);
+        this.zoom = Math.min(1.9, Math.max(0.42, z));
+        return this;
+    }
+
+    /** Put the owner's offsets back. The automatic shot is untouched. */
+    recenter() {
+        this.yaw = this.pitch = this.panX = this.panY = 0;
+        this.zoom = 1;
+        return this;
+    }
+
     /**
      * @param {number} dt      seconds
      * @param {number} settle  seconds to arrive; bigger is lazier
      */
     update(dt, settle = 0.75) {
         this.target(this.shot);
-        // Critically damped: no overshoot, arrives in about `settle`.
         const omega = 2 / Math.max(0.05, settle);
-        const k = Math.min(1, dt * omega);
         spring(this.pos, this._t, this.vPos, omega, dt);
         spring(this.aim, this._a, this.vAim, omega, dt);
-        void k;
         this._commit();
     }
 

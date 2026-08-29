@@ -2,84 +2,161 @@
 <html lang="th">
 <head>
 <meta charset="utf-8">
-<title>Assistant</title>
+<title>Mind</title>
 <script type="importmap">
-{ "imports": { "three": "./vendor/three/three.module.js" } }
+{ "imports": {
+  "three": "./vendor/three/three.module.js",
+  "@pixiv/three-vrm": "./vendor/three-vrm/three-vrm.module.min.js"
+} }
 </script>
 <style>
-  /* Standalone window: the face and the chat are ONE object here, unlike the
-     HUD overlay where they float over a busy galaxy. Deep navy behind a green
-     mesh, matching the reference the owner gave. */
-  :root { --wire:#35e08a; --bg:#131a4a; --bg2:#0b1030; --ink:#d7e3ee; }
+  /* SHE IS THE WINDOW NOW, not a panel in it. The canvas fills everything and
+     the chat floats over her as glass, because a full-body avatar squeezed into
+     the top third of a column is a thumbnail — the body, the walk and the
+     fidgeting were the whole point of giving her one.
+
+     She sits LEFT of centre (the camera dollies sideways; see framing.js), so
+     the right half is hers to be covered by the chat without hiding her. */
+  :root { --wire:#35e08a; --ink:#d7e3ee; }
   * { box-sizing: border-box; }
-  html, body { height: 100%; margin: 0; }
+  html, body { height: 100%; margin: 0; overflow: hidden; }
   body {
-    background: radial-gradient(120% 90% at 50% 22%, var(--bg) 0%, var(--bg2) 70%, #070a1e 100%);
+    background: radial-gradient(120% 90% at 34% 26%, #131a4a 0%, #0b1030 68%, #070a1e 100%);
     color: var(--ink);
     font: 13px/1.55 "Segoe UI", system-ui, sans-serif;
-    display: flex; flex-direction: column;
-    overflow: hidden;
     -webkit-user-select: none; user-select: none;
   }
 
-  /* Whole strip is the drag handle — a frameless window with no way to move
-     it is a window nobody can put anywhere. `-webkit-app-region: drag` is a
+  #stage { position: absolute; inset: 0; }
+  #stage canvas { display: block; }
+  /* No text cursor over her, and the wheel must not scroll the page. */
+  #stage { cursor: grab; touch-action: none; }
+
+  /* Whole strip is the drag handle — a frameless window with no way to move it
+     is a window nobody can put anywhere. `-webkit-app-region: drag` is a
      browser/PWA feature and does NOT move a WebView2's host window, so the
      strip asks the host to DragMove() on mousedown instead. */
   #bar {
-    cursor: default;
-    display: flex; align-items: center; gap: 10px;
-    padding: 9px 12px; flex: none;
-    border-bottom: 1px solid rgba(53,224,138,.16);
-    background: rgba(7,10,30,.55);
+    position: absolute; left: 0; right: 0; top: 0; height: 36px; z-index: 3;
+    display: flex; align-items: center; gap: 10px; padding: 0 10px;
+    background: linear-gradient(to bottom, rgba(7,10,30,.55), rgba(7,10,30,0));
   }
-  #who { font-size: 12px; letter-spacing: .14em; color: var(--wire); text-transform: uppercase; }
-  #state { flex: 1; font-size: 11px; opacity: .7; }
+  #who { font-size: 12px; letter-spacing: .14em; color: var(--wire); text-transform: uppercase;
+         text-shadow: 0 1px 6px rgba(0,0,0,.8); }
+  #state { flex: 1; font-size: 11px; opacity: .75; text-shadow: 0 1px 6px rgba(0,0,0,.8); }
   #bar button {
     background: none; border: none; color: #93a6bd;
-    font-size: 15px; line-height: 1; cursor: pointer; padding: 2px 6px; border-radius: 6px;
+    font-size: 15px; line-height: 1; cursor: pointer; padding: 3px 7px; border-radius: 6px;
   }
-  #bar button:hover { color: var(--wire); background: rgba(53,224,138,.12); }
+  #bar button:hover { color: var(--wire); background: rgba(53,224,138,.14); }
 
-  #stage { flex: none; height: 300px; position: relative; }
-  #stage canvas { display: block; margin: 0 auto; }
+  /* THE GLASS. Two things make it read as glass rather than as a grey box: the
+     backdrop blur, and a mask that fades the panel to nothing on its left edge
+     so it dissolves into her side instead of ending on a hard line. The mask is
+     what stops it looking like a pasted-on rectangle. */
+  #chat {
+    position: absolute; right: 0; top: 0; bottom: 0; width: 62%; min-width: 300px;
+    z-index: 2; display: flex; flex-direction: column;
+    padding: 42px 12px 10px;
+    background: linear-gradient(to left,
+                rgba(9,13,38,.90) 0%, rgba(9,13,38,.86) 62%,
+                rgba(9,13,38,.55) 88%, rgba(9,13,38,0) 100%);
+    -webkit-backdrop-filter: blur(18px) saturate(1.3);
+            backdrop-filter: blur(18px) saturate(1.3);
+    /* Fade only the outer sliver. At 38% the fade reached the text, and a
+       message you have to squint at is not a soft edge, it is a broken panel. */
+    -webkit-mask-image: linear-gradient(to left, #000 0%, #000 84%, transparent 100%);
+            mask-image: linear-gradient(to left, #000 0%, #000 84%, transparent 100%);
+    opacity: 0; pointer-events: none;
+    transform: translateX(14px);
+    transition: opacity .32s ease, transform .32s cubic-bezier(.2,.7,.3,1);
+  }
+  #chat.open { opacity: 1; pointer-events: auto; transform: none; }
 
   #log {
     flex: 1; min-height: 0; overflow-y: auto;
-    padding: 10px 12px; display: flex; flex-direction: column; gap: 7px;
+    display: flex; flex-direction: column; justify-content: flex-end; gap: 7px;
+    padding-right: 4px;
     -webkit-user-select: text; user-select: text;
+    /* Fades under the title strip rather than ending on a cut edge. Kept to a
+       few pixels: any more and the newest message is the one it eats. */
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 14px);
+            mask-image: linear-gradient(to bottom, transparent 0, #000 14px);
   }
-  .msg { padding: 7px 10px; border-radius: 9px; max-width: 86%; white-space: pre-wrap; word-break: break-word; }
-  .me  { align-self: flex-end; background: rgba(53,224,138,.14); color: #d9ffe9; }
-  .her { align-self: flex-start; background: rgba(255,255,255,.055); }
+  #log::-webkit-scrollbar { width: 6px; }
+  #log::-webkit-scrollbar-thumb { background: rgba(53,224,138,.28); border-radius: 3px; }
+
+  .msg { padding: 7px 10px; border-radius: 10px; max-width: 88%; white-space: pre-wrap;
+         word-break: break-word; backdrop-filter: blur(2px); }
+  .me  { align-self: flex-end; background: rgba(53,224,138,.22); color: #dcffe9;
+         border: 1px solid rgba(53,224,138,.30); }
+  .her { align-self: flex-start; background: rgba(255,255,255,.10);
+         border: 1px solid rgba(255,255,255,.10); }
   .pending { opacity: .5; animation: pulse 1.1s ease-in-out infinite; }
   @keyframes pulse { 0%,100%{opacity:.3} 50%{opacity:.75} }
 
-  #row { flex: none; display: flex; gap: 6px; align-items: flex-end;
-         padding: 8px; border-top: 1px solid rgba(53,224,138,.16); }
+  #row { flex: none; display: flex; gap: 6px; align-items: flex-end; padding-top: 8px; }
   #input {
     flex: 1; resize: none; max-height: 96px;
-    background: rgba(255,255,255,.05); color: var(--ink);
-    border: 1px solid rgba(53,224,138,.2); border-radius: 8px;
+    background: rgba(255,255,255,.06); color: var(--ink);
+    border: 1px solid rgba(53,224,138,.22); border-radius: 9px;
     padding: 7px 9px; font: inherit;
     -webkit-user-select: text; user-select: text;
   }
-  #input:focus { outline: none; border-color: rgba(53,224,138,.55); }
+  #input:focus { outline: none; border-color: rgba(53,224,138,.6); }
   #mic, #send {
-    background: rgba(53,224,138,.10); border: 1px solid rgba(53,224,138,.24);
-    border-radius: 8px; color: var(--wire); padding: 6px 10px; cursor: pointer; font-size: 14px;
+    background: rgba(53,224,138,.12); border: 1px solid rgba(53,224,138,.26);
+    border-radius: 9px; color: var(--wire); padding: 6px 10px; cursor: pointer; font-size: 14px;
   }
-  #mic:hover, #send:hover { background: rgba(53,224,138,.2); }
+  #mic:hover, #send:hover { background: rgba(53,224,138,.22); }
   /* A mic that is recording and does not look like it is recording is a
      privacy problem, not a styling one. */
   #mic.listening {
-    background: rgba(248,113,113,.22); border-color: #f87171; color: #fecaca;
+    background: rgba(248,113,113,.24); border-color: #f87171; color: #fecaca;
     animation: rec 1s ease-in-out infinite;
   }
   @keyframes rec { 0%,100%{box-shadow:0 0 0 0 rgba(248,113,113,.45)} 50%{box-shadow:0 0 0 7px rgba(248,113,113,0)} }
+
+  /* WHAT SHE JUST SAID, floating beside her head. The glass panel is the
+     ARCHIVE — scroll it back as far as you like — and this is the moment: the
+     last thing out of her mouth, where you are already looking, so a reply does
+     not require opening a panel to read. Both exist because they answer
+     different questions: "what did she just say" and "what did we say". */
+  #bubble {
+    position: absolute; z-index: 2; max-width: 260px;
+    padding: 9px 12px; border-radius: 14px;
+    background: rgba(18,26,60,.90);
+    border: 1px solid rgba(53,224,138,.34);
+    box-shadow: 0 6px 26px rgba(0,0,0,.45);
+    -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+    font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+    opacity: 0; transform: translateY(6px) scale(.97);
+    transition: opacity .28s ease, transform .28s cubic-bezier(.2,.8,.3,1);
+    pointer-events: none;
+  }
+  #bubble.show { opacity: 1; transform: none; }
+  /* The tail is what makes it HERS rather than a floating label. */
+  #bubble::after {
+    content: ''; position: absolute; left: 22px; bottom: -7px;
+    width: 12px; height: 12px; transform: rotate(45deg);
+    background: rgba(18,26,60,.90);
+    border-right: 1px solid rgba(53,224,138,.34);
+    border-bottom: 1px solid rgba(53,224,138,.34);
+  }
+
+  /* Shown until the first click, then never again. A panel that only appears
+     on a click needs to say so once. */
+  #hint {
+    position: absolute; left: 0; bottom: 14px; width: 34%; text-align: center;
+    z-index: 1; font-size: 11px; color: rgba(215,227,238,.5);
+    transition: opacity .4s; pointer-events: none;
+  }
+  #hint.gone { opacity: 0; }
 </style>
 </head>
 <body>
+  <div id="stage"></div>
+
   <div id="bar">
     <span id="who">—</span>
     <span id="state"></span>
@@ -87,23 +164,27 @@
     <button id="close" title="ปิด">×</button>
   </div>
 
-  <div id="stage"></div>
-
-  <div id="log"></div>
-
-  <div id="row">
-    <button id="mic" title="พูด">🎤</button>
-    <textarea id="input" rows="1" placeholder="พิมพ์ หรือกดไมค์…"></textarea>
-    <button id="send" title="ส่ง">➤</button>
+  <div id="chat">
+    <div id="log"></div>
+    <div id="row">
+      <button id="mic" title="พูด">🎤</button>
+      <textarea id="input" rows="1" placeholder="พิมพ์ หรือกดไมค์…"></textarea>
+      <button id="send" title="ส่ง">➤</button>
+    </div>
   </div>
 
+  <div id="bubble"></div>
+
+  <div id="hint">คลิก = แชท · ลาก = หมุน · คลิกขวา/Shift = เลื่อน · ลูกกลิ้ง = ซูม · ดับเบิ้ล = คืนค่า</div>
+
 <script type="module">
-import { AssistantFace } from './face.js';
+import * as THREE from 'three';
+import { Avatar } from './avatar.js';
 
 const $ = (id) => document.getElementById(id);
 const post = (m) => { try { window.chrome?.webview?.postMessage(m); } catch {} };
 
-const face = new AssistantFace($('stage'), true);
+const face = new Avatar($('stage'), { base: './avatar/' });
 let busy = false, pending = null, recog = null, listening = false;
 // Thai marks the speaker's gender, so every line this page writes in her voice
 // has to follow the configured voice too — not just the ones the model writes.
@@ -111,8 +192,45 @@ let busy = false, pending = null, recog = null, listening = false;
 let self_ = 'ฉัน', particle = 'ค่ะ';
 const askParticle = () => (particle === 'ค่ะ' ? 'คะ' : particle);
 
-const fit = () => face.resize(Math.min($('stage').clientWidth, 320), $('stage').clientHeight);
-fit(); window.addEventListener('resize', fit);
+const fit = () => face.resize(innerWidth, innerHeight);
+fit(); addEventListener('resize', fit);
+// She sits left of centre so the glass has somewhere to go.
+face.loaded.then(() => { face.framing.lateral = 0.17; });
+
+/**
+ * Float what she just said beside her head.
+ *
+ * Positioned by projecting her head bone to screen every frame rather than
+ * being pinned to a corner: she is dragged, orbited, zoomed and framed by a
+ * camera that moves on its own, and a bubble that does not follow all of that
+ * ends up pointing at her ankle.
+ */
+let bubbleHideAt = 0;
+function saySoon(text) {
+  const b = $('bubble');
+  b.textContent = text;
+  b.classList.add('show');
+  bubbleHideAt = Date.now() + Math.min(14000, 3200 + text.length * 55);
+}
+const _bv = new THREE.Vector3();
+function placeBubble() {
+  const b = $('bubble');
+  if (!b.classList.contains('show')) return;
+  if (Date.now() > bubbleHideAt) { b.classList.remove('show'); return; }
+  const head = face.vrm?.humanoid?.getNormalizedBoneNode('head');
+  if (!head) return;
+  head.getWorldPosition(_bv);
+  _bv.y += 0.20;                       // just above her, not through her hair
+  _bv.project(face.camera);
+  const x = (_bv.x * 0.5 + 0.5) * innerWidth;
+  const y = (-_bv.y * 0.5 + 0.5) * innerHeight;
+  // Kept inside the window: a bubble half off the edge is worse than one that
+  // has drifted a little from the tail.
+  const w = b.offsetWidth, h = b.offsetHeight;
+  b.style.left = Math.max(8, Math.min(innerWidth - w - 8, x - 24)) + 'px';
+  b.style.top  = Math.max(40, Math.min(innerHeight - h - 8, y - h - 12)) + 'px';
+}
+requestAnimationFrame(function tick() { placeBubble(); requestAnimationFrame(tick); });
 
 function bubble(cls, text, isPending) {
   const d = document.createElement('div');
@@ -127,11 +245,87 @@ function send(text) {
   text = (text || '').trim();
   if (!text || busy) return;
   busy = true;
+  openChat(true);
   bubble('me', text);
   $('input').value = '';
   pending = bubble('her', '…', true);
   face.setMood('thinking');       // the only progress indicator this window has
   post({ type: 'mind.ask', text });
+}
+
+// ── the glass ───────────────────────────────────────────────────────────
+let chatOpen = false;
+function openChat(open) {
+  chatOpen = open;
+  $('chat').classList.toggle('open', open);
+  $('hint').classList.add('gone');
+  if (open) setTimeout(() => $('input').focus(), 120);
+}
+
+// Drag orbits, right-drag or shift-drag pans, wheel zooms, double-click puts
+// it all back. A plain CLICK — no movement — opens the chat: without the
+// distance test, letting go after turning her head opens the panel every single
+// time, which makes the camera unusable.
+{
+  const el = $('stage');
+  let down = null, dragging = false;
+  el.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  el.addEventListener('pointerdown', (e) => {
+    down = { x: e.clientX, y: e.clientY, t: Date.now(),
+             pan: e.button === 2 || e.shiftKey, id: e.pointerId };
+    dragging = false;
+    el.setPointerCapture?.(e.pointerId);
+    el.style.cursor = 'grabbing';
+  });
+
+  el.addEventListener('pointermove', (e) => {
+    if (!down || !face.framing) return;
+    const dx = e.clientX - down.x, dy = e.clientY - down.y;
+    if (!dragging && Math.hypot(dx, dy) < 4) return;   // still a click, so far
+    dragging = true;
+    const sx = e.clientX - (down.lx ?? down.x), sy = e.clientY - (down.ly ?? down.y);
+    if (down.pan) face.framing.pan(sx, sy, innerHeight);
+    else face.framing.orbit(sx, sy);
+    down.lx = e.clientX; down.ly = e.clientY;
+  });
+
+  const end = (e) => {
+    if (!down) return;
+    el.releasePointerCapture?.(down.id);
+    el.style.cursor = 'grab';
+    if (!dragging && Date.now() - down.t < 400) openChat(!chatOpen);
+    down = null; dragging = false;
+    void e;
+  };
+  el.addEventListener('pointerup', end);
+  el.addEventListener('pointercancel', end);
+  el.addEventListener('dblclick', () => face.framing?.recenter());
+
+  el.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    face.framing?.dolly(e.deltaY);
+  }, { passive: false });
+}
+
+// ── the greeting ────────────────────────────────────────────────────────
+/**
+ * What she says when she appears. Reading the clock costs nothing and is the
+ * cheapest possible signal that she is running NOW rather than replaying
+ * something canned — the one line where a generic "hello" is most obviously a
+ * recording.
+ */
+function greeting(name) {
+  const h = new Date().getHours();
+  const p = particle;
+  // After นะ the particle is คะ, never ค่ะ — ค่ะ closes a plain statement, and
+  // นะค่ะ is the single most common way to get Thai politeness visibly wrong.
+  if (h < 5)  return `ดึกมากแล้วนะ${askParticle()} ${self_}ยังอยู่ตรงนี้${p}`;
+  if (h < 11) return `อรุณสวัสดิ์${p} วันนี้ให้${self_}ช่วยอะไรดี${askParticle()}`;
+  if (h < 13) return `เที่ยงแล้ว${p} กินข้าวหรือยัง${askParticle()}`;
+  if (h < 17) return `สวัสดีตอนบ่าย${p} ${self_}พร้อมแล้ว${p}`;
+  if (h < 20) return `เย็นแล้วนะ${askParticle()} วันนี้เป็นยังไงบ้าง${askParticle()}`;
+  return `ค่ำแล้ว${p} ${self_}อยู่เป็นเพื่อน${p}`;
 }
 
 // ── mic ─────────────────────────────────────────────────────────────────
@@ -171,16 +365,22 @@ function stopMic() {
 
 // ── host → page ─────────────────────────────────────────────────────────
 window.brainxAssistant = {
-  configure({ name, female, self, particle: p } = {}) {
+  configure({ name, self, particle: p } = {}) {
     if (typeof name === 'string') $('who').textContent = name;
-    if (typeof female === 'boolean') face.setFemale(female);
     if (typeof self === 'string' && self) self_ = self;
     if (typeof p === 'string' && p) particle = p;
-    // Greet once, in her own voice. It also proves the wiring end to end: if
-    // the particle is wrong here it is wrong everywhere, before you have to
-    // wait on a model to find out.
-    if (!$('log').children.length && typeof name === 'string')
-      bubble('her', `${self_}ชื่อ${name}${particle} ถามได้เลย${particle}`);
+    // Greet once, in her own voice and to the hour. It also proves the wiring
+    // end to end: if the particle is wrong here it is wrong everywhere, before
+    // you have to wait on a model to find out.
+    if (!$('log').children.length && typeof name === 'string') {
+      const g = greeting(name);
+      bubble('her', g);
+      saySoon(g);
+      face.setMood('pleased');
+      setTimeout(() => face.setMood('neutral'), 4000);
+      // No panel for the greeting: the bubble says it where you are already
+      // looking, and opening the archive to read one line is backwards.
+    }
     return true;
   },
   async say(url, { mood = null } = {}) {
@@ -191,6 +391,8 @@ window.brainxAssistant = {
   },
   mood(m) { face.setMood(m); return true; },
   stop() { face.stop(); return true; },
+  sit() { return face.sit(); },
+  stand() { return face.stand(); },
   get face() { return face; },
 };
 
@@ -199,6 +401,7 @@ window.brainxChat = {
     busy = false;
     if (pending) { pending.textContent = text; pending.classList.remove('pending'); pending = null; }
     else bubble('her', text);
+    saySoon(text);
     if (!ok) face.setMood('sorry');
     $('log').scrollTop = $('log').scrollHeight;
     return true;
@@ -211,6 +414,7 @@ $('send').onclick = () => send($('input').value);
 $('input').addEventListener('keydown', (e) => {
   // Enter sends, Shift+Enter is a newline — the convention every chat box has.
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(e.target.value); }
+  if (e.key === 'Escape') openChat(false);
 });
 $('mic').onclick = () => listening ? stopMic() : startMic();
 // Drag the frameless window by its strip. Buttons are excluded, or clicking
