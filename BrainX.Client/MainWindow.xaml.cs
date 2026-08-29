@@ -2491,6 +2491,10 @@ public partial class MainWindow : Window
         Services.StartupProgress.Report("Wiring the galaxy", 0.92, tag: "universe-wire");
         // Everything the HUD reads is now real — release its boot curtain.
         MarkHudBrainReady();
+        // ...and only now, with the dashboard actually usable, is it fair to
+        // start her: she parses a 20 MB avatar and twenty clips, and doing that
+        // alongside the indexing makes both feel broken.
+        MaybeAutoStartMind();
         // An update that landed while Claude was open leaves Claude talking to
         // the previous MCP. Check right after startup, when it matters most:
         // this run is very often the first one after Velopack applied.

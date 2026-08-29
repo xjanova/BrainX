@@ -1,4 +1,4 @@
-// AssistantService — everything the assistant needs that is not a window.
+﻿// AssistantService — everything the assistant needs that is not a window.
 //
 // Lives in Core so the standalone app owns it and the dashboard does not have
 // to. Nothing here touches WPF.
@@ -20,14 +20,28 @@ namespace BrainX.Core.Services;
 
 public sealed class AssistantConfig
 {
-    public string Name { get; set; } = "มายด์";
+    /// <summary>
+    /// Her name is not a setting. She is มาย, the way a person is their name —
+    /// a rename box turns a character into a configurable object, and every
+    /// line she says about herself has to agree with it anyway. Get-only, so an
+    /// older config file carrying a different name is simply ignored.
+    /// </summary>
+    public string Name => "มาย";
     public string Voice { get; set; } = "th-TH-PremwadeeNeural";
     public string Rate { get; set; } = "-8%";
     public bool Topmost { get; set; }
     public double X { get; set; } = double.NaN;
     public double Y { get; set; } = double.NaN;
-    public double W { get; set; } = 400;
-    public double H { get; set; } = 680;
+    // She is a full-body avatar with the chat laid over her now, not a face
+    // above a column of text. At 400x680 the body was a thumbnail and the glass
+    // had nowhere to go without covering her.
+    public double W { get; set; } = 880;
+    public double H { get; set; } = 780;
+
+    /// <summary>Open her automatically once the dashboard has finished loading.
+    /// Off by default: a window that appears uninvited on every launch is a
+    /// thing people resent before they discover the setting that stops it.</summary>
+    public bool AutoStart { get; set; }
 
     /// <summary>Override the self-pronoun. Null follows the voice. Set it to
     /// หนู or ดิฉัน if ฉัน is the wrong register for this household.</summary>
@@ -36,14 +50,14 @@ public sealed class AssistantConfig
     /// <summary>Override the sentence-ending particle. Null follows the voice.</summary>
     public string? Particle { get; set; }
 
-    /// <summary>Female voices get the female wireframe. Kept in step with
-    /// Program.Speak.IsFemaleVoice — a face whose gender disagrees with the
-    /// voice reads as a bug, not a style.</summary>
+    /// <summary>
+    /// She is a girl, and that is not adjustable either. It used to be derived
+    /// from the voice so the wireframe could follow it; the avatar is now a
+    /// specific young woman with her own model, and a male voice coming out of
+    /// her would read as a bug rather than as a setting.
+    /// </summary>
     [JsonIgnore]
-    public bool Female =>
-        !(Voice.Contains("Niwat", StringComparison.OrdinalIgnoreCase)
-       || Voice.Contains("Guy", StringComparison.OrdinalIgnoreCase)
-       || Voice.Contains("Male", StringComparison.OrdinalIgnoreCase));
+    public bool Female => true;
 
     // Thai marks the speaker's gender in ordinary speech, so a male voice
     // saying "ค่ะ" is not a small stylistic slip — it is the wrong person

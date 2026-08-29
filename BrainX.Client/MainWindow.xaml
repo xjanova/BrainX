@@ -1,4 +1,4 @@
-<Window x:Class="BrainX.Client.MainWindow"
+﻿<Window x:Class="BrainX.Client.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
@@ -6235,13 +6235,16 @@
                                                     </TextBlock>
                                                 </StackPanel>
 
-                                                <TextBlock Text="Name — what she answers to" FontSize="11"
+                                                <TextBlock Text="Name" FontSize="11"
                                                            Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
                                                 <TextBox x:Name="AssistantNameBox" Style="{StaticResource NeonTextBox}"
-                                                         FontSize="12" Margin="0,0,0,12" MaxLength="24"
-                                                         LostFocus="AssistantName_Changed"/>
+                                                         FontSize="12" Margin="0,0,0,2" IsReadOnly="True"
+                                                         Focusable="False" Opacity="0.75"/>
+                                                <TextBlock Text="She is มาย. Not a setting — see AssistantConfig.Name."
+                                                           FontSize="10" Opacity="0.6"
+                                                           Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,12"/>
 
-                                                <TextBlock Text="Voice — also sets the face, the pronoun and the particle" FontSize="11"
+                                                <TextBlock Text="Voice — also sets the pronoun and the particle" FontSize="11"
                                                            Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"/>
                                                 <ComboBox x:Name="AssistantVoiceCombo" Margin="0,0,0,12"
                                                           Background="{StaticResource SurfaceBrush}"
@@ -6269,6 +6272,11 @@
                                                               Foreground="{StaticResource TextPrimaryBrush}"
                                                               Checked="AssistantTopmost_Changed"
                                                               Unchecked="AssistantTopmost_Changed"/>
+                                                    <CheckBox x:Name="AssistantAutoStartCheck" Content="Open her on startup"
+                                                              Margin="14,0,0,0" VerticalAlignment="Center"
+                                                              Foreground="{StaticResource TextPrimaryBrush}"
+                                                              Checked="AssistantAutoStart_Changed"
+                                                              Unchecked="AssistantAutoStart_Changed"/>
                                                 </StackPanel>
                                             </StackPanel>
                                         </Border>

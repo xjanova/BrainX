@@ -1,4 +1,4 @@
-// Assistant settings — and nothing else.
+﻿// Assistant settings — and nothing else.
 //
 // The assistant herself moved out. She is BrainX.Mind now: her own exe, her
 // own window, her own WebView2 profile. What used to live here — a chat panel
@@ -46,12 +46,17 @@ public partial class MainWindow
     /// Thai the voice also picks the pronoun (ฉัน / ผม) and the particle
     /// (ค่ะ / ครับ) she speaks with — this is not only a choice of timbre.
     /// </summary>
+    /// <summary>
+    /// Female voices only. The male ones are gone rather than hidden: she has a
+    /// face and a body now, both of a young woman, and a voice that disagrees
+    /// with them is not a preference anyone actually wants — it is the avatar
+    /// looking broken.
+    /// </summary>
     private static readonly (string Id, string Label)[] AssistantVoices =
     {
         ("th-TH-PremwadeeNeural", "เปรมวดี — หญิง (ไทย)"),
-        ("th-TH-NiwatNeural",     "นิวัฒน์ — ชาย (ไทย)"),
         ("en-US-AriaNeural",      "Aria — female (English)"),
-        ("en-US-GuyNeural",       "Guy — male (English)"),
+        ("en-US-JennyNeural",     "Jenny — female (English)"),
     };
 
     private void PopulateAssistantSettings()
@@ -61,8 +66,10 @@ public partial class MainWindow
             _assistantSettingsLoading = true;
             var cfg = AssistantSvc.LoadConfig();
 
+            // Shown, never edited — see AssistantConfig.Name.
             if (AssistantNameBox != null) AssistantNameBox.Text = cfg.Name;
             if (AssistantTopmostCheck != null) AssistantTopmostCheck.IsChecked = cfg.Topmost;
+            if (AssistantAutoStartCheck != null) AssistantAutoStartCheck.IsChecked = cfg.AutoStart;
 
             if (AssistantVoiceCombo != null)
             {
@@ -105,15 +112,6 @@ public partial class MainWindow
         catch (Exception ex) { Debug.WriteLine($"[assistant] settings save failed: {ex.Message}"); }
     }
 
-    private void AssistantName_Changed(object sender, RoutedEventArgs e)
-    {
-        var name = AssistantNameBox?.Text?.Trim();
-        // An assistant with no name cannot introduce herself, so an empty box
-        // reverts instead of being stored.
-        if (string.IsNullOrWhiteSpace(name)) { PopulateAssistantSettings(); return; }
-        MutateAssistantConfig(c => c.Name = name!);
-    }
-
     private void AssistantVoice_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (AssistantVoiceCombo?.SelectedItem is not ComboBoxItem { Tag: string id }) return;
@@ -154,21 +152,21 @@ public partial class MainWindow
         finally { if (AssistantPreviewBtn != null) AssistantPreviewBtn.IsEnabled = true; }
     }
 
+    private void AssistantAutoStart_Changed(object sender, RoutedEventArgs e)
+        => MutateAssistantConfig(c => c.AutoStart = AssistantAutoStartCheck?.IsChecked == true);
+
     /// <summary>
     /// Launch her. A separate process on purpose — closing the dashboard must
     /// not close her, which is the whole reason she stopped being a panel in it.
     /// </summary>
-    private void AssistantWindowToggle_Click(object sender, RoutedEventArgs e)
+    /// <returns>A line to show the owner, or null if she was already up.</returns>
+    private string? LaunchMind()
     {
         try
         {
             // Already up? Bring nothing up. A second copy would fight the first
             // for the same config file and the last one closed would win.
-            if (Process.GetProcessesByName("BrainX.Mind").Length > 0)
-            {
-                if (AssistantPreviewStatus != null) AssistantPreviewStatus.Text = "เปิดอยู่แล้ว";
-                return;
-            }
+            if (Process.GetProcessesByName("BrainX.Mind").Length > 0) return null;
 
             var baseDir = AppDomain.CurrentDomain.BaseDirectory;
             var exe = new[]
@@ -179,20 +177,40 @@ public partial class MainWindow
                              "BrainX", "current", "BrainX.Mind.exe"),
             }.FirstOrDefault(File.Exists);
 
-            if (exe == null)
-            {
-                if (AssistantPreviewStatus != null) AssistantPreviewStatus.Text = "ไม่พบ BrainX.Mind.exe";
-                return;
-            }
+            if (exe == null) return "ไม่พบ BrainX.Mind.exe";
 
             // Hand over the vault explicitly: she can find it on her own, but
             // only the dashboard knows which one is open right now.
             Process.Start(new ProcessStartInfo(exe, $"\"{_vaultPath}\"") { UseShellExecute = true });
-            if (AssistantPreviewStatus != null) AssistantPreviewStatus.Text = "เปิดแล้ว";
+            return "เปิดแล้ว";
         }
-        catch (Exception ex)
+        catch (Exception ex) { return $"เปิดไม่ได้: {ex.Message}"; }
+    }
+
+    private void AssistantWindowToggle_Click(object sender, RoutedEventArgs e)
+    {
+        var msg = LaunchMind();
+        if (AssistantPreviewStatus != null) AssistantPreviewStatus.Text = msg ?? "เปิดอยู่แล้ว";
+    }
+
+    /// <summary>
+    /// Open her at startup if the owner asked for it.
+    ///
+    /// Called at the point the boot curtain lifts rather than at the top of
+    /// Window_Loaded: she takes a couple of seconds to parse a 20 MB avatar and
+    /// twenty animation clips, and starting that while the dashboard is still
+    /// indexing means two heavy things competing for the same first seconds.
+    /// Failures here are silent by design — an owner who did not press anything
+    /// should not be handed an error box.
+    /// </summary>
+    private void MaybeAutoStartMind()
+    {
+        try
         {
-            if (AssistantPreviewStatus != null) AssistantPreviewStatus.Text = $"เปิดไม่ได้: {ex.Message}";
+            if (!AssistantSvc.LoadConfig().AutoStart) return;
+            var msg = LaunchMind();
+            if (msg != null) Debug.WriteLine($"[assistant] autostart: {msg}");
         }
+        catch (Exception ex) { Debug.WriteLine($"[assistant] autostart failed: {ex.Message}"); }
     }
 }

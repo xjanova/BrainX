@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -23,16 +23,35 @@
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2792.45" />
   </ItemGroup>
 
-  <!-- The page she renders. Copied beside the exe so this app is standalone —
+  <!-- Everything she renders. Copied beside the exe so this app is standalone -
        it must not reach into the dashboard's install directory, which Velopack
-       replaces wholesale on update. -->
+       replaces wholesale on update.
+
+       THREE GROUPS, NOT ONE GLOB. %(RecursiveDir) only holds the part that `**`
+       itself matched, so a single Include of universe\**\*.* flattens vendor\
+       and avatar\ into the root and the page 404s every asset it asks for. Each
+       subtree therefore carries its own Link prefix. -->
   <ItemGroup>
-    <Content Include="..\BrainX.Client\wwwroot\universe\assistant-window.html"
-             Link="wwwroot\universe\assistant-window.html" CopyToOutputDirectory="PreserveNewest" />
-    <Content Include="..\BrainX.Client\wwwroot\universe\face.js"
-             Link="wwwroot\universe\face.js" CopyToOutputDirectory="PreserveNewest" />
-    <Content Include="..\BrainX.Client\wwwroot\universe\vendor\three\three.module.js"
-             Link="wwwroot\universe\vendor\three\three.module.js" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\BrainX.Client\wwwroot\universe\assistant-window.html;
+                      ..\BrainX.Client\wwwroot\universe\avatar.js;
+                      ..\BrainX.Client\wwwroot\universe\motion.js;
+                      ..\BrainX.Client\wwwroot\universe\idle.js;
+                      ..\BrainX.Client\wwwroot\universe\lipsync.js;
+                      ..\BrainX.Client\wwwroot\universe\framing.js"
+             Link="wwwroot\universe\%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest" />
+    <!-- Only her three. vendor\ also holds the dashboard's d3, which she has
+         no use for and should not be shipping. -->
+    <Content Include="..\BrainX.Client\wwwroot\universe\vendor\three\**\*.js;
+                      ..\BrainX.Client\wwwroot\universe\vendor\three-vrm\**\*.*;
+                      ..\BrainX.Client\wwwroot\universe\vendor\vrm-mixamo\**\*.js"
+             Link="wwwroot\universe\vendor\%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest" />
+    <!-- The model and its clips. Not in git (tens of MB); present on a dev
+         machine, and produced by the packaging step for a release. -->
+    <Content Include="..\BrainX.Client\wwwroot\universe\avatar\**\*.*"
+             Link="wwwroot\universe\avatar\%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
