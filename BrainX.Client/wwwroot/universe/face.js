@@ -106,10 +106,10 @@ function cr(tab, t) {
 
 // Half-width of each slice. Below t ~ 0.14 this is the NECK, not the jaw: the
 // mandible is added as a feature on the front of it (see `sculpt`).
-const RX = [[-0.34, 0.206], [-0.18, 0.187], [-0.02, 0.180], [0.14, 0.203],
-            [0.28, 0.256], [0.40, 0.294], [0.50, 0.320], [0.62, 0.336],
-            [0.74, 0.326], [0.84, 0.292], [0.92, 0.242], [0.97, 0.150],
-            [1.00, 0.000]];
+const RX = [[-0.34, 0.206], [-0.18, 0.187], [-0.02, 0.181], [0.06, 0.198],
+            [0.16, 0.232], [0.28, 0.274], [0.40, 0.304], [0.50, 0.324],
+            [0.62, 0.334], [0.74, 0.325], [0.84, 0.292], [0.92, 0.242],
+            [0.97, 0.150], [1.00, 0.000]];
 // Depth in front of the ear axis. The dip at the eye line is the reason the
 // brow reads as a brow: the socket sits behind both the brow and the cheek.
 const ZF = [[-0.34, 0.120], [-0.18, 0.132], [-0.02, 0.152], [0.14, 0.208],
@@ -173,14 +173,14 @@ function sculpt(a, t, P, M) {
     // falloff to "define" it, and a hard edge next to a big chin bump is not an
     // edge, it is a ledge — the cheek folded over it and the whole lower face
     // came out creased.
-    d += P.chin * b1(el(A / 0.46, (t - 0.072) / 0.180));
+    d += P.chin * b1(el(A / P.chinW, (t - 0.082) / 0.170));
     // `tj` is the height of the jaw's lower border at this angle — it climbs as
     // it runs back from the chin to the corner below the ear.
     const kj = ss(A / 1.45);
     const tj = 0.055 + 0.210 * Math.pow(kj, 1.25);
     const dtj = t - tj;
     d += (0.088 - 0.016 * kj) * P.jaw *
-         b1(Math.abs(dtj) / (dtj > 0 ? 0.200 : 0.140)) * ss((2.05 - A) / 0.55);
+         b1(Math.abs(dtj) / (dtj > 0 ? 0.205 : P.jawSoft)) * ss((2.05 - A) / 0.55);
     // Under the jaw the surface tucks back in toward the throat.
     d -= 0.024 * b1(el((t - (tj - 0.125)) / 0.115, (A - 0.45) / 1.05));
     // Gonial angle — the corner of the jaw. Square on a man, soft on a woman.
@@ -221,7 +221,7 @@ function sculpt(a, t, P, M) {
     // ---- nose ----------------------------------------------------------
     // Nasion: a shallow dip at the root, between the brows. Narrow and deep it
     // cuts a crease ACROSS the bridge instead of starting it.
-    d -= 0.036 * b1(el(A / 0.200, (t - 0.572) / 0.058));
+    d -= P.nasion * b1(el(A / 0.215, (t - 0.570) / 0.062));
     // Dorsum: a ridge that widens and rises as it runs down to the tip. The
     // width is the whole game — the first pass made it 0.08 rad wide, and a
     // nose that narrow is a fin, clearly wrong the moment the head turns.
@@ -230,7 +230,7 @@ function sculpt(a, t, P, M) {
          ss((t - 0.312) / 0.045);
     // Tip, wings, and the undercut that turns the wings into nostrils. That
     // undercut is the whole reason this is a closed surface and not a mask.
-    d += 0.034 * b1(el(A / 0.150, (t - 0.368) / 0.050));
+    d += 0.030 * b1(el(A / 0.175, (t - 0.366) / 0.054));
     d += 0.024 * b1(el((A - 0.150) / 0.095, (t - 0.348) / 0.040));
     d -= 0.028 * b1(el((A - 0.105) / 0.080, (t - 0.318) / 0.021));
     d -= 0.012 * b1(el(A / 0.100, (t - 0.316) / 0.019));
@@ -318,11 +318,10 @@ function glowTexture() {
     c.width = c.height = 128;
     const g = c.getContext('2d');
     const grd = g.createRadialGradient(64, 64, 0, 64, 64, 64);
-    grd.addColorStop(0.00, 'rgba(225,255,238,1)');
-    grd.addColorStop(0.30, 'rgba(90,255,165,0.92)');
-    grd.addColorStop(0.52, 'rgba(30,212,124,0.46)');
-    grd.addColorStop(0.78, 'rgba(10,150,80,0.10)');
-    grd.addColorStop(1.00, 'rgba(0,90,55,0)');
+    grd.addColorStop(0.00, 'rgba(190,255,210,1)');
+    grd.addColorStop(0.25, 'rgba(60,240,140,0.95)');
+    grd.addColorStop(0.55, 'rgba(20,200,110,0.45)');
+    grd.addColorStop(1.00, 'rgba(0,120,70,0)');
     g.fillStyle = grd;
     g.fillRect(0, 0, 128, 128);
     return new THREE.CanvasTexture(c);
@@ -431,12 +430,14 @@ function buildHead(female) {
     // second set of formulae — a woman's skull is the same skull with a lighter
     // brow, a rounder jaw, fuller lips and more cheekbone.
     const P = female
-        ? { wide: 0.985, brow: 0.032, chin: 0.048, jaw: 0.92, gonial: 0.014,
-            nose: 0.062, lip: 1.12, mouth: 0.96, throat: 0.004,
-            cheekBone: 0.024, cheekHollow: 0.013 }
-        : { wide: 1.055, brow: 0.050, chin: 0.066, jaw: 1.08, gonial: 0.030,
-            nose: 0.074, lip: 0.94, mouth: 1.04, throat: 0.011,
-            cheekBone: 0.019, cheekHollow: 0.008 };
+        ? { wide: 1.000, brow: 0.018, chin: 0.030, chinW: 0.66, jaw: 0.90,
+            jawSoft: 0.185, gonial: 0.005, nose: 0.038, lip: 1.24,
+            mouth: 0.90, throat: 0.003, nasion: 0.021,
+            cheekBone: 0.020, cheekHollow: 0.004 }
+        : { wide: 1.055, brow: 0.046, chin: 0.052, chinW: 0.56, jaw: 1.06,
+            jawSoft: 0.145, gonial: 0.024, nose: 0.066, lip: 1.00,
+            mouth: 1.02, throat: 0.011, nasion: 0.034,
+            cheekBone: 0.018, cheekHollow: 0.007 };
 
     const rows = new Array(ROWS);
     for (let r = 0; r < ROWS; r++) rows[r] = rowOf(rowT(r));
@@ -527,11 +528,11 @@ function buildHead(female) {
     const eyes = [];
     for (let i = 0; i < 2; i++) {
         const iris = new THREE.Sprite(new THREE.SpriteMaterial({
-            map: tex, color: 0x62ffae, transparent: true,
+            map: tex, color: 0x4bff9b, transparent: true,
             blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false,
             opacity: 0.95,
         }));
-        iris.scale.set(0.108, 0.088, 1);
+        iris.scale.set(0.260, 0.170, 1);
         g.add(iris);
         eyes.push(iris);
     }
@@ -722,7 +723,11 @@ export class AssistantFace {
         const w = host.clientWidth || 260, h = host.clientHeight || 320;
         this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
         this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
-        this.renderer.setSize(w, h, false);
+        // updateStyle ON. With it off the canvas gets no CSS size and lays out
+        // at its BUFFER size, which is w * devicePixelRatio — so on a HiDPI
+        // screen she rendered at twice her frame and burst out of the panel,
+        // and how big she looked depended on the monitor.
+        this.renderer.setSize(w, h);
         host.appendChild(this.renderer.domElement);
         // After the renderer, so insertBefore(firstChild) puts it underneath.
         this.wave = new WaveField(host);
@@ -882,17 +887,20 @@ export class AssistantFace {
                 // what a blink actually looks like.
                 const h = sn > 0 ? 0.034 * lidOpen
                                 : 0.020 * (1 + Math.max(0, -lid) * 0.6);
+                // The epicanthus: the inner corner is hooded, so the lower
+                // margin lifts there rather than running out to a point.
+                const hood = 0.014 * Math.max(0, -cs) * Math.max(0, -sn);
                 put(sgn * (A_EYE + 0.215 * cs),
-                    T_EYE + h * sn + 0.013 * cs - lid * 0.010);
+                    T_EYE + h * sn + hood + 0.021 * cs - lid * 0.010);
             }
 
         // The crease above the lid, which drops as the eye closes.
         for (const sgn of [-1, 1])
             for (let k = 0; k < 11; k++) {
-                const f = k / 10, cs = -0.75 + 1.65 * f;
+                const f = k / 10, cs = -0.42 + 1.32 * f;
                 put(sgn * (A_EYE + 0.215 * cs),
-                    T_EYE + 0.044 + 0.022 * Math.sin(Math.PI * f) + 0.013 * cs
-                          - lid * 0.022);
+                    T_EYE + 0.034 + 0.016 * Math.sin(Math.PI * f) + 0.021 * cs
+                          - lid * 0.020);
             }
 
         // The mouth: the top of the upper lip, the bottom of the lower, and the
@@ -933,7 +941,7 @@ export class AssistantFace {
             // iris has to fade on its own or a blink leaves two dots behind.
             H.eyes[i].material.opacity = 0.95 * Math.min(1, Math.max(0, 1 - lid * 1.3));
             const sc = 0.86 + M.eyeOpen * 0.16;
-            H.eyes[i].scale.set(0.108 * sc, 0.088 * sc, 1);
+            H.eyes[i].scale.set(0.260 * sc, 0.170 * sc, 1);
         }
     }
 
@@ -1081,7 +1089,7 @@ export class AssistantFace {
     resize(w, h) {
         this.camera.aspect = w / h;
         this.camera.updateProjectionMatrix();
-        this.renderer.setSize(w, h, false);
+        this.renderer.setSize(w, h);
         // The face is clamped narrower than the panel; the waves are not, so
         // they measure the host rather than taking w/h.
         this.wave.fit();
