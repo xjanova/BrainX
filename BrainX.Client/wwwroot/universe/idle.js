@@ -1,4 +1,5 @@
-// idle.js — how she stands when nothing else is driving her.
+// idle.js — the procedural body layer: how she holds herself when nothing else
+// is driving her, and the small things she does with her head while speaking.
 //
 // WHY THIS EXISTS AT ALL. VRM 1.0 requires the model to ship in a T-pose: that
 // is the rest pose every normalized bone starts from, and with no clip playing
@@ -9,9 +10,15 @@
 // WHY IT IS PROCEDURAL AND NOT A CLIP. Standing still is the one thing a canned
 // loop is worst at. A clip repeats exactly, and stillness is where a repeat is
 // most visible — the same breath at the same interval forever is how you notice
-// the loop. Sine waves at frequencies that do not divide into each other never
-// line up, so she never quite repeats. It also costs nothing to ship, works
-// before a single .fbx exists, and layers under anything that does arrive.
+// the loop. Oscillators at frequencies that do not divide into each other never
+// line up, so she never quite repeats, and the fidget on top is irregular by
+// construction. It also costs nothing to ship and worked before a single .fbx
+// existed.
+//
+// WHY THE SPEECH ACCENTS LIVE HERE TOO. A nod on a stressed syllable and a
+// breath both end up as a rotation on the neck, and two layers writing the same
+// bone from different files is how you get one silently cancelling the other.
+// One owner for procedural bone offsets, one blend, one place to look.
 //
 // WHY IT BLENDS INSTEAD OF SETTING. When a real clip IS playing, the mixer has
 // already written these bones. Overwriting would throw the clip away; ignoring
@@ -59,6 +66,8 @@ export class Idle {
     constructor(vrm) {
         this.vrm = vrm;
         this.bones = [];
+        /** Read by the caller and pushed to the `blink` expression. */
+        this.blink = 0;
 
         const add = (name, euler) => {
             const node = vrm.humanoid?.getNormalizedBoneNode(name);
@@ -86,25 +95,66 @@ export class Idle {
             }
         }
 
+        // Fidget. The sine layer alone is honest breathing but it is also
+        // perfectly regular, and a body that only ever does the same smooth
+        // thing reads as a machine idling. Real stillness is punctuated: a
+        // shift of weight, a glance away, a small settle — irregular, and never
+        // quite the same size twice.
+        this._fidgetAt = 0;
+        this._fid = { x: 0, y: 0, z: 0, tx: 0, ty: 0, tz: 0 };
+
+        // Speech accents.
+        this._env = 0;          // smoothed loudness
+        this._envSlow = 0;      // slower average, to detect a RISE against
+        this._nod = 0;          // impulse; decays into a damped oscillation
+        this._nodT = 0;
+        this._nodLock = 0;      // no second nod on the same syllable
+        this._quietFor = 0;     // seconds of silence, for phrase boundaries
+        this._wasLoud = false;
+        this._blinkAt = 0;
+        this._blinkStart = -1e9;
+
         this.hips = vrm.humanoid?.getNormalizedBoneNode('hips') ?? null;
         this.hipsRest = this.hips ? this.hips.position.clone() : null;
-        this._q = new THREE.Quaternion();
         this._e = new THREE.Euler();
     }
 
     /**
      * @param {number} t      seconds, monotonic
      * @param {number} weight 1 = she is standing there; lower while a clip drives her
+     * @param {number} speech current loudness 0..1, or 0 when she is not talking
+     * @param {number} dt     seconds since the last call
      */
-    apply(t, weight = 1) {
+    apply(t, weight = 1, speech = 0, dt = 1 / 60) {
+        this._accents(t, speech, dt);
         if (weight <= 0.001 || !this.bones.length) return;
 
-        // Three oscillators, deliberately not harmonically related, so the pose
-        // never returns to exactly where it was. Breathing is the fastest and
-        // the only one big enough to notice on its own.
+        // Oscillators, deliberately not harmonically related, so the pose never
+        // returns to exactly where it was. Breathing is the fastest and the only
+        // one big enough to notice on its own.
         const breath = Math.sin(t * 0.95);
         const sway = Math.sin(t * 0.31);
         const drift = Math.sin(t * 0.23), drift2 = Math.sin(t * 0.17);
+
+        // A new fidget every few seconds, eased into rather than snapped to.
+        // The interval is deliberately ragged: anything regular enough to
+        // anticipate stops registering as alive after the third repetition.
+        if (t > this._fidgetAt) {
+            this._fidgetAt = t + 2.2 + Math.random() * 5.5;
+            const f = this._fid;
+            f.tx = (Math.random() - 0.5) * 0.055;   // head pitch
+            f.ty = (Math.random() - 0.5) * 0.130;   // head turn
+            f.tz = (Math.random() - 0.5) * 0.045;   // weight lean
+        }
+        const F = this._fid;
+        F.x += (F.tx - F.x) * 0.020;
+        F.y += (F.ty - F.y) * 0.020;
+        F.z += (F.tz - F.z) * 0.020;
+
+        // A nod is a quick dip and a slower recovery, not a sine — the head
+        // drops on the stress and comes back up, and a symmetric wobble reads
+        // as a bobblehead.
+        const nod = this._nod * Math.sin(this._nodT * 11.0) * Math.exp(-this._nodT * 4.5);
 
         for (const b of this.bones) {
             let x = 0, y = 0, z = 0;
@@ -112,10 +162,18 @@ export class Idle {
                 // The chest opens on the inhale and the shoulders ride with it.
                 case 'chest':      x = -breath * 0.026; break;
                 case 'upperChest': x = -breath * 0.018; break;
-                case 'spine':      x = breath * 0.010 + sway * 0.006; z = -sway * 0.020; break;
-                // The head does not sit still on a still body; it drifts.
-                case 'neck':       x = breath * 0.008; y = drift * 0.045; z = sway * 0.012; break;
-                case 'head':       y = drift2 * 0.035; x = -drift * 0.020; z = -sway * 0.010; break;
+                case 'spine':      x = breath * 0.010 + sway * 0.006; z = -sway * 0.020 - F.z * 0.5; break;
+                // The head does not sit still on a still body; it drifts. While
+                // she talks the nod is added on top of that, split between neck
+                // and head so it hinges in two places like a real one.
+                case 'neck':
+                    x = breath * 0.008 + nod * 0.45;
+                    y = drift * 0.045 + F.y * 0.35;
+                    z = sway * 0.012; break;
+                case 'head':
+                    x = -drift * 0.020 + F.x + nod * 0.55;
+                    y = drift2 * 0.035 + F.y * 0.65;
+                    z = -sway * 0.010 + F.z * 0.4; break;
                 // Arms hang from the shoulders, so they inherit the sway late
                 // and slightly damped — that lag is most of what sells it.
                 case 'leftShoulder':  x = -breath * 0.020; break;
@@ -138,9 +196,55 @@ export class Idle {
         // standing.
         if (this.hips && this.hipsRest) {
             this.hips.position.set(
-                this.hipsRest.x + sway * 0.012 * weight,
+                this.hipsRest.x + (sway * 0.012 + F.z * 0.10) * weight,
                 this.hipsRest.y + breath * 0.004 * weight,
                 this.hipsRest.z);
         }
+    }
+
+    /**
+     * Everything that keys off the voice: nods on emphasis, a glance at the end
+     * of a phrase, and blinking.
+     *
+     * All of it is driven by the AUDIO rather than by a timer. A nod on a fixed
+     * interval lands in the middle of words and reads as a tic; a nod on a rise
+     * in loudness lands on the stress, which is where a person puts one.
+     */
+    _accents(t, speech, dt) {
+        this._env += (speech - this._env) * (speech > this._env ? 0.55 : 0.10);
+        this._envSlow += (this._env - this._envSlow) * 0.035;
+
+        // A RISE against the slow average is emphasis. Comparing against a
+        // fixed threshold instead would fire constantly on a loud passage and
+        // never on a quiet one.
+        this._nodLock -= dt;
+        if (this._env > 0.22 && this._env - this._envSlow > 0.13 && this._nodLock <= 0) {
+            this._nod = 0.035 + Math.min(0.030, (this._env - this._envSlow) * 0.10);
+            this._nodT = 0;
+            this._nodLock = 0.55 + Math.random() * 0.7;
+        }
+        this._nodT += dt;
+        this._nod *= 0.999;                       // the envelope does the decay
+
+        // Phrase boundary: she was talking and has gone quiet for a moment.
+        // People look away and blink at exactly these seams.
+        const loud = this._env > 0.10;
+        if (loud) { this._quietFor = 0; this._wasLoud = true; }
+        else this._quietFor += dt;
+        if (this._wasLoud && this._quietFor > 0.28) {
+            this._wasLoud = false;
+            this._fidgetAt = 0;                   // a fresh glance, now
+            this._blinkAt = Math.min(this._blinkAt, t + 0.15);
+        }
+
+        // Blinking. Faster while she is speaking, because people do.
+        if (t > this._blinkAt) {
+            const talking = this._env > 0.05;
+            this._blinkAt = t + (talking ? 1.2 + Math.random() * 1.8
+                                         : 2.2 + Math.random() * 3.2);
+            this._blinkStart = t;
+        }
+        const bp = (t - this._blinkStart) / 0.13;
+        this.blink = bp >= 0 && bp <= 1 ? Math.abs(Math.sin(bp * Math.PI)) : 0;
     }
 }
