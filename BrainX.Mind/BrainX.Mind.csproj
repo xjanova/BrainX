@@ -41,11 +41,23 @@
              Link="wwwroot\universe\%(Filename)%(Extension)"
              CopyToOutputDirectory="PreserveNewest" />
     <!-- Only her three. vendor\ also holds the dashboard's d3, which she has
-         no use for and should not be shipping. -->
-    <Content Include="..\BrainX.Client\wwwroot\universe\vendor\three\**\*.js;
-                      ..\BrainX.Client\wwwroot\universe\vendor\three-vrm\**\*.*;
-                      ..\BrainX.Client\wwwroot\universe\vendor\vrm-mixamo\**\*.js"
-             Link="wwwroot\universe\vendor\%(RecursiveDir)%(Filename)%(Extension)"
+         no use for and should not be shipping.
+
+         ONE GROUP PER PACKAGE, for the same reason as above and one level
+         down: `**` here begins INSIDE vendor\three\, so %(RecursiveDir) is
+         `jsm\loaders\` and never `three\jsm\loaders\`. Sharing a Link
+         prefix of vendor\ across the three packages therefore drops the
+         package name from every path — GLTFLoader.js shipped as
+         vendor\jsm\loaders\ while the page asked for vendor\three\jsm\
+         loaders\, and she came up as an empty blue window. -->
+    <Content Include="..\BrainX.Client\wwwroot\universe\vendor\three\**\*.js"
+             Link="wwwroot\universe\vendor\three\%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\BrainX.Client\wwwroot\universe\vendor\three-vrm\**\*.*"
+             Link="wwwroot\universe\vendor\three-vrm\%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\BrainX.Client\wwwroot\universe\vendor\vrm-mixamo\**\*.js"
+             Link="wwwroot\universe\vendor\vrm-mixamo\%(RecursiveDir)%(Filename)%(Extension)"
              CopyToOutputDirectory="PreserveNewest" />
     <!-- The MANIFEST only. The model and its clips are 33 MB that change
          almost never, and shipping them inside the package would re-send the

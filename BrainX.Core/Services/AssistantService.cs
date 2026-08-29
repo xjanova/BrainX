@@ -35,8 +35,22 @@ public sealed class AssistantConfig
     // She is a full-body avatar with the chat laid over her now, not a face
     // above a column of text. At 400x680 the body was a thumbnail and the glass
     // had nowhere to go without covering her.
-    public double W { get; set; } = 880;
-    public double H { get; set; } = 780;
+    public const double DefaultW = 880;
+    public const double DefaultH = 780;
+    public double W { get; set; } = DefaultW;
+    public double H { get; set; } = DefaultH;
+
+    /// <summary>
+    /// Which window layout this file was written for.
+    ///
+    /// A remembered size always beats a new default, so anyone who had used
+    /// her before the avatar landed would keep the old 400x680 window forever
+    /// and never see the layout the redesign needs — the glass panel would
+    /// simply sit on top of her. Bumping this resets the SIZE once, on the
+    /// next launch, and leaves position and every other setting alone.
+    /// </summary>
+    public int Layout { get; set; }
+    public const int CurrentLayout = 1;
 
     /// <summary>Open her automatically once the dashboard has finished loading.
     /// Off by default: a window that appears uninvited on every launch is a

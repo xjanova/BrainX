@@ -135,6 +135,18 @@ public partial class MindWindow : Window
 
     private void RestorePlacement()
     {
+        // One-time: a config written before she had a body remembers 400x680,
+        // which is a thumbnail of her with the chat glass laid across her face.
+        // Only the size is reset — position, voice, autostart and the rest
+        // are the owner's and stay as they are.
+        if (_cfg.Layout < AssistantConfig.CurrentLayout)
+        {
+            _cfg.W = AssistantConfig.DefaultW;
+            _cfg.H = AssistantConfig.DefaultH;
+            _cfg.Layout = AssistantConfig.CurrentLayout;
+            _svc.SaveConfig(_cfg);
+        }
+
         Width = Math.Max(MinWidth, _cfg.W);
         Height = Math.Max(MinHeight, _cfg.H);
         Topmost = _cfg.Topmost;
@@ -199,6 +211,9 @@ public partial class MindWindow : Window
             // the page is already up rather than blocking the window on it.
             var pack = new AvatarPackService();
             Directory.CreateDirectory(pack.Root);
+            // Fast enough to wait for: the originals are copied off this same
+            // machine, so by the time the page asks for her body it is there.
+            await pack.EnsureLocalAsync();
             core.SetVirtualHostNameToFolderMapping(
                 "avatar.local", pack.Root, CoreWebView2HostResourceAccessKind.Allow);
             // Runs before any page script, so the page never has to guess.
@@ -214,15 +229,47 @@ public partial class MindWindow : Window
                     e.State = CoreWebView2PermissionState.Allow;
             };
 
+            // Her console, on request.
+            //
+            // She has no address bar, no F12 and no status line, so a page that
+            // fails to load is a blank blue window and nothing else — which
+            // is exactly how a build shipped with the vendor scripts landing at
+            // the wrong paths: 404, 404, 404, and no way to see it from
+            // outside. Set BRAINX_MIND_LOG to a file path and every console
+            // message, exception and failed request goes there.
+            if (Environment.GetEnvironmentVariable("BRAINX_MIND_LOG") is { Length: > 0 } logPath)
+            {
+                try { File.Delete(logPath); } catch { }
+                void W(string t) { try { File.AppendAllText(logPath, t + "\n"); } catch { } }
+                var rt = core.GetDevToolsProtocolEventReceiver("Runtime.consoleAPICalled");
+                rt.DevToolsProtocolEventReceived += (_, ev) => W("CONSOLE " + ev.ParameterObjectAsJson);
+                var ex2 = core.GetDevToolsProtocolEventReceiver("Runtime.exceptionThrown");
+                ex2.DevToolsProtocolEventReceived += (_, ev) => W("THROW " + ev.ParameterObjectAsJson);
+                var lg = core.GetDevToolsProtocolEventReceiver("Log.entryAdded");
+                lg.DevToolsProtocolEventReceived += (_, ev) => W("LOG " + ev.ParameterObjectAsJson);
+                await core.CallDevToolsProtocolMethodAsync("Runtime.enable", "{}");
+                await core.CallDevToolsProtocolMethodAsync("Log.enable", "{}");
+                core.WebResourceResponseReceived += (_, e) =>
+                {
+                    try
+                    {
+                        if (e.Response.StatusCode >= 400)
+                            W($"HTTP {e.Response.StatusCode} {e.Request.Uri}");
+                    }
+                    catch { }
+                };
+            }
+
             core.WebMessageReceived += OnMessage;
             core.Settings.AreDefaultContextMenusEnabled = false;
             Web.Source = new Uri("https://universe.local/universe/assistant-window.html");
 
-            // Not awaited: on a first run this is 33 MB, and blocking the
-            // window on it would show nothing at all for the length of the
-            // download. The page copes with an absent pack and is told when it
-            // lands.
-            _ = EnsureAvatarAsync(pack);
+            // Only the download half runs in the background. The copy half was
+            // awaited above, BEFORE navigation — measured at 87ms for the
+            // whole 33MB, against a reload() that has to arrive after the page
+            // has attached its bridge and would silently do nothing if it beat
+            // it there.
+            if (!pack.IsInstalled) _ = EnsureAvatarAsync(pack);
         }
         catch (Exception ex)
         {
@@ -242,16 +289,23 @@ public partial class MindWindow : Window
         if (pack.IsInstalled) return;
         var progress = new Progress<(string stage, double fraction)>(p =>
             _ = Eval($"window.brainxChat?.status?.({Js(Describe(p))})"));
-        var dir = await pack.EnsureAsync(progress);
-        await Eval(dir != null
-            ? "window.brainxAssistant?.reload?.()"
-            : $"window.brainxChat?.status?.({Js("โหลดตัวมายด์ไม่สำเร็จ — ลองเปิดใหม่อีกครั้ง")})");
+        var dir = await pack.EnsureRemoteAsync(progress);
+        if (dir != null) { await Eval("window.brainxAssistant?.reload?.()"); return; }
+
+        // Nothing to reopen and nothing to retry: this machine simply does not
+        // have her model on it. The clips are Mixamo's and the model is the
+        // owner's, so neither is in the repository or in the installer — say
+        // where to put them rather than offering a retry that cannot help.
+        var here = AvatarPackService.LocalSources().First();
+        await Eval($"window.brainxChat?.status?.({Js(
+            $"ยังไม่มีไฟล์ตัวมายในเครื่องนี้ค่ะ — วางไว้ที่ {here} แล้วเปิดใหม่นะคะ")})");
     }
 
     private static string Describe((string stage, double fraction) p) => p.stage switch
     {
+        "missing" => "",
         "connecting" => "กำลังเชื่อมต่อ…",
-        "downloading" => $"กำลังโหลดตัวมายด์ {p.fraction * 100:0}%",
+        "downloading" => $"กำลังโหลดตัวมาย {p.fraction * 100:0}%",
         "unpacking" => "กำลังแตกไฟล์…",
         "ready" => "",
         _ => p.stage,
