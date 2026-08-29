@@ -17,6 +17,10 @@
     "mood:  which feelings this suits. Empty means any. The scheduler will not",
     "       pick a cheerful skip while she is apologising.",
     "",
+    "Waiting.fbx and Bored.fbx are listed but NOT yet downloaded — they are what",
+    "the 'waiting' mood will use, and they will start working the moment the files",
+    "land here. Nothing else has to change.",
+    "",
     "Also present but deliberately unlisted: 'Standing Up.fbx' is Mixamo's",
     "getting-up-off-the-FLOOR animation, 343 frames of it. The chair transitions",
     "are Stand To Sit / Sit To Stand below."
@@ -27,6 +31,8 @@
     { "id": "idle_happy",  "file": "Happy Idle.fbx",         "role": "idle",       "mood": ["happy", "pleased"] },
     { "id": "idle_sad",    "file": "Sad Idle.fbx",           "role": "idle",       "mood": ["sorry", "concerned"] },
     { "id": "idle_think",  "file": "Thinking.fbx",           "role": "idle",       "mood": ["thinking"] },
+    { "id": "idle_wait",   "file": "Waiting.fbx",            "role": "idle",       "mood": ["waiting"] },
+    { "id": "idle_bored",  "file": "Bored.fbx",              "role": "idle",       "mood": ["waiting"] },
 
     { "id": "walk",        "file": "Walking.fbx",            "role": "pose",       "mood": [], "speed": 0.62 },
 
