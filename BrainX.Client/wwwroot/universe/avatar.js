@@ -166,11 +166,18 @@ export class Avatar {
         // the body; a whisper of breathing when one does, so a canned loop
         // still looks like it is being performed by something that breathes.
         const w = this.motion?.ready ? 0.18 : 1;
-        this.lip.update();
-        this.idle.apply(this._t, w, this.lip.speaking ? this.lip.level : 0, dt);
+        // Mixamo's standing idles are braced, knees bent, weight forward. While
+        // she is on her FEET that stance is pulled back toward standing; while
+        // she is sitting or mid-transition it is left alone, or the correction
+        // would stand her up through the chair.
+        const onFeet = !this.motion?.ready
+            || ['idle', 'gesture'].includes(this.motion.current?.meta.role ?? 'idle');
+        this.lip.update(dt);
+        this.idle.apply(this._t, w, this.lip.speaking ? this.lip.level : 0, dt,
+                        onFeet ? 0.82 : 0);
 
         // 3 — face.
-        this._face();
+        this._face(dt);
 
         // 4 — propagate, look-at, spring bones.
         vrm.update(dt);
@@ -189,7 +196,7 @@ export class Avatar {
      * crawl whenever it is not visible — every timing-based check of this has
      * to be synchronous or it measures the scheduler instead of the code.
      */
-    _face() {
+    _face(dt = 1 / 60) {
         const em = this.vrm?.expressionManager;
         if (!em) return;
         this.lip.applyTo(this.vrm);
@@ -198,10 +205,11 @@ export class Avatar {
         // weight it simply eats the visemes. Held back while she is talking —
         // the mood stays legible and the words still land.
         const cap = this.speaking ? 0.45 : 1;
+        const k = 1 - Math.exp(-5.2 * dt);
         for (const expr of MOOD_EXPRS) {
             const cur = em.getValue(expr) ?? 0;
             const want = expr === wantExpr ? wantAmt * cap : 0;
-            em.setValue(expr, cur + (want - cur) * 0.08);
+            em.setValue(expr, cur + (want - cur) * k);
         }
         em.setValue('blink', this.idle.blink);
     }

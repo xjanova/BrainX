@@ -29,6 +29,17 @@
 import * as THREE from 'three';
 
 /**
+ * Frame-rate independent easing factor.
+ *
+ * `x += (target - x) * 0.02` looks smooth at a steady 60fps and JUDDERS the
+ * moment the frame rate moves, because the constant is per FRAME rather than
+ * per second: a long frame eases exactly as far as a short one, so the motion
+ * arrives in visible steps. Every ease in this file is a rate in units per
+ * second run through this instead. That judder is what "she twitches" was.
+ */
+const ease = (rate, dt) => 1 - Math.exp(-rate * dt);
+
+/**
  * The relaxed standing pose, as Euler offsets from the T-pose, in radians.
  *
  * Arms are the whole job: from T-pose they have to come down about 70 degrees,
@@ -53,9 +64,29 @@ const POSE = {
     // Feet slightly apart and turned out, or she stands like a soldier.
     leftUpperLeg:  [0, 0, 0.030],
     rightUpperLeg: [0, 0, -0.030],
+    // Barely bent. Not zero, because a knee locked dead straight reads as a
+    // mannequin, but nowhere near the 18 degrees the clip asks for.
+    leftLowerLeg:  [0.030, 0, 0],
+    rightLowerLeg: [0.030, 0, 0],
     leftFoot:      [0, 0.06, 0],
     rightFoot:     [0, -0.06, 0],
 };
+
+/**
+ * The lower body, which gets its own blend weight.
+ *
+ * Mixamo's standing idles are BRACED — knees bent about 18 degrees, hips
+ * dropped, weight forward. That is correct for the game characters they were
+ * authored for and wrong for a girl standing in a room: measured on Breathing
+ * Idle, her knee sat at 18.3 degrees and her hips 15mm low, which reads as a
+ * permanent half-crouch. The clip's sway is worth keeping; its stance is not,
+ * so the legs are pulled back toward standing while the rest of the clip plays
+ * at full strength.
+ */
+const LEGS = new Set([
+    'leftUpperLeg', 'rightUpperLeg', 'leftLowerLeg', 'rightLowerLeg',
+    'leftFoot', 'rightFoot', 'leftToes', 'rightToes',
+]);
 
 /** A hand at rest is not flat. Every finger joint curls a little. */
 const FINGER_CURL = 0.26;
@@ -124,10 +155,15 @@ export class Idle {
      * @param {number} weight 1 = she is standing there; lower while a clip drives her
      * @param {number} speech current loudness 0..1, or 0 when she is not talking
      * @param {number} dt     seconds since the last call
+     * @param {number} legWeight how hard to pull the legs back toward standing.
+     *   The caller decides, because it is only right while she is on her feet —
+     *   applied to a sitting clip it would stand her up through the chair.
      */
-    apply(t, weight = 1, speech = 0, dt = 1 / 60) {
+    apply(t, weight = 1, speech = 0, dt = 1 / 60, legWeight = 0) {
         this._accents(t, speech, dt);
-        if (weight <= 0.001 || !this.bones.length) return;
+        if (!this.bones.length) return;
+        const legW = Math.max(weight, legWeight);
+        if (weight <= 0.001 && legW <= 0.001) return;
 
         // Oscillators, deliberately not harmonically related, so the pose never
         // returns to exactly where it was. Breathing is the fastest and the only
@@ -147,9 +183,10 @@ export class Idle {
             f.tz = (Math.random() - 0.5) * 0.045;   // weight lean
         }
         const F = this._fid;
-        F.x += (F.tx - F.x) * 0.020;
-        F.y += (F.ty - F.y) * 0.020;
-        F.z += (F.tz - F.z) * 0.020;
+        const k = ease(1.2, dt);
+        F.x += (F.tx - F.x) * k;
+        F.y += (F.ty - F.y) * k;
+        F.z += (F.tz - F.z) * k;
 
         // A nod is a quick dip and a slower recovery, not a sine — the head
         // drops on the stress and comes back up, and a symmetric wobble reads
@@ -188,17 +225,20 @@ export class Idle {
             b.target.setFromEuler(this._e).premultiply(b.base);
             // Slerp rather than assign: at weight 1 this lands exactly on the
             // pose, and below it the clip underneath keeps its say.
-            b.node.quaternion.slerp(b.target, weight);
+            b.node.quaternion.slerp(b.target, LEGS.has(b.name) ? legW : weight);
         }
 
         // Weight shifts from one foot to the other, and breathing lifts her a
         // little. Both are centimetres — any more and she is bobbing, not
         // standing.
+        // The hips move with the LEGS, not with the general weight: straighten
+        // the knees while leaving the hips where a braced clip put them and her
+        // feet go through the floor.
         if (this.hips && this.hipsRest) {
-            this.hips.position.set(
-                this.hipsRest.x + (sway * 0.012 + F.z * 0.10) * weight,
-                this.hipsRest.y + breath * 0.004 * weight,
-                this.hipsRest.z);
+            const p = this.hips.position;
+            p.x += (this.hipsRest.x + (sway * 0.012 + F.z * 0.10) - p.x) * legW;
+            p.y += (this.hipsRest.y + breath * 0.004 - p.y) * legW;
+            p.z += (this.hipsRest.z - p.z) * legW;
         }
     }
 
@@ -211,8 +251,8 @@ export class Idle {
      * in loudness lands on the stress, which is where a person puts one.
      */
     _accents(t, speech, dt) {
-        this._env += (speech - this._env) * (speech > this._env ? 0.55 : 0.10);
-        this._envSlow += (this._env - this._envSlow) * 0.035;
+        this._env += (speech - this._env) * ease(speech > this._env ? 48 : 6.5, dt);
+        this._envSlow += (this._env - this._envSlow) * ease(2.1, dt);
 
         // A RISE against the slow average is emphasis. Comparing against a
         // fixed threshold instead would fire constantly on a loud passage and
@@ -223,8 +263,7 @@ export class Idle {
             this._nodT = 0;
             this._nodLock = 0.55 + Math.random() * 0.7;
         }
-        this._nodT += dt;
-        this._nod *= 0.999;                       // the envelope does the decay
+        this._nodT += dt;                         // the envelope does the decay
 
         // Phrase boundary: she was talking and has gone quiet for a moment.
         // People look away and blink at exactly these seams.

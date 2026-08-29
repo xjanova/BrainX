@@ -96,8 +96,13 @@ export class LipSync {
         this.speaking = false;
     }
 
-    /** Recompute the viseme weights. Call once a frame. */
-    update() {
+    /**
+     * Recompute the viseme weights. Call once a frame.
+     * @param {number} dt seconds since the last call — the smoothing is a rate,
+     *   not a per-frame constant, or the mouth steps whenever the frame rate does.
+     */
+    update(dt = 1 / 60) {
+        const ease = (rate) => 1 - Math.exp(-rate * dt);
         let open = 0, spread = 0;
 
         if (this.speaking && this.analyser) {
@@ -117,14 +122,14 @@ export class LipSync {
             const lo = band(this.freq, LOW), mid = band(this.freq, MID), hi = band(this.freq, HIGH);
             spread = Math.min(1, Math.max(0, hi * 2.4 + mid * 0.7 - lo * 0.6));
         } else {
-            this.level += (0 - this.level) * 0.1;
+            this.level += (0 - this.level) * ease(6.5);
         }
 
         // Asymmetric: mouths open faster than they close, and equal rates read
         // as mush. Attack near-instant, release merely quick — one that closes
         // as fast as it opens chatters between syllables.
-        this._open += (open - this._open) * (open > this._open ? 0.90 : 0.38);
-        this._spread += (spread - this._spread) * 0.34;
+        this._open += (open - this._open) * ease(open > this._open ? 138 : 29);
+        this._spread += (spread - this._spread) * ease(25);
 
         return this.shape(this._open, this._spread);
     }
