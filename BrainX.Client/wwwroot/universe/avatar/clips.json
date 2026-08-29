@@ -15,34 +15,36 @@
     "       transition plays once to get into or out of a pose",
     "",
     "mood:  which feelings this suits. Empty means any. The scheduler will not",
-    "       pick a cheerful skip while she is apologising."
+    "       pick a cheerful skip while she is apologising.",
+    "",
+    "Also present but deliberately unlisted: 'Standing Up.fbx' is Mixamo's",
+    "getting-up-off-the-FLOOR animation, 343 frames of it. The chair transitions",
+    "are Stand To Sit / Sit To Stand below."
   ],
 
   "clips": [
-    { "id": "idle",        "file": "Breathing Idle.fbx",      "role": "idle",       "mood": [] },
-    { "id": "idle_happy",  "file": "Happy Idle.fbx",          "role": "idle",       "mood": ["happy", "pleased"] },
-    { "id": "idle_sad",    "file": "Sad Idle.fbx",            "role": "idle",       "mood": ["sorry", "concerned"] },
-    { "id": "idle_think",  "file": "Thinking.fbx",            "role": "idle",       "mood": ["thinking"] },
+    { "id": "idle",        "file": "Breathing Idle.fbx",     "role": "idle",       "mood": [] },
+    { "id": "idle_happy",  "file": "Happy Idle.fbx",         "role": "idle",       "mood": ["happy", "pleased"] },
+    { "id": "idle_sad",    "file": "Sad Idle.fbx",           "role": "idle",       "mood": ["sorry", "concerned"] },
+    { "id": "idle_think",  "file": "Thinking.fbx",           "role": "idle",       "mood": ["thinking"] },
 
-    { "id": "walk",        "file": "Walking.fbx",             "role": "pose",       "mood": [], "speed": 0.62 },
-    { "id": "walk_happy",  "file": "Happy Walk.fbx",          "role": "pose",       "mood": ["happy"], "speed": 0.66 },
+    { "id": "walk",        "file": "Walking.fbx",            "role": "pose",       "mood": [], "speed": 0.62 },
 
-    { "id": "sit",         "file": "Sitting Idle.fbx",        "role": "pose",       "mood": [] },
-    { "id": "sit_down",    "file": "Sitting Down.fbx",        "role": "transition", "mood": [], "into": "sit" },
-    { "id": "stand_up",    "file": "Standing Up.fbx",         "role": "transition", "mood": [], "into": "idle" },
+    { "id": "sit",         "file": "Sitting Idle.fbx",       "role": "pose",       "mood": [] },
+    { "id": "sit_down",    "file": "Stand To Sit.fbx",       "role": "transition", "mood": [], "into": "sit" },
+    { "id": "stand_up",    "file": "Sit To Stand.fbx",       "role": "transition", "mood": [], "into": "idle" },
 
-    { "id": "wave",        "file": "Waving.fbx",              "role": "gesture",    "mood": ["happy", "pleased", "neutral"], "weight": 3 },
-    { "id": "nod",         "file": "Head Nod Yes.fbx",        "role": "gesture",    "mood": [], "weight": 2 },
-    { "id": "shake",       "file": "Shaking Head No.fbx",     "role": "gesture",    "mood": ["concerned", "sorry"], "weight": 1 },
-    { "id": "clap",        "file": "Clapping.fbx",            "role": "gesture",    "mood": ["happy"], "weight": 2 },
-    { "id": "bow",         "file": "Quick Formal Bow.fbx",    "role": "gesture",    "mood": ["sorry", "pleased"], "weight": 2 },
-    { "id": "talk",        "file": "Talking.fbx",             "role": "gesture",    "mood": [], "weight": 3 },
-    { "id": "agree",       "file": "Agreeing.fbx",            "role": "gesture",    "mood": ["pleased"], "weight": 1 },
-    { "id": "look",        "file": "Looking Around.fbx",      "role": "gesture",    "mood": [], "weight": 2 },
-    { "id": "stretch",     "file": "Stretching.fbx",          "role": "gesture",    "mood": ["neutral"], "weight": 1 },
-    { "id": "yawn",        "file": "Yawn.fbx",                "role": "gesture",    "mood": ["neutral"], "weight": 1 },
-    { "id": "excited",     "file": "Excited.fbx",             "role": "gesture",    "mood": ["happy"], "weight": 2 },
-    { "id": "shy",         "file": "Shy.fbx",                 "role": "gesture",    "mood": ["pleased", "sorry"], "weight": 1 },
-    { "id": "dance",       "file": "Silly Dancing.fbx",       "role": "gesture",    "mood": ["happy"], "weight": 1 }
+    { "id": "wave",        "file": "Waving.fbx",             "role": "gesture",    "mood": ["happy", "pleased", "neutral"], "weight": 3 },
+    { "id": "nod",         "file": "Head Nod Yes.fbx",       "role": "gesture",    "mood": [], "weight": 2 },
+    { "id": "shake",       "file": "Shaking Head No.fbx",    "role": "gesture",    "mood": ["concerned", "sorry"], "weight": 1 },
+    { "id": "clap",        "file": "Clapping.fbx",           "role": "gesture",    "mood": ["happy"], "weight": 2 },
+    { "id": "bow",         "file": "Quick Formal Bow.fbx",   "role": "gesture",    "mood": ["sorry", "pleased"], "weight": 2 },
+    { "id": "talk",        "file": "Talking.fbx",            "role": "gesture",    "mood": [], "weight": 3 },
+    { "id": "agree",       "file": "Agreeing.fbx",           "role": "gesture",    "mood": ["pleased"], "weight": 1 },
+    { "id": "look",        "file": "Looking Around.fbx",     "role": "gesture",    "mood": [], "weight": 2 },
+    { "id": "stretch",     "file": "Arm Stretching.fbx",     "role": "gesture",    "mood": ["neutral"], "weight": 1 },
+    { "id": "yawn",        "file": "Yawn.fbx",               "role": "gesture",    "mood": ["neutral"], "weight": 1 },
+    { "id": "excited",     "file": "Excited.fbx",            "role": "gesture",    "mood": ["happy"], "weight": 2 },
+    { "id": "dance",       "file": "Silly Dancing.fbx",      "role": "gesture",    "mood": ["happy"], "weight": 1 }
   ]
 }
