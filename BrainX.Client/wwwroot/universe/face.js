@@ -717,6 +717,10 @@ export class AssistantFace {
         this._blinkAt = 0;
         this._gazeAt = 0;
         this._gaze = { x: 0, y: 0, tx: 0, ty: 0 };
+        // Where the cursor is, relative to her eyes, and how much she has
+        // noticed it. `on` eases so she does not snap to attention.
+        this._look = { x: 0, y: 0, on: 0, seen: false };
+        this._drag = { on: false, id: -1, px: 0, py: 0, yaw: 0, pitch: 0, vy: 0, vp: 0 };
         this.mood = { ...MOODS.neutral };
         this._mood = { ...MOODS.neutral };
 
@@ -743,9 +747,99 @@ export class AssistantFace {
         this.scene.add(this.head.group);
         this._pose(0, 0, 0, 0);
         this._detail(0, 0, 0, 0);
+        this._bindPointer();
 
         this._loop = this._loop.bind(this);
         this._raf = requestAnimationFrame(this._loop);
+    }
+
+    /**
+     * Cursor tracking, and dragging her round.
+     *
+     * SHE WATCHES THE WHOLE WINDOW, not just her own canvas. What makes a face
+     * feel present is that it notices you while you are doing something else,
+     * and in this window "something else" is the chat box underneath her — so
+     * the move listener is on the window and only the DRAG is scoped to the
+     * canvas.
+     *
+     * Scoping the drag matters: the strip along the top of the standalone
+     * window is the host's drag handle, because a frameless WebView2 cannot use
+     * `-webkit-app-region` and has to ask WPF to DragMove() on mousedown
+     * instead. Taking pointer events there would leave the window unmovable.
+     */
+    _bindPointer() {
+        const el = this.renderer.domElement;
+        el.style.touchAction = 'none';   // or a touch drag scrolls the chat log
+        el.style.cursor = 'grab';
+        const D = this._drag, L = this._look;
+
+        this._onMove = (e) => {
+            const r = this._rect || (this._rect = el.getBoundingClientRect());
+            if (!r.width) return;
+            // Measured from her EYE LINE, not the middle of the canvas. She
+            // sits high in the frame — crown at 8% of it, chin at 84% — so
+            // centring on the canvas had her looking permanently downward.
+            const cx = r.left + r.width * 0.5;
+            const cy = r.top + r.height * this._eyeFrac();
+            // Same divisor on both axes, so a cursor at 45 degrees reads as 45
+            // degrees; tanh, so one parked in the far corner of the window is a
+            // look and not a stare into the middle distance.
+            const k = r.width * 0.62;
+            L.x = Math.tanh((e.clientX - cx) / k);
+            L.y = Math.tanh((e.clientY - cy) / k);
+            L.seen = true;
+
+            if (D.on && e.pointerId === D.id) {
+                const cap = (v, m) => Math.max(-m, Math.min(m, v));
+                D.vy = cap((e.clientX - D.px) * 0.011, 0.09);
+                D.vp = cap((e.clientY - D.py) * 0.006, 0.05);
+                D.px = e.clientX; D.py = e.clientY;
+                D.yaw += D.vy;
+                D.pitch = Math.max(-0.55, Math.min(0.55, D.pitch + D.vp));
+            }
+        };
+
+        this._onDown = (e) => {
+            if (e.pointerType === 'mouse' && e.button !== 0) return;
+            D.on = true; D.id = e.pointerId;
+            D.px = e.clientX; D.py = e.clientY;
+            D.vy = 0; D.vp = 0;
+            try { el.setPointerCapture(e.pointerId); } catch {}
+            el.style.cursor = 'grabbing';
+            e.preventDefault();
+        };
+
+        this._onUp = (e) => {
+            if (!D.on || e.pointerId !== D.id) return;
+            D.on = false; D.id = -1;
+            try { el.releasePointerCapture(e.pointerId); } catch {}
+            el.style.cursor = 'grab';
+        };
+
+        // relatedTarget null means the pointer left the window entirely. Losing
+        // focus counts too — a cursor that stopped moving because the user
+        // alt-tabbed is not a cursor she should still be staring at.
+        this._onOut = (e) => { if (!e.relatedTarget && !D.on) L.seen = false; };
+        this._onBlur = () => { L.seen = false; };
+
+        window.addEventListener('pointermove', this._onMove, { passive: true });
+        window.addEventListener('pointerout', this._onOut, { passive: true });
+        window.addEventListener('blur', this._onBlur);
+        el.addEventListener('pointerdown', this._onDown);
+        el.addEventListener('pointerup', this._onUp);
+        el.addEventListener('pointercancel', this._onUp);
+    }
+
+    /**
+     * Where her eye line falls in the canvas, 0 top to 1 bottom. Projected
+     * rather than hard-coded so it survives the camera being moved — the last
+     * time this number was written down by hand it was a different camera.
+     */
+    _eyeFrac() {
+        const v = this._eyeV || (this._eyeV = new THREE.Vector3());
+        v.set(0, T_EYE * HH + this.head.group.position.y, 0.29 * HH);
+        v.project(this.camera);
+        return (1 - v.y) / 2;
     }
 
     /** @param {string|object} m a MOODS key, or partial dials to blend toward. */
@@ -933,7 +1027,7 @@ export class AssistantFace {
         // Irises ride inside the opening and follow the gaze.
         for (let i = 0; i < 2; i++) {
             const sgn = i ? 1 : -1;
-            const p = surface(sgn * (A_EYE + this._gaze.x * 0.11),
+            const p = surface(sgn * A_EYE + this._gaze.x * 0.11,
                               rowOf(T_EYE + this._gaze.y * 0.05), P, Mo);
             H.eyes[i].position.set(p[0] + p[3] * LIFT * 1.4, p[1],
                                    p[2] + p[4] * LIFT * 1.4);
@@ -1048,17 +1142,38 @@ export class AssistantFace {
         const blink = bp >= 0 && bp <= 1 ? Math.abs(Math.sin(bp * Math.PI)) : 0;
         this._lid = Math.min(1, Math.max(-0.30, blink + (1 - M.eyeOpen) * 0.55));
 
+        // Spin. Off the pointer the drag keeps its velocity for a moment and
+        // then unwinds, because she always comes back to facing you: a head
+        // left staring at the wall because someone flicked it is a prop.
+        const D = this._drag, L = this._look;
+        if (!D.on) {
+            D.yaw += D.vy;
+            D.pitch = Math.max(-0.55, Math.min(0.55, D.pitch + D.vp));
+            D.vy *= 0.90; D.vp *= 0.90;
+            D.yaw *= 0.982; D.pitch *= 0.982;
+        }
+        L.on += ((L.seen ? 1 : 0) - L.on) * 0.06;
+
         // Gaze. Eyes that hold dead centre look painted on; real ones make
-        // small jumps and then settle, so this picks a new target every couple
-        // of seconds and eases toward it.
-        if (t > this._gazeAt) {
+        // small jumps and then settle, so with no cursor to watch she picks a
+        // new target every couple of seconds and eases toward it.
+        if (L.on > 0.03) {
+            // While she is being held still the eyes do all the work; otherwise
+            // her head turns too and they only have to cover the rest.
+            this._gaze.tx = L.x * (D.on ? 0.85 : 0.55) * L.on;
+            this._gaze.ty = -L.y * 0.35 * L.on;
+            this._gazeAt = t + 700;      // no idle saccade over the top of it
+        } else if (t > this._gazeAt) {
             this._gazeAt = t + 1400 + Math.random() * 2600;
             this._gaze.tx = (Math.random() - 0.5) * 0.30;
             this._gaze.ty = (Math.random() - 0.5) * 0.16;
         }
         const pgx = this._gaze.x, pgy = this._gaze.y;
-        this._gaze.x += (this._gaze.tx - this._gaze.x) * 0.14;
-        this._gaze.y += (this._gaze.ty - this._gaze.y) * 0.14;
+        // Eyes reach a target faster than a head does; equal rates read as a
+        // doll being turned rather than as someone looking at you.
+        const ease = L.on > 0.03 ? 0.22 : 0.14;
+        this._gaze.x += (this._gaze.tx - this._gaze.x) * ease;
+        this._gaze.y += (this._gaze.ty - this._gaze.y) * ease;
 
         const moved = Math.abs(this._open - po) > 0.0012 ||
                       Math.abs(this._wide - pw) > 0.0012 ||
@@ -1076,8 +1191,14 @@ export class AssistantFace {
             this._detail(this._open, this._wide, M.smile, this._lid);
 
         const s = t / 1000;
-        H.group.rotation.y = Math.sin(s * 0.4) * 0.15;
-        H.group.rotation.x = Math.sin(s * 0.31) * 0.05 + (this.speaking ? 0.03 : 0);
+        // The idle sway is what she does when nobody is there; it gives way to
+        // the cursor rather than fighting it, and the drag overrides both.
+        const idle = 1 - L.on * 0.75, lookW = D.on ? 0 : L.on;
+        H.group.rotation.y = Math.sin(s * 0.4) * 0.15 * idle
+                           + L.x * 0.30 * lookW + D.yaw;
+        H.group.rotation.x = Math.sin(s * 0.31) * 0.05 * idle
+                           + L.y * 0.17 * lookW + D.pitch
+                           + (this.speaking ? 0.03 : 0);
         // The cocked head is half of what makes "thinking" read as thinking
         // rather than as a blank stare.
         H.group.rotation.z = -M.browTilt * 0.05 + (M.eyeOpen < 0.85 ? 0.06 : 0);
@@ -1090,6 +1211,7 @@ export class AssistantFace {
         this.camera.aspect = w / h;
         this.camera.updateProjectionMatrix();
         this.renderer.setSize(w, h);
+        this._rect = null;           // the canvas just moved; re-measure it
         // The face is clamped narrower than the panel; the waves are not, so
         // they measure the host rather than taking w/h.
         this.wave.fit();
@@ -1097,6 +1219,9 @@ export class AssistantFace {
 
     dispose() {
         cancelAnimationFrame(this._raf);
+        window.removeEventListener('pointermove', this._onMove);
+        window.removeEventListener('pointerout', this._onOut);
+        window.removeEventListener('blur', this._onBlur);
         this.stop();
         try { this.ctx?.close(); } catch {}
         this._disposeHead();
