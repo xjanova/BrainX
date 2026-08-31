@@ -37,8 +37,19 @@
                       ..\BrainX.Client\wwwroot\universe\motion.js;
                       ..\BrainX.Client\wwwroot\universe\idle.js;
                       ..\BrainX.Client\wwwroot\universe\lipsync.js;
-                      ..\BrainX.Client\wwwroot\universe\framing.js"
+                      ..\BrainX.Client\wwwroot\universe\framing.js;
+                      ..\BrainX.Client\wwwroot\universe\sky.js;
+                      ..\BrainX.Client\wwwroot\universe\panorama.js"
              Link="wwwroot\universe\%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest" />
+    <!-- The room behind her. Named one by one rather than globbed for the same
+         reason as everything above: a `**` here would flatten sky\ into the
+         root and she would come up against the bare page gradient again, with
+         nothing but a 404 in a console nobody has open to say why. Unlike the
+         model this DOES ship in the package — 1.7 MB that changes about never
+         is not worth a second fetch-and-cache path on first run. -->
+    <Content Include="..\BrainX.Client\wwwroot\universe\sky\milkyway.jpg"
+             Link="wwwroot\universe\sky\milkyway.jpg"
              CopyToOutputDirectory="PreserveNewest" />
     <!-- Only her three. vendor\ also holds the dashboard's d3, which she has
          no use for and should not be shipping.

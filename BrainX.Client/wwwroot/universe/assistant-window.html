@@ -144,6 +144,17 @@
     border-bottom: 1px solid rgba(53,224,138,.34);
   }
 
+  /* The sky behind her is a photograph, and a photograph edge to edge at full
+     strength is a busy wall. This darkens it toward the corners so the frame
+     falls away and she and the glass are what the eye lands on. It lives in
+     SCREEN space, not in the texture: baked into the panorama it would turn
+     with the drift, and a vignette that rotates is a stain, not a lens. */
+  #veil {
+    position: absolute; inset: 0; z-index: 1; pointer-events: none;
+    background: radial-gradient(118% 82% at 30% 44%,
+                  rgba(7,10,30,0) 34%, rgba(7,10,30,.42) 74%, rgba(7,10,30,.80) 100%);
+  }
+
   /* Shown until the first click, then never again. A panel that only appears
      on a click needs to say so once. */
   #hint {
@@ -156,6 +167,7 @@
 </head>
 <body>
   <div id="stage"></div>
+  <div id="veil"></div>
 
   <div id="bar">
     <span id="who">—</span>
@@ -287,6 +299,10 @@ function openChat(open) {
     if (!down || !face.framing) return;
     const dx = e.clientX - down.x, dy = e.clientY - down.y;
     if (!dragging && Math.hypot(dx, dy) < 4) return;   // still a click, so far
+    // The sky drifts on its own, but not while it is being driven: two turns
+    // at once — yours and its — is the one combination that reads as the
+    // camera slipping rather than as a room going past.
+    face.sky?.grip(true);
     dragging = true;
     const sx = e.clientX - (down.lx ?? down.x), sy = e.clientY - (down.ly ?? down.y);
     if (down.pan) face.framing.pan(sx, sy, innerHeight);
@@ -298,6 +314,7 @@ function openChat(open) {
     if (!down) return;
     el.releasePointerCapture?.(down.id);
     el.style.cursor = 'grab';
+    face.sky?.grip(false);
     if (!dragging && Date.now() - down.t < 400) openChat(!chatOpen);
     down = null; dragging = false;
     void e;

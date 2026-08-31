@@ -27,6 +27,7 @@ import { Motion } from './motion.js';
 import { Idle } from './idle.js';
 import { LipSync } from './lipsync.js';
 import { Framing } from './framing.js';
+import { Sky } from './sky.js';
 
 /**
  * Mood -> the VRM expression that carries it, and how much of it.
@@ -76,6 +77,15 @@ export class Avatar {
         const key = new THREE.DirectionalLight(0xffffff, 2.1);
         key.position.set(1.2, 2.0, 2.4);
         this.scene.add(key, new THREE.AmbientLight(0xbfd4ff, 1.15));
+
+        // The room she is standing in. Loads on its own and adds itself when
+        // it arrives; until then — and for good if it never does — the page's
+        // own gradient shows through the transparent canvas, which is exactly
+        // what was behind her before there was a sky at all.
+        this.sky = new Sky(this.scene, this.camera, {
+            url: opts.sky,
+            anisotropy: this.renderer.capabilities.getMaxAnisotropy(),
+        });
 
         this.lip = new LipSync();
         this.clock = new THREE.Clock();
@@ -188,6 +198,10 @@ export class Avatar {
         vrm.update(dt);
 
         this.framing?.update(dt, this.speaking ? 0.65 : 1.1);
+        // The sky rides on the camera's position, so it goes AFTER framing has
+        // committed one: read a frame-old camera and a 30m sphere lags behind
+        // it, which shows up as the backdrop swimming during a push-in.
+        this.sky?.update(dt);
         this.renderer.render(this.scene, this.camera);
     }
 
@@ -229,6 +243,7 @@ export class Avatar {
         cancelAnimationFrame(this._raf);
         this.lip.dispose();
         this.motion?.dispose();
+        this.sky?.dispose();
         if (this.vrm) VRMUtils.deepDispose?.(this.vrm.scene);
         this.renderer.dispose();
         this.renderer.domElement.remove();
