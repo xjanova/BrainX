@@ -13,6 +13,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { forceSimulation, forceManyBody, forceLink, forceCenter, forceCollide, forceX, forceY } from 'd3-force';
 import { buildUniverse } from './layout.js';
+import { loadPanorama } from './panorama.js';
 
 // ── shaders ────────────────────────────────────────────────────────────
 // Star sprites: billboarded quads with a radial gradient so each "star"
@@ -232,6 +233,27 @@ function buildStarfield() {
  *  the glow and the stars would describe two different galaxies. */
 const MW_TILT = { x: 0.36, y: 0.62, z: 0.17 };
 
+/** Idle rotation of the world about Y, rad/s. The graph and the sky share it. */
+const SPIN = 0.020;
+
+/* The sky, once the photograph arrives.
+ *
+ * The painted dome below is not thrown away — it is what is on screen for the
+ * first second and a half, and what stays there if the file is missing, which
+ * for a wallpaper matters more than it would for a page nobody leaves running.
+ * BAND_STARS is why the swap is not just a texture assignment: those 1500
+ * points exist to give the painted glow some resolvable stars, and a photograph
+ * arrives with its own. Left at full strength you get two star fields at
+ * slightly different densities over the same band, which reads as grain. Turned
+ * down rather than off, because they sit 300 units inside the dome and are the
+ * only thing giving the sky any parallax at all when the camera moves.
+ */
+const SKY_PHOTO = './sky/milkyway.jpg';
+const BAND_STARS_PAINTED = 0.55;
+const BAND_STARS_PHOTO = 0.22;
+/** Crush the photograph's voids to true black — see graded() in panorama.js. */
+const SKY_GRADE = 'brightness(1.25) contrast(1.30) saturate(1.15)';
+
 function milkyWayTexture() {
     const W = 2048, H = 1024;
     const c = document.createElement('canvas');
@@ -351,7 +373,8 @@ function milkyWayTexture() {
     return tex;
 }
 
-function buildMilkyWay() {
+/** @param {number} anisotropy from renderer.capabilities.getMaxAnisotropy() */
+function buildMilkyWay(anisotropy = 1) {
     const group = new THREE.Group();
 
     const dome = new THREE.Mesh(
@@ -407,13 +430,36 @@ function buildMilkyWay() {
         size: 0.85,
         sizeAttenuation: false,
         transparent: true,
-        opacity: 0.55,
+        opacity: BAND_STARS_PAINTED,
         depthWrite: false,
         fog: false,                       // same reason as the dome
         blending: THREE.AdditiveBlending,
     }));
     bandStars.rotation.set(MW_TILT.x, MW_TILT.y, MW_TILT.z);
     group.add(bandStars);
+
+    /* Swap the painted band for the photograph when it lands. The void the
+       image fades out into is BLACK and not the page colour, because this dome
+       is drawn with additive blending: black is the only value that adds
+       nothing, and anything else would lift the whole sky by a constant. */
+    loadPanorama(new URL(SKY_PHOTO, import.meta.url).href,
+                 { voidColor: [0, 0, 0], top: 0.10, bottom: 0.10, filter: SKY_GRADE })
+        .then((canvas) => {
+            if (!canvas) return;                  // painted sky stands
+            const tex = new THREE.CanvasTexture(canvas);
+            tex.colorSpace = THREE.SRGBColorSpace;
+            tex.wrapS = THREE.RepeatWrapping;
+            tex.wrapT = THREE.ClampToEdgeWrapping;
+            tex.anisotropy = anisotropy;
+            dome.material.map?.dispose();         // the canvas we are replacing
+            dome.material.map = tex;
+            // The painted sky was held at 0.85 because it was drawn to be a
+            // glow. A graded photograph is already as dark as it should be
+            // where it is dark, so holding it back only greys the band.
+            dome.material.opacity = 1;
+            dome.material.needsUpdate = true;
+            bandStars.material.opacity = BAND_STARS_PHOTO;
+        });
 
     return group;
 }
@@ -709,12 +755,27 @@ export function createScene(canvas, callbacks = {}) {
     // background starfield is built once and never replaced. Reference is
     // kept so setBackground('black') can hide it for the "deep void" look.
     const starfieldObj = buildStarfield();
-    scene.add(starfieldObj);
 
     // The galaxy the sky belongs to. Same lifetime as the starfield — built
     // once, never rebuilt per brain, hidden together with it in 'black' mode.
-    const milkyWayObj = buildMilkyWay();
-    scene.add(milkyWayObj);
+    const milkyWayObj = buildMilkyWay(renderer.capabilities.getMaxAnisotropy());
+
+    /* ONE GROUP, and it turns with the universe.
+       Both of these used to be added straight to the scene, which meant that
+       while the graph did its slow idle rotation the sky sat perfectly still
+       behind it. Drag the mouse and everything moved together — the camera was
+       orbiting, so of course it did — but let go and only half the picture kept
+       moving. A sky that is nailed down while the world in front of it turns is
+       the one thing that gives away that it is a backdrop and not a place, and
+       the fault only ever showed when nobody was touching anything.
+       Rotated at exactly universeGroup's rate rather than a slower "parallax"
+       one: a rigid rotation about Y turns everything through the same angle
+       whatever its distance, so anything less is not depth, it is the sky
+       slipping. The nebula still spins faster on its own axis, which is where
+       the relative motion in the scene comes from. */
+    const skyGroup = new THREE.Group();
+    skyGroup.add(starfieldObj, milkyWayObj);
+    scene.add(skyGroup);
 
     // All "live" content (stars, edges, nebula) lives inside one universeGroup
     // so a single rotation pumps motion through everything coherently. Nebula
@@ -1504,7 +1565,11 @@ export function createScene(canvas, callbacks = {}) {
         const mo = settings.motion;
         if (mo > 0) {
             const flyPause = fly ? 0.15 : 1.0;
-            universeGroup.rotation.y += dt * 0.020 * mo * flyPause;
+            const spin = dt * SPIN * mo * flyPause;
+            universeGroup.rotation.y += spin;
+            // The sky turns through the SAME angle, off the same variable, so
+            // the two can never be edited apart. It is one world turning.
+            skyGroup.rotation.y += spin;
             nebulaGroup.rotation.y  += dt * 0.045 * mo;
             nebulaGroup.rotation.x  += dt * 0.012 * mo;
         }
