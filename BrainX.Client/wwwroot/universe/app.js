@@ -632,17 +632,24 @@ let pendingBrain = null;
 let _lastGalaxies = null;
 
 /**
- * Did this MCP call CHANGE the brain, or only read it?
+ * Did this touch CHANGE the brain, or only read it?
  *
- * Matched on a verb the tool name contains rather than an allow-list of tool
- * names, because the tool list grows — a new `brain_merge_notes` would have to
- * be remembered here, and the failure is silent (a real change that never
- * moves the picture). Verbs are how these tools have always been named.
+ * `write` FIRST, because it is the one that actually happens. The access log's
+ * whole vocabulary is eight short verbs, not tool names — search, recall,
+ * semantic_search and get_note read; `write` is the only one that changes a
+ * note, and it covers both an MCP write and an editor save, which reach here
+ * as the same string (BumpNodeActivityByPath passes "write" too). The first
+ * cut of this matched tool-name verbs like `create` and `append` and therefore
+ * matched NOTHING this log emits: the galaxies would never have re-settled and
+ * nothing would have said why. Checked against every op in 8,900 logged calls.
  *
- * The access log carries both the old `mcp.<tool>` and the new bare `<tool>`
- * shape, and `contains` reads both without caring which.
+ * The tool-name verbs stay because the client documents two access-log shapes
+ * (`mcp.<tool>` and bare `<tool>`), so an op named after a tool is a thing this
+ * has to survive rather than a thing it can assume away. None of them appears
+ * inside a read verb, so the superset costs nothing.
  */
-const WRITE_VERBS = ['create', 'append', 'remember', 'import', 'delete', 'remove',
+const WRITE_VERBS = ['write', 'save',
+                     'create', 'append', 'remember', 'import', 'delete', 'remove',
                      'apply_audit_fix', 'mark_verified', 'synthesize', 'dream'];
 function isWriteOp(op) {
     if (!op) return false;
