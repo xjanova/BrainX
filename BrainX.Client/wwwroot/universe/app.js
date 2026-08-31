@@ -31,6 +31,7 @@ const $settingsToggle = document.getElementById('settings-toggle');
 const $settingsPanel  = document.getElementById('settings-panel');
 const $setGlow   = document.getElementById('set-glow');
 const $setStars  = document.getElementById('set-stars');
+const $setSky    = document.getElementById('set-sky');
 const $setSize   = document.getElementById('set-size');
 const $setEdges  = document.getElementById('set-edges');
 const $setDrift  = document.getElementById('set-drift');
@@ -39,6 +40,7 @@ const $setLightning      = document.getElementById('set-lightning');
 const $setLightningSpeed = document.getElementById('set-lightning-speed');
 const $setGlowV   = document.getElementById('set-glow-val');
 const $setStarsV  = document.getElementById('set-stars-val');
+const $setSkyV    = document.getElementById('set-sky-val');
 const $setSizeV   = document.getElementById('set-size-val');
 const $setEdgesV  = document.getElementById('set-edges-val');
 const $setDriftV  = document.getElementById('set-drift-val');
@@ -109,6 +111,7 @@ function saveWallpaperPrefs(prefs) {
 const SETTINGS_KEY = 'obsidianx.universe.settings.v3';
 const DEFAULT_SETTINGS = {
     glow: 0.55, stars: 0.85, motion: 1.0,
+    sky: 1.0,               // Milky Way dome brightness; 0 = off, 1 = as tuned
     size: 1.0, edges: 1.0, drift: 0.0,
     lightning: 1.0,         // 0 = disable pulse flash, 1 = default, 2 = blinding
     lightningSpeed: 1.0,    // 0.5 = slow majestic strike, 2 = frantic flicker
@@ -897,6 +900,7 @@ function loadSettings() {
         return {
             glow:   num(parsed.glow,   DEFAULT_SETTINGS.glow),
             stars:  num(parsed.stars,  DEFAULT_SETTINGS.stars),
+            sky:    num(parsed.sky,    DEFAULT_SETTINGS.sky),
             motion: num(parsed.motion, DEFAULT_SETTINGS.motion),
             size:   num(parsed.size,   DEFAULT_SETTINGS.size),
             edges:  num(parsed.edges,  DEFAULT_SETTINGS.edges),
@@ -947,6 +951,7 @@ function saveSettings(s) {
 function applySettingsToUI(s) {
     if ($setGlow)   { $setGlow.value   = s.glow;   $setGlowV.textContent   = s.glow.toFixed(2); }
     if ($setStars)  { $setStars.value  = s.stars;  $setStarsV.textContent  = s.stars.toFixed(2); }
+    if ($setSky)    { $setSky.value    = s.sky;    $setSkyV.textContent    = s.sky.toFixed(2); }
     if ($setSize)   { $setSize.value   = s.size;   $setSizeV.textContent   = s.size.toFixed(2); }
     if ($setEdges)  { $setEdges.value  = s.edges;  $setEdgesV.textContent  = s.edges.toFixed(2); }
     if ($setDrift)  { $setDrift.value  = s.drift;  $setDriftV.textContent  = s.drift.toFixed(2); }
@@ -988,6 +993,7 @@ function applySettingsToScene(s) {
     if (!scene) return;
     scene.setGlow(s.glow);
     scene.setStars(s.stars);
+    scene.setSky?.(s.sky);
     scene.setStarSize?.(s.size);
     scene.setEdgeAlpha?.(s.edges);
     scene.setDrift?.(s.drift);
@@ -1066,6 +1072,7 @@ function wireSettingsPanel() {
     };
     $setGlow  ?.addEventListener('input', onSlide('glow',   $setGlow,   $setGlowV));
     $setStars ?.addEventListener('input', onSlide('stars',  $setStars,  $setStarsV));
+    $setSky   ?.addEventListener('input', onSlide('sky',    $setSky,    $setSkyV));
     $setSize  ?.addEventListener('input', onSlide('size',   $setSize,   $setSizeV));
     $setEdges ?.addEventListener('input', onSlide('edges',  $setEdges,  $setEdgesV));
     $setDrift ?.addEventListener('input', onSlide('drift',  $setDrift,  $setDriftV));

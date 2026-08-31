@@ -251,8 +251,19 @@ const SPIN = 0.020;
 const SKY_PHOTO = './sky/milkyway.jpg';
 const BAND_STARS_PAINTED = 0.55;
 const BAND_STARS_PHOTO = 0.22;
-/** Crush the photograph's voids to true black — see graded() in panorama.js. */
-const SKY_GRADE = 'brightness(1.25) contrast(1.30) saturate(1.15)';
+
+/* HOW BRIGHT THE SKY IS ALLOWED TO BE, and why the photograph gets less than
+   the painting did. The dome is drawn ADDITIVELY, so every value in the image
+   is light added to the whole view — and a photograph carries far more total
+   light than a painted glow does, because the painting is mostly black by
+   construction and the photograph has stars everywhere. Shipping it at the
+   painting's 0.85, then grading it BRIGHTER on top, put the sky over the graph
+   and the nodes stopped reading. Cut, and the contrast raised instead: pushing
+   the voids to black takes light off the screen where it means nothing and
+   leaves it where the band is. */
+const SKY_DOME_PAINTED = 0.85;
+const SKY_DOME_PHOTO = 0.55;
+const SKY_GRADE = 'brightness(0.95) contrast(1.40) saturate(1.10)';
 
 function milkyWayTexture() {
     const W = 2048, H = 1024;
@@ -391,7 +402,7 @@ function buildMilkyWay(anisotropy = 1) {
                would be mathematically erased and the bug would look like "the
                texture failed to load". */
             fog: false,
-            opacity: 0.85,
+            opacity: SKY_DOME_PAINTED,
         })
     );
     dome.renderOrder = -10;
@@ -438,6 +449,19 @@ function buildMilkyWay(anisotropy = 1) {
     bandStars.rotation.set(MW_TILT.x, MW_TILT.y, MW_TILT.z);
     group.add(bandStars);
 
+    /* The owner's brightness knob, kept HERE because this is the only place
+       that knows which sky is currently on the dome and therefore what "1.00"
+       is supposed to mean. It is a multiplier on the tuned opacities above,
+       not an opacity itself: the painted sky and the photograph need different
+       amounts to look the same, and the slider must not change meaning under
+       the user when the photograph finishes loading a second after the page. */
+    let domeBase = SKY_DOME_PAINTED, starBase = BAND_STARS_PAINTED, brightness = 1;
+    group.userData.setBrightness = (v) => {
+        brightness = Math.max(0, Number.isFinite(v) ? v : 1);
+        dome.material.opacity = domeBase * brightness;
+        bandStars.material.opacity = starBase * brightness;
+    };
+
     /* Swap the painted band for the photograph when it lands. The void the
        image fades out into is BLACK and not the page colour, because this dome
        is drawn with additive blending: black is the only value that adds
@@ -453,12 +477,12 @@ function buildMilkyWay(anisotropy = 1) {
             tex.anisotropy = anisotropy;
             dome.material.map?.dispose();         // the canvas we are replacing
             dome.material.map = tex;
-            // The painted sky was held at 0.85 because it was drawn to be a
-            // glow. A graded photograph is already as dark as it should be
-            // where it is dark, so holding it back only greys the band.
-            dome.material.opacity = 1;
             dome.material.needsUpdate = true;
-            bandStars.material.opacity = BAND_STARS_PHOTO;
+            // Re-apply through the same knob, so whatever the owner had it set
+            // to survives the swap instead of snapping back to the default.
+            domeBase = SKY_DOME_PHOTO;
+            starBase = BAND_STARS_PHOTO;
+            group.userData.setBrightness(brightness);
         });
 
     return group;
@@ -790,6 +814,7 @@ export function createScene(canvas, callbacks = {}) {
         motion: 1.0,        // 0 = freeze frame, 1 = default lively, 2 = brisk
         glow: 0.55,         // mirrors bloom.strength
         stars: 0.85,        // uStarScale — color/alpha intensity (renamed "Brightness" in UI)
+        sky: 1.0,           // multiplier on the Milky Way dome; 0 = off, 1 = as tuned
         size:  1.0,         // uSizeScale — star size multiplier
         edges: 1.0,         // uEdgeAlpha — edge alpha multiplier
         drift: 0.0,         // 0 = freeze after settle; >0 = keep sims simmering forever
@@ -2159,6 +2184,16 @@ export function createScene(canvas, callbacks = {}) {
         settings.stars = clamp(v, 0.2, 1.5);
         applySettings();
     }
+    /**
+     * How bright the Milky Way behind the graph is. 0 turns it off entirely
+     * and leaves the plain starfield; 1 is the tuned default. Separate from
+     * `stars`, which is the note-stars — these are the two things that fight
+     * each other for the same screen, so they get a knob each.
+     */
+    function setSky(v) {
+        settings.sky = clamp(v, 0, 1.5);
+        milkyWayObj?.userData.setBrightness?.(settings.sky);
+    }
     function setStarSize(v) {
         settings.size = clamp(v, 0.3, 3.0);
         applySettings();
@@ -2604,6 +2639,7 @@ export function createScene(canvas, callbacks = {}) {
         setMotion,
         setGlow,
         setStars,
+        setSky,
         setStarSize,
         setEdgeAlpha,
         setLightning,
