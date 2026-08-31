@@ -1221,6 +1221,12 @@ public partial class MainWindow
     {
         if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(PushHudBusy); return; }
         PostHud("hudBusy", new { reindex = IndexRunning, garden = GardenRunning });
+        // The same two facts, to the SCENE on every surface rather than to the
+        // main view's HUD chrome. Put here rather than beside each caller so
+        // both jobs are covered on every path in and out, including the ones
+        // that only ever go through this method.
+        BroadcastBrainWorkToUniverse("garden", GardenRunning);
+        BroadcastBrainWorkToUniverse("reindex", IndexRunning);
     }
 
     private static string HexOf(Color c) => $"#{c.R:X2}{c.G:X2}{c.B:X2}";

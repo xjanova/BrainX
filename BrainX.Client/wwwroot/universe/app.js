@@ -680,12 +680,14 @@ function onHostMessage(evt) {
                 if (msg.noteId && isWriteOp(msg.op)) scene.reorganize?.([msg.noteId]);
             }
             break;
-        case 'garden':
-            // The gardener re-bakes bundles, fills embeddings and audits the
-            // whole vault — usually while nobody is watching. It is the most
-            // literally "the brain is organising itself" thing this product
-            // does, and the picture used to sit perfectly still through it.
-            scene?.setGardening?.(!!msg.running);
+        case 'brainwork':
+            // A long job over the whole brain: the gardener re-baking bundles
+            // and auditing, or a re-index re-scanning the vault. Both are
+            // literally "the brain is being organised", and the picture used
+            // to sit perfectly still through either. Sent as a state per job
+            // rather than as edges, so a message that arrives twice, or one
+            // that is missed, still leaves the scene agreeing with the app.
+            scene?.setBrainWork?.(msg.job, !!msg.running);
             break;
         case 'peerJoined':
             // Join Brain demo / live: C# forwards every PeerJoined hub

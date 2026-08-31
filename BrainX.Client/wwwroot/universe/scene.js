@@ -1058,6 +1058,7 @@ export function createScene(canvas, callbacks = {}) {
         // is what makes load and every later re-organisation the same code
         // path, and therefore impossible to drift apart.
         batches = [{ sims: new Set(sims), deadline: performance.now() + BATCH_MAX_MS }];
+        syncWorkAmbient();     // a job that outlived the previous scene resumes
 
         // Build id→index map once so C#-forwarded pulses (by note id) can
         // O(1) find the right star slot in the buffer.
@@ -1124,6 +1125,12 @@ export function createScene(canvas, callbacks = {}) {
         batches = [];
         cancelPendingReorg();
         simOfNode = null;
+        // The ambient interval outlives `universe` unless it is stopped here —
+        // it would keep firing at a disposed scene forever, harmlessly but
+        // forever. syncWorkAmbient re-arms it after the next mount if the job
+        // that started it is still running.
+        universe = null;
+        syncWorkAmbient();
         bloom.strength = settings.glow;
         // Drop component analysis — a new brain payload may have a totally
         // different graph topology, so the snapshot and component map
@@ -2215,7 +2222,13 @@ export function createScene(canvas, callbacks = {}) {
         // indistinguishable from no surge at all. The floor is what keeps the
         // smallest galaxy still legible as an arrival.
         const share = Math.max(0.35, Math.sqrt(pairs.length / Math.max(1, universe.nodes.length)));
-        converge = { t0: performance.now(), order, at, cursor: 0, peak: CONVERGE_GLOW_PEAK * share };
+        // Never dip below a surge already in flight. Two galaxies settling a
+        // second apart are two honest events, but restarting the envelope at a
+        // smaller peak while the first is still cresting reads as the light
+        // FAILING, not as a second arrival. The wave still restarts — new
+        // stars do have to light — only the bloom refuses to go backwards.
+        const peak = Math.max(CONVERGE_GLOW_PEAK * share, converge?.peak ?? 0);
+        converge = { t0: performance.now(), order, at, cursor: 0, peak };
     }
 
     /** Global star index → the sim that owns it. Built with the sims. */
@@ -2292,44 +2305,90 @@ export function createScene(canvas, callbacks = {}) {
         // Fold into a batch already watching the same cause instead of opening
         // a second one — two batches over overlapping galaxies would flash
         // twice for what the owner did once.
+        const now = performance.now();
         const open = batches.find(b => list.every(ps => b.sims.has(ps)));
-        if (open) { open.deadline = performance.now() + BATCH_MAX_MS; return; }
-        batches.push({ sims: new Set(list), deadline: performance.now() + BATCH_MAX_MS });
+        if (open) { open.deadline = now + BATCH_MAX_MS; return; }
+        // And the other direction, which the first cut of this missed: a note
+        // written a second before the gardener finishes leaves a one-galaxy
+        // batch open INSIDE the all-galaxy one. Nothing contained the new list,
+        // so a second batch opened, and that galaxy — settling on the same
+        // curve as every other — would flash small on its own and then again
+        // with the rest. Two flashes, half a second apart, for one arrival:
+        // exactly the stutter this design exists to avoid. The bigger cause
+        // swallows the smaller.
+        const kept = [];
+        for (const b of batches) {
+            let inside = true;
+            for (const ps of b.sims) if (!list.includes(ps)) { inside = false; break; }
+            if (!inside) kept.push(b);
+        }
+        batches = kept;
+        batches.push({ sims: new Set(list), deadline: now + BATCH_MAX_MS });
     }
 
-    /* ── The gardener, made visible ──────────────────────────────────────
+    /* ── Long jobs over the whole brain, made visible ────────────────────
      *
-     * `brainx-mcp garden` runs unattended once a day while the owner is away:
-     * it re-bakes stale bundles, fills missing embeddings and audits the whole
-     * vault. It is the single most "the brain is organising itself" thing this
-     * product does, and until now the picture did not move for it at all.
+     * Two of these exist and they behave identically, so they get one path
+     * rather than two that drift:
      *
-     * WHILE IT RUNS the brain is being read note by note, so it is shown the
+     *   garden   `brainx-mcp garden` runs unattended once a day while the
+     *            owner is away — re-bakes stale bundles, fills missing
+     *            embeddings, audits the vault.
+     *   reindex  the vault is re-scanned into the graph. The app's own 2D
+     *            view has always shaken on this (`_dashPhysics.Disturb(kick)`
+     *            right after IndexVaultAsync); the 3D universe was the only
+     *            surface that sat still through the same event.
+     *
+     * WHILE ONE RUNS the brain is being read note by note, so it is shown the
      * way every other note-touch is shown — a star lighting up — just slow and
-     * unfocused. Reusing the pulse rather than inventing a new effect is the
-     * point: the owner already knows that flicker means "something touched a
-     * note", and that is exactly what is happening.
+     * unfocused. Reusing the pulse rather than inventing an effect is the
+     * point: that flicker already means "something touched a note", and that
+     * is exactly what is happening.
      *
-     * WHEN IT FINISHES every galaxy re-settles and the full convergence flash
-     * fires. That is the honest scope — the pass touched everything.
+     * WHEN THE LAST ONE FINISHES every galaxy re-settles and the full flash
+     * fires. A SET rather than a flag because the two can overlap — a re-index
+     * kicked off while the gardener is still going would otherwise stop the
+     * ambience early and fire the arrival twice, once for a pass that had not
+     * actually finished.
      */
-    const GARDEN_TICK_MS = 900;
-    let gardenTimer = null;
+    const WORK_TICK_MS = 900;
+    const workJobs = new Set();
+    let workTimer = null;
 
-    function setGardening(on) {
-        const was = !!gardenTimer;
-        if (on === was) return;
-        if (on) {
-            gardenTimer = setInterval(() => {
-                if (settings.lightning > 0) firePulseRandom('garden');
-            }, GARDEN_TICK_MS);
-            return;
+    /**
+     * @param {string} job   'garden' | 'reindex'
+     * @param {boolean} on
+     */
+    function setBrainWork(job, on) {
+        const before = workJobs.size;
+        if (on) workJobs.add(job || 'work'); else workJobs.delete(job || 'work');
+        syncWorkAmbient();
+        // Falling edge of the LAST job: the work is done. Everything it
+        // touched settles at once, which is the one case where the whole-sky
+        // flash is the plain truth.
+        if (before > 0 && workJobs.size === 0 && sims.length) heatAndWatch(sims, REORG_ALPHA);
+    }
+
+    /**
+     * Start or stop the ambient flicker to match the job set.
+     *
+     * Also called from mount, because a re-index or a garden pass can outlive
+     * the scene it started under — the brain payload it produces is what
+     * re-mounts us. Without this the ambience would die at the swap and never
+     * come back, and the arrival flash would land with nothing having led up
+     * to it.
+     */
+    function syncWorkAmbient() {
+        const want = workJobs.size > 0 && !!universe;
+        if (want === !!workTimer) return;
+        if (want) {
+            workTimer = setInterval(() => {
+                if (settings.lightning > 0) firePulseRandom('work');
+            }, WORK_TICK_MS);
+        } else {
+            clearInterval(workTimer);
+            workTimer = null;
         }
-        clearInterval(gardenTimer);
-        gardenTimer = null;
-        // Falling edge = the pass is done. Everything it touched settles at
-        // once, which is the one case where the whole-sky flash is the truth.
-        if (was && sims.length) heatAndWatch(sims, REORG_ALPHA);
     }
 
     /**
@@ -2826,7 +2885,7 @@ export function createScene(canvas, callbacks = {}) {
         firePulse,
         firePulseRandom,
         reorganize,
-        setGardening,
+        setBrainWork,
         // Peer-halo API — see addPeer / removePeer / pulsePeerActivity
         // declarations above. Idempotent + safe to call before brain mount.
         addPeer,

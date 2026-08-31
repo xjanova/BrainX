@@ -14390,24 +14390,32 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Tell every Universe surface the gardener has started or stopped.
+    /// Tell every Universe surface that a long job over the whole brain — the
+    /// gardener, or a re-index — has started or stopped.
     ///
     /// hudBusy already carries the same fact, but only to the main view's HUD
-    /// chrome — and it is a HUD message, read by hud.js. This one is for the
-    /// scene: while it runs, notes light up as they are touched; when it
-    /// stops, the galaxies re-settle and the arrival flash fires.
+    /// chrome, and it is a HUD message read by hud.js. This one is for the
+    /// scene: while a job runs, notes light up as they are touched; when the
+    /// last one stops, the galaxies re-settle and the arrival flash fires.
+    ///
+    /// STATE, not edges. Sent as "this job is/is not running" rather than
+    /// "this job just started", so a message that arrives twice or one that is
+    /// missed still leaves the scene agreeing with the app. That is what lets
+    /// the single call in PushHudBusy() cover every path into and out of both
+    /// jobs, instead of a broadcast beside every one of them.
     /// </summary>
-    private void BroadcastGardenToUniverse(bool running)
+    private void BroadcastBrainWorkToUniverse(string job, bool running)
     {
         if (!_universeInitialized && _wallpapers.Count == 0 && _setupInstance == null
             && !_dashUniverseInitialized) return;
         try
         {
             FanOutToUniverseSurfaces(
-                "{\"type\":\"garden\",\"running\":" + (running ? "true" : "false") + "}",
-                "garden");
+                "{\"type\":\"brainwork\",\"job\":\"" + EscapeJson(job) + "\",\"running\":"
+                    + (running ? "true" : "false") + "}",
+                "brainwork");
         }
-        catch (Exception ex) { Debug.WriteLine($"BroadcastGardenToUniverse: {ex.Message}"); }
+        catch (Exception ex) { Debug.WriteLine($"BroadcastBrainWorkToUniverse: {ex.Message}"); }
     }
 
     /// <summary>
