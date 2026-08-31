@@ -903,8 +903,47 @@ export function createScene(canvas, callbacks = {}) {
     const CONVERGE_GLOW_MS   = 1150;   // bloom surge, outlasts the wave
     const CONVERGE_GLOW_PEAK = 0.55;   // added on top of settings.glow at the crest
     const CONVERGE_CREST     = 0.38;   // fraction of the surge spent rising
-    let converge = null;        // { t0, order: Int32Array, at: Float32Array, cursor }
-    let simsWereHot = false;    // edge detector for "the last galaxy just stopped"
+    let converge = null;        // { t0, order: Int32Array, at: Float32Array, cursor, peak }
+
+    /* ── Settling batches ────────────────────────────────────────────────
+     *
+     * WHY THIS REPLACED A SINGLE BOOLEAN. The flash used to hang off one
+     * global edge detector: "were any sims hot last frame, are none hot now".
+     * That is exactly right for the one event it was written for — the brain
+     * assembling itself on load — and useless for every other one, because it
+     * can only ever describe the whole universe at once.
+     *
+     * The brain is not only organised at startup. It is organised all day:
+     * an agent writes a note, the gardener re-bakes bundles and fills
+     * embeddings while the owner is away. Those are real events with a real
+     * SCOPE — one galaxy, or all of them — and the picture should say which.
+     *
+     * So a batch is "the set of galaxies that one cause just disturbed". It
+     * completes when every galaxy in it has come to rest, and completing is
+     * what fires the flash, over exactly those stars. Load registers a batch
+     * of all sims, which reproduces the old behaviour precisely; a note being
+     * written registers a batch of one.
+     *
+     * WHY A BATCH AND NOT PER-GALAXY. Fifteen galaxies re-heated together
+     * settle at slightly different times. Flashing each as it stops is
+     * fifteen events where there was one thing — the stutter the original
+     * design went out of its way to avoid. Waiting for the last one keeps a
+     * cause and its effect one to one.
+     */
+    let batches = [];           // [{ sims: Set, deadline }]
+    let simOfNode = null;       // global star index → its sim, for scoping
+    /** Re-heat alpha for a re-organisation. Not 1.0: this is a settling, not
+     *  a rebuild, and a full re-heat throws the layout apart hard enough that
+     *  the eye reads it as the graph breaking rather than tidying. */
+    const REORG_ALPHA = 0.28;
+    /** Agents write in bursts. Collect ids for this long so three notes in
+     *  two seconds are ONE re-organisation with one flash, not three. */
+    const REORG_COALESCE_MS = 700;
+    /** A batch can only complete by going cold, and with Drift > 0 no sim
+     *  ever does. Without this they would pile up forever, holding memory and
+     *  firing nothing. Expiring silently is right: nothing arrived. */
+    const BATCH_MAX_MS = 30000;
+    let pendingReorg = null;    // { ids: Set, timer }
 
     // Edge alpha pipeline (fixes B1 + B2 from the review).
     //
@@ -1013,6 +1052,12 @@ export function createScene(canvas, callbacks = {}) {
         // static log-spiral. Sims mutate node.local.{u,v}; projectAll then
         // pushes new world positions to the GPU buffers each frame.
         sims = buildPhysics(universe);
+        buildSimIndex();
+        // The assembly is itself a batch — the whole sky, disturbed by one
+        // cause. Registering it here rather than special-casing "first settle"
+        // is what makes load and every later re-organisation the same code
+        // path, and therefore impossible to drift apart.
+        batches = [{ sims: new Set(sims), deadline: performance.now() + BATCH_MAX_MS }];
 
         // Build id→index map once so C#-forwarded pulses (by note id) can
         // O(1) find the right star slot in the buffer.
@@ -1027,7 +1072,8 @@ export function createScene(canvas, callbacks = {}) {
         // from a previous universe, the very first frame of this one would
         // look like an arrival that had already happened.
         converge = null;
-        simsWereHot = false;
+        batches = [];
+        cancelPendingReorg();
 
         // fit camera: aim at centroid of all galaxy centers; back off enough
         // that all galaxies fit comfortably in the frustum.
@@ -1075,7 +1121,9 @@ export function createScene(canvas, callbacks = {}) {
         // next thing mounted would inherit a scene lit 2× brighter than the
         // owner's slider says.
         converge = null;
-        simsWereHot = false;
+        batches = [];
+        cancelPendingReorg();
+        simOfNode = null;
         bloom.strength = settings.glow;
         // Drop component analysis — a new brain payload may have a totally
         // different graph topology, so the snapshot and component map
@@ -1243,13 +1291,27 @@ export function createScene(canvas, callbacks = {}) {
         }
         if (anyHot) projectAndUpload();
 
-        // An EDGE, not a level: the flash belongs to the instant the last
-        // galaxy stops moving, not to every one of the thousands of frames
-        // it sits still afterwards. With drift > 0 the sims are never allowed
-        // to cool, so this never fires — which is correct, because nothing
-        // ever finishes arriving.
-        if (simsWereHot && !anyHot) startConvergenceFlash();
-        simsWereHot = anyHot;
+        // A batch fires when every galaxy IT disturbed has come to rest —
+        // which is not the same question as "is anything moving", because a
+        // note written during the gardener's pass must not steal the
+        // gardener's flash, nor be swallowed by it.
+        if (batches.length) {
+            const now = performance.now();
+            for (let i = batches.length - 1; i >= 0; i--) {
+                const b = batches[i];
+                let hot = false;
+                for (const ps of b.sims) {
+                    if (ps.sim.alpha() > ps.sim.alphaMin()) { hot = true; break; }
+                }
+                if (hot) {
+                    if (now > b.deadline) batches.splice(i, 1);   // Drift on: never arrives
+                    continue;
+                }
+                batches.splice(i, 1);
+                startConvergenceFlash([...b.sims]);
+            }
+        }
+
     }
 
     function applySettings() {
@@ -1658,7 +1720,9 @@ export function createScene(canvas, callbacks = {}) {
     }
 
     function resettle() {
-        for (const ps of sims) ps.sim.alpha(1.0);
+        // Through heatAndWatch so the manual button gets the arrival flash the
+        // automatic paths get. A re-settle you asked for is still an arrival.
+        heatAndWatch(sims, 1.0);
     }
 
     // ── Peer halos (Join Brain visualization) ────────────────────────────
@@ -2112,13 +2176,24 @@ export function createScene(canvas, callbacks = {}) {
      * small one is still lighting up — which would read as a stutter rather
      * than one event.
      */
-    function startConvergenceFlash() {
+    /**
+     * @param {Array} which  the galaxies this flash belongs to. Defaults to
+     *   all of them, which is the load/resettle case.
+     *
+     * SCOPE IS THE MESSAGE. A note being written disturbs one galaxy, and if
+     * that fired the same whole-sky flash as the brain assembling itself, the
+     * picture would be lying about how much just happened. The wave covers
+     * only the stars that moved, and the bloom surge is scaled by their share
+     * of the sky — so a small change reads small and the gardener finishing a
+     * full pass reads like the arrival it is, off one code path.
+     */
+    function startConvergenceFlash(which = sims) {
         // settings.lightning is the owner's existing "how loud are flashes"
         // control, including 0 = off. A new effect does not get to ignore it.
-        if (!pulseAttr || !universe || !sims.length || settings.lightning <= 0) return;
+        if (!pulseAttr || !universe || !which.length || settings.lightning <= 0) return;
 
         const pairs = [];
-        for (const ps of sims) {
+        for (const ps of which) {
             const r = Math.max(1e-3, ps.radius);
             for (let k = 0; k < ps.particles.length; k++) {
                 const p = ps.particles[k];
@@ -2135,7 +2210,126 @@ export function createScene(canvas, callbacks = {}) {
         const at    = new Float32Array(pairs.length);
         for (let i = 0; i < pairs.length; i++) { order[i] = pairs[i][0]; at[i] = pairs[i][1]; }
 
-        converge = { t0: performance.now(), order, at, cursor: 0 };
+        // Square-rooted, not linear: one galaxy in fifteen is 7% of the stars
+        // but nothing like 7% of the event, and a surge that faint is
+        // indistinguishable from no surge at all. The floor is what keeps the
+        // smallest galaxy still legible as an arrival.
+        const share = Math.max(0.35, Math.sqrt(pairs.length / Math.max(1, universe.nodes.length)));
+        converge = { t0: performance.now(), order, at, cursor: 0, peak: CONVERGE_GLOW_PEAK * share };
+    }
+
+    /** Global star index → the sim that owns it. Built with the sims. */
+    function buildSimIndex() {
+        simOfNode = new Map();
+        for (const ps of sims)
+            for (const gi of ps.localToGlobalIdx) simOfNode.set(gi, ps);
+    }
+
+    /**
+     * Something in the brain actually changed — let the galaxies it touched
+     * re-settle, and flash when they arrive.
+     *
+     * This is the whole point of the batch machinery: motion that happens all
+     * the time carries no information, and motion that happens when something
+     * changed carries all of it. Perpetual drift (the Drift slider) looks
+     * alive and says nothing — d3-force at low alpha is a wobble around a
+     * solution it already found. This moves only when there is a reason.
+     *
+     * @param {string[]} noteIds  ids of the notes that changed
+     * @param {{alpha?: number}} opts
+     */
+    function reorganize(noteIds, opts = {}) {
+        if (!sims.length || !idToIndex || !noteIds?.length) return;
+        if (!pendingReorg) pendingReorg = { ids: new Set(), alpha: 0, timer: null };
+        for (const id of noteIds) pendingReorg.ids.add(id);
+        pendingReorg.alpha = Math.max(pendingReorg.alpha, opts.alpha ?? REORG_ALPHA);
+        // Restart the window on every arrival: a burst of writes is ONE
+        // re-organisation, and the flash belongs at the end of the burst.
+        clearTimeout(pendingReorg.timer);
+        pendingReorg.timer = setTimeout(commitReorganize, REORG_COALESCE_MS);
+    }
+
+    function cancelPendingReorg() {
+        if (!pendingReorg) return;
+        clearTimeout(pendingReorg.timer);
+        pendingReorg = null;
+    }
+
+    function commitReorganize() {
+        const req = pendingReorg;
+        pendingReorg = null;
+        if (!req || !sims.length || !universe) return;
+        if (!simOfNode) buildSimIndex();
+
+        const touched = new Set();
+        for (const id of req.ids) {
+            const idx = idToIndex.get(id);
+            if (idx == null) continue;          // stale export; the pulse path already warns
+            const ps = simOfNode.get(idx);
+            if (ps) touched.add(ps);
+        }
+        if (!touched.size) return;
+        heatAndWatch([...touched], req.alpha);
+    }
+
+    /**
+     * Re-heat a set of galaxies and register the batch that will flash when
+     * they have all come to rest.
+     *
+     * `alpha()` rather than `alphaTarget()`: a target keeps the sim warm
+     * forever, which is Drift's job and would mean the batch never completes.
+     * Setting alpha gives it energy that decays on the same curve as the
+     * original settle, so a re-organisation LOOKS like the assembly it is a
+     * smaller version of.
+     */
+    function heatAndWatch(list, alpha = REORG_ALPHA) {
+        if (!list.length) return;
+        for (const ps of list) {
+            // max, never overwrite: a galaxy still settling from a moment ago
+            // must not be cooled down by a smaller nudge arriving on top.
+            if (ps.sim.alpha() < alpha) ps.sim.alpha(alpha);
+        }
+        // Fold into a batch already watching the same cause instead of opening
+        // a second one — two batches over overlapping galaxies would flash
+        // twice for what the owner did once.
+        const open = batches.find(b => list.every(ps => b.sims.has(ps)));
+        if (open) { open.deadline = performance.now() + BATCH_MAX_MS; return; }
+        batches.push({ sims: new Set(list), deadline: performance.now() + BATCH_MAX_MS });
+    }
+
+    /* ── The gardener, made visible ──────────────────────────────────────
+     *
+     * `brainx-mcp garden` runs unattended once a day while the owner is away:
+     * it re-bakes stale bundles, fills missing embeddings and audits the whole
+     * vault. It is the single most "the brain is organising itself" thing this
+     * product does, and until now the picture did not move for it at all.
+     *
+     * WHILE IT RUNS the brain is being read note by note, so it is shown the
+     * way every other note-touch is shown — a star lighting up — just slow and
+     * unfocused. Reusing the pulse rather than inventing a new effect is the
+     * point: the owner already knows that flicker means "something touched a
+     * note", and that is exactly what is happening.
+     *
+     * WHEN IT FINISHES every galaxy re-settles and the full convergence flash
+     * fires. That is the honest scope — the pass touched everything.
+     */
+    const GARDEN_TICK_MS = 900;
+    let gardenTimer = null;
+
+    function setGardening(on) {
+        const was = !!gardenTimer;
+        if (on === was) return;
+        if (on) {
+            gardenTimer = setInterval(() => {
+                if (settings.lightning > 0) firePulseRandom('garden');
+            }, GARDEN_TICK_MS);
+            return;
+        }
+        clearInterval(gardenTimer);
+        gardenTimer = null;
+        // Falling edge = the pass is done. Everything it touched settles at
+        // once, which is the one case where the whole-sky flash is the truth.
+        if (was && sims.length) heatAndWatch(sims, REORG_ALPHA);
     }
 
     /**
@@ -2169,7 +2363,7 @@ export function createScene(canvas, callbacks = {}) {
         const k = g < CONVERGE_CREST
             ? g / CONVERGE_CREST
             : 1 - (g - CONVERGE_CREST) / (1 - CONVERGE_CREST);
-        bloom.strength = settings.glow + CONVERGE_GLOW_PEAK * k * k * settings.lightning;
+        bloom.strength = settings.glow + (converge.peak ?? CONVERGE_GLOW_PEAK) * k * k * settings.lightning;
     }
 
     function setMotion(v) {
@@ -2631,6 +2825,8 @@ export function createScene(canvas, callbacks = {}) {
         resettle,
         firePulse,
         firePulseRandom,
+        reorganize,
+        setGardening,
         // Peer-halo API — see addPeer / removePeer / pulsePeerActivity
         // declarations above. Idempotent + safe to call before brain mount.
         addPeer,

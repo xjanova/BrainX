@@ -201,6 +201,11 @@ public partial class MainWindow
         _gardenRunning = true;
         _gardenStopRequested = false;
         PushHudBusy();
+        // The galaxy, not just the HUD. PushHudBusy reaches the main view's
+        // chrome; this reaches the scene on every surface including the
+        // wallpaper, which is where the owner actually sees the brain while
+        // the gardener is doing its work.
+        BroadcastGardenToUniverse(true);
         StatusText.Text = manual ? "🌱 คนสวนเริ่มทำงาน…" : "🌱 คนสวนทำงานตอนเครื่องว่าง…";
         try
         {
@@ -292,6 +297,10 @@ public partial class MainWindow
             _gardenRunning = false;
             _gardenProc = null;
             PushHudBusy();
+            // In `finally` on purpose: a crashed or stopped run still ENDED,
+            // and a galaxy left flickering as though the gardener were still
+            // walking it would be the picture telling a lie about the machine.
+            BroadcastGardenToUniverse(false);
         }
     }
 }

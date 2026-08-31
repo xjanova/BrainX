@@ -631,6 +631,25 @@ let pendingBrain = null;
 // was what made the universe stutter).
 let _lastGalaxies = null;
 
+/**
+ * Did this MCP call CHANGE the brain, or only read it?
+ *
+ * Matched on a verb the tool name contains rather than an allow-list of tool
+ * names, because the tool list grows — a new `brain_merge_notes` would have to
+ * be remembered here, and the failure is silent (a real change that never
+ * moves the picture). Verbs are how these tools have always been named.
+ *
+ * The access log carries both the old `mcp.<tool>` and the new bare `<tool>`
+ * shape, and `contains` reads both without caring which.
+ */
+const WRITE_VERBS = ['create', 'append', 'remember', 'import', 'delete', 'remove',
+                     'apply_audit_fix', 'mark_verified', 'synthesize', 'dream'];
+function isWriteOp(op) {
+    if (!op) return false;
+    const s = String(op).toLowerCase();
+    return WRITE_VERBS.some(v => s.includes(v));
+}
+
 function onHostMessage(evt) {
     const msg = evt.data;
     if (!msg || typeof msg !== 'object') return;
@@ -647,7 +666,19 @@ function onHostMessage(evt) {
             if (scene) {
                 if (msg.noteId) scene.firePulse(msg.noteId, msg.op);
                 else scene.firePulseRandom?.(msg.op);
+                // A READ and a WRITE are not the same event and must not look
+                // the same. Both flash the star — something touched this note.
+                // Only a write also lets that galaxy re-settle, because only a
+                // write changed what the layout is a picture OF.
+                if (msg.noteId && isWriteOp(msg.op)) scene.reorganize?.([msg.noteId]);
             }
+            break;
+        case 'garden':
+            // The gardener re-bakes bundles, fills embeddings and audits the
+            // whole vault — usually while nobody is watching. It is the most
+            // literally "the brain is organising itself" thing this product
+            // does, and the picture used to sit perfectly still through it.
+            scene?.setGardening?.(!!msg.running);
             break;
         case 'peerJoined':
             // Join Brain demo / live: C# forwards every PeerJoined hub

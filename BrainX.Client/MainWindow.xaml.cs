@@ -14353,28 +14353,61 @@ public partial class MainWindow : Window
             if (!string.IsNullOrEmpty(context))
                 sb.Append(",\"context\":\"").Append(EscapeJson(context)).Append("\"");
             sb.Append('}');
-            var json = sb.ToString();
-            // Fan out to ALL WebView surfaces so every Universe (main app +
-            // dashboard embed + each per-monitor wallpaper + setup preview
-            // if active) stays perfectly synced. Every MCP touch flashes
-            // the same star on each surface — user: "เอฟเฟค ของ univers
-            // เมื่อมีการค้นหา ที่เป็นการกระพริบ หายไปไหน".
-            try { UniverseWebView?.CoreWebView2?.PostWebMessageAsJson(json); }
-            catch (Exception ex) { Debug.WriteLine($"main pulse: {ex.Message}"); }
-            try { DashUniverseWebView?.CoreWebView2?.PostWebMessageAsJson(json); }
-            catch (Exception ex) { Debug.WriteLine($"dash pulse: {ex.Message}"); }
-            foreach (var inst in _wallpapers)
-            {
-                try { inst.WebView?.CoreWebView2?.PostWebMessageAsJson(json); }
-                catch (Exception ex) { Debug.WriteLine($"wallpaper pulse[{inst.MonitorId}]: {ex.Message}"); }
-            }
-            if (_setupInstance != null)
-            {
-                try { _setupInstance.WebView?.CoreWebView2?.PostWebMessageAsJson(json); }
-                catch (Exception ex) { Debug.WriteLine($"wallpaper-setup pulse: {ex.Message}"); }
-            }
+            FanOutToUniverseSurfaces(sb.ToString(), "pulse");
         }
         catch (Exception ex) { Debug.WriteLine($"BroadcastPulseToUniverse: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Post one envelope to every Universe surface: the main view, the
+    /// dashboard embed, each per-monitor wallpaper, and the setup preview.
+    ///
+    /// Pulled out of BroadcastPulseToUniverse when the gardener needed the
+    /// same reach. PostHud() deliberately targets ONLY the main view, because
+    /// HUD chrome does not exist on a wallpaper — but a scene effect does, and
+    /// the wallpaper is where this brain spends most of its life. Anything
+    /// that changes what the galaxy is DOING belongs on all of them.
+    ///
+    /// Each surface is wrapped on its own: one dead WebView must not stop the
+    /// others from hearing about it.
+    /// </summary>
+    private void FanOutToUniverseSurfaces(string json, string what)
+    {
+        try { UniverseWebView?.CoreWebView2?.PostWebMessageAsJson(json); }
+        catch (Exception ex) { Debug.WriteLine($"main {what}: {ex.Message}"); }
+        try { DashUniverseWebView?.CoreWebView2?.PostWebMessageAsJson(json); }
+        catch (Exception ex) { Debug.WriteLine($"dash {what}: {ex.Message}"); }
+        foreach (var inst in _wallpapers)
+        {
+            try { inst.WebView?.CoreWebView2?.PostWebMessageAsJson(json); }
+            catch (Exception ex) { Debug.WriteLine($"wallpaper {what}[{inst.MonitorId}]: {ex.Message}"); }
+        }
+        if (_setupInstance != null)
+        {
+            try { _setupInstance.WebView?.CoreWebView2?.PostWebMessageAsJson(json); }
+            catch (Exception ex) { Debug.WriteLine($"wallpaper-setup {what}: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>
+    /// Tell every Universe surface the gardener has started or stopped.
+    ///
+    /// hudBusy already carries the same fact, but only to the main view's HUD
+    /// chrome — and it is a HUD message, read by hud.js. This one is for the
+    /// scene: while it runs, notes light up as they are touched; when it
+    /// stops, the galaxies re-settle and the arrival flash fires.
+    /// </summary>
+    private void BroadcastGardenToUniverse(bool running)
+    {
+        if (!_universeInitialized && _wallpapers.Count == 0 && _setupInstance == null
+            && !_dashUniverseInitialized) return;
+        try
+        {
+            FanOutToUniverseSurfaces(
+                "{\"type\":\"garden\",\"running\":" + (running ? "true" : "false") + "}",
+                "garden");
+        }
+        catch (Exception ex) { Debug.WriteLine($"BroadcastGardenToUniverse: {ex.Message}"); }
     }
 
     /// <summary>
