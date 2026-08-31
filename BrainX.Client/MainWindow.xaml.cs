@@ -14404,6 +14404,49 @@ public partial class MainWindow : Window
     /// the single call in PushHudBusy() cover every path into and out of both
     /// jobs, instead of a broadcast beside every one of them.
     /// </summary>
+    /// <summary>
+    /// Send the semantic springs to the Universe surfaces.
+    ///
+    /// These have existed since 2026-04-25 but only the WPF PhysicsEngine ever
+    /// applied them, so two thirds of what they say was invisible in the view
+    /// this product actually leads with. They go as their OWN message rather
+    /// than inside the brain payload, because that payload is the raw
+    /// brain-export.json file forwarded verbatim by three different senders —
+    /// merging into it would mean editing all three and re-serialising a 10 MB
+    /// file to carry 450 KB of pairs. Arriving separately also costs nothing:
+    /// the scene applies them whenever they land and lets the galaxies
+    /// re-settle, which is the same path a written note already takes.
+    ///
+    /// Sent once per recompute. Not hot.
+    /// </summary>
+    private void BroadcastSemanticSpringsToUniverse(
+        List<BrainX.Core.Services.SemanticSpring> springs)
+    {
+        if (springs == null || springs.Count == 0) return;
+        if (!_universeInitialized && _wallpapers.Count == 0 && _setupInstance == null
+            && !_dashUniverseInitialized) return;
+        try
+        {
+            // Hand-rolled: 7,600 pairs through a serialiser allocates far more
+            // than the three fields are worth, and the shape is fixed.
+            var sb = new System.Text.StringBuilder(springs.Count * 56);
+            sb.Append("{\"type\":\"semantic\",\"springs\":[");
+            for (int i = 0; i < springs.Count; i++)
+            {
+                var s = springs[i];
+                if (i > 0) sb.Append(',');
+                sb.Append("{\"a\":\"").Append(EscapeJson(s.SourceId))
+                  .Append("\",\"b\":\"").Append(EscapeJson(s.TargetId))
+                  .Append("\",\"s\":").Append(s.Similarity.ToString("0.###",
+                      System.Globalization.CultureInfo.InvariantCulture))
+                  .Append('}');
+            }
+            sb.Append("]}");
+            FanOutToUniverseSurfaces(sb.ToString(), "semantic");
+        }
+        catch (Exception ex) { Debug.WriteLine($"BroadcastSemanticSpringsToUniverse: {ex.Message}"); }
+    }
+
     private void BroadcastBrainWorkToUniverse(string job, bool running)
     {
         if (!_universeInitialized && _wallpapers.Count == 0 && _setupInstance == null
@@ -14603,6 +14646,8 @@ public partial class MainWindow : Window
             // map and the full graph view feel each other's nudge.
             _dashPhysics.SemanticSprings = result.Springs;
             _graphPhysics.SemanticSprings = result.Springs;
+
+            BroadcastSemanticSpringsToUniverse(result.Springs);
 
             try
             {

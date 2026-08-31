@@ -1059,6 +1059,10 @@ export function createScene(canvas, callbacks = {}) {
         // path, and therefore impossible to drift apart.
         batches = [{ sims: new Set(sims), deadline: performance.now() + BATCH_MAX_MS }];
         syncWorkAmbient();     // a job that outlived the previous scene resumes
+        // Springs arrive once per recompute and outlive any number of mounts;
+        // without this a re-index would silently drop the semantic layer and
+        // the galaxies would quietly go back to structure-only.
+        if (semanticSprings) applySemanticSprings();
 
         // Build id→index map once so C#-forwarded pulses (by note id) can
         // O(1) find the right star slot in the buffer.
@@ -1217,8 +1221,8 @@ export function createScene(canvas, callbacks = {}) {
                 // Spiral-arm anchor: weak spring toward each node's original
                 // log-spiral slot. Strong enough that the arms survive the
                 // settle, weak enough that linked notes still cluster.
-                .force('anchorU', forceX(d => d.u0).strength(0.055))
-                .force('anchorV', forceY(d => d.v0).strength(0.055))
+                .force('anchorU', forceX(d => d.u0).strength(ANCHOR_STRENGTH))
+                .force('anchorV', forceY(d => d.v0).strength(ANCHOR_STRENGTH))
                 .alphaDecay(0.025)
                 .alphaMin(0.005)
                 .stop();   // we tick manually each frame
@@ -1228,6 +1232,7 @@ export function createScene(canvas, callbacks = {}) {
                 sim,
                 particles,
                 localToGlobalIdx,
+                globalToLocalIdx,   // kept for the semantic springs
                 radius: galaxy.radius
             });
         }
@@ -2326,6 +2331,136 @@ export function createScene(canvas, callbacks = {}) {
         batches.push({ sims: new Set(list), deadline: now + BATCH_MAX_MS });
     }
 
+    /* ── Semantic springs — the meaning the 3D view never had ───────────
+     *
+     * Embeddings have nudged the WPF layout since 2026-04-25: pairs of notes
+     * whose vectors sit above cosine 0.55 pull toward each other at ~12% of a
+     * wiki-link's strength, so notes ABOUT the same thing end up near each
+     * other even with no link between them. Only PhysicsEngine ever applied
+     * them. This view — the one the product leads with — had structural forces
+     * only, which is the same information Obsidian's graph has.
+     *
+     * THE PROBLEM WITH PORTING THEM STRAIGHT. This layout is one sim PER
+     * GALAXY, and measured on this brain — 1,522 notes, wiki-linked pairs
+     * excluded exactly as SemanticSpringComputer excludes them — only 30.8% of
+     * springs join two notes in the same galaxy. 69.2% cross. Adding them as
+     * ordinary links inside each sim would therefore drop seven tenths of the
+     * feature while looking like it worked.
+     *
+     * And the missing seven tenths cannot become a force here, for the reason
+     * the file already gives about cross-galaxy edges: pulling galaxies toward
+     * each other collapses the Fibonacci placement, and the placement is what
+     * says "these are different categories". Truth about relatedness must not
+     * be bought with a lie about separation.
+     *
+     * WHAT THIS SHIPS is the 30.8% that can be said honestly: an extra link
+     * force inside each galaxy at SEMANTIC_RATIO of the structural one, so
+     * notes about the same thing sit closer even with no link between them.
+     * That is the WPF behaviour, unchanged, finally in this view.
+     *
+     * The other 69.2% is measured, counted, and deliberately NOT drawn — see
+     * the long note further down for what was built, what it measured, and why
+     * a position cannot carry that claim without lying about it.
+     */
+    const SEMANTIC_RATIO = 0.12;   // matches PhysicsEngine.SemanticSpringStrength
+    const SEMANTIC_FLOOR = 0.55;   // matches SemanticSpringComputer.SimilarityThreshold
+    /** Anchor spring strength. Shared with buildPhysics: the re-seat below
+     *  rebuilds these forces, and a second copy of the number here would be a
+     *  silent retune of the spiral arms the first time anyone edited one. */
+    const ANCHOR_STRENGTH = 0.055;
+    let semanticSprings = null;    // kept so a re-mount can re-apply them
+
+    /**
+     * @param {Array<{a: string, b: string, s: number}>} springs
+     */
+    function applySemanticSprings(springs) {
+        if (Array.isArray(springs)) semanticSprings = springs;
+        if (!semanticSprings || !sims.length || !universe || !idToIndex) return;
+
+        // Strongest cross-galaxy affinity per node, and the intra-galaxy pairs
+        // per sim. One pass; the spring list is ~5 per note.
+        const bestCross = new Map();          // global idx → { sim, otherGalaxyIdx, s }
+        const intra = new Map();              // sim → [{ source, target, s }]
+        for (const sp of semanticSprings) {
+            const ia = idToIndex.get(sp.a), ib = idToIndex.get(sp.b);
+            if (ia == null || ib == null) continue;
+            const sa = simOfNode?.get(ia), sb = simOfNode?.get(ib);
+            if (!sa || !sb) continue;
+            const s = +sp.s || 0;
+            if (s < SEMANTIC_FLOOR) continue;
+            if (sa === sb) {
+                if (!intra.has(sa)) intra.set(sa, []);
+                intra.get(sa).push({
+                    source: sa.globalToLocalIdx.get(ia),
+                    target: sa.globalToLocalIdx.get(ib), s });
+                continue;
+            }
+            // Cross: each end leans toward the OTHER end's galaxy.
+            for (const [self, other, selfSim] of [[ia, sb, sa], [ib, sa, sb]]) {
+                const cur = bestCross.get(self);
+                if (!cur || s > cur.s) bestCross.set(self, { sim: selfSim, other: other.galaxy, s });
+            }
+        }
+
+        for (const ps of sims) {
+            const links = intra.get(ps) ?? [];
+            // Replaced wholesale rather than merged into the structural link
+            // force: a second force under its own name leaves the tuned
+            // structural one untouched, and re-applying is then idempotent.
+            ps.sim.force('semantic', links.length
+                ? forceLink(links).distance(6)
+                    .strength(l => 0.35 * SEMANTIC_RATIO * l.s)
+                : null);
+        }
+
+        /* THE CROSS-GALAXY HALF IS NOT SHOWN, AND THAT IS THE FINDING.
+         *
+         * It was built: each node's angle inside its own disk turned toward
+         * the galaxy it is most related to, radius untouched so "distance from
+         * the core" went on meaning importance, and the disk clamp guaranteed
+         * no note could leave its category. It applied cleanly — mean angle to
+         * the related galaxy went 1.575 -> 1.373 rad on the first tick, which
+         * is exactly the lean that was asked for.
+         *
+         * Then the settle ate it. 1.373 -> 1.540 by tick 100, 1.546 by tick
+         * 800, against 1.571 for random: 14% of what was applied survived.
+         * That is not a tuning problem. These disks are packed, charge and
+         * collide decide where a node ends up, and one note cannot hold a
+         * position 13 degrees around the rim while its neighbours are pressed
+         * against it. Leaning harder is eroded proportionally; holding it with
+         * a stronger anchor combs the spiral arms into mush.
+         *
+         * So the channel cannot carry the claim, and shipping it anyway would
+         * have been the exact failure this design is trying to avoid: motion
+         * that looks like it means something while being mostly packing noise.
+         * A viewer would read affinity off a position that is 86% arbitrary.
+         *
+         * The 69% of springs that cross galaxies still deserve to be seen —
+         * but as something that states relatedness WITHOUT making a claim
+         * about position, category or importance. A drawn edge does that; a
+         * coordinate cannot. That is the next piece, not this one.
+         */
+
+        // A force added to a cold sim does nothing at all — the layout only
+        // changes if something makes it settle again. This is also the honest
+        // reading of the event: the semantic field just landed, so the brain
+        // re-arranges and arrives, exactly as it does when a note is written.
+        heatAndWatch(sims, REORG_ALPHA);
+
+        /* Returned, not logged. Every part of this can fail by doing nothing —
+         * ids that no longer match the export, springs that all sit on the
+         * similarity floor and therefore lean by nothing, a galaxy whose
+         * neighbour happens to lie along its own normal. Each of those looks
+         * exactly like "the feature is off", and the only way to tell them
+         * apart from outside is a count. */
+        return {
+            springs: semanticSprings.length,
+            intraPairs: [...intra.values()].reduce((n, a) => n + a.length, 0),
+            crossPairsNotShown: bestCross.size,
+        };
+
+    }
+
     /* ── Long jobs over the whole brain, made visible ────────────────────
      *
      * Two of these exist and they behave identically, so they get one path
@@ -2886,6 +3021,7 @@ export function createScene(canvas, callbacks = {}) {
         firePulseRandom,
         reorganize,
         setBrainWork,
+        applySemanticSprings,
         // Peer-halo API — see addPeer / removePeer / pulsePeerActivity
         // declarations above. Idempotent + safe to call before brain mount.
         addPeer,

@@ -680,6 +680,12 @@ function onHostMessage(evt) {
                 if (msg.noteId && isWriteOp(msg.op)) scene.reorganize?.([msg.noteId]);
             }
             break;
+        case 'semantic':
+            // Embedding-derived affinities. They arrive once, after the client
+            // finishes computing them, which is usually well after the brain
+            // payload — the scene applies them whenever they land.
+            scene?.applySemanticSprings?.(msg.springs);
+            break;
         case 'brainwork':
             // A long job over the whole brain: the gardener re-baking bundles
             // and auditing, or a re-index re-scanning the vault. Both are
