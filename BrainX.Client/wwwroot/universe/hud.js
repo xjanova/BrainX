@@ -23,18 +23,62 @@ const HUD_ON = QS.get('hud') === '1';
  * unless explicitly asked for. */
 const HUD_DEMO = QS.get('hudDemo') === '1';
 
-/* Boot steps. Each one is a section of the old dashboard; the bar fills as the
- * host delivers them, so a slow section is visible as a slow section instead of
- * the whole window looking frozen — which is what the WPF dashboard did. */
+/* ═══════════════════════════════════════════════════════════════════════
+ * THE BOOT MANIFEST — every single thing BrainX does on startup.
+ *
+ * ADDING STARTUP WORK? ADD A ROW HERE. That is not a style preference, it
+ * is the contract this list exists to keep: the owner reads this list to
+ * know what the app is doing and how much is left, and the curtain lifts
+ * when — and only when — every row on it has settled. Work that is not on
+ * the list is work that runs with the checklist claiming to be finished,
+ * which is how the window came to sit frozen under a completed progress
+ * bar. Tick sites live in MainWindow (search the id).
+ *
+ * WHOLE, and from the first frame. It used to be these eight sections
+ * only, with the host's rows appended when the host got round to
+ * declaring them — so the list GREW while the owner watched it, 1/8 to
+ * 1/15, and the eight before it were never on any list at all. A count
+ * whose denominator moves cannot answer "how much is left", which is the
+ * one question a boot screen is for.
+ *
+ * Order is boot order. Rows settle out of order — several of these run at
+ * once and land whenever they land — and the list re-sorts as they do.
+ * ═══════════════════════════════════════════════════════════════════════ */
 const STEPS = [
-    { id: 'galaxy',    label: 'Rendering galaxy' },
-    { id: 'stats',     label: 'Reading brain index' },
-    { id: 'expertise', label: 'Mapping expertise' },
-    { id: 'activity',  label: 'Attaching activity feed' },
-    { id: 'agents',    label: 'Locating agents' },
-    { id: 'network',   label: 'Joining mesh' },
-    { id: 'system',    label: 'Polling system' },
-    { id: 'usage',     label: 'Tallying usage' },
+    // ── Before this page exists. The host ticks these from its own
+    //    StartupProgress history the moment the HUD announces itself, so
+    //    they are usually green on the first frame the owner sees. ──
+    { id: 'boot',       label: 'Booting BrainX' },
+    { id: 'theme',      label: 'Loading theme & resources' },
+    { id: 'update',     label: 'Checking for updates' },
+    { id: 'identity',   label: 'Initialising brain identity' },
+    { id: 'universe',   label: 'Starting the Universe' },
+    { id: 'host',       label: 'Reading the vault' },
+    { id: 'claudeconn', label: 'Checking Claude connection' },
+    { id: 'ui',         label: 'Wiring UI panels' },
+
+    // ── This page's own sections, ticked by their render functions as the
+    //    host delivers each payload. `network` is the peer READOUT — the
+    //    mesh connection itself is `mesh`, further down, and conflating
+    //    the two is what let the list claim the mesh was joined while the
+    //    dial was still ringing. ──
+    { id: 'galaxy',     label: 'Rendering galaxy' },
+    { id: 'stats',      label: 'Reading brain index' },
+    { id: 'expertise',  label: 'Mapping expertise' },
+    { id: 'activity',   label: 'Attaching activity feed' },
+    { id: 'agents',     label: 'Locating agents' },
+    { id: 'network',    label: 'Reading mesh status' },
+    { id: 'system',     label: 'Polling system' },
+    { id: 'usage',      label: 'Tallying usage' },
+
+    // ── After the readouts, and the reason this list was rewritten: all
+    //    of it used to run with the curtain already up. ──
+    { id: 'export',     label: 'Writing brain snapshot' },
+    { id: 'mcpfresh',   label: 'Verifying MCP servers' },
+    { id: 'mesh',       label: 'Connecting to the mesh' },
+    { id: 'ai',         label: 'Reaching the AI node' },
+    { id: 'springs',    label: 'Linking notes by meaning' },
+    { id: 'workspace',  label: 'Opening the workspace' },
 ];
 
 /* A section that never arrives must not hold the boot screen hostage. After
@@ -59,47 +103,39 @@ const BOOT_DEADLINE_MS = 20000;
 const state = { done: new Set(), started: performance.now(), finished: false };
 let bootDeadline = null;
 
-/* Rows the HOST owns, declared at runtime and counted in the same total.
- *
- * The first of these was the vault read: ~15 of the ~18 seconds of a cold
- * start, and the one part of the boot with no line of its own. Six sections
- * cannot even begin until it lands, so the bar sat at 2/8 for fifteen seconds
- * and then jumped to 8/8. Counting it made the bar describe the wait instead
- * of hiding it.
- *
- * It is plural now because the eight sections above were never the end of the
- * boot. Behind them the host still had to write the ~10 MB brain snapshot,
- * dial the mesh, reach the AI node and compute semantic springs — and it did
- * all of that with the curtain ALREADY UP, which is why the window sat frozen
- * for a few seconds after the checklist had said, in writing, that it was
- * finished. A checklist that omits the slowest thing left is worse than no
- * checklist: it makes the freeze that follows look like a crash.
- *
- * Note the eight above do NOT cover this. `network` there ticks when the peer
- * READOUT arrives, not when the mesh is actually joined; that is a panel being
- * filled, which is a different claim. */
 const HOST_READ_STEP = 'host';
-const hostSteps = new Map();          // id -> { id, label }
-const totalSteps = () => STEPS.length + hostSteps.size;
+
+/* Rows the host reported that the manifest does not know about — i.e. someone
+ * added startup work and did not add it to STEPS.
+ *
+ * They are shown rather than dropped, and warned about rather than shown
+ * quietly. Dropping them would recreate the exact bug this file was rewritten
+ * for (work running under a checklist that says it is done), and swallowing
+ * the mistake would let the manifest rot without anyone noticing. A row here
+ * is a bug report: put it in STEPS, in boot order. */
+const extraSteps = new Map();         // id -> { id, label }
+const totalSteps = () => STEPS.length + extraSteps.size;
 
 function armBootDeadline() {
     clearTimeout(bootDeadline);
     bootDeadline = setTimeout(() => {
         STEPS.forEach(s => { if (!state.done.has(s.id)) markStep(s.id, 'skip'); });
-        hostSteps.forEach(s => { if (!state.done.has(s.id)) markStep(s.id, 'skip'); });
+        extraSteps.forEach(s => { if (!state.done.has(s.id)) markStep(s.id, 'skip'); });
     }, BOOT_DEADLINE_MS);
 }
 
-/** Put a host-owned row on the board, and tick it when the host says it
- *  landed. Idempotent in both halves: the host replays the whole set after a
- *  page reload, so every message here can arrive twice, and a row that is
- *  already settled must not be re-opened. */
+/** Tick a row the host owns.
+ *
+ *  Idempotent: the host replays its whole tick history whenever this page
+ *  announces itself, so every message here can arrive twice, and a row that
+ *  has already settled must not be re-opened. */
 function noteHostStep(id, label, done, skipped) {
     if (!id || state.finished) return;
 
-    if (!hostSteps.has(id)) {
+    if (!STEPS.some(s => s.id === id) && !extraSteps.has(id)) {
         const clean = String(label || id).replace(/[.…]+$/, '');
-        hostSteps.set(id, { id, label: clean });
+        console.warn(`[hud] boot step "${id}" is not in the manifest — add it to STEPS in hud.js, in boot order.`);
+        extraSteps.set(id, { id, label: clean });
         const host = $('hud-boot-steps');
         if (host && !host.querySelector(`.hud-boot-step[data-step="${id}"]`)) {
             const row = document.createElement('div');
@@ -186,7 +222,7 @@ function markStep(id, status = 'ok') {
     // are the second half of the sequence it shows. Harmless when unhosted.
     post({
         type: 'hudBootStep', id,
-        label: STEPS.find(s => s.id === id)?.label || hostSteps.get(id)?.label || id,
+        label: STEPS.find(s => s.id === id)?.label || extraSteps.get(id)?.label || id,
         done: state.done.size, total: totalSteps(),
         skipped: status !== 'ok',
     });

@@ -2323,6 +2323,12 @@ public partial class MainWindow : Window
         // boot stages into it so the wait is described rather than hidden. The
         // subscription drops itself once the HUD takes over.
         Services.StartupProgress.Reported += OnStartupStageForUniverseLoader;
+        // Row one of the boot checklist, ticked here because App.OnStartup
+        // reported it before this window — or the WebView holding the list —
+        // existed. Every tick below is recorded and replayed to the HUD the
+        // moment it announces itself, so the checklist the owner first sees
+        // already shows what happened before the page could draw.
+        FinishHostBootStep("boot", "Booting BrainX");
         Services.StartupProgress.Report("Loading theme & resources", 0.10, tag: "theme");
 
         var pulse = (Storyboard)FindResource("PulseAnimation");
@@ -2342,6 +2348,7 @@ public partial class MainWindow : Window
         InitializeIdentity();
 
         LoadSettingsFromFile();
+        FinishHostBootStep("identity", "Initialising brain identity");
         // The Software-update card was painted by UpdateAboutCard() above, i.e.
         // BEFORE the persisted toggle was read — so a user who switched
         // auto-update off came back to a ticked box claiming updates install
@@ -2361,12 +2368,21 @@ public partial class MainWindow : Window
         // app. Deciding while the splash is still up costs one HTTP call and
         // removes both problems.
         if (await TryUpdateBeforeBootAsync()) return;   // restarting — boot nothing
+        // Settled either way. The method has half a dozen "boot normally" exits
+        // — auto-update off, portable build, offline, a package that keeps
+        // failing — and a row that only ticks on the happy path is a row that
+        // hangs the checklist on every other launch. It reported under the
+        // "update" tag if and only if it actually reached the network, which is
+        // the honest difference between checked and skipped.
+        FinishHostBootStep("update", "Checking for updates",
+            skipped: !Services.StartupProgress.History.Any(h => h.tag == "update"));
 
         // ...and keep looking, for a release published while this stays open.
         StartUpdateRecheckTimer();
         ApplyUiTheme(_uiTheme);
         ApplyBgDim();
         PopulateThemeList();
+        FinishHostBootStep("theme", "Loading theme & resources");
 
         // The Universe starts BEFORE the heavy work, not after it. Its boot
         // screen is the app's loading screen now, and it renders in the
@@ -2375,6 +2391,10 @@ public partial class MainWindow : Window
         Services.StartupProgress.Report("Initializing Universe galaxy", 0.30, tag: "universe");
         SetSidebarAutoHide(true);
         _ = InitializeUniverseAsync();
+        // The page is asked for here; it announces itself later. This row is
+        // "the Universe was started", not "the Universe is on screen" — the
+        // eight section rows below are what say the page arrived.
+        FinishHostBootStep("universe", "Starting the Universe");
 
         Services.StartupProgress.Report("Indexing vault notes", 0.42, tag: "index");
         // AWAIT, not call: this is the ~15s that used to freeze the whole app
@@ -2387,6 +2407,7 @@ public partial class MainWindow : Window
 
         Services.StartupProgress.Report("Checking Claude MCP connection", 0.62, tag: "mcp");
         CheckClaudeConnection();
+        FinishHostBootStep("claudeconn", "Checking Claude connection");
 
         // Auto-join the BrainX mesh so "connect to the central server" just
         // works on open — no manual click. Background + self-healing (auto-
@@ -2499,26 +2520,20 @@ public partial class MainWindow : Window
         // page is retired and collapsed, and a second WebView2 + three.js scene
         // would burn a GPU context on something nobody can see. Nav_Click
         // starts it if the user ever navigates back to the Dashboard.
+        FinishHostBootStep("ui", "Wiring UI panels");
         Services.StartupProgress.Report("Wiring the galaxy", 0.92, tag: "universe-wire");
 
-        // ── The rest of the boot, put on the board ──────────────────────
+        // ── Past this line the boot USED to be invisible ────────────────
         //
-        // Declared BEFORE MarkHudBrainReady, and that order is the whole point.
-        // The boot screen lifts its curtain when done == total, and total is
-        // panels + host rows; a row declared after the eight payloads have
-        // landed arrives at a curtain that is already up. Which is exactly what
-        // used to happen: everything below this line ran with the checklist
-        // showing 8/8 and the window frozen on top of it — the ~10 MB snapshot
-        // write above all, on the dispatcher, for seconds.
+        // Everything below ran with the checklist showing 8/8 and the window
+        // frozen on top of it — the ~10 MB snapshot write above all, on the
+        // dispatcher, for seconds. The rows are declared in the manifest at the
+        // top of wwwroot/universe/hud.js, so the count includes them from the
+        // first frame and the curtain cannot reach 100 % until each has been
+        // ticked below.
         //
         // "If that screen closes, everything should be ready" — owner,
         // 2026-09-06. These rows are what makes that true instead of aspirational.
-        DeclareHostBootStep("export", "Writing brain snapshot");
-        DeclareHostBootStep("mcp", "Verifying Claude MCP");
-        DeclareHostBootStep("mesh", "Connecting to the mesh");
-        DeclareHostBootStep("ai", "Reaching the AI node");
-        DeclareHostBootStep("springs", "Linking notes by meaning");
-        DeclareHostBootStep("workspace", "Opening the workspace");
 
         // Everything the HUD reads is now real — fill its panels.
         MarkHudBrainReady();
@@ -2533,7 +2548,7 @@ public partial class MainWindow : Window
         // the previous MCP. Check right after startup, when it matters most:
         // this run is very often the first one after Velopack applied.
         CheckMcpFreshness(force: true);
-        FinishHostBootStep("mcp");
+        FinishHostBootStepReported("mcpfresh", "Verifying MCP servers");
 
         // Both hit the local AI node, both take the same 5×(8s+2s) worst case
         // when it is not running, and neither blocks the dispatcher. Held
@@ -2548,7 +2563,7 @@ public partial class MainWindow : Window
             // work, and holding the boot for it would be a worse lie than the
             // one being fixed here. The row settles now; the scan reports for
             // itself in the status bar when it lands.
-            FinishHostBootStep("export", skipped: true);
+            FinishHostBootStepReported("export", "Writing brain snapshot", skipped: true);
             _ = Task.Run(() =>
             {
                 var report = _importer.Scan(BuildImportOptions());
@@ -2591,7 +2606,7 @@ public partial class MainWindow : Window
             }
             // Settles either way — a vault on a drive that went away must not
             // hold the boot screen — but says which happened.
-            FinishHostBootStep("export", skipped: !exported);
+            FinishHostBootStepReported("export", "Writing brain snapshot", skipped: !exported);
         }
 
         // AFTER the export, not before. The watcher's whole job is to re-index
@@ -2640,7 +2655,7 @@ public partial class MainWindow : Window
 
         // Editor, watchers, network handlers and shortcuts are all wired: the
         // window is now a workspace rather than a picture of one.
-        FinishHostBootStep("workspace");
+        FinishHostBootStepReported("workspace", "Opening the workspace");
 
         // The splash does NOT lift here any more.
         //
@@ -2672,9 +2687,9 @@ public partial class MainWindow : Window
         // task keeps running after its row settles, and reports itself in the
         // status bar when it lands.
         await Task.WhenAll(
-            SettleHostBootStepAsync("mesh", meshJoin, TimeSpan.FromSeconds(8)),
-            SettleHostBootStepAsync("ai", aiNode, TimeSpan.FromSeconds(10)),
-            SettleHostBootStepAsync("springs", semanticSprings, TimeSpan.FromSeconds(12)));
+            SettleHostBootStepAsync("mesh", "Connecting to the mesh", meshJoin, TimeSpan.FromSeconds(8)),
+            SettleHostBootStepAsync("ai", "Reaching the AI node", aiNode, TimeSpan.FromSeconds(10)),
+            SettleHostBootStepAsync("springs", "Linking notes by meaning", semanticSprings, TimeSpan.FromSeconds(12)));
     }
 
     /// <summary>
@@ -8627,11 +8642,12 @@ public partial class MainWindow : Window
                 Dispatcher.BeginInvoke(new Action(() =>
                 {
                     _hudPageReady = true;
-                    // FIRST, before any payload: the rows the host owns. They
-                    // are part of the boot screen's total, so if the eight
-                    // panels were counted before these arrived the bar would
-                    // hit 8/8 and lift the curtain over work still running.
-                    ReplayHostBootSteps();
+                    // FIRST, before any payload: every row the host has already
+                    // ticked. Most of the boot happens before this page can
+                    // draw, and a message posted to a page that did not exist
+                    // is gone — so the checklist would open with eight blank
+                    // rows for work that finished long ago.
+                    ReplayHostBootTicks();
                     // If the vault finished first, MarkHudBrainReady had no page
                     // to tell. Replay it here — the boot screen needs both the
                     // "vault indexed" tick and the readouts, and this is the
