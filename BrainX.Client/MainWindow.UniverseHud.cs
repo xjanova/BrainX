@@ -172,8 +172,12 @@ public partial class MainWindow
     private void FinishHostBootStep(string id, string? label = null, bool skipped = false)
     {
         if (_hostBootTicks.Any(t => t.Id == id)) return;
-        var tick = new HostBootTick { Id = id, Label = label ?? id, Skipped = skipped };
+        if (!Services.BootManifest.Knows(id))
+            System.Diagnostics.Debug.WriteLine(
+                $"[boot] '{id}' is not in BootManifest.Rows — add it, in boot order.");
+        var tick = new HostBootTick { Id = id, Label = label ?? Services.BootManifest.LabelFor(id), Skipped = skipped };
         _hostBootTicks.Add(tick);
+        TickBootChecklistRow(id, skipped);        // the WPF list, on screen now
         PostHud("hudBootHost", new { id, label = tick.Label, done = true, skipped });
     }
 
@@ -190,6 +194,11 @@ public partial class MainWindow
         Services.StartupProgress.Report(
             skipped ? $"{label} — skipped" : label, HostBootProgress(), tag: "tail-" + id);
     }
+
+    /// <summary>Hand the HUD the one list both renderers draw.</summary>
+    private void PostHudBootManifest()
+        => PostHud("hudBootManifest", Services.BootManifest.Rows
+            .Select(r => new { id = r.Id, label = r.Label }).ToList());
 
     /// <summary>
     /// Re-send every tick recorded so far. Ordered, and sent BEFORE the panel

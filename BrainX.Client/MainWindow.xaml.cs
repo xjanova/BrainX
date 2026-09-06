@@ -2322,6 +2322,11 @@ public partial class MainWindow : Window
         // enough that a static "Initializing…" reads as a hang. Mirror the real
         // boot stages into it so the wait is described rather than hidden. The
         // subscription drops itself once the HUD takes over.
+        // BEFORE anything else, including the update check that can hold the
+        // boot for minutes: draw the whole checklist, every row pending. The
+        // owner asked for the list to come first and to be complete — so the
+        // denominator is final here, at the top, before a single stage runs.
+        BuildBootChecklist();
         Services.StartupProgress.Reported += OnStartupStageForUniverseLoader;
         // Row one of the boot checklist, ticked here because App.OnStartup
         // reported it before this window — or the WebView holding the list —
@@ -8484,7 +8489,18 @@ public partial class MainWindow : Window
             _ = Dispatcher.BeginInvoke(new Action(() => OnStartupStageForUniverseLoader(ev)));
             return;
         }
-        SetUniverseLoadingStatus(ev.stage, $"{ev.progress:P0} · {ev.atMs / 1000.0:F1}s");
+        // The headline stays the running commentary; the DETAIL goes onto the
+        // row that stage belongs to, which is how "downloading 43%" ends up
+        // beside "Checking for updates" instead of replacing the whole screen.
+        if (Services.BootManifest.RowIdForTag(ev.tag) is string rowId)
+        {
+            var dash = ev.stage.LastIndexOf('—');   // "Update v2.9.3 — downloading 43%"
+            var detail = dash >= 0 && dash + 1 < ev.stage.Length
+                ? ev.stage[(dash + 1)..].Trim()
+                : $"{ev.progress:P0}";
+            SetBootChecklistDetail(rowId, detail);
+        }
+        SetUniverseLoadingStatus(ev.stage, null);
     }
 
     /// <summary>Update the mini loader overlay over Universe. No-op if overlay is already hidden.</summary>
@@ -8642,11 +8658,12 @@ public partial class MainWindow : Window
                 Dispatcher.BeginInvoke(new Action(() =>
                 {
                     _hudPageReady = true;
-                    // FIRST, before any payload: every row the host has already
-                    // ticked. Most of the boot happens before this page can
+                    // FIRST, before any payload: the manifest, then every row
+                    // the host has already ticked. Most of the boot happens before this page can
                     // draw, and a message posted to a page that did not exist
                     // is gone — so the checklist would open with eight blank
                     // rows for work that finished long ago.
+                    PostHudBootManifest();
                     ReplayHostBootTicks();
                     // If the vault finished first, MarkHudBrainReady had no page
                     // to tell. Replay it here — the boot screen needs both the
@@ -8672,6 +8689,7 @@ public partial class MainWindow : Window
                 if (step != null && !string.IsNullOrEmpty(step.label))
                 {
                     var frac = step.total > 0 ? step.done / (double)step.total : 1.0;
+                    TickBootChecklistRow(step.id, step.skipped);
                     Dispatcher.BeginInvoke(new Action(() =>
                         Services.StartupProgress.Report(
                             step.skipped ? $"{step.label} — skipped" : step.label,

@@ -26,13 +26,18 @@ const HUD_DEMO = QS.get('hudDemo') === '1';
 /* ═══════════════════════════════════════════════════════════════════════
  * THE BOOT MANIFEST — every single thing BrainX does on startup.
  *
- * ADDING STARTUP WORK? ADD A ROW HERE. That is not a style preference, it
- * is the contract this list exists to keep: the owner reads this list to
- * know what the app is doing and how much is left, and the curtain lifts
- * when — and only when — every row on it has settled. Work that is not on
- * the list is work that runs with the checklist claiming to be finished,
- * which is how the window came to sit frozen under a completed progress
- * bar. Tick sites live in MainWindow (search the id).
+ * ADDING STARTUP WORK? ADD IT TO `Services/BootManifest.cs`, WHICH OWNS
+ * THIS LIST. The host sends it over (`hudBootManifest`) before any payload
+ * and it replaces what is written here; the copy below is the fallback for
+ * running this page standalone (?hud=1), and a second renderer that could
+ * silently disagree with the first is precisely what having one source
+ * avoids. Keep them in step if you touch either.
+ *
+ * The contract either way: the owner reads this list to know what the app
+ * is doing and how much is left, and the curtain lifts when — and only
+ * when — every row on it has settled. Work that is not on the list is work
+ * that runs with the checklist claiming to be finished, which is how the
+ * window came to sit frozen under a completed progress bar.
  *
  * WHOLE, and from the first frame. It used to be these eight sections
  * only, with the host's rows appended when the host got round to
@@ -44,7 +49,7 @@ const HUD_DEMO = QS.get('hudDemo') === '1';
  * Order is boot order. Rows settle out of order — several of these run at
  * once and land whenever they land — and the list re-sorts as they do.
  * ═══════════════════════════════════════════════════════════════════════ */
-const STEPS = [
+let STEPS = [
     // ── Before this page exists. The host ticks these from its own
     //    StartupProgress history the moment the HUD announces itself, so
     //    they are usually green on the first frame the owner sees. ──
@@ -100,7 +105,7 @@ const STEPS = [
  * working, so it can afford to be generous. */
 const BOOT_DEADLINE_MS = 20000;
 
-const state = { done: new Set(), started: performance.now(), finished: false };
+const state = { done: new Set(), status: new Map(), started: performance.now(), finished: false };
 let bootDeadline = null;
 
 const HOST_READ_STEP = 'host';
@@ -115,6 +120,31 @@ const HOST_READ_STEP = 'host';
  * is a bug report: put it in STEPS, in boot order. */
 const extraSteps = new Map();         // id -> { id, label }
 const totalSteps = () => STEPS.length + extraSteps.size;
+
+/** Take the host's list as the authority.
+ *
+ *  Normally a no-op: the fallback above is kept in step with
+ *  Services/BootManifest.cs, so the two arrive identical and nothing is
+ *  redrawn. It matters when they have drifted — a client shipped against a
+ *  newer manifest than this file, or the other way round — and the honest
+ *  answer there is that the side which knows what actually runs wins.
+ *
+ *  Ticks that landed while the message was in flight are re-applied rather
+ *  than dropped: `galaxy` settles on a 400 ms floor and can easily beat the
+ *  round trip, and a redraw that quietly un-ticked it would leave a row that
+ *  nothing will ever tick again. */
+function adoptManifest(rows) {
+    if (state.finished || !Array.isArray(rows)) return;
+    const next = rows.filter(r => r && r.id).map(r => ({ id: r.id, label: r.label || r.id }));
+    if (!next.length) return;
+    if (next.length === STEPS.length && next.every((r, i) => r.id === STEPS[i].id)) return;
+
+    const settled = [...state.done].map(id => [id, state.status.get(id) || 'ok']);
+    STEPS = next;
+    state.done.clear();
+    renderBootSteps();
+    settled.forEach(([id, status]) => markStep(id, status));
+}
 
 function armBootDeadline() {
     clearTimeout(bootDeadline);
@@ -217,6 +247,7 @@ function updateBootProgress() {
 function markStep(id, status = 'ok') {
     if (state.done.has(id)) return;
     state.done.add(id);
+    state.status.set(id, status);
 
     // Relay to the host: the WPF splash covers the whole boot now, and these
     // are the second half of the sequence it shows. Harmless when unhosted.
@@ -1008,6 +1039,7 @@ function onHudMessage(evt) {
         // snapshot write, the mesh dial, the AI node, the semantic springs.
         // Declared before the eight panels start landing, so the curtain
         // cannot reach 8/8 and lift while these are still running.
+        case 'hudBootManifest': adoptManifest(m.payload); break;
         case 'hudBootHost':
             noteHostStep(m.payload?.id, m.payload?.label, m.payload?.done, m.payload?.skipped);
             break;

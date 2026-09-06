@@ -4931,7 +4931,7 @@
                                         CornerRadius="10"
                                         Padding="24,18"
                                         HorizontalAlignment="Center" VerticalAlignment="Center"
-                                        MinWidth="280">
+                                        MinWidth="340">
                                     <Border.Effect>
                                         <DropShadowEffect Color="#FF6CF0FF" BlurRadius="24"
                                                           ShadowDepth="0" Opacity="0.45"/>
@@ -5004,13 +5004,43 @@
                                                    FontFamily="Consolas, JetBrains Mono, Cascadia Mono"
                                                    Foreground="#FFE8E6FF"
                                                    HorizontalAlignment="Center"/>
+
+                                        <!-- The SAME checklist the Universe HUD shows, drawn in
+                                             plain WPF so it exists from the first painted frame.
+                                             It has to be this one: WebView2 is seconds away on a
+                                             cold start, and the update download that can precede
+                                             it takes minutes on a domestic line — the whole of
+                                             which used to be a single line of text. Rows come
+                                             from Services/BootManifest.cs; see BuildBootChecklist. -->
+                                        <Grid Height="3" Margin="0,10,0,5" Background="#22FFFFFF">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition x:Name="BootBarDone" Width="0*"/>
+                                                <ColumnDefinition x:Name="BootBarLeft" Width="1*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <Border Grid.Column="0" Background="#FF6CF0FF">
+                                                <Border.Effect>
+                                                    <DropShadowEffect Color="#FF6CF0FF" BlurRadius="8"
+                                                                      ShadowDepth="0" Opacity="0.85"/>
+                                                </Border.Effect>
+                                            </Border>
+                                        </Grid>
                                         <TextBlock x:Name="UniverseLoadingSubText"
                                                    Text="starting up"
                                                    FontSize="9"
                                                    FontFamily="Consolas, JetBrains Mono, Cascadia Mono"
                                                    Foreground="#88A0A8C8"
                                                    HorizontalAlignment="Center"
-                                                   Margin="0,4,0,0"/>
+                                                   Margin="0,0,0,0"/>
+                                        <!-- Twenty-two rows is ~330px of list. It fits any
+                                             normal window, but a short one would clip the tail
+                                             — and the tail is where the rows still pending
+                                             live, i.e. the half the owner is actually reading.
+                                             Scroll rather than clip. -->
+                                        <ScrollViewer MaxHeight="360" Margin="0,10,0,0"
+                                                      VerticalScrollBarVisibility="Auto"
+                                                      HorizontalScrollBarVisibility="Disabled">
+                                            <StackPanel x:Name="BootChecklistRows"/>
+                                        </ScrollViewer>
                                     </StackPanel>
                                 </Border>
                             </Border>
