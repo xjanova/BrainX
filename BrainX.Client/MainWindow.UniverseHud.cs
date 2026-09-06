@@ -135,6 +135,125 @@ public partial class MainWindow
         PushAllHudPayloads();
     }
 
+    // ═════════════════════════════════════════════════════════════════
+    // Host-owned boot rows
+    // ═════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// A line on the boot checklist for work the HOST does, which no HUD panel
+    /// stands for.
+    ///
+    /// <para>The eight panel sections were never the whole boot. Behind them
+    /// the tail of <c>Window_Loaded</c> still had to write the ~10 MB brain
+    /// snapshot, verify the MCP servers, dial the mesh, reach the AI node and
+    /// compute semantic springs — and the curtain was released before any of
+    /// it, so the window froze for seconds after the checklist said it was
+    /// done. From the owner's chair that is indistinguishable from a hang, and
+    /// the checklist was the thing asserting otherwise.</para>
+    ///
+    /// <para>Declaring a row is what makes the boot screen WAIT: its total is
+    /// panels + host rows, so a declared row keeps the count off 100 % until it
+    /// is ticked. Declare every one of them BEFORE the panels start landing,
+    /// or the curtain lifts at 8/8 before the tail has been counted.</para>
+    /// </summary>
+    private sealed class HostBootStep
+    {
+        public string Id = "";
+        public string Label = "";
+        public bool Done;
+        public bool Skipped;
+    }
+
+    private readonly List<HostBootStep> _hostBootSteps = new();
+
+    /// <summary>Put a row on the board as pending. Idempotent.</summary>
+    private void DeclareHostBootStep(string id, string label)
+    {
+        if (_hudBootDone) return;
+        if (_hostBootSteps.Any(s => s.Id == id)) return;
+        _hostBootSteps.Add(new HostBootStep { Id = id, Label = label });
+        PostHud("hudBootHost", new { id, label, done = false, skipped = false });
+        // Also into the boot timeline: the WPF loader shows it while the
+        // WebView is still cold, and the guard timers read this feed to tell a
+        // slow boot from a dead one.
+        Services.StartupProgress.Report(label, HostBootProgress(), tag: "tail-" + id);
+    }
+
+    /// <summary>
+    /// Tick a row. <paramref name="skipped"/> means the work ran out of its
+    /// budget or failed — the row settles either way, because a boot screen
+    /// that waits forever on an unreachable mesh is the failure mode this
+    /// whole checklist exists to avoid.
+    /// </summary>
+    private void FinishHostBootStep(string id, bool skipped = false)
+    {
+        var step = _hostBootSteps.FirstOrDefault(s => s.Id == id);
+        if (step == null || step.Done) return;
+        step.Done = true;
+        step.Skipped = skipped;
+        PostHud("hudBootHost", new { id, label = step.Label, done = true, skipped });
+        Services.StartupProgress.Report(
+            skipped ? $"{step.Label} — skipped" : step.Label,
+            HostBootProgress(), tag: "tail-" + id);
+    }
+
+    /// <summary>
+    /// Re-send every host row with its current state. The page can announce
+    /// itself AFTER these were declared (a cold WebView2 loses that race
+    /// routinely on a first launch) and a message posted before the JS existed
+    /// is simply gone — so the set is replayed rather than assumed delivered.
+    /// Must run BEFORE the panel payloads, so the rows are counted before the
+    /// eight sections start ticking.
+    /// </summary>
+    private void ReplayHostBootSteps()
+    {
+        foreach (var s in _hostBootSteps)
+            PostHud("hudBootHost",
+                new { id = s.Id, label = s.Label, done = s.Done, skipped = s.Skipped });
+    }
+
+    /// <summary>Where the tail sits on the WPF loader's bar: the galaxy wiring
+    /// hands over at 0.92 and the tail spends what is left.</summary>
+    private double HostBootProgress()
+    {
+        if (_hostBootSteps.Count == 0) return 0.92;
+        return 0.92 + 0.08 * (_hostBootSteps.Count(s => s.Done) / (double)_hostBootSteps.Count);
+    }
+
+    /// <summary>
+    /// Tick <paramref name="id"/> when <paramref name="work"/> lands, or mark
+    /// it skipped when <paramref name="budget"/> runs out.
+    ///
+    /// <para>Every row here is something that can legitimately never finish —
+    /// a mesh hub that is down, an AI node that was never started. Those must
+    /// delay the boot (they are real work, and the owner asked to see them)
+    /// but they must not own it, so each gets a budget and the work carries on
+    /// in the background after the row settles.</para>
+    /// </summary>
+    private async System.Threading.Tasks.Task SettleHostBootStepAsync(
+        string id, System.Threading.Tasks.Task work, TimeSpan budget)
+    {
+        try
+        {
+            var landed = await System.Threading.Tasks.Task.WhenAny(
+                work, System.Threading.Tasks.Task.Delay(budget)) == work;
+            // Reading .Exception marks a faulted task observed, so a failure
+            // here can never surface later as an unobserved-exception crash.
+            var failed = work.Exception != null || work.IsCanceled;
+            if (failed)
+                System.Diagnostics.Debug.WriteLine($"Boot step '{id}' failed: {work.Exception?.Message}");
+            else if (!landed)
+                System.Diagnostics.Debug.WriteLine(
+                    $"Boot step '{id}' still running after {budget.TotalSeconds:F0}s.");
+            FinishHostBootStep(id, skipped: !landed || failed);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Boot step '{id}': {ex.Message}");
+            FinishHostBootStep(id, skipped: true);
+        }
+    }
+
     private void StartUniverseHud()
     {
         if (_hudTimer != null) return;

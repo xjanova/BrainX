@@ -28,13 +28,22 @@ namespace BrainX.Client.Services;
 ///
 /// <para><b>When it stops.</b> On <see cref="StartupProgress.Complete"/> —
 /// the one signal that owns "the boot is over", raised when the HUD reports
-/// <c>hudBootDone</c>. That seam has produced three separate defects where a
-/// completion signal never arrived (see the vault note "The BrainX loading
-/// screen was honest about everything except when it was allowed to stop"),
-/// so this does not trust it alone: a guard timer fades the music out
-/// regardless after <see cref="GuardTimeout"/>. Music that plays forever
-/// because a step forgot to report would be the fourth defect in that seam.
-/// </para>
+/// <c>hudBootDone</c>, i.e. when the loading screen the user is watching is
+/// finished. That is the whole contract: the track fades as the last thing
+/// lands, and the app is quiet by the time it is usable. Nothing may cut it
+/// short of that, because music that stops over a loading screen still
+/// counting says the app is ready when it is not.</para>
+///
+/// <para>That seam has produced three separate defects where a completion
+/// signal never arrived (see the vault note "The BrainX loading screen was
+/// honest about everything except when it was allowed to stop"), so this does
+/// not trust it blindly: <see cref="GuardTimeout"/> fades the music anyway
+/// once the boot has gone SILENT for that long. Silent, not elapsed — the
+/// guard used to be a flat 45 s from launch, which is a bet that no healthy
+/// boot ever takes longer, and a first launch (cold WebView2 profile, cold
+/// vault, no shader cache) loses that bet. It cut the music over a loading
+/// screen that was still visibly working. A boot that is still working is
+/// still reporting, so the wait is bounded by silence instead.</para>
 ///
 /// <para>Nothing in here is allowed to throw. A machine with no audio device,
 /// a Windows N edition without the media codecs, or a locked temp directory
@@ -55,10 +64,18 @@ internal static class BootMusic
     private static readonly TimeSpan FadeStep = TimeSpan.FromMilliseconds(50);
 
     /// <summary>
-    /// Backstop for a boot that never announces itself. Comfortably past the
-    /// HUD's own 20 s boot deadline, so in a healthy boot this never fires.
+    /// Backstop for a boot that DIED, measured as silence on
+    /// <see cref="StartupProgress"/> rather than as time since launch. Three
+    /// times the longest quiet stretch a healthy boot has (the ~15 s vault
+    /// read, which reports nothing between "Indexing vault notes" and its
+    /// result) and comfortably past the HUD's own 20 s boot deadline — so a
+    /// boot that is merely slow never reaches it, and one that has stopped
+    /// reporting cannot outlast it.
     /// </summary>
     private static readonly TimeSpan GuardTimeout = TimeSpan.FromSeconds(45);
+
+    /// <summary>How often the guard asks. Cheap: one long subtraction.</summary>
+    private static readonly TimeSpan GuardPoll = TimeSpan.FromSeconds(2);
 
     private static readonly object _gate = new();
 
@@ -124,13 +141,20 @@ internal static class BootMusic
                 return;
             }
 
+            // Polls rather than firing once, so every stage the boot reports
+            // pushes the deadline out. A one-shot timer armed here is an
+            // absolute limit on how long a boot is allowed to take, and that
+            // is not a thing this class is entitled to decide.
             _guardTimer = new DispatcherTimer(DispatcherPriority.Background)
             {
-                Interval = GuardTimeout
+                Interval = GuardPoll
             };
             _guardTimer.Tick += (_, _) =>
             {
-                Debug.WriteLine("BootMusic: boot never reported complete — fading on the guard timer.");
+                var silence = StartupProgress.SinceLastReport;
+                if (silence < GuardTimeout) return;
+                Debug.WriteLine($"BootMusic: boot silent for {silence.TotalSeconds:F0}s " +
+                                "without reporting complete — fading on the guard timer.");
                 BeginFadeOut();
             };
             _guardTimer.Start();

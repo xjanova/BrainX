@@ -34,6 +34,7 @@ public static class StartupProgress
     private static readonly object _lock = new();
     private static readonly List<StartupStage> _history = new();
     private static readonly Stopwatch _sinceBoot = Stopwatch.StartNew();
+    private static long _lastReportAtMs;
     private static bool _completed;
 
     /// <summary>
@@ -53,6 +54,28 @@ public static class StartupProgress
     }
 
     /// <summary>
+    /// How long the boot has been SILENT — time since the last Report or
+    /// Complete.
+    ///
+    /// Guard timers read this instead of measuring "N seconds since launch".
+    /// A first launch is legitimately slower than every launch after it — the
+    /// WebView2 profile is created from scratch, nothing is in the file cache,
+    /// there is no shader cache and no embedding cache — and an absolute
+    /// deadline cannot tell that apart from a boot that died. It fired on the
+    /// slowest healthy boot we have, which is the one launch where cutting the
+    /// boot short is most obviously wrong. Silence can tell them apart: a boot
+    /// that is still working is still reporting.
+    /// </summary>
+    public static TimeSpan SinceLastReport
+    {
+        get
+        {
+            lock (_lock)
+                return TimeSpan.FromMilliseconds(_sinceBoot.ElapsedMilliseconds - _lastReportAtMs);
+        }
+    }
+
+    /// <summary>
     /// Report a stage transition. `progress` is 0..1 (best-effort —
     /// it's just for the splash bar). `tag` is a short stable id
     /// like "mcp" or "brain-export" so the splash can render a ✓/⠋
@@ -66,7 +89,7 @@ public static class StartupProgress
             tag: tag,
             atMs: _sinceBoot.ElapsedMilliseconds,
             isComplete: false);
-        lock (_lock) _history.Add(ev);
+        lock (_lock) { _history.Add(ev); _lastReportAtMs = ev.atMs; }
         try { Reported?.Invoke(ev); }
         catch (Exception ex) { Debug.WriteLine($"StartupProgress subscriber error: {ex.Message}"); }
     }
@@ -86,6 +109,7 @@ public static class StartupProgress
             ev = new StartupStage("Ready", 1.0, tag: "ready",
                 atMs: _sinceBoot.ElapsedMilliseconds, isComplete: true);
             _history.Add(ev);
+            _lastReportAtMs = ev.atMs;
         }
         try { Reported?.Invoke(ev); }
         catch (Exception ex) { Debug.WriteLine($"StartupProgress complete subscriber error: {ex.Message}"); }

@@ -59,22 +59,60 @@ const BOOT_DEADLINE_MS = 20000;
 const state = { done: new Set(), started: performance.now(), finished: false };
 let bootDeadline = null;
 
-/* The host's own work, as a row in the same list.
+/* Rows the HOST owns, declared at runtime and counted in the same total.
  *
- * Reading the vault is ~15 of the ~18 seconds of a cold start, and it was the
- * one part of the boot with no line of its own: six sections cannot even begin
- * until it lands, so the bar sat at 2/8 for fifteen seconds and then jumped to
- * 8/8. Counting it makes the bar describe the wait instead of hiding it.
- * Added only when the host says it is busy — a fast start never sees it. */
-const hostStep = { id: 'host', label: 'Reading the vault', added: false };
-const totalSteps = () => STEPS.length + (hostStep.added ? 1 : 0);
+ * The first of these was the vault read: ~15 of the ~18 seconds of a cold
+ * start, and the one part of the boot with no line of its own. Six sections
+ * cannot even begin until it lands, so the bar sat at 2/8 for fifteen seconds
+ * and then jumped to 8/8. Counting it made the bar describe the wait instead
+ * of hiding it.
+ *
+ * It is plural now because the eight sections above were never the end of the
+ * boot. Behind them the host still had to write the ~10 MB brain snapshot,
+ * dial the mesh, reach the AI node and compute semantic springs — and it did
+ * all of that with the curtain ALREADY UP, which is why the window sat frozen
+ * for a few seconds after the checklist had said, in writing, that it was
+ * finished. A checklist that omits the slowest thing left is worse than no
+ * checklist: it makes the freeze that follows look like a crash.
+ *
+ * Note the eight above do NOT cover this. `network` there ticks when the peer
+ * READOUT arrives, not when the mesh is actually joined; that is a panel being
+ * filled, which is a different claim. */
+const HOST_READ_STEP = 'host';
+const hostSteps = new Map();          // id -> { id, label }
+const totalSteps = () => STEPS.length + hostSteps.size;
 
 function armBootDeadline() {
     clearTimeout(bootDeadline);
     bootDeadline = setTimeout(() => {
         STEPS.forEach(s => { if (!state.done.has(s.id)) markStep(s.id, 'skip'); });
-        if (hostStep.added) markStep(hostStep.id, 'skip');
+        hostSteps.forEach(s => { if (!state.done.has(s.id)) markStep(s.id, 'skip'); });
     }, BOOT_DEADLINE_MS);
+}
+
+/** Put a host-owned row on the board, and tick it when the host says it
+ *  landed. Idempotent in both halves: the host replays the whole set after a
+ *  page reload, so every message here can arrive twice, and a row that is
+ *  already settled must not be re-opened. */
+function noteHostStep(id, label, done, skipped) {
+    if (!id || state.finished) return;
+
+    if (!hostSteps.has(id)) {
+        const clean = String(label || id).replace(/[.…]+$/, '');
+        hostSteps.set(id, { id, label: clean });
+        const host = $('hud-boot-steps');
+        if (host && !host.querySelector(`.hud-boot-step[data-step="${id}"]`)) {
+            const row = document.createElement('div');
+            row.className = 'hud-boot-step pending';
+            row.dataset.step = id;
+            row.innerHTML = `<span class="mark">·</span><span>${esc(clean)}</span><span class="ms"></span>`;
+            host.insertBefore(row, firstPendingRow(host));
+        }
+        updateBootProgress();
+    }
+
+    if (done) markStep(id, skipped ? 'skip' : 'ok');
+    armBootDeadline();
 }
 
 /** Host heartbeat during a long read: keep the curtain, say why, and put the
@@ -82,23 +120,7 @@ function armBootDeadline() {
 function noteHostBusy(label, done) {
     if (state.finished) return;
     if (label) setText('hud-boot-busy', label);
-
-    if (!hostStep.added) {
-        hostStep.added = true;
-        if (label) hostStep.label = label.replace(/[.…]+$/, '');
-        const host = $('hud-boot-steps');
-        if (host) {
-            const row = document.createElement('div');
-            row.className = 'hud-boot-step pending';
-            row.dataset.step = hostStep.id;
-            row.innerHTML = `<span class="mark">·</span><span>${esc(hostStep.label)}</span><span class="ms"></span>`;
-            host.insertBefore(row, firstPendingRow(host));
-        }
-        updateBootProgress();
-    }
-
-    if (done) markStep(hostStep.id);
-    armBootDeadline();
+    noteHostStep(HOST_READ_STEP, label || 'Reading the vault', done);
 }
 
 /** Where the pending block starts — i.e. just after the settled ones.
@@ -164,7 +186,7 @@ function markStep(id, status = 'ok') {
     // are the second half of the sequence it shows. Harmless when unhosted.
     post({
         type: 'hudBootStep', id,
-        label: STEPS.find(s => s.id === id)?.label || (id === hostStep.id ? hostStep.label : id),
+        label: STEPS.find(s => s.id === id)?.label || hostSteps.get(id)?.label || id,
         done: state.done.size, total: totalSteps(),
         skipped: status !== 'ok',
     });
@@ -946,6 +968,13 @@ function onHudMessage(evt) {
         // rescue a HUD whose host went quiet, not to overrule a host that is
         // telling us, right now, that it is still working.
         case 'hudBootBusy':  noteHostBusy(m.payload?.label, m.payload?.done); break;
+        // A row for work the host does that no panel represents — the brain
+        // snapshot write, the mesh dial, the AI node, the semantic springs.
+        // Declared before the eight panels start landing, so the curtain
+        // cannot reach 8/8 and lift while these are still running.
+        case 'hudBootHost':
+            noteHostStep(m.payload?.id, m.payload?.label, m.payload?.done, m.payload?.skipped);
+            break;
         case 'hudNotice':    renderNotice(m.payload); break;
         // The galaxy payload already flows for the renderer; piggyback on it so
         // the first two boot steps complete without waiting on the host's own
