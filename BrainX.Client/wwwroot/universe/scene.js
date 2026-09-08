@@ -1128,6 +1128,11 @@ export function createScene(canvas, callbacks = {}) {
         converge = null;
         batches = [];
         cancelPendingReorg();
+        // A pending return would otherwise fire minutes later and fly the
+        // camera of whatever scene is mounted by then to a home pose that
+        // belonged to the graph this one just threw away.
+        cancelFocusIdleReturn();
+        _focusHomeTarget = _focusHomeCam = null;
         simOfNode = null;
         // The ambient interval outlives `universe` unless it is stopped here —
         // it would keep firing at a disposed scene forever, harmlessly but
@@ -1420,11 +1425,25 @@ export function createScene(canvas, callbacks = {}) {
 
     function focusNode(idx, instant = false) {
         if (!universe || idx < 0 || idx >= universe.nodes.length) {
+            // Deselecting IS the destination, so nothing is owed a return any
+            // more — and dropping the home pose here is what makes the next
+            // focus capture a fresh one.
+            cancelFocusIdleReturn();
+            _focusHomeTarget = _focusHomeCam = null;
             selectedIndex = -1;
             if (starsObj) starsObj.material.uniforms.uSelectedIndex.value = -1;
             highlightConnectedEdges(-1);
             callbacks.onSelect?.(null);
             return;
+        }
+        // Remembered once per chain, not per click: hopping star → star → star
+        // is one excursion, and it should end back at the pose the user chose
+        // before it started — not at the second-to-last star, and not at
+        // whatever angle the scene had drifted to on its own.
+        if (selectedIndex === -1 && !_focusHomeTarget) {
+            const h = homePose();
+            _focusHomeTarget = h.target;
+            _focusHomeCam = h.cam;
         }
         selectedIndex = idx;
         if (starsObj) starsObj.material.uniforms.uSelectedIndex.value = idx;
@@ -1462,6 +1481,7 @@ export function createScene(canvas, callbacks = {}) {
         const swing = fromDir.angleTo(approach);
         const dur = 0.75 + (swing / Math.PI) * 0.85;
         flyTo(target, newCamPos, instant ? 0 : dur, instant ? 0 : ARC_FOCUS);
+        scheduleFocusIdleReturn();
 
         callbacks.onSelect?.({
             index: idx,
@@ -1569,6 +1589,77 @@ export function createScene(canvas, callbacks = {}) {
                 flyTo(_followHomeTarget, _followHomeCam, 0.7);
             }
         }, FOLLOW_IDLE_RETURN_MS);
+    }
+
+    // ── idle return after focusing a star ────────────────────────────
+    // Follow mode has had a return-home for a while, but only follow mode:
+    // click a star yourself in free or orbit and the camera stayed parked on
+    // it forever, so the view the app settles into was whatever you last
+    // touched rather than the framing it is supposed to sit at.
+    //
+    // Longer than follow's 3 s on purpose. Follow is the camera keeping up
+    // with a live pulse train; this is a place you went to READ something,
+    // and the return has to wait long enough to read it.
+    const FOCUS_IDLE_RETURN_MS = 14000;
+    let _focusHomeTarget = null, _focusHomeCam = null, _focusIdleTimer = null;
+
+    // ── the pose the user actually chose ─────────────────────────────
+    // "Default" is not the pose the app happened to be in when a star was
+    // clicked. autoRotate, random mode, the auto-fit loop and our own flights
+    // all move this camera without anyone asking, and none of them is a
+    // decision. The default is the last pose a HUMAN put it in — so only real
+    // gestures write here, and every return flies back to this.
+    let _userPose = null;
+    let _gestureSeq = 0;
+    function captureUserPose() {
+        _userPose = { target: controls.target.clone(), cam: camera.position.clone() };
+    }
+    function onUserGestureEnd() {
+        const seq = ++_gestureSeq;
+        captureUserPose();
+        // enableDamping keeps gliding after the pointer is released, so the
+        // pose at 'end' is not the pose the user is left looking at. Take it
+        // again once that glide has settled — unless they grabbed it again,
+        // in which case the sequence number makes this late capture a no-op.
+        setTimeout(() => { if (seq === _gestureSeq && !fly) captureUserPose(); }, 500);
+    }
+    /** Where a return should fly to: what the user last chose, or wherever we
+     *  are now if they have never touched the camera — on first run that is
+     *  the fitted default, which is the right answer for that case. */
+    function homePose() {
+        return _userPose
+            ? { target: _userPose.target.clone(), cam: _userPose.cam.clone() }
+            : { target: controls.target.clone(), cam: camera.position.clone() };
+    }
+
+    function cancelFocusIdleReturn() {
+        if (_focusIdleTimer) { clearTimeout(_focusIdleTimer); _focusIdleTimer = null; }
+    }
+    function scheduleFocusIdleReturn() {
+        cancelFocusIdleReturn();
+        // 'follow' runs its own 3 s chain and 'random' is already steering;
+        // arming here would have two timers fighting over one camera.
+        if (settings.cameraMode !== 'free' && settings.cameraMode !== 'orbit') return;
+        _focusIdleTimer = setTimeout(() => {
+            _focusIdleTimer = null;
+            if (selectedIndex === -1 || !_focusHomeTarget || !_focusHomeCam) return;
+            if (settings.cameraMode !== 'free' && settings.cameraMode !== 'orbit') return;
+            // Mid-flight means something else is already driving. Come back to
+            // it rather than stacking a second flight on top.
+            if (fly) { scheduleFocusIdleReturn(); return; }
+            const homeT = _focusHomeTarget, homeC = _focusHomeCam;
+            _focusHomeTarget = _focusHomeCam = null;
+            focusNode(-1);              // drop the highlight + close the detail
+            flyTo(homeT, homeC, 1.1, ARC_FOCUS);   // and swing back out the way we came
+        }, FOCUS_IDLE_RETURN_MS);
+    }
+    // Hands on the camera restart the clock rather than cancelling it: the
+    // request is that an UNATTENDED camera settles back, and someone who
+    // nudged the view ten seconds ago is still attended. Only the gestures
+    // are listened for — never OrbitControls' 'change', which also fires for
+    // damping, autoRotate and our own flights, and would rearm forever.
+    function noteUserCameraInput() {
+        if (selectedIndex !== -1) scheduleFocusIdleReturn();
     }
     // How far the camera bows OUTWARD at the midpoint of an arced flight, as a
     // fraction of the interpolated distance. This is the "pull back first" half
@@ -1787,6 +1878,15 @@ export function createScene(canvas, callbacks = {}) {
     canvas.addEventListener('pointerleave', onPointerLeave);
     canvas.addEventListener('click', onClick);
     canvas.addEventListener('contextmenu', onContextMenu);
+    // Gestures only — see noteUserCameraInput. Passive: none of these are
+    // cancelled here, and saying so keeps the wheel handler off the main
+    // thread's critical path.
+    canvas.addEventListener('pointerdown', noteUserCameraInput, { passive: true });
+    canvas.addEventListener('wheel', noteUserCameraInput, { passive: true });
+    controls.addEventListener('start', noteUserCameraInput);
+    // 'end' fires once per completed gesture — the moment a pose stops being
+    // something in progress and becomes the one the user settled on.
+    controls.addEventListener('end', onUserGestureEnd);
     window.addEventListener('keydown', onKey);
 
     function destroy() {
@@ -2810,8 +2910,12 @@ export function createScene(canvas, callbacks = {}) {
         // when the user toggles follow OFF — otherwise the camera is
         // stranded on whichever star last pulsed.
         if (prev !== 'follow' && m === 'follow') {
-            _followHomeTarget = controls.target.clone();
-            _followHomeCam    = camera.position.clone();
+            // Same rule as a focus excursion: remember the pose the USER put
+            // the camera in, not the one the scene had drifted into by the
+            // time follow was switched on.
+            const h = homePose();
+            _followHomeTarget = h.target;
+            _followHomeCam    = h.cam;
         } else if (prev === 'follow' && m !== 'follow') {
             // Clear any pending idle-return timer so it doesn't fire after
             // we've already flown home via this mode-exit handler.
