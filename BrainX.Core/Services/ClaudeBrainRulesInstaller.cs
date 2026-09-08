@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -13,11 +15,22 @@ namespace BrainX.Core.Services;
 /// can call the same single source of truth.
 ///
 /// Target path: %USERPROFILE%/.claude/projects/&lt;vault-slug&gt;/memory/
-///   feedback_brain_proactive_save.md     ← write proactively
-///   feedback_consult_brain_proactively.md ← search BEFORE coding
-///   feedback_session_handoff_pattern.md  ← write handoff at session end
 ///   feedback_task_queue_pickup.md        ← pick up work chat handed over
-///   MEMORY.md                            ← index pointing at all four
+///   MEMORY.md                            ← index + the layer guard
+///
+/// WHY SO LITTLE (v2.0). This directory is PUSH context: Claude Code loads
+/// MEMORY.md into every single session before the first tool call. That makes
+/// it the most expensive place in the system to say something twice, and the
+/// MCP server's own `instructions` block — also always-on, also free — already
+/// states brain-first search, proactive save, and the session-handoff format
+/// verbatim in its HARD RULES. Three of the four rules this installer used to
+/// seed were therefore a second copy of a live rule.
+///
+/// A second copy is not a second safety net. It is a copy that can drift, and
+/// drift is how a rule starts contradicting itself with nobody watching. So
+/// v2.0 RETIRES those three (moving them aside, never deleting outright) and
+/// keeps only the one rule the instructions do not spell out as a procedure.
+/// Everything else belongs in the brain, where a note can be corrected once.
 ///
 /// Slug rule (matches Claude Code's own scheme):
 ///   "G:\Obsidian"          → "G--Obsidian"
@@ -28,7 +41,10 @@ namespace BrainX.Core.Services;
 /// installer overwrites older versions, leaves newer/equal versions
 /// alone, and (importantly) NEVER overwrites a file that has no version
 /// field — that's the safety net for hand-edited user files from before
-/// the version scheme existed.
+/// the version scheme existed. Retirement is held to a STRICTER test than
+/// overwrite: the file must still carry both `version:` and `installedBy:
+/// BrainX`, proving this installer wrote it and the user has not made it
+/// their own.
 /// </summary>
 public static class ClaudeBrainRulesInstaller
 {
@@ -36,12 +52,20 @@ public static class ClaudeBrainRulesInstaller
     // carries this version; the comparator works per-file so adding a
     // new rule mid-cycle doesn't force-clobber existing user edits on
     // unrelated rules.
-    public const string RuleVersion = "1.2";
+    public const string RuleVersion = "2.0";
 
     private const string IndexFileName = "MEMORY.md";
 
+    // Presence of this marker in MEMORY.md means the layer guard is installed
+    // and the v2.0 retirement has already run on this machine.
+    private const string LayerMarker = "<!-- brainx-memory-layer v2 -->";
+
     private static readonly Regex VersionLineRx = new(
         @"^version:\s*(?<v>[\d.]+)\s*$",
+        RegexOptions.Multiline | RegexOptions.Compiled);
+
+    private static readonly Regex InstalledByRx = new(
+        @"^installedBy:\s*BrainX\b",
         RegexOptions.Multiline | RegexOptions.Compiled);
 
     private static readonly UTF8Encoding Utf8NoBom = new(false);
@@ -52,21 +76,21 @@ public static class ClaudeBrainRulesInstaller
     private static readonly IReadOnlyList<Rule> Rules =
     [
         new Rule(
-            "feedback_brain_proactive_save.md",
-            BuildProactiveSaveBody,
-            "- [Brain proactive-save expectation](feedback_brain_proactive_save.md) — save non-trivial BrainX insights to the brain during work, don't wait to be asked"),
-        new Rule(
-            "feedback_consult_brain_proactively.md",
-            BuildConsultProactivelyBody,
-            "- [Consult brain before non-trivial decisions](feedback_consult_brain_proactively.md) — search brain BEFORE writing code, not just after; cite notes I find"),
-        new Rule(
-            "feedback_session_handoff_pattern.md",
-            BuildSessionHandoffBody,
-            "- [Session handoff pattern](feedback_session_handoff_pattern.md) — at end of substantive sessions, save a #session-handoff note; SessionStart hook auto-injects these for next Claude"),
-        new Rule(
             "feedback_task_queue_pickup.md",
             BuildTaskQueueBody,
             "- [Task queue pickup](feedback_task_queue_pickup.md) — chat hands coding work to Claude Code through Tasks/; check task_queue at session start and when a taskQueue block appears")
+    ];
+
+    // Retired in 2.0 — every one of these is stated verbatim in the MCP
+    // server's always-on `instructions` HARD RULES block, so the copy here
+    // only added drift risk. The procedural DETAIL that the instructions do
+    // not carry (the handoff content checklist, the vault folder conventions)
+    // was moved into the brain as notes, where it is one editable source.
+    private static readonly IReadOnlyList<string> RetiredFiles =
+    [
+        "feedback_brain_proactive_save.md",
+        "feedback_consult_brain_proactively.md",
+        "feedback_session_handoff_pattern.md"
     ];
 
     public static InstallResult EnsureInstalled(string vaultPath)
@@ -82,7 +106,13 @@ public static class ClaudeBrainRulesInstaller
             Directory.CreateDirectory(memoryDir);
             var indexPath = Path.Combine(memoryDir, IndexFileName);
 
-            int wrote = 0, upgraded = 0;
+            int wrote = 0, upgraded = 0, retired = 0;
+
+            // Retire first: a superseded rule must be gone before the index is
+            // rewritten, or the guard header would sit above a stale entry.
+            retired = RetireSuperseded(memoryDir, indexPath);
+
+            EnsureLayerHeader(indexPath);
 
             foreach (var rule in Rules)
             {
@@ -102,6 +132,7 @@ public static class ClaudeBrainRulesInstaller
                 EnsureIndexEntry(indexPath, rule);
             }
 
+            if (retired > 0) return InstallResult.Retired;
             if (wrote == 0 && upgraded == 0) return InstallResult.AlreadyCurrent;
             if (wrote > 0 && upgraded == 0) return InstallResult.InstalledFresh;
             return InstallResult.Upgraded;
@@ -110,6 +141,72 @@ public static class ClaudeBrainRulesInstaller
         {
             System.Diagnostics.Debug.WriteLine($"Brain rules install failed: {ex.Message}");
             return InstallResult.Failed;
+        }
+    }
+
+    /// <summary>
+    /// Moves installer-owned superseded rules into a dated `_retired-*` folder
+    /// and drops their lines from the index. Moved, not deleted: the same
+    /// courtesy the `_legacy-backup-*` folders already extend, and the only
+    /// honest way to remove something from a directory the user can hand-edit.
+    /// </summary>
+    private static int RetireSuperseded(string memoryDir, string indexPath)
+    {
+        var toRetire = RetiredFiles
+            .Select(name => Path.Combine(memoryDir, name))
+            .Where(IsInstallerOwnedAndSuperseded)
+            .ToList();
+
+        if (toRetire.Count == 0) return 0;
+
+        // InvariantCulture, not the machine's: on a Thai-locale box the default
+        // calendar is Buddhist, so "yyyy" renders 2569 instead of 2026 and the
+        // attic sorts nowhere near the `_legacy-backup-2026*` folders beside it.
+        var attic = Path.Combine(memoryDir,
+            "_retired-" + DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture));
+        Directory.CreateDirectory(attic);
+
+        var moved = 0;
+        foreach (var path in toRetire)
+        {
+            try
+            {
+                File.Move(path, Path.Combine(attic, Path.GetFileName(path)), overwrite: true);
+                RemoveIndexEntry(indexPath, Path.GetFileName(path));
+                moved++;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Retire failed for {path}: {ex.Message}");
+            }
+        }
+        return moved;
+    }
+
+    /// <summary>
+    /// True only for a file this installer wrote and the user has not taken
+    /// over: it must still carry a parseable `version:` older than the current
+    /// one AND an `installedBy: BrainX` line. A file the user rewrote (either
+    /// marker gone) is theirs, and stays.
+    /// </summary>
+    private static bool IsInstallerOwnedAndSuperseded(string path)
+    {
+        if (!File.Exists(path)) return false;
+        try
+        {
+            var existing = File.ReadAllText(path);
+            if (!InstalledByRx.IsMatch(existing)) return false;
+
+            var m = VersionLineRx.Match(existing);
+            if (!m.Success) return false;
+            if (!Version.TryParse(m.Groups["v"].Value, out var existingVer)) return false;
+            if (!Version.TryParse(RuleVersion, out var bundledVer)) return false;
+
+            return existingVer < bundledVer;
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -154,88 +251,6 @@ public static class ClaudeBrainRulesInstaller
 
     // ── Rule bodies ──────────────────────────────────────────────────
 
-    private static string BuildProactiveSaveBody() => $"""
----
-name: Save to BrainX brain proactively, don't wait to be told
-description: BrainX vault expects auto-save of non-trivial insights to the brain during work, not a final "should I save this?" prompt
-type: project-default
-installedBy: BrainX {RuleVersion}
-version: {RuleVersion}
----
-When working on this BrainX vault, save substantive findings to the brain *as they happen*, without asking — the brain is a living knowledge graph and every non-trivial answer should leave a trace.
-
-**Rule of thumb (also stated in vault CLAUDE.md):** if you just spent more than 2 tool calls figuring something out and the answer is non-trivial, SAVE IT. Every good answer should leave a trace in the vault.
-
-**How to apply:**
-- Any debugging session that took more than 2 tool calls and produced a generalizable insight → call `brain_create_note` with a proper folder (e.g. `Programming/WPF`, `Debugging`, `AI`) and tags, **during** the session, not after being prompted.
-- Small observations / one-liners → `brain_remember` to today's session journal.
-- Search first with `brain_search` to avoid duplicating an existing note; if one exists, `brain_append_note` instead.
-- Never announce "I searched for X" — the auto-journal already logs every MCP tool call.
-- Pattern examples that warrant saving: WPF resource-dictionary gotchas, theme-propagation pitfalls, Windows shell COM patterns, multi-ICO generation, GPU-performance wins, mesh-rendering tricks, MCP launch logic.
-- Patterns that do NOT warrant saving: boilerplate lookups, trivial one-file edits, generic "I added a button" changes.
-
-Folder conventions: `Programming/<Tech>`, `Notes/Claude-Sessions`, `Debugging`, `AI`, `Blockchain_Web3`. Always include tags in frontmatter.
-""";
-
-    private static string BuildConsultProactivelyBody() => $"""
----
-name: Consult brain BEFORE coding, not after
-description: Search the brain at the start of any non-trivial task — don't write code first then ask
-type: project-default
-installedBy: BrainX {RuleVersion}
-version: {RuleVersion}
----
-ALWAYS run `brain_search` (2-4 keywords) at the start of any non-trivial task — BEFORE writing code, not after.
-
-**Why:** the brain holds 1M+ words of project history (610+ notes, 3,600+ wiki-links). Skipping it means re-discovering known facts at high token cost, AND risks reintroducing past bugs the user has already solved.
-
-**How to apply:**
-- New feature → search the feature name + the technology + a constraint word ("auth", "deploy", "embeddings"). If past notes describe trade-offs, cite them by title.
-- Bug fix → search the symptom AND the file path AND the related lib name. Do this BEFORE reading code.
-- Architecture decision → search past decisions, find existing precedent. The user may have already decided this once.
-- Debugging session that hits an error → search the error string verbatim before stack-tracing — past sessions may name the root cause.
-- 0-hit results → retry with `brain_semantic_search` (Ollama embeddings, finds notes with no keyword overlap; works for natural-language Thai queries too).
-- Cite note titles you actually read — proves to the user the brain was consulted, not just bypassed.
-
-**Skip search ONLY for:**
-- Trivial Q (< 60 chars, conversational)
-- Prompts that contain explicit file paths or code blocks (user already gave you the location)
-- Generic framework/language knowledge questions
-
-The auto-journal logs every MCP tool call, so never narrate "I searched for X" — just search.
-""";
-
-    private static string BuildSessionHandoffBody() => $"""
----
-name: Session handoff pattern
-description: At end of substantive sessions, save a #session-handoff note; SessionStart hook auto-injects these for the next Claude
-type: project-default
-installedBy: BrainX {RuleVersion}
-version: {RuleVersion}
----
-At the end of any session where you shipped code, fixed bugs, or made architectural decisions, write a `#session-handoff` note with `brain_create_note`.
-
-**Why:** the SessionStart hook auto-injects the most recent #session-handoff into the next Claude's context. A good handoff means the next session starts at full context, not at "what was I doing?". Without one, the next session burns 5-10k tokens re-deriving state.
-
-**How to apply:**
-- Trigger phrases from user: "พรุ่งนี้คุยต่อ", "save session", "handoff", "พักก่อน", "session jib"
-- Auto-trigger: any session with > 5 tool calls that touched code OR made decisions
-- Tag with: `#session-handoff`, `#YYYY-MM-DD`, `#<project>`, plus topic tags
-- Folder: `Notes/Claude-Sessions/`
-- Title format: `Session YYYY-MM-DD — <project> <one-line outcome>`
-
-**Required content (the next Claude will thank you):**
-- **Branch / commit** — exact ref the work landed on
-- **Files touched** — list, with one-line role descriptions
-- **What shipped** — concrete deliverables
-- **What's pending** — known follow-ups, not decided
-- **Gotchas** — things that surprised you, hidden constraints, traps for future-you
-- **Deploy steps** — exact commands to test/deploy from a clean state
-- **Open questions** — things you'd ask the user if they came back
-
-Skip the handoff for trivial sessions (< 5 tool calls, or pure conversation with no code change).
-""";
-
     private static string BuildTaskQueueBody() => $$"""
 ---
 name: Pick up coding tasks handed over by chat
@@ -266,6 +281,44 @@ A chat client (Claude Desktop, claude.ai connector) reaches this brain over HTTP
 Tasks are real notes — `brain_search` finds them, `[[wiki-links]]` point at them, and the spec is the answer to "why does this code exist" long after the conversation is gone.
 """;
 
+    // ── Index (MEMORY.md) ────────────────────────────────────────────
+
+    /// <summary>
+    /// Writes the layer guard at the top of MEMORY.md. This file is read into
+    /// EVERY session before the first tool call, so the guard's whole job is to
+    /// tell the next agent where NOT to write — without it the index silently
+    /// regrows every rule the brain and the hooks already push.
+    /// </summary>
+    private static void EnsureLayerHeader(string indexPath)
+    {
+        var header =
+            $"{LayerMarker}{Environment.NewLine}" +
+            $"> This file is PUSH context: it is loaded into every session before the first tool call.{Environment.NewLine}" +
+            $"> Keep ONLY what must be known BEFORE any tool runs — language, identity, and traps that destroy data.{Environment.NewLine}" +
+            $"> Everything else belongs in the brain (`brain_create_note`), which is searchable, correctable, and linked.{Environment.NewLine}" +
+            $"> Do NOT re-add rules the MCP `instructions` block or the hooks already push every session" +
+            $" (brain-first search, proactive save, session handoff) — a second copy is not a second safety net,{Environment.NewLine}" +
+            $"> it is a copy that drifts. Retired copies live in `_retired-*/`.{Environment.NewLine}";
+
+        try
+        {
+            if (!File.Exists(indexPath))
+            {
+                File.WriteAllText(indexPath, header, Utf8NoBom);
+                return;
+            }
+
+            var content = File.ReadAllText(indexPath);
+            if (content.Contains(LayerMarker, StringComparison.Ordinal)) return;
+
+            File.WriteAllText(indexPath, header + Environment.NewLine + content, Utf8NoBom);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Layer header write failed: {ex.Message}");
+        }
+    }
+
     private static void EnsureIndexEntry(string indexPath, Rule rule)
     {
         if (File.Exists(indexPath))
@@ -276,7 +329,28 @@ Tasks are real notes — `brain_search` finds them, `[[wiki-links]]` point at th
         }
         else
         {
-            File.WriteAllText(indexPath, $"# Memory Index{Environment.NewLine}{Environment.NewLine}{rule.IndexEntry}{Environment.NewLine}", Utf8NoBom);
+            File.WriteAllText(indexPath, $"{rule.IndexEntry}{Environment.NewLine}", Utf8NoBom);
+        }
+    }
+
+    /// <summary>Drops every index line that points at a retired rule file.</summary>
+    private static void RemoveIndexEntry(string indexPath, string fileName)
+    {
+        try
+        {
+            if (!File.Exists(indexPath)) return;
+
+            var lines = File.ReadAllLines(indexPath);
+            var kept = lines
+                .Where(l => !(l.TrimStart().StartsWith('-') && l.Contains(fileName, StringComparison.Ordinal)))
+                .ToArray();
+
+            if (kept.Length == lines.Length) return;
+            File.WriteAllText(indexPath, string.Join(Environment.NewLine, kept) + Environment.NewLine, Utf8NoBom);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Index cleanup failed for {fileName}: {ex.Message}");
         }
     }
 
@@ -287,6 +361,7 @@ Tasks are real notes — `brain_search` finds them, `[[wiki-links]]` point at th
         AlreadyCurrent,
         InstalledFresh,
         Upgraded,
+        Retired,
         SkippedNoVault,
         SkippedNoUserProfile,
         Failed
