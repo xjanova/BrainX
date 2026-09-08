@@ -487,7 +487,12 @@ body.hud-active #settings-toggle {
     position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px;
     background: repeating-linear-gradient(90deg, var(--g, #6cf0ff) 0 3px, transparent 3px 5px);
     filter: drop-shadow(0 0 5px var(--g, #6cf0ff));
-    transition: width 600ms cubic-bezier(.2, .8, .3, 1);
+    /* No CSS transition here on purpose: the rAF loop in hud.js sets this width
+       every frame, and a 600 ms transition chasing per-frame writes lags behind
+       and reads as mush. The easing lives in one place now — the frame loop —
+       which is also the only place that can ease the number and the history
+       trace in step with the bar. `prefers-reduced-motion` is honoured there by
+       snapping straight to the reading. */
 }
 /* Where the reading stops being comfortable. Drawn on the track, not in the
    fill, so it stays put as the value moves past it. */

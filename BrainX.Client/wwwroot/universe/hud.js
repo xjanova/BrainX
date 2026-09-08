@@ -760,6 +760,121 @@ function pushLoad(series, v) {
     if (series.length > LOAD_KEEP) series.shift();
 }
 
+/* ── live gauges ──────────────────────────────────────────────────────────
+ * These used to be rebuilt as a fresh HTML string on every host sample, which
+ * is why they snapped: `.hud-gauge-fill` has carried `transition: width 600ms`
+ * the whole time, but a brand-new element is BORN at its final width, so the
+ * transition had nothing to animate from. Ever. The instrument looked digital
+ * because the DOM was being replaced, not because anyone chose that.
+ *
+ * So the gauge DOM is now built once and patched in place, and a rAF loop owns
+ * three continuous quantities:
+ *   • the bar + the number    — eased toward the newest reading, frame-rate
+ *                               independent, so a 2 s sample reads as a glide
+ *   • the history trace       — scrolled by a fractional `phase` between
+ *                               samples instead of jumping one slot every 2 s
+ *   • the live right edge     — the eased value pinned at x=w, so the line
+ *                               always touches "now" instead of ending one
+ *                               sample in the past
+ * The host tick stays 2 s; only the reading of it became continuous. */
+const GAUGE_TAU = 0.26;            // seconds to close ~63% of the remaining gap
+const SPARK_W = 100, SPARK_H = 14; // viewBox units of the trace behind a gauge
+const _gauges = new Map();
+let _gaugeRoot = null, _gaugeRows = null;
+let _gaugeRAF = 0, _gaugeLast = 0, _gaugeFrameAt = 0;
+let _sampleAt = 0, _samplePeriod = 2000;   // measured, so scroll matches reality
+const REDUCE_MOTION = (typeof matchMedia === 'function')
+    && matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+function gaugeTrace(series, phase, live) {
+    const n = series.length;
+    if (!n) return { line: '', area: '' };
+    const step = SPARK_W / (LOAD_KEEP - 1);
+    const y = v => (SPARK_H - (Math.max(0, Math.min(100, v)) / 100) * (SPARK_H - 2) - 1).toFixed(2);
+    const pts = [];
+    for (let i = 0; i < n; i++)
+        pts.push(`${(SPARK_W - (n - 1 - i + phase) * step).toFixed(2)},${y(series[i])}`);
+    pts.push(`${SPARK_W},${y(live)}`);
+    const line = pts.join(' ');
+    const x0 = (SPARK_W - (n - 1 + phase) * step).toFixed(2);
+    return { line, area: `${x0},${SPARK_H} ${line} ${SPARK_W},${SPARK_H}` };
+}
+
+function paintGauge(g, phase) {
+    g.fillEl.style.width = `${g.cur.toFixed(2)}%`;
+    if (g.numeric) g.valEl.innerHTML = `${Math.round(g.cur)}<small>${g.unit}</small>`;
+    const t = gaugeTrace(g.series, phase, g.cur);
+    g.lineEl.setAttribute('points', t.line);
+    g.areaEl.setAttribute('points', t.area);
+    const hot = g.redline != null && g.cur >= g.redline;
+    if (hot !== g.hot) { g.hot = hot; g.el.classList.toggle('is-hot', hot); }
+}
+
+function gaugeFrame(now) {
+    _gaugeRAF = 0;
+    _gaugeFrameAt = now;
+    if (!_gaugeRoot?.isConnected) return;          // panel got rebuilt — stop
+    const dt = Math.min(0.1, (now - (_gaugeLast || now)) / 1000);
+    _gaugeLast = now;
+    // Frame-rate independent easing: the same visual speed at 30 fps and 144.
+    const k = REDUCE_MOTION ? 1 : 1 - Math.exp(-dt / GAUGE_TAU);
+    // Clamped at 1 so a HUD that stopped receiving samples (the host kills the
+    // timer while the Universe view is hidden) parks the trace instead of
+    // scrolling it off the left edge forever.
+    const phase = Math.max(0, Math.min(1, (now - _sampleAt) / _samplePeriod));
+    let moving = false;
+    for (const g of _gauges.values()) {
+        const gap = g.target - g.cur;
+        if (Math.abs(gap) > 0.02) { g.cur += gap * k; moving = true; } else g.cur = g.target;
+        paintGauge(g, phase);
+    }
+    if (moving || phase < 1) scheduleGaugeFrame();
+}
+function scheduleGaugeFrame() {
+    if (!_gaugeRAF) _gaugeRAF = requestAnimationFrame(gaugeFrame);
+}
+
+function ensureGauge(key, label, color, redline, series, numeric, unit) {
+    let g = _gauges.get(key);
+    if (g && g.el.isConnected) return g;
+    const el = document.createElement('div');
+    el.className = 'hud-gauge';
+    el.style.setProperty('--g', color);
+    const gid = `spark-${key}`;
+    // History sits BEHIND the readout, not under it — one instrument per metric
+    // rather than a readout and a chart competing for the same glance.
+    el.innerHTML =
+        `<span class="hud-gauge-bg">
+           <svg class="hud-spark" style="--spark:${esc(color)};height:${SPARK_H}px"
+                viewBox="0 0 ${SPARK_W} ${SPARK_H}" preserveAspectRatio="none" aria-hidden="true">
+             <defs><linearGradient id="${esc(gid)}" x1="0" y1="0" x2="0" y2="1">
+               <stop offset="0" stop-color="${esc(color)}" stop-opacity="0.6"/>
+               <stop offset="1" stop-color="${esc(color)}" stop-opacity="0"/>
+             </linearGradient></defs>
+             <polygon fill="url(#${esc(gid)})" points=""/>
+             <polyline points=""/>
+           </svg>
+         </span>
+         <div class="hud-gauge-head">
+           <span class="hud-gauge-label">${esc(label)}</span>
+           <span class="hud-gauge-val"></span>
+         </div>
+         <div class="hud-gauge-track">
+           <i class="hud-gauge-fill" style="width:0%"></i>
+           ${redline != null ? `<b class="hud-gauge-redline" style="left:${redline}%"></b>` : ''}
+         </div>`;
+    _gaugeRoot.appendChild(el);
+    g = {
+        el, series, redline, numeric, unit, hot: false, cur: 0, target: 0,
+        fillEl: el.querySelector('.hud-gauge-fill'),
+        valEl:  el.querySelector('.hud-gauge-val'),
+        lineEl: el.querySelector('polyline'),
+        areaEl: el.querySelector('polygon'),
+    };
+    _gauges.set(key, g);
+    return g;
+}
+
 function renderSystem(d = {}) {
     pushLoad(_load.gpu, d.gpu);
     pushLoad(_load.cpu, d.cpu);
@@ -767,50 +882,49 @@ function renderSystem(d = {}) {
     pushLoad(_load.ram, d.ram);
     pushLoad(_load.vram, d.vram);
 
+    // Measure the real sample interval rather than trusting the documented 2 s:
+    // the host tiers its timer, and a trace that scrolls at the wrong rate is
+    // more distracting than one that steps.
+    const now = performance.now();
+    if (_sampleAt) _samplePeriod = Math.max(250, Math.min(10000, now - _sampleAt));
+    _sampleAt = now;
+
+    const body = $('hud-system-body');
+    if (!body) return;
+    if (!_gaugeRoot?.isConnected || _gaugeRoot.parentNode !== body) {
+        body.innerHTML = '<div class="hud-gauges"></div><div class="hud-sysrows"></div>';
+        _gaugeRoot = body.firstElementChild;
+        _gaugeRows = body.lastElementChild;
+        _gauges.clear();
+    }
+
     // Every live metric is a percentage of a real ceiling, so each one gets a
     // real instrument: segmented bargraph, redline, and the history trace
     // underneath. `redline` is where the reading stops being comfortable —
     // 85 °C for a GPU, 90% for memory you can actually exhaust, none for load
     // that is supposed to sit at 100% while work happens.
-    const gauges = [];
-    const G = (label, value, text, color, redline, spark) => {
+    let seeded = false;
+    const G = (key, label, value, color, redline, series, unit, label2) => {
         if (value == null) return;
-        const pct = Math.max(0, Math.min(100, Number(value) || 0));
-        const hot = redline != null && pct >= redline;
-        // History sits BEHIND the readout, not under it — one instrument per
-        // metric rather than a readout and a chart competing for the same
-        // glance. It also buys back the vertical space five stacked graphs
-        // were spending.
-        gauges.push(
-            `<div class="hud-gauge${hot ? ' is-hot' : ''}" style="--g:${color}">
-               <span class="hud-gauge-bg">${spark}</span>
-               <div class="hud-gauge-head">
-                 <span class="hud-gauge-label">${esc(label)}</span>
-                 <span class="hud-gauge-val">${text}</span>
-               </div>
-               <div class="hud-gauge-track">
-                 <i class="hud-gauge-fill" style="width:${pct}%"></i>
-                 ${redline != null ? `<b class="hud-gauge-redline" style="left:${redline}%"></b>` : ''}
-               </div>
-             </div>`);
+        const g = ensureGauge(key, label, color, redline, series, !label2, unit);
+        g.target = Math.max(0, Math.min(100, Number(value) || 0));
+        // First reading lands where it is instead of sweeping up from zero —
+        // the sweep is an animation of data that never existed.
+        if (!g.seen) { g.seen = true; g.cur = g.target; seeded = true; }
+        if (label2) g.valEl.textContent = label2;
     };
 
-    G('GPU', d.gpu, `${Math.round(d.gpu ?? 0)}<small>%</small>`, '#6cf0ff', null,
-        sparkline(_load.gpu, { id: 'spark-gpu', color: '#6cf0ff', max: 100, height: 14 }));
-    G('CPU', d.cpu, `${Math.round(d.cpu ?? 0)}<small>%</small>`, '#a68bff', null,
-        sparkline(_load.cpu, { id: 'spark-cpu', color: '#a68bff', max: 100, height: 14 }));
+    G('gpu',  'GPU',      d.gpu,     '#6cf0ff', null, _load.gpu,  '%');
+    G('cpu',  'CPU',      d.cpu,     '#a68bff', null, _load.cpu,  '%');
     // Temperature is the one that says whether the load above is SUSTAINABLE.
     // Drawn against a fixed 100 °C ceiling so the bar means the same thing
     // every time you glance at it — autoscaling would make 45 °C idle look
     // identical to 85 °C under load.
-    G('GPU temp', d.gpuTemp, `${Math.round(d.gpuTemp ?? 0)}<small>°C</small>`, '#ff9f4a', 85,
-        sparkline(_load.temp, { id: 'spark-temp', color: '#ff9f4a', max: 100, height: 14 }));
+    G('temp', 'GPU temp', d.gpuTemp, '#ff9f4a', 85, _load.temp, '°C');
     // VRAM before RAM: on this box the card is 8 GB and it is what runs out
     // first when a local model loads.
-    G('VRAM', d.vram, esc(d.vramLabel || `${Math.round(d.vram ?? 0)}%`), '#5ce0a0', 90,
-        sparkline(_load.vram, { id: 'spark-vram', color: '#5ce0a0', max: 100, height: 14 }));
-    G('RAM', d.ram, esc(d.ramLabel || `${Math.round(d.ram ?? 0)}%`), '#f07de0', 90,
-        sparkline(_load.ram, { id: 'spark-ram', color: '#f07de0', max: 100, height: 14 }));
+    G('vram', 'VRAM', d.vram, '#5ce0a0', 90, _load.vram, '%', d.vramLabel || null);
+    G('ram',  'RAM',  d.ram,  '#f07de0', 90, _load.ram,  '%', d.ramLabel  || null);
 
     // The old SYSTEM HEALTH card, verbatim — these are the lines the owner
     // actually checks when something looks wrong. Text, not instruments:
@@ -828,8 +942,26 @@ function renderSystem(d = {}) {
            <span class="hud-row-name">${esc(l)}</span>
            <span class="hud-row-val">${esc(v)}</span>
          </div>`).join('');
+    const empty = !_gauges.size && !rowHtml;
+    if (_gaugeRows._html !== rowHtml) { _gaugeRows._html = rowHtml; _gaugeRows.innerHTML = rowHtml; }
+    if (empty) _gaugeRows.innerHTML = emptyRow('no telemetry');
 
-    setHTML('hud-system-body', (gauges.join('') + rowHtml) || emptyRow('no telemetry'));
+    // An animated readout must never be able to end up MORE stale than the
+    // stepping one it replaced. rAF can be starved outright — a minimised
+    // window, a WebView2 that is not compositing — and then the eased value
+    // stops chasing the target and the panel freezes on whatever was on screen
+    // when the frames stopped. So: if no frame has run recently, snap to the
+    // reading and step, exactly as this panel did before. Smoothness is the
+    // enhancement; showing the truth is the requirement.
+    const framesRunning = _gaugeFrameAt > 0 && (now - _gaugeFrameAt) < 1000;
+    if (seeded || !framesRunning) for (const g of _gauges.values()) g.cur = g.target;
+    _gaugeLast = 0;
+    for (const g of _gauges.values()) paintGauge(g, 0);
+    // Re-arm from scratch. A pending id whose callback never ran would other-
+    // wise leave scheduleGaugeFrame() a permanent no-op — the loop would be
+    // dead for the life of the page with nothing saying so.
+    if (_gaugeRAF) { cancelAnimationFrame(_gaugeRAF); _gaugeRAF = 0; }
+    scheduleGaugeFrame();
     markStep('system');
 }
 
