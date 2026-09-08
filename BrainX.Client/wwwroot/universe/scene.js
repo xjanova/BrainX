@@ -1437,9 +1437,31 @@ export function createScene(canvas, callbacks = {}) {
         universeGroup.updateMatrixWorld();
         target.applyMatrix4(universeGroup.matrixWorld);
         const desiredDist = 14 + n.size * 6;
-        const fromCam = camera.position.clone().sub(controls.target).normalize();
-        const newCamPos = target.clone().add(fromCam.multiplyScalar(desiredDist));
-        flyTo(target, newCamPos, instant ? 0 : 0.65);
+        const fromDir = camera.position.clone().sub(controls.target).normalize();
+
+        // Where to ARRIVE from. This used to reuse the current view direction
+        // verbatim, which meant a focus never rotated the camera at all — it
+        // just slid it along a straight line until the star filled the frame,
+        // so every star was approached from the same angle and the move read
+        // as a dolly, not as going somewhere. Approaching along the star's own
+        // outward normal gives each one its own vantage, which is what makes
+        // the swing exist in the first place.
+        const outward = target.lengthSq() > 1e-6
+            ? target.clone().normalize()
+            : fromDir.clone();
+        const approach = outward.multiplyScalar(0.9)
+            .addScaledVector(WORLD_UP, 0.32)      // look slightly down on it
+            .normalize()
+            .lerp(fromDir, 0.18);                 // keep a trace of where we were
+        if (approach.lengthSq() < 1e-6) approach.copy(fromDir);
+        approach.normalize();
+
+        const newCamPos = target.clone().addScaledVector(approach, desiredDist);
+        // Longer for a bigger swing: the arc has further to travel, and at the
+        // old flat 0.65 s a half-turn just looked like a lurch.
+        const swing = fromDir.angleTo(approach);
+        const dur = 0.75 + (swing / Math.PI) * 0.85;
+        flyTo(target, newCamPos, instant ? 0 : dur, instant ? 0 : ARC_FOCUS);
 
         callbacks.onSelect?.({
             index: idx,
@@ -1548,7 +1570,15 @@ export function createScene(canvas, callbacks = {}) {
             }
         }, FOLLOW_IDLE_RETURN_MS);
     }
-    function flyTo(targetVec, camVec, durationSec) {
+    // How far the camera bows OUTWARD at the midpoint of an arced flight, as a
+    // fraction of the interpolated distance. This is the "pull back first" half
+    // of the move; the rotation is the other half. 0 = the old straight dolly,
+    // which is still what every caller that doesn't ask for an arc gets.
+    const ARC_FOCUS = 0.45;
+    const WORLD_UP = new THREE.Vector3(0, 1, 0);
+    const _flyDir = new THREE.Vector3();   // scratch: a flight allocates nothing per frame
+
+    function flyTo(targetVec, camVec, durationSec, arc = 0) {
         if (durationSec <= 0) {
             controls.target.copy(targetVec);
             camera.position.copy(camVec);
@@ -1556,13 +1586,43 @@ export function createScene(canvas, callbacks = {}) {
             fly = null;
             return;
         }
+        const fromTarget = controls.target.clone();
+        const fromCam = camera.position.clone();
+        const toTarget = targetVec.clone();
+        const toCam = camVec.clone();
+
+        // Everything below is in OFFSETS from each end's own target, so an
+        // arced flight is an orbit around the thing being looked at rather than
+        // a chord straight through it.
+        const o0 = fromCam.clone().sub(fromTarget);
+        const o1 = toCam.clone().sub(toTarget);
+        const d0 = o0.length() || 1e-4;
+        const d1 = o1.length() || 1e-4;
+        const a = o0.divideScalar(d0);
+        const b = o1.divideScalar(d1);
+        let angle = Math.acos(Math.min(1, Math.max(-1, a.dot(b))));
+        const axis = new THREE.Vector3().crossVectors(a, b);
+        if (axis.lengthSq() < 1e-10) {
+            // Either parallel (nothing to rotate) or antiparallel, where the
+            // cross product gives no plane at all. A half-turn with no chosen
+            // axis would collapse back into a straight line THROUGH the star,
+            // which is the exact move this is here to avoid — so pick a stable
+            // perpendicular and swing over the top.
+            if (angle > 1e-3) {
+                axis.crossVectors(a, WORLD_UP);
+                if (axis.lengthSq() < 1e-10) axis.crossVectors(a, new THREE.Vector3(1, 0, 0));
+            } else { angle = 0; axis.set(0, 1, 0); }
+        }
+        axis.normalize();
+
         fly = {
             t0: performance.now() / 1000,
             dur: durationSec,
-            fromTarget: controls.target.clone(),
-            toTarget: targetVec.clone(),
-            fromCam: camera.position.clone(),
-            toCam: camVec.clone()
+            fromTarget, toTarget, fromCam, toCam,
+            a, axis, angle, d0, d1,
+            // Scale the bow by how far we are actually turning: nudging to the
+            // next-door star should not balloon outward like a grand tour.
+            arc: arc * Math.min(1, Math.max(0.25, angle / (Math.PI / 2))),
         };
     }
     function stepFly(now) {
@@ -1571,8 +1631,18 @@ export function createScene(canvas, callbacks = {}) {
         // ease-in-out cubic
         const k = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
         controls.target.lerpVectors(fly.fromTarget, fly.toTarget, k);
-        camera.position.lerpVectors(fly.fromCam, fly.toCam, k);
-        if (t >= 1) fly = null;
+        if (fly.arc > 0) {
+            // Rotate the offset around the target while riding a distance
+            // envelope that bulges at the midpoint: back off, swing round to
+            // the star's own side, then close in. The bulge peaks at k=0.5 and
+            // is exactly 0 at both ends, so the arrival pose is still toCam.
+            _flyDir.copy(fly.a).applyAxisAngle(fly.axis, fly.angle * k);
+            const dist = (fly.d0 + (fly.d1 - fly.d0) * k) * (1 + fly.arc * Math.sin(Math.PI * k));
+            camera.position.copy(controls.target).addScaledVector(_flyDir, dist);
+        } else {
+            camera.position.lerpVectors(fly.fromCam, fly.toCam, k);
+        }
+        if (t >= 1) { camera.position.copy(fly.toCam); fly = null; }
     }
 
     function focusGalaxy(category) {
