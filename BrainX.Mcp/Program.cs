@@ -2873,9 +2873,21 @@ internal static partial class Program
         var folder = (args["folder"]?.ToString() ?? "Notes").Trim();
         if (string.IsNullOrEmpty(folder)) folder = "Notes";
 
-        var tagsStr = args["tags"]?.ToString() ?? "";
+        // `tags` is a comma/semicolon-separated STRING. Callers reach for a
+        // JSON array anyway ("[\"a\",\"b\"]") and the naive split accepted it
+        // silently: it cut on the commas and wrote `- ["a"` / `- "b"]` into the
+        // YAML frontmatter. That parses to NO tags at all — 33 real notes
+        // between 2026-08-12 and 2026-09-07 ended up with Tags=[] and no Scope,
+        // which drops them out of `brain_search scope:` (the +15-22 pt lever).
+        // Trim the JSON punctuation off every token so both shapes land right.
+        var tagsStr = (args["tags"] is JArray tagsArr
+                ? string.Join(',', tagsArr.Select(t => t?.ToString() ?? ""))
+                : args["tags"]?.ToString()) ?? "";
         var tags = tagsStr.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries
-                                              | StringSplitOptions.TrimEntries);
+                                              | StringSplitOptions.TrimEntries)
+                          .Select(t => t.Trim('[', ']', '"', '\'', ' '))
+                          .Where(t => t.Length > 0)
+                          .ToArray();
 
         var safeTitle = string.Concat(title.Split(Path.GetInvalidFileNameChars())).Trim();
         var safeFolder = string.Concat(folder.Split(Path.GetInvalidPathChars())).Trim();
