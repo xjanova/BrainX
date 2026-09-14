@@ -599,9 +599,16 @@ public partial class MainWindow : Window
 
         // Put primary first so index 0 of _wallpapers is always the
         // monitor users would expect to be "the main one" (matches
-        // single-monitor behavior order).
-        list.Sort((a, b) => b.IsPrimary.CompareTo(a.IsPrimary));
-        return list;
+        // single-monitor behavior order), then left to right. A STABLE order:
+        // List.Sort is an unstable introsort, so the non-primary monitors used
+        // to come back in whatever order it left them — and "screen 2" in the
+        // setup bar could be a different physical monitor by the time Apply
+        // enumerated again.
+        return list
+            .OrderByDescending(m => m.IsPrimary)
+            .ThenBy(m => m.Left)
+            .ThenBy(m => m.Top)
+            .ToList();
     }
 
     // Wallpaper Engine constants for window styling + z-ordering.
@@ -640,6 +647,12 @@ public partial class MainWindow : Window
         public int Left, Top, Width, Height;   // monitor bounds in physical pixels
         public string MonitorId = "";   // for HUD logs
         public bool RenderPaused;       // tracked so we don't spam pauseRender messages
+        // The page's HUD said hudReady — it can take card payloads now.
+        public bool HudReady;
+        // This surface prints at least one HUD card, so the HUD timer has to
+        // keep feeding it even while the main window is hidden (which, for a
+        // wallpaper, is most of the time).
+        public bool ShowCards;
     }
 
     // SETUP-only preview window. After Apply this is null — the window
@@ -655,15 +668,25 @@ public partial class MainWindow : Window
     //                (1 WebView2, default, pre-fa49312 behavior).
     //   "mirror"   = N WebView2, all showing the SAME view, sync'd via
     //                host master→slave broadcast (~10 fps).
-    //   "separate" = N WebView2, each monitor has its OWN settings/camera
-    //                (per-monitor prefs map in _pendingMonitorPrefs).
+    //   "separate" = N WebView2, each monitor has its OWN settings/camera/
+    //                cards (one payload per surface in _surfacePayloads).
+    // Whichever layout, only the monitors in _wallpaperScreens take part.
     private string _wallpaperLayout = "span";
 
-    // Per-monitor preferences received from wallpaperApply (Separate mode).
-    // Keyed by monitor index (0 = primary). Value = pre-built JSON message
-    // ready to PostWebMessageAsJson to that monitor's clone on its 'ready'.
-    // Null when not in Separate mode or no prefs were supplied.
-    private Dictionary<int, string>? _pendingMonitorPrefs;
+    // The wallpaperApply message as the page sent it, parsed. FinalizeWallpaper
+    // turns it into one payload per surface once it knows the surfaces.
+    private Newtonsoft.Json.Linq.JObject? _pendingWallpaperApply;
+
+    // One pre-built applyMonitorSettings message per surface, keyed by the
+    // surface's MonitorId (device name; "virtual-screen-span" in Span mode):
+    // theme + sliders, camera, cards, and the mirror role or the span card
+    // rect. Pushed on each surface's 'ready' — and to the promoted setup
+    // window right after Apply, since that page never says 'ready' again.
+    private Dictionary<string, string>? _surfacePayloads;
+
+    // Devices chosen to show the wallpaper, from wallpaperApply. Null = every
+    // monitor (single-monitor hosts, older pages, or nothing chosen).
+    private HashSet<string>? _wallpaperScreens;
 
     private DispatcherTimer? _wallpaperWatchdog;
     private bool _wallpaperReattachInFlight;     // re-entry guard for AttachWallpaperToShell
@@ -881,7 +904,9 @@ public partial class MainWindow : Window
             // from normal teardown. Especially important for Separate mode
             // where multiple per-monitor processes can fail independently.
             core.ProcessFailed += OnWallpaperWebViewProcessFailed;
-            webView.Source = new Uri("https://universe.local/universe/index.html?mode=wallpaper-setup");
+            // hud=1: the preview carries the live HUD cards it will print, so
+            // what is chosen in the setup bar is what the desktop gets.
+            webView.Source = new Uri("https://universe.local/universe/index.html?mode=wallpaper-setup&hud=1");
 
             _setupInstance = new WallpaperInstance
             {
@@ -972,100 +997,80 @@ public partial class MainWindow : Window
                 if (File.Exists(path) && instance?.WebView?.CoreWebView2 != null)
                     instance.WebView.CoreWebView2.PostWebMessageAsJson(
                         "{\"type\":\"brain\",\"payload\":" + File.ReadAllText(path) + "}");
-                // Also report current monitor count so the wallpaper-setup
-                // UI can render its per-monitor selector + resource warning.
-                // Single-monitor users still get 1 here (selector stays hidden).
+                // The monitors themselves, so the setup bar can name each
+                // screen, switch it on or off, and remember choices by device.
+                // monitorCount stays for pages older than the list.
                 if (instance?.WebView?.CoreWebView2 != null)
                 {
                     try
                     {
-                        var monCount = EnumerateMonitors().Count;
+                        var mons = EnumerateMonitors();
                         instance.WebView.CoreWebView2.PostWebMessageAsJson(
-                            $"{{\"type\":\"monitorCount\",\"count\":{monCount}}}");
+                            $"{{\"type\":\"monitorCount\",\"count\":{mons.Count}}}");
+                        instance.WebView.CoreWebView2.PostWebMessageAsJson(
+                            Newtonsoft.Json.JsonConvert.SerializeObject(new
+                            {
+                                type = "monitors",
+                                list = mons.Select(m => new
+                                {
+                                    device = m.DeviceName, width = m.Width, height = m.Height,
+                                    left = m.Left, top = m.Top, primary = m.IsPrimary,
+                                }),
+                            }));
                     }
-                    catch (Exception ex) { Debug.WriteLine($"monitorCount post: {ex.Message}"); }
+                    catch (Exception ex) { Debug.WriteLine($"monitors post: {ex.Message}"); }
                 }
-                // Per-monitor settings handoff: if this instance is a Separate-mode
-                // clone with a pending per-monitor pref slot, push it now so the
-                // clone applies the right camera/settings on boot. Also marks
-                // mirror-mode role (master/slave) so JS knows whether to broadcast.
-                if (instance != null && _pendingMonitorPrefs != null
-                    && instance.WebView?.CoreWebView2 != null)
+                // This surface's configuration: theme, camera, cards, and its
+                // mirror role or span card rect. A clone asks with 'ready' when
+                // it boots, and again after any reload of its page.
+                if (instance != null) PushSurfacePayload(instance);
+            }
+            else if (msg?.type == "hudReady")
+            {
+                // A wallpaper surface's HUD is up. Feed it everything now —
+                // the 2 s HUD timer keeps it fresh from here, for as long as
+                // this surface prints cards.
+                Dispatcher.BeginInvoke(new Action(() =>
                 {
-                    // Find this instance's index in _wallpapers — that's its
-                    // monitor index for the per-monitor map.
-                    var idx = _wallpapers.IndexOf(instance);
-                    if (idx >= 0 && _pendingMonitorPrefs.TryGetValue(idx, out var perMon))
-                    {
-                        try
-                        {
-                            instance.WebView.CoreWebView2.PostWebMessageAsJson(perMon);
-                        }
-                        catch (Exception ex) { Debug.WriteLine($"applyMonitorSettings[{idx}]: {ex.Message}"); }
-                    }
-                    else if (_wallpaperLayout == "mirror")
-                    {
-                        // No per-monitor slot, but Mirror mode → tell the
-                        // instance its role so master starts broadcasting
-                        // and slaves are silent.
-                        var role = (idx == 0) ? "master" : "slave";
-                        try
-                        {
-                            instance.WebView.CoreWebView2.PostWebMessageAsJson(
-                                $"{{\"type\":\"applyMonitorSettings\",\"mirrorRole\":\"{role}\"}}");
-                        }
-                        catch (Exception ex) { Debug.WriteLine($"mirror role[{idx}]: {ex.Message}"); }
-                    }
-                }
+                    if (instance == null) return;
+                    instance.HudReady = true;
+                    if (instance.ShowCards || ReferenceEquals(instance, _setupInstance))
+                        PushAllHudPayloads();
+                }));
             }
             else if (msg?.type == "wallpaperApply")
             {
                 // Layout = 'span' | 'mirror' | 'separate'. Default span if
                 // missing/unknown — matches the original pre-fa49312 mode.
-                var layoutPayload = Newtonsoft.Json.JsonConvert.DeserializeAnonymousType(
-                    e.WebMessageAsJson, new { layout = "" });
-                var layout = (layoutPayload?.layout ?? "").ToLowerInvariant();
+                Newtonsoft.Json.Linq.JObject? apply = null;
+                try
+                {
+                    apply = Newtonsoft.Json.JsonConvert.DeserializeObject<
+                        Newtonsoft.Json.Linq.JObject>(e.WebMessageAsJson);
+                }
+                catch (Exception ex) { ReportWp($"apply payload parse FAILED: {ex.Message}"); }
+                var layout = ((string?)apply?["layout"] ?? "").ToLowerInvariant();
                 _wallpaperLayout = (layout == "mirror" || layout == "separate") ? layout : "span";
 
-                // For Separate mode: parse the per-monitor preference map
-                // and stash it. FinalizeWallpaper will push each entry to
-                // the matching clone after it fires 'ready'.
-                _pendingMonitorPrefs = null;
-                if (_wallpaperLayout == "separate")
+                // Which screens show it. Only the devices the page marked
+                // enabled; an empty or missing list means every screen, and a
+                // list naming nothing we can see falls back the same way in
+                // GetWallpaperSurfaces — a wallpaper on no screen is not one.
+                _wallpaperScreens = null;
+                if (apply?["screens"] is Newtonsoft.Json.Linq.JArray screens && screens.Count > 0)
                 {
-                    try
+                    var on = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var s in screens)
                     {
-                        var monPayload = Newtonsoft.Json.JsonConvert.DeserializeObject<
-                            Newtonsoft.Json.Linq.JObject>(e.WebMessageAsJson);
-                        var monNode = monPayload?["monitors"] as Newtonsoft.Json.Linq.JObject;
-                        if (monNode != null)
-                        {
-                            _pendingMonitorPrefs = new Dictionary<int, string>();
-                            foreach (var prop in monNode.Properties())
-                            {
-                                if (int.TryParse(prop.Name, out var idx))
-                                {
-                                    // Build the applyMonitorSettings message body for
-                                    // this monitor. JS receives settings + camera
-                                    // (and applies them on boot).
-                                    var settings = prop.Value?["settings"]?.ToString(
-                                        Newtonsoft.Json.Formatting.None) ?? "null";
-                                    var camera = prop.Value?["camera"]?.ToString(
-                                        Newtonsoft.Json.Formatting.None) ?? "null";
-                                    _pendingMonitorPrefs[idx] =
-                                        "{\"type\":\"applyMonitorSettings\",\"settings\":" + settings
-                                        + ",\"camera\":" + camera + "}";
-                                }
-                            }
-                            ReportWp($"separate mode — parsed {_pendingMonitorPrefs.Count} monitor pref slot(s)");
-                        }
+                        var device = (string?)s?["device"];
+                        if (!string.IsNullOrEmpty(device) && s?["enabled"]?.Type == Newtonsoft.Json.Linq.JTokenType.Boolean
+                            && (bool)s["enabled"]!)
+                            on.Add(device);
                     }
-                    catch (Exception ex)
-                    {
-                        Debug.WriteLine($"separate-mode prefs parse: {ex.Message}");
-                        ReportWp($"separate prefs parse FAILED: {ex.Message}");
-                    }
+                    if (on.Count > 0) _wallpaperScreens = on;
                 }
+                _pendingWallpaperApply = apply;
+                ReportWp($"apply — layout={_wallpaperLayout}, screens={(_wallpaperScreens == null ? "all" : string.Join(", ", _wallpaperScreens))}");
 
                 Dispatcher.BeginInvoke(new Action(FinalizeWallpaper));
             }
@@ -1122,13 +1127,16 @@ public partial class MainWindow : Window
     /// </summary>
     private List<MonitorBounds> GetWallpaperSurfaces()
     {
-        var monitors = EnumerateMonitors();
+        var monitors = ChosenWallpaperMonitors();
         // Mirror and Separate both spawn one surface per monitor — they
         // differ only in CONTENT (mirror = sync'd identical view; separate
         // = per-monitor settings). Span collapses to a single big surface.
         if (_wallpaperLayout == "mirror" || _wallpaperLayout == "separate") return monitors;
 
-        // Span: collapse to one entry covering bounding box of all monitors.
+        // Span: collapse to one entry covering bounding box of the chosen
+        // monitors. Two screens with a third switched off BETWEEN them get
+        // a box that covers the middle one too — a box is all a single
+        // window can be, and the setup bar's hint says span is one picture.
         int minLeft = int.MaxValue, minTop = int.MaxValue;
         int maxRight = int.MinValue, maxBottom = int.MinValue;
         foreach (var m in monitors)
@@ -1150,6 +1158,113 @@ public partial class MainWindow : Window
                 IsPrimary  = true
             }
         };
+    }
+
+    /// <summary>
+    /// The monitors the owner chose to show the wallpaper on, primary first.
+    /// Every monitor when nothing was chosen — and also when the choice names
+    /// no monitor that exists any more (unplugged between sessions), because
+    /// applying a wallpaper to zero screens would look exactly like a failure.
+    /// </summary>
+    private List<MonitorBounds> ChosenWallpaperMonitors()
+    {
+        var all = EnumerateMonitors();
+        if (_wallpaperScreens == null || _wallpaperScreens.Count == 0) return all;
+        var chosen = all.Where(m => _wallpaperScreens.Contains(m.DeviceName)).ToList();
+        return chosen.Count > 0 ? chosen : all;
+    }
+
+    /// <summary>
+    /// Turn the page's wallpaperApply into one applyMonitorSettings message
+    /// per surface: theme + sliders, camera and cards, plus what the layout
+    /// needs — the mirror role, or in Span the rect (in PHYSICAL px, relative
+    /// to the span window) of the one screen the cards sit on.
+    ///
+    /// Separate looks each surface up in the per-monitor map by DEVICE first,
+    /// then by its position in the full monitor list (what older pages keyed
+    /// by), then falls back to the global look.
+    /// </summary>
+    private void BuildSurfacePayloads(List<MonitorBounds> surfaces)
+    {
+        var payloads = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var apply = _pendingWallpaperApply;
+        var global = apply?["global"] as Newtonsoft.Json.Linq.JObject;
+        var perMonitor = apply?["monitors"] as Newtonsoft.Json.Linq.JObject;
+        var all = EnumerateMonitors();
+
+        for (int i = 0; i < surfaces.Count; i++)
+        {
+            var s = surfaces[i];
+            Newtonsoft.Json.Linq.JObject? src = global;
+            if (_wallpaperLayout == "separate" && perMonitor != null)
+            {
+                Newtonsoft.Json.Linq.JObject? slot = null;
+                foreach (var p in perMonitor.Properties())
+                {
+                    if (p.Value is Newtonsoft.Json.Linq.JObject o
+                        && string.Equals((string?)o["device"], s.DeviceName, StringComparison.OrdinalIgnoreCase))
+                    { slot = o; break; }
+                }
+                if (slot == null)
+                {
+                    var idx = all.FindIndex(m => m.DeviceName == s.DeviceName);
+                    if (idx >= 0) slot = perMonitor[idx.ToString()] as Newtonsoft.Json.Linq.JObject;
+                }
+                src = slot ?? global;
+            }
+
+            var msg = new Newtonsoft.Json.Linq.JObject { ["type"] = "applyMonitorSettings" };
+            if (src?["settings"] is Newtonsoft.Json.Linq.JObject settings) msg["settings"] = settings;
+            if (src?["camera"] is Newtonsoft.Json.Linq.JObject camera) msg["camera"] = camera;
+            // Always present, so a surface whose page restarted is told "no
+            // cards" rather than left showing whatever it had.
+            msg["cards"] = src?["cards"] as Newtonsoft.Json.Linq.JObject ?? new Newtonsoft.Json.Linq.JObject();
+            msg["screen"] = new Newtonsoft.Json.Linq.JObject { ["device"] = s.DeviceName, ["index"] = i };
+            if (_wallpaperLayout == "mirror")
+                msg["mirrorRole"] = i == 0 ? "master" : "slave";
+            if (_wallpaperLayout == "span")
+            {
+                // The cards' screen: the one asked for if it is showing, else
+                // the primary among the chosen, else the first chosen.
+                var chosen = ChosenWallpaperMonitors();
+                var want = (string?)global?["cardsScreen"];
+                var on = chosen.Find(m => string.Equals(m.DeviceName, want, StringComparison.OrdinalIgnoreCase))
+                         ?? chosen.Find(m => m.IsPrimary)
+                         ?? chosen.FirstOrDefault();
+                // Only worth pinning when the span actually covers more than
+                // one screen; a single-screen span IS that screen.
+                if (on != null && chosen.Count > 1)
+                    msg["hudRect"] = new Newtonsoft.Json.Linq.JObject
+                    {
+                        ["left"] = on.Left - s.Left, ["top"] = on.Top - s.Top,
+                        ["width"] = on.Width, ["height"] = on.Height,
+                    };
+            }
+            payloads[s.DeviceName] = msg.ToString(Newtonsoft.Json.Formatting.None);
+        }
+        _surfacePayloads = payloads;
+    }
+
+    /// <summary>Does this surface's payload switch on any card?</summary>
+    private bool SurfaceShowsCards(string monitorId)
+    {
+        if (_surfacePayloads == null || !_surfacePayloads.TryGetValue(monitorId, out var json)) return false;
+        try
+        {
+            var cards = Newtonsoft.Json.Linq.JObject.Parse(json)["cards"] as Newtonsoft.Json.Linq.JObject;
+            return cards != null && cards.Properties().Any(p =>
+                p.Value.Type == Newtonsoft.Json.Linq.JTokenType.Boolean && (bool)p.Value);
+        }
+        catch { return false; }
+    }
+
+    /// <summary>Send a surface its configuration, if Apply produced one.</summary>
+    private void PushSurfacePayload(WallpaperInstance inst)
+    {
+        if (_surfacePayloads == null || inst.WebView?.CoreWebView2 == null) return;
+        if (!_surfacePayloads.TryGetValue(inst.MonitorId, out var json)) return;
+        try { inst.WebView.CoreWebView2.PostWebMessageAsJson(json); }
+        catch (Exception ex) { Debug.WriteLine($"applyMonitorSettings[{inst.MonitorId}]: {ex.Message}"); }
     }
 
     /// <summary>
@@ -1177,15 +1292,25 @@ public partial class MainWindow : Window
             // and Apply.
             var surfaces = GetWallpaperSurfaces();
             ReportWp($"apply 1/4 — layout={_wallpaperLayout}, {surfaces.Count} surface(s): {string.Join(" | ", surfaces)}");
+            // What each surface shows — before any clone exists, so a clone
+            // that boots fast still finds its payload waiting on 'ready'.
+            BuildSurfacePayloads(surfaces);
 
             // Promote the setup instance to be wallpaper #0 (primary).
             // This avoids tearing down + recreating the WebView2 (slow).
             var setup = _setupInstance;
             _setupInstance = null;
             setup.MonitorId = surfaces[0].DeviceName;
+            setup.ShowCards = SurfaceShowsCards(setup.MonitorId);
             await PrepareInstanceForWallpaper(setup, surfaces[0]);
             await AttachWallpaperToShell(setup, isReattach: false);
             _wallpapers.Add(setup);
+            // The setup page never says 'ready' again, so it is handed its
+            // surface's configuration here. Before this, Separate mode left
+            // monitor 1 showing whichever screen was edited LAST in the
+            // preview (both screens came up as screen 2), and Mirror mode's
+            // master — which is this window — was never told to broadcast.
+            PushSurfacePayload(setup);
 
             // Clone an instance per ADDITIONAL surface (mirror mode only —
             // span mode has exactly one surface and skips this loop).
@@ -1196,8 +1321,15 @@ public partial class MainWindow : Window
                 var clone = await SpawnWallpaperClone(mon);
                 if (clone != null)
                 {
-                    await AttachWallpaperToShell(clone, isReattach: false);
+                    clone.ShowCards = SurfaceShowsCards(clone.MonitorId);
+                    // Registered BEFORE the attach. The attach waits ~800 ms on
+                    // the shell, the clone's page is already loading, and its
+                    // 'ready' landing inside that wait used to find no instance
+                    // for its WebView — FindInstanceByWebView then answered with
+                    // the primary, which got the brain and the payload a second
+                    // time while the clone got nothing at all.
                     _wallpapers.Add(clone);
+                    await AttachWallpaperToShell(clone, isReattach: false);
                 }
                 else
                 {
@@ -1310,8 +1442,9 @@ public partial class MainWindow : Window
             // see the exit kind / reason / code instead of guessing.
             core.ProcessFailed += OnWallpaperWebViewProcessFailed;
             // Load directly in wallpaper-mode (no setup chrome) since clones
-            // skip the setup phase entirely.
-            webView.Source = new Uri("https://universe.local/universe/index.html?mode=wallpaper");
+            // skip the setup phase entirely. hud=1 so its cards can show; which
+            // ones (if any) arrive with its applyMonitorSettings on 'ready'.
+            webView.Source = new Uri("https://universe.local/universe/index.html?mode=wallpaper&hud=1");
 
             return new WallpaperInstance
             {
@@ -2007,6 +2140,10 @@ public partial class MainWindow : Window
 
         _wallpapers.Clear();
         _setupInstance = null;
+        // The next Apply computes its own; a stale payload map would hand a
+        // re-opened setup preview the previous run's cards and camera.
+        _surfacePayloads = null;
+        _pendingWallpaperApply = null;
 
         // CRITICAL: force Windows to repaint the real desktop wallpaper.
         // 0x052C spawned an empty back-WorkerW that spans the virtual screen;

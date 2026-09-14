@@ -926,6 +926,7 @@ body.bg-nebula {
 }
 .wp-monitor-chips {
     display: inline-flex;
+    flex-wrap: wrap;
     gap: 4px;
 }
 .wp-mon-chip {
@@ -938,6 +939,8 @@ body.bg-nebula {
     cursor: pointer;
     transition: all 0.15s ease;
     opacity: 0.7;
+    /* "1 ★ · 2560×1440" is one label; broken over two lines it reads as two. */
+    white-space: nowrap;
 }
 .wp-mon-chip:hover {
     color: var(--accent);
@@ -950,6 +953,34 @@ body.bg-nebula {
     color: var(--accent);
     font-weight: 600;
     opacity: 1;
+}
+
+/* Eight card chips do not fit one line in a narrow preview; they wrap under
+   their label instead of pushing the bar off screen. */
+.wp-card-chips {
+    flex-wrap: wrap;
+}
+.wp-cards-on {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+}
+.wp-cards-on[hidden] {
+    display: none;
+}
+/* A screen chip that is switched off: still clickable, visibly not showing. */
+.wp-mon-chip.off {
+    opacity: 0.45;
+    text-decoration: line-through;
+    border-style: dashed;
+}
+
+/* The preview carries the live HUD cards now (hud-active), and the top-centre
+   card sits exactly where this bar does. The bar is the thing being used, so
+   it stays on top. */
+body.wallpaper-setup .wp-setup-bar {
+    z-index: 60;
 }
 
 /* In setup mode, push the existing settings panel up so the setup bar

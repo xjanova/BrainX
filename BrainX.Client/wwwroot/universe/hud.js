@@ -12,9 +12,20 @@
 
 import { initHudLayout } from './hudlayout.js';
 import { getTheme, onThemeChange } from './theme.js';
+import { WALLPAPER_CARDS, getWallpaperCards, setWallpaperCards, onWallpaperCardsChange } from './cards.js';
 
 const QS = new URLSearchParams(location.search);
 const HUD_ON = QS.get('hud') === '1';
+
+/* A live wallpaper (and its setup preview) carries this same HUD, card by
+ * card, as the owner chooses per screen. It is the HUD with everything that
+ * belongs to a WINDOW taken out: no boot curtain (a wallpaper has nothing to
+ * wait for — it is drawn behind the desktop long after the app has booted),
+ * no free layout (a wallpaper takes no drags, and its own layout key would
+ * clobber the main view's), no action buttons, no notice bar. Which cards
+ * show comes from cards.js, not from the main view's switches.
+ * `wallpaper-active` is the dashboard embed, which has no HUD at all. */
+const WP_MODE = QS.get('mode') === 'wallpaper' || QS.get('mode') === 'wallpaper-setup';
 
 /* ?hudDemo=1 fills every panel with representative data and no host.
  * Design work on a HUD needs the HUD to be FULL — empty panels hide exactly
@@ -214,6 +225,9 @@ let lastAgents = null;
 /** Whether the card is on screen; a freshly swapped picture must honour it,
  *  because its IntersectionObserver will not fire again for the same canvas. */
 let busVisible = true;
+/** Wallpaper only: the host paused this surface (a fullscreen window covers
+ *  it). Nothing may restart the bus until it says resume. */
+let wallpaperPaused = false;
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -256,6 +270,9 @@ function updateBootProgress() {
 }
 
 function markStep(id, status = 'ok') {
+    // A wallpaper has no boot screen, and the host's wallpaper bridge has no
+    // use for a boot checklist relayed from behind the desktop.
+    if (WP_MODE) return;
     if (state.done.has(id)) return;
     state.done.add(id);
     state.status.set(id, status);
@@ -740,6 +757,42 @@ function wireCardToggles() {
     });
 }
 
+/* Wallpaper pages: the same chips, a different owner. What shows comes from
+ * cards.js — fed by app.js out of the wallpaper prefs, per screen — and a
+ * click writes back there, never to CARDS_KEY: that key is the main view's,
+ * and a wallpaper setup that re-arranged the owner's HUD would be the same
+ * bug as the one that once made wallpaper sliders overwrite app settings. */
+function wireWallpaperCards() {
+    const apply = (cards) => {
+        for (const { id } of WALLPAPER_CARDS) {
+            const on = cards[id] === true;
+            const panel = document.querySelector(`.hud-panel.hud-${id}`);
+            if (panel) panel.hidden = !on;
+            const btn = document.querySelector(`.card-btn[data-card="${id}"]`);
+            if (btn) {
+                btn.classList.toggle('is-on', on);
+                btn.setAttribute('aria-pressed', String(on));
+            }
+        }
+        markScrollable();
+    };
+    // On a wallpaper the top-centre card is the network readout alone — its
+    // action buttons are hidden, since nothing behind the desktop takes a click.
+    const tcBtn = document.querySelector('.card-btn[data-card="tc"]');
+    if (tcBtn) tcBtn.textContent = WALLPAPER_CARDS.find(c => c.id === 'tc').label;
+    apply(getWallpaperCards());
+    onWallpaperCardsChange(apply);
+    document.querySelectorAll('.card-btn[data-card]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const next = getWallpaperCards();
+            next[btn.dataset.card] = !next[btn.dataset.card];
+            setWallpaperCards(next, 'hud');
+        });
+    });
+    document.getElementById('set-cards-all')?.addEventListener('click', () =>
+        setWallpaperCards(Object.fromEntries(WALLPAPER_CARDS.map(c => [c.id, true])), 'hud'));
+}
+
 /* Exact name first, then the vendor before the first dash. The work feed
  * names its agents finer than the bus does — claude-code and claude-chat are
  * two surfaces of one vendor, and telling them apart is the entire reason that
@@ -1188,6 +1241,15 @@ function onHudMessage(evt) {
             noteHostStep(m.payload?.id, m.payload?.label, m.payload?.done, m.payload?.skipped);
             break;
         case 'hudNotice':    renderNotice(m.payload); break;
+        // A wallpaper covered by a fullscreen window stops its galaxy (app.js
+        // handles the scene); the agent bus is its own render loop and has to
+        // stop with it, or a card nobody can see keeps a GPU context busy
+        // under a game.
+        case 'pauseRender':  wallpaperPaused = true;  bus?.stop(); break;
+        case 'resumeRender':
+            wallpaperPaused = false;
+            if (busVisible && !document.hidden) bus?.start();
+            break;
         // The galaxy payload already flows for the renderer; piggyback on it so
         // the first two boot steps complete without waiting on the host's own
         // hudStats. brain-export.json is PascalCase (the C# model serialised
@@ -1233,10 +1295,10 @@ async function initBus() {
     new ResizeObserver(() => bus?.resize()).observe(canvas);
     new IntersectionObserver(([e]) => {
         busVisible = e.isIntersecting;
-        busVisible && !document.hidden ? bus?.start() : bus?.stop();
+        busVisible && !document.hidden && !wallpaperPaused ? bus?.start() : bus?.stop();
     }, { threshold: 0.01 }).observe(canvas);
     document.addEventListener('visibilitychange', () =>
-        document.hidden ? bus?.stop() : (busVisible && bus?.start()));
+        document.hidden ? bus?.stop() : (busVisible && !wallpaperPaused && bus?.start()));
     onThemeChange((t) => swapBus(t).catch(e => console.warn('[hud] agent bus swap failed:', e?.message || e)));
 }
 
@@ -1267,7 +1329,7 @@ async function swapBus(theme) {
     bus = factory(canvas);
     busKind = kind;
     if (lastAgents) bus?.setAgents(lastAgents);
-    if (!busVisible || document.hidden) bus?.stop();
+    if (!busVisible || document.hidden || wallpaperPaused) bus?.stop();
     // Demo mode only: a console handle for checking orbits/traffic without
     // a screenshot. Never exposed in the shipped HUD.
     if (HUD_DEMO) window.__hudBus = bus;
@@ -1345,22 +1407,32 @@ function renderBusy(d = {}) {
 export function initHud() {
     if (!HUD_ON) return;
     document.body.classList.add('hud-active');
-    renderBootSteps();
+    if (WP_MODE) {
+        // See WP_MODE: a wallpaper has no boot to show, so there is no curtain
+        // and nothing will ever be waited on.
+        document.body.classList.add('hud-wallpaper');
+        state.finished = true;
+        $('hud-boot')?.remove();
+    } else {
+        renderBootSteps();
+    }
     wireActions();
     wireNotice();
     wireWheelScroll();
     // Before initHudLayout: a hidden panel must not be measured for its
     // placed rect, or restoring it later would put it back at a size the
     // layout took while it was display:none.
-    wireCardToggles();
+    if (WP_MODE) wireWallpaperCards(); else wireCardToggles();
     // Before the first payload lands, so the chip is already painted in the
     // owner's remembered state rather than flipping once data arrives.
     initChatWorkToggle();
     initBus();
     // Grid first, then the owner's own arrangement on top of it: the layout
     // module measures the panels where the grid put them, so it has to run
-    // after everything above has had its say about their size.
-    initHudLayout();
+    // after everything above has had its say about their size. A wallpaper
+    // keeps the grid: nobody can drag behind the desktop, and the layout's
+    // storage key belongs to the main view.
+    if (!WP_MODE) initHudLayout();
     // Arms the quiet clock from the start — a bus that has never carried
     // anything should not hold its empty log over the render for the session.
     noteFlowActivity();
@@ -1394,8 +1466,10 @@ export function initHud() {
     // Safety net: never let a missing section strand the boot screen. Rearmed
     // by every hudBootBusy heartbeat, so a slow host extends it and a silent
     // host does not.
-    armBootDeadline();
+    if (!WP_MODE) armBootDeadline();
 
+    // On a wallpaper this is what makes the host start feeding this surface's
+    // cards (OnWallpaperMessage) — the main view's HUD is fed regardless.
     post({ type: 'hudReady' });
     // Demo-only handle, same idea as __hudBus: lets the busy/idle button states
     // be driven and checked from a browser console without waiting on the

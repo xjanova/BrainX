@@ -6,6 +6,7 @@
 
 import { createScene } from './scene.js';
 import { publishTheme } from './theme.js';
+import { WALLPAPER_CARDS, normalizeCards, setWallpaperCards, onWallpaperCardsChange } from './cards.js';
 
 const $status   = document.getElementById('status');
 const $stats    = document.getElementById('stats');
@@ -69,6 +70,13 @@ const $wpResourceWarn      = document.getElementById('wp-resource-warn');
 const $wpResourceWarnText  = document.getElementById('wp-resource-warn-text');
 const $wpMonitorBar        = document.getElementById('wp-monitor-bar');
 const $wpMonitorChips      = document.getElementById('wp-monitor-chips');
+const $wpScreensBar        = document.getElementById('wp-screens-bar');
+const $wpScreenChips       = document.getElementById('wp-screen-chips');
+const $wpLookLabel         = document.getElementById('wp-look-label');
+const $wpCardChips         = document.getElementById('wp-card-chips');
+const $wpCardsLabel        = document.getElementById('wp-cards-label');
+const $wpCardsOn           = document.getElementById('wp-cards-on');
+const $wpCardsScreenChips  = document.getElementById('wp-cards-screen-chips');
 
 // localStorage key for the saved wallpaper preferences. v2 adds:
 //   - layout: 'span' | 'mirror' | 'separate'
@@ -89,9 +97,22 @@ let _wpLayout = WALLPAPER_LAYOUT_DEFAULT;
 let _wpMonitorCount = 1;
 // Index of the monitor currently being edited in Separate mode. 0 = primary.
 let _wpEditingMonitor = 0;
-// Per-monitor saved prefs in Separate mode. Shape: { 0: {settings, camera}, ... }
-// Persisted as part of the prefs object on every edit.
+// Per-monitor saved prefs in Separate mode. Shape:
+//   { 0: {settings, camera, cards, device}, ... }
+// `device` (\\.\DISPLAY2) is what survives a monitor being re-ordered or
+// unplugged; the index key is only where it sat when it was saved.
 let _wpMonitorPrefs = {};
+// The host's monitor list: [{index, device, width, height, left, top, primary}],
+// primary first. Empty until the `monitors` message lands (single screen, or
+// a host older than this page).
+let _wpMonitors = [];
+// Screens switched OFF, by device: { "\\\\.\\DISPLAY2": false }. Absent = on,
+// so a newly plugged monitor shows the wallpaper like every screen used to.
+let _wpScreens = {};
+// Span / Mirror: the cards every screen shows (Separate keeps them per slot).
+let _wpCards = {};
+// Span: the screen the cards sit on (a device name; null = the primary).
+let _wpCardsScreen = null;
 
 function loadWallpaperPrefs() {
     try {
@@ -355,6 +376,16 @@ function exitEditUI() {
 // ── Wallpaper setup bar ────────────────────────────────────────────
 // Shown when ?mode=wallpaper-setup. User configures interactively then
 // clicks Apply → posts wallpaperApply to C# which reparents to WorkerW.
+//
+// Three things are chosen here, per screen when there are several:
+//   WHERE — which monitors show the wallpaper at all (_wpScreens);
+//   WHAT  — universe or neural brain (the ordinary `theme` setting);
+//   WHICH — the HUD cards printed on it (cards.js; none by default).
+// Span and Mirror make one choice for every screen — Mirror by definition
+// shows one picture, and Span IS one picture. Separate makes it per screen,
+// through the same "Configuring" chips that already carried each screen's
+// camera and settings. The preview shows the result live: its theme is the
+// live theme and its HUD shows exactly the cards that will be printed.
 function wireWallpaperSetup() {
     if (!$wpSetupBar) return;
     $wpSetupBar.hidden = false;
@@ -383,8 +414,12 @@ function wireWallpaperSetup() {
         if (saved.monitors && typeof saved.monitors === 'object') {
             _wpMonitorPrefs = saved.monitors;
         }
+        if (saved.screens && typeof saved.screens === 'object') _wpScreens = { ...saved.screens };
+        _wpCards = normalizeCards(saved.cards);
+        if (typeof saved.cardsScreen === 'string') _wpCardsScreen = saved.cardsScreen;
     }
     applyLayoutToUI(_wpLayout);
+    showPreviewCards();
 
     // Layout segmented toggle (Span / Mirror / Separate).
     //   • Span     = 1 WebView2, stretched across virtual screen.
@@ -400,18 +435,24 @@ function wireWallpaperSetup() {
         // free of charge; Mirror/Separate spawn N. Update text with current
         // monitor count so the user sees "Heavy: 3×~250 MB" not just "N×".
         if ($wpResourceWarn) {
-            const heavy = (mode === 'mirror' || mode === 'separate') && _wpMonitorCount > 1;
+            // Counted over the screens that will SHOW it: a screen switched
+            // off costs nothing, and quoting it would overstate the price.
+            const procs = enabledIndices().length;
+            const heavy = (mode === 'mirror' || mode === 'separate') && procs > 1;
             $wpResourceWarn.hidden = !heavy;
             if (heavy && $wpResourceWarnText) {
-                const procs = _wpMonitorCount;
                 $wpResourceWarnText.textContent =
                     `Heavy: ${procs}×~250 MB RAM + ${procs} GPU contexts. Span uses only 1.`;
             }
         }
-        // Per-monitor selector — Separate mode only, multi-monitor only.
-        const showMonitorBar = (mode === 'separate' && _wpMonitorCount > 1);
+        // Per-monitor selector — Separate mode only, and only once there is
+        // more than one SHOWING screen to choose between.
+        const showMonitorBar = (mode === 'separate' && enabledIndices().length > 1);
         if ($wpMonitorBar) $wpMonitorBar.hidden = !showMonitorBar;
         if (showMonitorBar) renderMonitorChips();
+        renderScreens();
+        renderLook();
+        renderCards();
     }
 
     // Wire all three layout chips. Switching mode rebuilds the per-monitor
@@ -420,54 +461,253 @@ function wireWallpaperSetup() {
         if (_wpLayout === 'separate') flushEditingMonitorPrefs();
         _wpLayout = 'span';
         applyLayoutToUI(_wpLayout);
+        showPreviewCards();
     });
     $wpLayoutMirror?.addEventListener('click', () => {
         if (_wpLayout === 'separate') flushEditingMonitorPrefs();
         _wpLayout = 'mirror';
         applyLayoutToUI(_wpLayout);
+        showPreviewCards();
     });
     $wpLayoutSeparate?.addEventListener('click', () => {
         _wpLayout = 'separate';
-        applyLayoutToUI(_wpLayout);
+        ensureEditingEnabled();
         // Entering Separate: ensure the currently-edited monitor's slot has
         // SOMETHING in it (the current live settings/camera) so the chip
         // looks "filled". Other slots seed from live values lazily on click.
+        // Before the render, so the card row draws the slot, not an empty one.
         flushEditingMonitorPrefs();
+        applyLayoutToUI(_wpLayout);
+        showPreviewCards();
     });
 
-    // Host reports monitor count after wallpaper-setup boots. Re-run
-    // applyLayoutToUI so the warning + chip row react to the actual count.
-    window.addEventListener('wpMonitorCountChanged', () => applyLayoutToUI(_wpLayout));
+    // Host reports its monitors after wallpaper-setup boots. Slots saved
+    // against a device follow that device to wherever it now sits in the
+    // list, the screen being edited must be one that is switched on, and then
+    // every row re-renders against the real count.
+    window.addEventListener('wpMonitorCountChanged', () => {
+        remapSlotsByDevice();
+        ensureEditingEnabled();
+        applyLayoutToUI(_wpLayout);
+        showPreviewCards();
+    });
 
     // Persist the currently-shown live settings/camera into the slot for
     // the monitor currently being edited (Separate mode only). Called
-    // when the user switches monitors so edits don't get lost.
+    // when the user switches monitors so edits don't get lost. The slot's
+    // cards are kept — they are edited on their own row, not captured live.
     function flushEditingMonitorPrefs() {
         if (_wpLayout !== 'separate') return;
         const cam = scene?.snapshotCamera?.() ?? null;
+        // A slot born here starts from the shared card set, the same way its
+        // settings start from what is on screen — cards picked in Span or
+        // Mirror a moment ago should not vanish on switching to Separate.
+        const prev = _wpMonitorPrefs[_wpEditingMonitor] || { cards: normalizeCards(_wpCards) };
         _wpMonitorPrefs[_wpEditingMonitor] = {
+            ...prev,
             settings: { ...currentSettings },
             camera:   cam,
+            device:   _wpMonitors[_wpEditingMonitor]?.device ?? prev.device ?? null,
         };
     }
 
-    // Build the per-monitor chip row. One chip per detected monitor,
-    // labelled "1 (primary)", "2", "3", ... The active chip is the one
-    // currently being edited in the preview window.
+    /** "2 · 1920×1080" — or just "2" before the host has said anything. */
+    function screenLabel(i) {
+        const m = _wpMonitors[i];
+        const n = String(i + 1);
+        if (!m) return i === 0 ? `${n} (primary)` : n;
+        return `${n}${m.primary ? ' ★' : ''} · ${m.width}×${m.height}`;
+    }
+
+    // Build the per-monitor chip row. One chip per SHOWING monitor. The
+    // active chip is the one currently being edited in the preview window.
     function renderMonitorChips() {
         if (!$wpMonitorChips) return;
         $wpMonitorChips.innerHTML = '';
-        for (let i = 0; i < _wpMonitorCount; i++) {
+        for (const i of enabledIndices()) {
             const chip = document.createElement('button');
             chip.type = 'button';
             chip.className = 'wp-mon-chip' + (i === _wpEditingMonitor ? ' active' : '');
             chip.dataset.idx = String(i);
-            chip.textContent = (i === 0) ? `${i + 1} (primary)` : String(i + 1);
-            chip.title = `Edit monitor ${i + 1}'s wallpaper setup`;
+            chip.textContent = screenLabel(i);
+            chip.title = `Edit screen ${i + 1}'s theme, camera and cards`;
             chip.addEventListener('click', () => switchEditingMonitor(i));
             $wpMonitorChips.appendChild(chip);
         }
     }
+
+    // ── WHERE: screens on / off ──
+    function screenCount() { return Math.max(1, _wpMonitors.length || _wpMonitorCount); }
+    function screenEnabled(i) {
+        const d = _wpMonitors[i]?.device;
+        return d ? _wpScreens[d] !== false : true;
+    }
+    function enabledIndices() {
+        const out = [];
+        for (let i = 0; i < screenCount(); i++) if (screenEnabled(i)) out.push(i);
+        return out.length ? out : [0];
+    }
+    function ensureEditingEnabled() {
+        const on = enabledIndices();
+        if (!on.includes(_wpEditingMonitor)) {
+            if (_wpLayout === 'separate') switchEditingMonitor(on[0]);
+            else _wpEditingMonitor = on[0];
+        }
+    }
+    /**
+     * A monitor list that moved between sessions takes its slots with it.
+     * Slots that name a device go wherever that device now sits; a slot whose
+     * device is not plugged in is PARKED under `d:<device>` — kept, not given
+     * to whichever monitor now holds its old index, so it comes back intact
+     * with its screen. Only slots from before devices were recorded fall back
+     * to their index, and only onto a position nothing else claimed.
+     */
+    function remapSlotsByDevice() {
+        if (!_wpMonitors.length) return;
+        const at = new Map(_wpMonitors.map(m => [m.device, m.index]));
+        const next = {};
+        const legacy = [];
+        for (const [k, slot] of Object.entries(_wpMonitorPrefs)) {
+            if (!slot) continue;
+            if (!slot.device) { legacy.push([k, slot]); continue; }
+            if (at.has(slot.device)) next[at.get(slot.device)] = slot;
+            else next['d:' + slot.device] = slot;
+        }
+        for (const [k, slot] of legacy) {
+            const idx = Number(k);
+            if (Number.isInteger(idx) && next[idx] === undefined) next[idx] = slot;
+        }
+        _wpMonitorPrefs = next;
+    }
+    function renderScreens() {
+        if (!$wpScreensBar || !$wpScreenChips) return;
+        const multi = _wpMonitors.length > 1;
+        $wpScreensBar.hidden = !multi;
+        if (!multi) return;
+        $wpScreenChips.innerHTML = '';
+        for (const m of _wpMonitors) {
+            const on = screenEnabled(m.index);
+            const chip = document.createElement('button');
+            chip.type = 'button';
+            chip.className = 'wp-mon-chip' + (on ? ' active' : ' off');
+            chip.setAttribute('aria-pressed', String(on));
+            chip.textContent = screenLabel(m.index);
+            chip.title = on
+                ? `Screen ${m.index + 1} shows the BrainX wallpaper — click to leave its own wallpaper there instead`
+                : `Screen ${m.index + 1} keeps its own wallpaper — click to show BrainX there`;
+            chip.addEventListener('click', () => toggleScreen(m.index));
+            $wpScreenChips.appendChild(chip);
+        }
+    }
+    function toggleScreen(i) {
+        const d = _wpMonitors[i]?.device;
+        if (!d) return;
+        if (screenEnabled(i)) {
+            // Nothing showing is not a wallpaper, it is a Cancel with extra
+            // steps — and Cancel already has a button.
+            if (enabledIndices().length <= 1) {
+                setStatus('At least one screen has to show the wallpaper.');
+                return;
+            }
+            if (_wpLayout === 'separate' && i === _wpEditingMonitor) flushEditingMonitorPrefs();
+            _wpScreens[d] = false;
+        } else {
+            delete _wpScreens[d];
+        }
+        ensureEditingEnabled();
+        applyLayoutToUI(_wpLayout);
+        showPreviewCards();
+    }
+
+    // ── WHAT: universe or neural brain ──
+    // The segmented control is a second face of the ordinary theme setting —
+    // chooseTheme saves it through the wallpaper routing, and in Separate
+    // mode flushEditingMonitorPrefs carries it into the screen's slot.
+    document.querySelectorAll('[data-wp-theme]').forEach(btn =>
+        btn.addEventListener('click', () => chooseTheme(btn.dataset.wpTheme)));
+    function renderLook() {
+        if (!$wpLookLabel) return;
+        const separate = _wpLayout === 'separate' && enabledIndices().length > 1;
+        const scope = separate ? `Screen ${_wpEditingMonitor + 1}`
+                    : (_wpMonitors.length > 1 ? 'All screens' : '');
+        $wpLookLabel.textContent = scope ? `${scope} · theme:` : 'Theme:';
+        if ($wpCardsLabel) $wpCardsLabel.textContent = scope ? `${scope} · cards:` : 'Cards:';
+    }
+
+    // ── WHICH: the cards printed on it ──
+    function cardsForEditing() {
+        return _wpLayout === 'separate'
+            ? normalizeCards(_wpMonitorPrefs[_wpEditingMonitor]?.cards)
+            : normalizeCards(_wpCards);
+    }
+    function storeCards(c) {
+        const cards = normalizeCards(c);
+        if (_wpLayout === 'separate') {
+            if (!_wpMonitorPrefs[_wpEditingMonitor]) flushEditingMonitorPrefs();
+            const prev = _wpMonitorPrefs[_wpEditingMonitor];
+            _wpMonitorPrefs[_wpEditingMonitor] = { ...prev, cards };
+        } else {
+            _wpCards = cards;
+        }
+    }
+    function showPreviewCards() { setWallpaperCards(cardsForEditing(), 'setup'); }
+    function renderCards() {
+        if ($wpCardChips) {
+            const cards = cardsForEditing();
+            $wpCardChips.innerHTML = '';
+            for (const c of WALLPAPER_CARDS) {
+                const on = cards[c.id] === true;
+                const chip = document.createElement('button');
+                chip.type = 'button';
+                chip.className = 'wp-mon-chip' + (on ? ' active' : '');
+                chip.setAttribute('aria-pressed', String(on));
+                chip.textContent = c.label;
+                chip.addEventListener('click', () => {
+                    const next = cardsForEditing();
+                    next[c.id] = !next[c.id];
+                    storeCards(next);
+                    showPreviewCards();
+                    renderCards();
+                });
+                $wpCardChips.appendChild(chip);
+            }
+        }
+        // Span is ONE window across the screens: its cards go on a screen of
+        // their own choosing, or the centre column would sit on a bezel.
+        const spanScreens = _wpLayout === 'span' ? enabledIndices() : [];
+        if ($wpCardsOn) $wpCardsOn.hidden = spanScreens.length < 2;
+        if ($wpCardsScreenChips && spanScreens.length >= 2) {
+            const current = cardsScreenIndex();
+            $wpCardsScreenChips.innerHTML = '';
+            for (const i of spanScreens) {
+                const chip = document.createElement('button');
+                chip.type = 'button';
+                chip.className = 'wp-mon-chip' + (i === current ? ' active' : '');
+                chip.textContent = String(i + 1);
+                chip.title = `Put the cards on screen ${i + 1}`;
+                chip.addEventListener('click', () => {
+                    _wpCardsScreen = _wpMonitors[i]?.device ?? null;
+                    renderCards();
+                });
+                $wpCardsScreenChips.appendChild(chip);
+            }
+        }
+    }
+    /** The span screen the cards go on: the chosen one if it is still
+     *  showing, else the primary, else the first screen that is on. */
+    function cardsScreenIndex() {
+        const on = enabledIndices();
+        const chosen = _wpMonitors.findIndex(m => m.device === _wpCardsScreen);
+        if (chosen >= 0 && on.includes(chosen)) return chosen;
+        const primary = _wpMonitors.findIndex(m => m.primary);
+        return (primary >= 0 && on.includes(primary)) ? primary : on[0];
+    }
+    // A chip in the preview's own settings panel changes the same cards.
+    onWallpaperCardsChange((cards, source) => {
+        if (source !== 'hud') return;
+        storeCards(cards);
+        renderCards();
+    });
 
     // Switch which monitor is being edited. Saves current live state into
     // the OLD monitor's slot, then loads the NEW monitor's slot into the
@@ -495,6 +735,9 @@ function wireWallpaperSetup() {
             flushEditingMonitorPrefs();
         }
         renderMonitorChips();
+        renderLook();
+        renderCards();
+        showPreviewCards();
     }
 
     // (Random camera quick-toggle handler removed — Free/Orbit/Follow/Random
@@ -521,25 +764,59 @@ function wireWallpaperSetup() {
         // monitor's slot is up-to-date.
         if (_wpLayout === 'separate') flushEditingMonitorPrefs();
 
-        // Bundle live settings/camera (= primary monitor's view for
-        // Span/Mirror, or the currently-edited monitor for Separate)
-        // PLUS the per-monitor prefs map (Separate only) for the host
-        // to fan out to each clone.
         const cam = scene?.snapshotCamera?.() ?? null;
+        // Separate: a showing screen nobody opened gets what is on screen
+        // now and the shared cards — the same seed its chip would have given
+        // it on its first click — rather than the host guessing.
+        if (_wpLayout === 'separate') {
+            for (const i of enabledIndices()) {
+                if (_wpMonitorPrefs[i]) continue;
+                _wpMonitorPrefs[i] = {
+                    settings: { ...currentSettings }, camera: cam, cards: normalizeCards(_wpCards),
+                    device: _wpMonitors[i]?.device ?? null,
+                };
+            }
+        }
+        const monitors = {};
+        for (const [k, slot] of Object.entries(_wpMonitorPrefs)) {
+            if (!slot) continue;
+            monitors[k] = {
+                settings: slot.settings ?? null,
+                camera: slot.camera ?? null,
+                cards: normalizeCards(slot.cards),
+                device: slot.device ?? _wpMonitors[k]?.device ?? null,
+            };
+        }
+        const spanOn = cardsScreenIndex();
         const prefs = {
             settings: currentSettings,
             camera: cam,
             layout: _wpLayout,
             monitors: _wpMonitorPrefs,
+            screens: _wpScreens,
+            cards: _wpCards,
+            cardsScreen: _wpCardsScreen,
         };
         saveWallpaperPrefs(prefs);
         setStatus('Applying wallpaper…');
         postToHost({
             type: 'wallpaperApply',
             layout: _wpLayout,
-            // Host uses this map to push per-monitor settings to each
-            // clone's WebView2 after they fire 'ready'. Empty in Span/Mirror.
-            monitors: (_wpLayout === 'separate') ? _wpMonitorPrefs : null,
+            // Which screens show it. Null from a single-monitor host (or one
+            // that never listed its monitors): every screen, as before.
+            screens: _wpMonitors.length
+                ? _wpMonitors.map(m => ({ index: m.index, device: m.device, enabled: screenEnabled(m.index) }))
+                : null,
+            // Span / Mirror: one look for every screen.
+            global: {
+                settings: currentSettings,
+                camera: cam,
+                cards: normalizeCards(_wpCards),
+                cardsScreen: _wpMonitors[spanOn]?.device ?? null,
+            },
+            // Separate: the host pushes each screen its own slot after that
+            // screen's WebView2 fires 'ready' — matched by device first.
+            monitors: (_wpLayout === 'separate') ? monitors : null,
         });
     });
 
@@ -780,6 +1057,22 @@ function onHostMessage(evt) {
                 window.dispatchEvent(new CustomEvent('wpMonitorCountChanged'));
             }
             break;
+        case 'monitors':
+            // The monitors themselves — device names, sizes, which is
+            // primary — so the setup bar can name each screen and remember
+            // choices by device rather than by a position that can move.
+            if (Array.isArray(msg.list) && msg.list.length) {
+                _wpMonitors = msg.list
+                    .filter(m => m && typeof m.device === 'string')
+                    .map((m, i) => ({
+                        index: i, device: m.device,
+                        width: m.width | 0, height: m.height | 0,
+                        left: m.left | 0, top: m.top | 0, primary: !!m.primary,
+                    }));
+                _wpMonitorCount = Math.max(1, _wpMonitors.length);
+                window.dispatchEvent(new CustomEvent('wpMonitorCountChanged'));
+            }
+            break;
         case 'mirrorState':
             // Slave-side: master WebView2 broadcasts camera state to all
             // mirror-mode siblings via the host. Apply directly (no lerp)
@@ -789,18 +1082,22 @@ function onHostMessage(evt) {
             }
             break;
         case 'applyMonitorSettings':
-            // Per-monitor bootstrap (Separate mode only): host sends each
-            // clone its monitor-specific settings + camera right after the
-            // 'ready' handshake. Single-shot — just apply and forget.
+            // Per-surface bootstrap: the host sends every wallpaper surface
+            // what it was configured to show — theme and sliders, camera,
+            // cards — after its 'ready' handshake (and to the promoted setup
+            // window straight after Apply, which never says 'ready' again).
+            // Apply only, never save: N surfaces writing the one shared
+            // settings object would leave it holding whichever booted last.
             if (msg.settings) {
                 currentSettings = { ...currentSettings, ...msg.settings };
                 applySettingsToUI?.(currentSettings);
                 applySettingsToScene?.(currentSettings);
-                saveSettings?.(currentSettings);
             }
             if (msg.camera && scene?.restoreCamera) {
                 requestAnimationFrame(() => scene.restoreCamera(msg.camera));
             }
+            if (msg.cards !== undefined) setWallpaperCards(msg.cards, 'host');
+            applyHudRect(msg.hudRect);
             // If host marks us as a mirror master, start broadcasting
             // camera state to siblings at ~10 fps.
             if (msg.mirrorRole === 'master' && scene?.startMirrorBroadcast) {
@@ -1058,6 +1355,9 @@ function applyThemeToUI(s) {
     const brain = s.theme === 'brain';
     document.querySelectorAll('.cam-btn[data-theme]').forEach(b =>
         b.classList.toggle('active', b.dataset.theme === s.theme));
+    // The wallpaper setup bar's copy of the same choice.
+    document.querySelectorAll('[data-wp-theme]').forEach(b =>
+        b.classList.toggle('active', b.dataset.wpTheme === s.theme));
     document.querySelectorAll('.cam-btn[data-fiber]').forEach(b =>
         b.classList.toggle('active', b.dataset.fiber === s.fiberColor));
     const fiberRow = document.querySelector('.fiber-row');
@@ -1125,6 +1425,26 @@ function applySettingsToScene(s) {
         // leaving a control that says ON over a picture that is not.
         if ($setIslands?.classList.contains('active')) scene.toggleIslands?.(true);
     }
+}
+
+/**
+ * Span wallpaper: pin the HUD to the one screen its cards were given, inside
+ * a window that covers several. `r` is that screen's rect in PHYSICAL pixels
+ * relative to the window — what the host measures — so it is divided back to
+ * CSS pixels here. Null returns the HUD to the whole window.
+ */
+function applyHudRect(r) {
+    const layer = document.getElementById('hud-layer');
+    if (!layer) return;
+    const props = ['left', 'top', 'width', 'height'];
+    if (!r || !(r.width > 0) || !(r.height > 0)) {
+        layer.classList.remove('hud-layer-pinned');
+        props.forEach(p => layer.style.removeProperty(p));
+        return;
+    }
+    const dpr = window.devicePixelRatio || 1;
+    layer.classList.add('hud-layer-pinned');
+    for (const p of props) layer.style.setProperty(p, (Number(r[p]) || 0) / dpr + 'px');
 }
 
 /** Tell the host which theme is showing, so the WPF pill over the view can

@@ -64,15 +64,51 @@
             <span id="wp-resource-warn-text">Heavy: N&times;~250 MB RAM + N GPU contexts. Span uses only 1.</span>
         </div>
 
+        <!-- Screens: which monitors show the wallpaper at all. Multi-monitor
+             only. A screen switched off keeps its own Windows wallpaper; at
+             least one always stays on. -->
+        <div id="wp-screens-bar" class="wp-monitor-bar" hidden>
+            <span class="wp-monitor-label">Screens:</span>
+            <div id="wp-screen-chips" class="wp-monitor-chips" role="group" aria-label="Screens that show the wallpaper">
+                <!-- Chips injected by app.js once the host reports its monitors. -->
+            </div>
+            <span class="wp-monitor-hint">click a screen to switch BrainX on or off there</span>
+        </div>
+
         <!-- Per-monitor setup selector — only visible in Separate mode and
              only when there's more than one monitor. Each chip switches the
-             setup preview to that monitor's saved settings + camera. -->
+             setup preview to that monitor's saved settings + camera + cards. -->
         <div id="wp-monitor-bar" class="wp-monitor-bar" hidden>
             <span class="wp-monitor-label">Configuring:</span>
             <div id="wp-monitor-chips" class="wp-monitor-chips" role="radiogroup" aria-label="Monitor to configure">
                 <!-- Chips injected by app.js once host reports monitor count. -->
             </div>
-            <span class="wp-monitor-hint">edits auto-save per monitor</span>
+            <span class="wp-monitor-hint">each screen keeps its own theme, camera and cards</span>
+        </div>
+
+        <!-- What the wallpaper IS: a universe or a human brain — for every
+             screen at once in Span/Mirror, for the screen being configured in
+             Separate. -->
+        <div id="wp-look-bar" class="wp-monitor-bar">
+            <span class="wp-monitor-label" id="wp-look-label">Theme:</span>
+            <div id="wp-theme-seg" class="wp-seg-group" role="radiogroup" aria-label="Wallpaper theme">
+                <button type="button" class="wp-seg-btn" data-wp-theme="universe">&#x1F30C; Universe</button>
+                <button type="button" class="wp-seg-btn" data-wp-theme="brain">&#x1F9E0; Neural Brain</button>
+            </div>
+        </div>
+
+        <!-- Which HUD cards are printed on the wallpaper. None by default —
+             a wallpaper is a picture first. In Span mode the cards go on ONE
+             screen (picked on the right) so the bezel never cuts one in half. -->
+        <div id="wp-cards-bar" class="wp-monitor-bar">
+            <span class="wp-monitor-label" id="wp-cards-label">Cards:</span>
+            <div id="wp-card-chips" class="wp-monitor-chips wp-card-chips" role="group" aria-label="Cards shown on the wallpaper">
+                <!-- Chips injected by app.js. -->
+            </div>
+            <span id="wp-cards-on" class="wp-cards-on" hidden>
+                <span class="wp-monitor-label">on</span>
+                <span id="wp-cards-screen-chips" class="wp-monitor-chips" role="radiogroup" aria-label="Screen the cards sit on"></span>
+            </span>
         </div>
     </div>
 

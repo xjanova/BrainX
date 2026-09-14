@@ -283,7 +283,7 @@ public partial class MainWindow
                     label = _hudBrainReady ? "Vault indexed" : (StatusText?.Text ?? "Reading the vault"),
                     done = _hudBrainReady,
                 });
-            if (!HudOnScreen) return;
+            if (!HudOnScreen && !WallpaperHudWanted) return;
             // The tick awaits a counter read; a machine where that read stalls
             // must not queue ticks behind it and then fire them all at once.
             if (_hudTicking) return;
@@ -356,20 +356,49 @@ public partial class MainWindow
         }
     }
 
+    /// <summary>
+    /// One HUD message to the main view and to every wallpaper surface that
+    /// prints cards (plus the setup preview, which shows the cards live while
+    /// they are being chosen). Serialised once however many surfaces hear it,
+    /// and each post wrapped on its own: one dead WebView must not starve the
+    /// rest. A paused surface (a fullscreen window covers it) is skipped — it
+    /// catches up on the next tick after it resumes.
+    /// </summary>
     private void PostHud(string type, object payload)
     {
-        try
+        string json;
+        try { json = Newtonsoft.Json.JsonConvert.SerializeObject(new { type, payload }); }
+        catch (Exception ex)
         {
-            var core = UniverseWebView?.CoreWebView2;
-            if (core == null) return;
-            core.PostWebMessageAsJson(
-                Newtonsoft.Json.JsonConvert.SerializeObject(new { type, payload }));
+            System.Diagnostics.Debug.WriteLine($"PostHud({type}) serialise: {ex.Message}");
+            return;
         }
+        try { UniverseWebView?.CoreWebView2?.PostWebMessageAsJson(json); }
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"PostHud({type}): {ex.Message}");
         }
+        foreach (var inst in _wallpapers)
+        {
+            if (!inst.HudReady || !inst.ShowCards || inst.RenderPaused) continue;
+            try { inst.WebView?.CoreWebView2?.PostWebMessageAsJson(json); }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"PostHud({type})[{inst.MonitorId}]: {ex.Message}"); }
+        }
+        if (_setupInstance is { HudReady: true } setup)
+        {
+            try { setup.WebView?.CoreWebView2?.PostWebMessageAsJson(json); }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"PostHud({type})[setup]: {ex.Message}"); }
+        }
     }
+
+    /// <summary>
+    /// A wallpaper somewhere is printing cards that someone can see. The
+    /// wallpaper is on screen exactly when the main window usually is not, so
+    /// the HUD timer must not go quiet just because the Universe view is hidden.
+    /// </summary>
+    private bool WallpaperHudWanted =>
+        _setupInstance?.HudReady == true
+        || _wallpapers.Any(w => w.HudReady && w.ShowCards && !w.RenderPaused);
 
     // ═════════════════════════════════════════════════════════════════
     // Panels
