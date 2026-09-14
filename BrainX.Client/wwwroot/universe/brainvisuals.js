@@ -77,7 +77,10 @@ const cortexFrag = /* glsl */`
     void main() {
         vec3 n = normalize(vN);
         if (!gl_FrontFacing) n = -n;
-        float facing = abs(dot(n, normalize(vV)));
+        // Clamped: two normalised vectors can dot to 1.0000001, and pow() of
+        // the negative base that leaves is NaN. Three such pixels, spread by
+        // the bloom's mip chain, blacked out half the frame.
+        float facing = clamp(abs(dot(n, normalize(vV))), 0.0, 1.0);
         // The medial walls are flat and face each other: seen edge-on, their
         // rims stack into a white sheet down the fissure. They keep a trace
         // of rim so the fissure still reads as an edge.
@@ -97,7 +100,9 @@ const cortexFrag = /* glsl */`
         // The scanner's slice: one bright band drifting up and down the brain,
         // the way an MRI viewer scrubs through a volume.
         float slice = sin(uTime * 0.21) * 95.0 + 10.0;
-        float band = exp(-pow((vY - slice) / 2.2, 2.0)) * uScan * uOpacity;
+        // Squared by hand — pow() of a negative base is undefined in GLSL.
+        float sd = (vY - slice) / 2.2;
+        float band = exp(-sd * sd) * uScan * uOpacity;
         gl_FragColor = vec4(col + vec3(0.45, 0.8, 1.0) * band * 1.2, a + band * 0.2);
     }
 `;
@@ -145,7 +150,8 @@ const fiberFrag = /* glsl */`
         float s = vSpark.y > 0.0 ? vT : 1.0 - vT;
         float front = age * uSparkSpeed;
         float live = step(0.0, age) * (1.0 - smoothstep(1.02, 1.3, front));
-        float head = exp(-pow((s - front) / 0.045, 2.0));
+        float hd = (s - front) / 0.045;   // behind the front it is negative: no pow()
+        float head = exp(-hd * hd);
         float tail = s < front ? exp(-(front - s) / 0.14) * 0.6 : 0.0;
         float ap = (head + tail) * live * uSpark;
         col += vec3(0.85, 0.95, 1.25) * ap * 1.5;
@@ -215,7 +221,8 @@ const dendriteFrag = /* glsl */`
         vec3 col = mix(mix(uColor, vec3(1.0), 0.35), vec3(0.85, 0.92, 1.0), vAxon * 0.55);
         // Firing: light spreading outward from the soma along the arbour.
         float live = step(0.0, uFire) * (1.0 - smoothstep(0.7, 1.2, uFire));
-        float wave = exp(-pow((vDist - uFire * 18.0) / 2.5, 2.0)) * live;
+        float wd = (vDist - uFire * 18.0) / 2.5;   // negative inside the front: no pow()
+        float wave = exp(-wd * wd) * live;
         float shimmer = 0.85 + 0.15 * sin(vDist * 2.4 - uTime * 3.0);
         float a = uOpacity * fade * shimmer * (vAxon > 0.5 ? 0.55 : 0.8) + wave * uOpacity * 0.9;
         gl_FragColor = vec4(col + vec3(1.0) * wave * 0.8, a);
@@ -830,7 +837,10 @@ function createNeuronDetail(parent) {
             if (pulse > 0.35 && s.prevPulse <= 0.35 && (s.fireAt < 0 || ctx.now - s.fireAt > 0.9)) s.fireAt = ctx.now;
             s.prevPulse = pulse;
             s.mat.uniforms.uOpacity.value = s.fade;
-            s.mat.uniforms.uFire.value = s.fireAt < 0 ? -1 : ctx.now - s.fireAt;
+            // Back to "never" once the wave has run out, rather than counting
+            // up for as long as the neuron stays on screen.
+            const since = ctx.now - s.fireAt;
+            s.mat.uniforms.uFire.value = s.fireAt < 0 || since > 1.5 ? -1 : since;
             s.mat.uniforms.uTime.value = ctx.now;
             s.soma.material.opacity = s.fade * (0.55 + pulse * 0.4);
         }

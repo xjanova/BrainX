@@ -354,7 +354,9 @@ varying float vFade;
 void main() {
     float facing = smoothstep(-0.55, 0.45, vFacing);
     float depth  = 1.0 - smoothstep(uNear, uFar, vDepth);
-    float rim    = pow(1.0 - abs(vFacing), 5.0);
+    // min(): an interpolated dot of unit vectors can exceed 1, and pow() of a
+    // negative base is NaN.
+    float rim    = pow(1.0 - min(abs(vFacing), 1.0), 5.0);
     float a = (0.040 + 0.55 * facing) * (0.28 + 0.72 * depth) + 0.34 * rim * depth;
     a *= vFade * uGain;
     if (a <= 0.002) discard;

@@ -115,10 +115,14 @@ const holoFrag = /* glsl */`
     uniform float uTime;
     uniform float uScan;
     void main() {
-        float facing = abs(dot(normalize(vN), normalize(vV)));
-        float rim = pow(1.0 - facing, 2.0);
+        // Clamped and squared by hand: a dot of two unit vectors can land a
+        // hair over 1, and pow() of a negative base is NaN, which the bloom
+        // spreads across the whole card.
+        float facing = clamp(abs(dot(normalize(vN), normalize(vV))), 0.0, 1.0);
+        float rim = (1.0 - facing) * (1.0 - facing);
         float sweep = 3.3 - mod(uTime * 0.85, 7.4);
-        float band = exp(-pow((vY - sweep) / 0.06, 2.0)) * uScan;
+        float sd = (vY - sweep) / 0.06;
+        float band = exp(-sd * sd) * uScan;
         vec3 col = uColor * (0.55 + 0.7 * rim) * uGlow + vec3(0.55, 0.85, 1.0) * band;
         float a = (uFill + rim * 0.85) * uOpacity + band * 0.45 * uOpacity;
         gl_FragColor = vec4(col, a);
