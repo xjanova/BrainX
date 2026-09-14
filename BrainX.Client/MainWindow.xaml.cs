@@ -8615,6 +8615,15 @@ public partial class MainWindow : Window
                     json2, new { view = "3d" })?.view ?? "3d";
                 Dispatcher.BeginInvoke(new Action(() => SwitchUniverseView(view)));
             }
+            else if (msg?.type == "themeState")
+            {
+                // The page reports which theme it is showing — at start-up and
+                // after every switch, whoever asked for it (its own settings
+                // row or the pill). The pill only ever mirrors this.
+                var theme = Newtonsoft.Json.JsonConvert.DeserializeAnonymousType(
+                    json, new { theme = "universe" })?.theme ?? "universe";
+                Dispatcher.BeginInvoke(new Action(() => ApplyUniverseThemePill(theme)));
+            }
             else if (msg?.type == "editNote")
             {
                 // JS info card → open the note in the WPF Markdown editor.
@@ -8735,8 +8744,12 @@ public partial class MainWindow : Window
     /// <summary>
     /// Toggle UniverseView's child: WebView2 (3D) ↔ Graph2DRenderer (2D).
     /// Both share UniverseView's grid cell; only one is visible at a time.
-    /// Also recolors the floating WPF toggle and notifies the JS panel so
-    /// the in-WebView segmented control stays in sync.
+    /// Notifies the JS panel so the in-WebView segmented control stays in sync.
+    ///
+    /// RETIRED FROM VIEW, NOT DELETED: nothing on screen asks for "2d" any
+    /// more — the WPF pill switches themes now and the JS View row is hidden —
+    /// but the `switchView` message still lands here, so bringing the 2D graph
+    /// back is un-hiding that row.
     /// </summary>
     private void SwitchUniverseView(string view)
     {
@@ -8745,16 +8758,6 @@ public partial class MainWindow : Window
             UniverseWebBorder.Visibility = to2D ? Visibility.Collapsed : Visibility.Visible;
         if (UniverseGraph2DBorder != null)
             UniverseGraph2DBorder.Visibility = to2D ? Visibility.Visible : Visibility.Collapsed;
-
-        // Highlight the active label in the WPF toggle (cyan = active, dim = idle).
-        if (UniverseViewLabel3D != null)
-            UniverseViewLabel3D.Foreground = new System.Windows.Media.SolidColorBrush(
-                to2D ? System.Windows.Media.Color.FromRgb(0x8A, 0x86, 0xB8)
-                     : System.Windows.Media.Color.FromRgb(0x6C, 0xF0, 0xFF));
-        if (UniverseViewLabel2D != null)
-            UniverseViewLabel2D.Foreground = new System.Windows.Media.SolidColorBrush(
-                to2D ? System.Windows.Media.Color.FromRgb(0x6C, 0xF0, 0xFF)
-                     : System.Windows.Media.Color.FromRgb(0x8A, 0x86, 0xB8));
 
         // Mirror back to JS so its segmented control reflects the actual state
         // (matters when WPF chrome triggered the switch — JS didn't know).
@@ -8774,14 +8777,48 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// WPF floating toggle (always-on-top, outside the WebView). The user's
-    /// lifeline back from 2D — the JS settings panel is unreachable while
-    /// the WebView is collapsed.
+    /// Which picture the Universe WebView is showing — "universe" or "brain".
+    /// JS owns the setting (it persists it with the other display settings);
+    /// this is only the last value it reported through <c>themeState</c>.
+    /// </summary>
+    private string _universeTheme = "universe";
+
+    /// <summary>Light the half of the floating pill that matches the theme.</summary>
+    private void ApplyUniverseThemePill(string theme)
+    {
+        _universeTheme = theme == "brain" ? "brain" : "universe";
+        var on = System.Windows.Media.Color.FromRgb(0x6C, 0xF0, 0xFF);
+        var off = System.Windows.Media.Color.FromRgb(0x8A, 0x86, 0xB8);
+        var brain = _universeTheme == "brain";
+        if (UniverseThemeLabelUniverse != null)
+            UniverseThemeLabelUniverse.Foreground = new System.Windows.Media.SolidColorBrush(brain ? off : on);
+        if (UniverseThemeLabelBrain != null)
+            UniverseThemeLabelBrain.Foreground = new System.Windows.Media.SolidColorBrush(brain ? on : off);
+    }
+
+    /// <summary>
+    /// WPF floating pill (always-on-top, outside the WebView): Universe · Brain.
+    /// Asks the page to switch; the page saves the choice and answers with
+    /// <c>themeState</c>. Still the lifeline back from 2D first — if anything
+    /// ever shows the retired 2D graph, the WebView and its settings panel are
+    /// collapsed, and this pill is the only control left on screen.
     /// </summary>
     private void UniverseViewToggle_Click(object s, MouseButtonEventArgs e)
     {
-        var currently2D = UniverseGraph2DBorder?.Visibility == Visibility.Visible;
-        SwitchUniverseView(currently2D ? "3d" : "2d");
+        if (UniverseGraph2DBorder?.Visibility == Visibility.Visible)
+        {
+            SwitchUniverseView("3d");
+            return;
+        }
+        var next = _universeTheme == "brain" ? "universe" : "brain";
+        try
+        {
+            UniverseWebView?.CoreWebView2?.PostWebMessageAsJson(
+                "{\"type\":\"setTheme\",\"theme\":\"" + next + "\"}");
+        }
+        catch { /* WebView not initialized yet — nothing to switch */ }
+        // Lit at once; the page's themeState confirms (or corrects) it.
+        ApplyUniverseThemePill(next);
     }
 
     /// <summary>
