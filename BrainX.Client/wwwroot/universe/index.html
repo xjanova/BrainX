@@ -285,7 +285,10 @@
         <span class="settings-glyph">&#x2699;</span>
     </button>
     <aside id="settings-panel" class="panel" hidden>
-        <div class="panel-title">Display</div>
+        <!-- Each theme keeps its own Display values (app.js LOOK_KEYS); the
+             title says whose they are, so a slider moved here is not a
+             surprise in the other theme. -->
+        <div class="panel-title" title="These values belong to the theme on screen — the other theme keeps its own.">Display &middot; <span data-label-brain="Neural Brain">Universe</span></div>
         <div class="setting-row">
             <label for="set-glow">Glow</label>
             <input id="set-glow" type="range" min="0" max="1.5" step="0.05" value="0.55" />

@@ -148,6 +148,64 @@ const DEFAULT_SETTINGS = {
     fiberColor: 'category'  // brain theme fibres: 'category' | 'dti'
 };
 
+/* Every Display value belongs to the theme it was set in — a glow that suits
+ * a sky of stars burns a brain's stacked fibres to white, and tuning one must
+ * not retune the other. The flat fields of a settings object are the theme on
+ * screen, so everything that reads `currentSettings.glow` is unchanged;
+ * `looks` holds each theme's set as it was when that theme was left. (The
+ * entry for the theme on screen is only read after switching away from it,
+ * which rewrites it first.) Theme itself and the cards are not per theme. */
+const LOOK_KEYS = ['glow', 'stars', 'sky', 'size', 'edges', 'drift', 'motion',
+    'lightning', 'lightningSpeed', 'background', 'lockSelected', 'legendVisible',
+    'cameraMode', 'fiberColor'];
+
+function lookOf(s) {
+    const o = {};
+    for (const k of LOOK_KEYS) o[k] = s[k];
+    return o;
+}
+
+/** `s` showing theme `t`: the outgoing theme's values go into `looks`, `t`'s
+ *  come out. A theme never tuned starts from the one being left, so the first
+ *  switch after this update changes nothing on screen. */
+function switchLook(s, t) {
+    if (s.theme === t) return s;
+    const looks = { ...(s.looks || {}), [s.theme]: lookOf(s) };
+    return { ...s, ...(looks[t] || lookOf(s)), theme: t, looks };
+}
+
+/** A saved slot or a host payload laid over `base`. Its `looks` replace
+ *  base's instead of merging — another screen's brain is not this screen's. */
+function adoptSettings(base, incoming) {
+    return { ...base, ...incoming, looks: { ...(incoming?.looks || {}) } };
+}
+
+/** One theme's Display values from storage, each checked; anything missing
+ *  or malformed falls back to `def`. */
+function readLook(p, def) {
+    const num = (v, d) => typeof v === 'number' ? v : d;
+    const bool = (v, d) => typeof v === 'boolean' ? v : d;
+    return {
+        glow:   num(p.glow,   def.glow),
+        stars:  num(p.stars,  def.stars),
+        sky:    num(p.sky,    def.sky),
+        motion: num(p.motion, def.motion),
+        size:   num(p.size,   def.size),
+        edges:  num(p.edges,  def.edges),
+        drift:  num(p.drift,  def.drift),
+        lightning:      num(p.lightning,      def.lightning),
+        lightningSpeed: num(p.lightningSpeed, def.lightningSpeed),
+        background: (p.background === 'black' || p.background === 'nebula')
+            ? p.background : def.background,
+        lockSelected:  bool(p.lockSelected,  def.lockSelected),
+        legendVisible: bool(p.legendVisible, def.legendVisible),
+        cameraMode: (['free', 'orbit', 'follow', 'random'].includes(p.cameraMode))
+            ? p.cameraMode : def.cameraMode,
+        fiberColor: (p.fiberColor === 'dti' || p.fiberColor === 'category')
+            ? p.fiberColor : def.fiberColor,
+    };
+}
+
 function setStatus(text, isError = false) {
     if (!$status) return;
     $status.textContent = text;
@@ -399,7 +457,7 @@ function wireWallpaperSetup() {
     const saved = loadWallpaperPrefs();
     if (saved) {
         if (saved.settings) {
-            currentSettings = { ...currentSettings, ...saved.settings };
+            currentSettings = adoptSettings(currentSettings, saved.settings);
             applySettingsToUI(currentSettings);
             applySettingsToScene(currentSettings);
             saveSettings(currentSettings);
@@ -721,7 +779,7 @@ function wireWallpaperSetup() {
         const slot = _wpMonitorPrefs[newIdx];
         if (slot) {
             if (slot.settings) {
-                currentSettings = { ...currentSettings, ...slot.settings };
+                currentSettings = adoptSettings(currentSettings, slot.settings);
                 applySettingsToUI(currentSettings);
                 applySettingsToScene(currentSettings);
                 saveSettings(currentSettings);
@@ -1089,7 +1147,7 @@ function onHostMessage(evt) {
             // Apply only, never save: N surfaces writing the one shared
             // settings object would leave it holding whichever booted last.
             if (msg.settings) {
-                currentSettings = { ...currentSettings, ...msg.settings };
+                currentSettings = adoptSettings(currentSettings, msg.settings);
                 applySettingsToUI?.(currentSettings);
                 applySettingsToScene?.(currentSettings);
             }
@@ -1264,34 +1322,24 @@ function loadSettings() {
             if (prefs && prefs.settings) raw = JSON.stringify(prefs.settings);
         }
         if (!raw) raw = localStorage.getItem(SETTINGS_KEY);
-        if (!raw) return { ...DEFAULT_SETTINGS };
+        if (!raw) return { ...DEFAULT_SETTINGS, looks: {} };
         const parsed = JSON.parse(raw);
-        const num = (v, def) => typeof v === 'number' ? v : def;
+        const live = readLook(parsed, DEFAULT_SETTINGS);
+        const looks = {};
+        if (parsed.looks && typeof parsed.looks === 'object') {
+            for (const t of ['universe', 'brain']) {
+                const l = parsed.looks[t];
+                if (l && typeof l === 'object') looks[t] = readLook(l, live);
+            }
+        }
         return {
-            glow:   num(parsed.glow,   DEFAULT_SETTINGS.glow),
-            stars:  num(parsed.stars,  DEFAULT_SETTINGS.stars),
-            sky:    num(parsed.sky,    DEFAULT_SETTINGS.sky),
-            motion: num(parsed.motion, DEFAULT_SETTINGS.motion),
-            size:   num(parsed.size,   DEFAULT_SETTINGS.size),
-            edges:  num(parsed.edges,  DEFAULT_SETTINGS.edges),
-            drift:  num(parsed.drift,  DEFAULT_SETTINGS.drift),
-            lightning:      num(parsed.lightning,      DEFAULT_SETTINGS.lightning),
-            lightningSpeed: num(parsed.lightningSpeed, DEFAULT_SETTINGS.lightningSpeed),
-            background: (parsed.background === 'black' || parsed.background === 'nebula')
-                ? parsed.background : DEFAULT_SETTINGS.background,
-            lockSelected: typeof parsed.lockSelected === 'boolean'
-                ? parsed.lockSelected : DEFAULT_SETTINGS.lockSelected,
-            legendVisible: typeof parsed.legendVisible === 'boolean'
-                ? parsed.legendVisible : DEFAULT_SETTINGS.legendVisible,
-            cameraMode: (['free','orbit','follow','random'].includes(parsed.cameraMode))
-                ? parsed.cameraMode : DEFAULT_SETTINGS.cameraMode,
+            ...live,
             theme: (parsed.theme === 'brain' || parsed.theme === 'universe')
                 ? parsed.theme : DEFAULT_SETTINGS.theme,
-            fiberColor: (parsed.fiberColor === 'dti' || parsed.fiberColor === 'category')
-                ? parsed.fiberColor : DEFAULT_SETTINGS.fiberColor
+            looks,
         };
     } catch {
-        return { ...DEFAULT_SETTINGS };
+        return { ...DEFAULT_SETTINGS, looks: {} };
     }
 }
 
@@ -1458,7 +1506,9 @@ function postThemeState(theme) {
 function chooseTheme(theme) {
     const t = theme === 'brain' ? 'brain' : 'universe';
     if (t === currentSettings.theme) { postThemeState(t); return; }
-    currentSettings = { ...currentSettings, theme: t };
+    currentSettings = switchLook(currentSettings, t);
+    // A camera the URL pinned stays pinned whichever theme's look comes in.
+    if (_URL_CAMERA_OVERRIDE) currentSettings = { ...currentSettings, cameraMode: _URL_CAMERA_OVERRIDE };
     applySettingsToUI(currentSettings);
     applySettingsToScene(currentSettings);
     saveSettings(currentSettings);
@@ -1490,7 +1540,10 @@ const _URL_THEME_OVERRIDE = (() => {
     return (t === 'brain' || t === 'universe') ? t : null;
 })();
 if (_URL_THEME_OVERRIDE) {
-    currentSettings = { ...currentSettings, theme: _URL_THEME_OVERRIDE };
+    // With that theme's own look — then the camera pin above, again, since
+    // the look just brought its own camera mode.
+    currentSettings = switchLook(currentSettings, _URL_THEME_OVERRIDE);
+    if (_URL_CAMERA_OVERRIDE) currentSettings = { ...currentSettings, cameraMode: _URL_CAMERA_OVERRIDE };
 }
 // Published at module load, before hud.js initialises, so the agent bus is
 // built as the right picture the first time rather than swapped a beat later.
@@ -1511,12 +1564,12 @@ if (window.location.search.includes('mode=wallpaper-active')) {
         if (ev.key !== WALLPAPER_PREFS_KEY) return;
         const prefs = loadWallpaperPrefs();
         if (!prefs || !prefs.settings) return;
-        currentSettings = {
-            ...currentSettings,
-            ...prefs.settings,
-            cameraMode: _URL_CAMERA_OVERRIDE || currentSettings.cameraMode,
-            theme: _URL_THEME_OVERRIDE || prefs.settings.theme || currentSettings.theme
-        };
+        const keepCamera = _URL_CAMERA_OVERRIDE || currentSettings.cameraMode;
+        let next = adoptSettings(currentSettings, prefs.settings);
+        // A pinned theme takes the wallpaper's tuning OF THAT THEME, not the
+        // flat values of whichever theme the wallpaper happens to show.
+        if (_URL_THEME_OVERRIDE) next = switchLook(next, _URL_THEME_OVERRIDE);
+        currentSettings = { ...next, cameraMode: keepCamera };
         try { applySettingsToUI(currentSettings); } catch {}
         try { applySettingsToScene(currentSettings); } catch {}
     });
@@ -1550,8 +1603,9 @@ function wireSettingsPanel() {
 
     $setReset?.addEventListener('click', () => {
         // Reset is "put the sliders back", not "change what I am looking at":
-        // the theme and its fibre colouring survive it.
-        currentSettings = { ...DEFAULT_SETTINGS, theme: currentSettings.theme, fiberColor: currentSettings.fiberColor };
+        // the theme and its fibre colouring survive it, and so does the
+        // other theme's tuning — Reset belongs to the theme on screen.
+        currentSettings = { ...currentSettings, ...lookOf(DEFAULT_SETTINGS), fiberColor: currentSettings.fiberColor };
         applySettingsToUI(currentSettings);
         applySettingsToScene(currentSettings);
         saveSettings(currentSettings);
