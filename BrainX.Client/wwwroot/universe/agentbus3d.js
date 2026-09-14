@@ -18,7 +18,10 @@
 
 import * as THREE from 'three';
 
-const AGENT_COLORS = {
+/* Exported with colorOf and radialTexture: the Neural Brain theme draws the
+ * same bus as an anatomical body (agentbody3d.js), and an agent must be the
+ * same colour in either picture (displayName below keeps the names aligned). */
+export const AGENT_COLORS = {
     claude:  0xe8825a,
     codex:   0x19a385,
     cluadex: 0x8b7cf6,
@@ -35,7 +38,7 @@ const AGENT_COLORS = {
 };
 const UNKNOWN_COLOR = 0x8e9aa6;
 
-const colorOf = (name) => AGENT_COLORS[String(name).toLowerCase()] ?? UNKNOWN_COLOR;
+export const colorOf = (name) => AGENT_COLORS[String(name).toLowerCase()] ?? UNKNOWN_COLOR;
 
 export function createAgentBus3D(canvas) {
     if (!canvas) return null;
@@ -149,13 +152,19 @@ export function createAgentBus3D(canvas) {
     // gesture would turn the solar system and fly the main camera at the same
     // time, and the panel's own scroller would join in on the wheel.
     let dragging = false, lastX = 0, lastY = 0, userMoved = false;
+    // Every listener is tied to this signal and dispose() aborts it. The HUD
+    // swaps this system for the anatomical body on the SAME canvas when the
+    // theme changes, and a listener left behind would keep turning a camera
+    // nobody renders — and keep the whole old scene alive through its closure.
+    const listeners = new AbortController();
+    const signal = listeners.signal;
 
     canvas.addEventListener('pointerdown', (e) => {
         dragging = true; userMoved = true;
         lastX = e.clientX; lastY = e.clientY;
         canvas.setPointerCapture?.(e.pointerId);
         e.stopPropagation(); e.preventDefault();
-    });
+    }, { signal });
     canvas.addEventListener('pointermove', (e) => {
         if (!dragging) return;
         // Scale by canvas size so the same drag turns the same amount whether
@@ -166,21 +175,21 @@ export function createAgentBus3D(canvas) {
         lastX = e.clientX; lastY = e.clientY;
         applyCamera();
         e.stopPropagation(); e.preventDefault();
-    });
+    }, { signal });
     const endDrag = (e) => {
         if (!dragging) return;
         dragging = false;
         canvas.releasePointerCapture?.(e.pointerId);
         e.stopPropagation();
     };
-    canvas.addEventListener('pointerup', endDrag);
-    canvas.addEventListener('pointercancel', endDrag);
+    canvas.addEventListener('pointerup', endDrag, { signal });
+    canvas.addEventListener('pointercancel', endDrag, { signal });
     canvas.addEventListener('wheel', (e) => {
         userMoved = true;
         view.dist = clamp(view.dist * (e.deltaY > 0 ? 1.12 : 0.89), DIST_MIN, DIST_MAX);
         applyCamera();
         e.stopPropagation(); e.preventDefault();
-    }, { passive: false });
+    }, { passive: false, signal });
     // Double-click puts it back — a view you can lose is a view you need a way
     // out of, and "drag until it looks right again" is not one.
     canvas.addEventListener('dblclick', (e) => {
@@ -190,7 +199,7 @@ export function createAgentBus3D(canvas) {
         userMoved = false;
         refit();
         e.stopPropagation(); e.preventDefault();
-    });
+    }, { signal });
 
     // ── Public API ──────────────────────────────────────────────
 
@@ -390,6 +399,7 @@ export function createAgentBus3D(canvas) {
 
     function dispose() {
         stop();
+        listeners.abort();
         planets.forEach(p => { disposeDeep(p.pivot); disposeDeep(p.ring); });
         motes.forEach(m => { disposeDeep(m.mesh); disposeDeep(m.trail); });
         disposeDeep(scene);
@@ -706,7 +716,7 @@ function ringGeometry(r) {
 
 /** Soft radial falloff for the corona sprite — generated rather than shipped
  *  so the HUD adds no binary assets. */
-function radialTexture() {
+export function radialTexture() {
     const s = 128;
     const c = document.createElement('canvas');
     c.width = c.height = s;

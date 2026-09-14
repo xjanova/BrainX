@@ -11,6 +11,7 @@
  */
 
 import { initHudLayout } from './hudlayout.js';
+import { getTheme, onThemeChange } from './theme.js';
 
 const QS = new URLSearchParams(location.search);
 const HUD_ON = QS.get('hud') === '1';
@@ -200,9 +201,19 @@ function firstPendingRow(host, ignore) {
     return last ? last.nextSibling : host.firstChild;
 }
 
-/** The Agent Bus solar system. Loaded lazily so a HUD-less page (wallpaper,
+/** The Agent Bus picture: a solar system beside the universe, an anatomical
+ *  body beside the neural brain. Loaded lazily so a HUD-less page (wallpaper,
  *  dashboard embed) never pays for three.js twice. */
 let bus = null;
+/** 'system' | 'body' — which picture `bus` is. */
+let busKind = null;
+/** The roster as last received, so a picture built mid-session (a theme
+ *  switch) starts with every agent in place instead of waiting for the next
+ *  presence poll to repopulate an empty body. */
+let lastAgents = null;
+/** Whether the card is on screen; a freshly swapped picture must honour it,
+ *  because its IntersectionObserver will not fire again for the same canvas. */
+let busVisible = true;
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -390,6 +401,7 @@ function renderActivity(list = []) {
 
 function renderAgents(d = {}) {
     const list = d.agents || [];
+    lastAgents = list;
     bus?.setAgents(list);
     // Motes are NOT fired here any more. This used to replay a call-counter
     // delta as one mote in and one mote out — abstract motion that could not
@@ -1200,20 +1212,17 @@ function onHudMessage(evt) {
     }
 }
 
-/** Spin up the solar system, and keep it honest about cost: the loop stops
- *  whenever the canvas is off-screen or the window is hidden, so a HUD left
- *  open behind another view never burns frames. */
+/** Spin up the agent-bus picture, and keep it honest about cost: the loop
+ *  stops whenever the canvas is off-screen or the window is hidden, so a HUD
+ *  left open behind another view never burns frames. */
 async function initBus() {
     const canvas = $('hud-bus-canvas');
     if (!canvas) return;
     try {
-        const { createAgentBus3D, displayName } = await import('./agentbus3d.js');
+        const { displayName } = await import('./agentbus3d.js');
         // The ticker must call an agent whatever its planet calls it.
         agentLabel = displayName;
-        bus = createAgentBus3D(canvas);
-        // Demo mode only: a console handle for checking orbits/traffic without
-        // a screenshot. Never exposed in the shipped HUD.
-        if (HUD_DEMO) window.__hudBus = bus;
+        await swapBus(getTheme());
     } catch (e) {
         // A missing WebGL context must not take the rest of the HUD with it —
         // the roster below the canvas still carries every fact.
@@ -1222,11 +1231,46 @@ async function initBus() {
         return;
     }
     new ResizeObserver(() => bus?.resize()).observe(canvas);
-    new IntersectionObserver(
-        ([e]) => (e.isIntersecting && !document.hidden ? bus?.start() : bus?.stop()),
-        { threshold: 0.01 }).observe(canvas);
+    new IntersectionObserver(([e]) => {
+        busVisible = e.isIntersecting;
+        busVisible && !document.hidden ? bus?.start() : bus?.stop();
+    }, { threshold: 0.01 }).observe(canvas);
     document.addEventListener('visibilitychange', () =>
-        document.hidden ? bus?.stop() : bus?.start());
+        document.hidden ? bus?.stop() : (busVisible && bus?.start()));
+    onThemeChange((t) => swapBus(t).catch(e => console.warn('[hud] agent bus swap failed:', e?.message || e)));
+}
+
+/**
+ * Build the picture that belongs with the theme, on the SAME canvas.
+ *
+ * Import first, then tear down, then build: the old picture keeps drawing
+ * while the new module loads, and a second switch arriving mid-load wins
+ * outright (the sequence number) instead of two pictures racing for one
+ * canvas. Each picture releases its listeners and renderer on dispose, so the
+ * canvas carries exactly one at a time.
+ */
+let busSwapSeq = 0;
+async function swapBus(theme) {
+    const kind = theme === 'brain' ? 'body' : 'system';
+    // Numbered BEFORE the early-out: brain → universe while the body module is
+    // still loading lands here with the solar system already on the canvas,
+    // and the pending body build must learn that it lost.
+    const seq = ++busSwapSeq;
+    if (bus && busKind === kind) return;
+    const factory = kind === 'body'
+        ? (await import('./agentbody3d.js')).createAgentBody3D
+        : (await import('./agentbus3d.js')).createAgentBus3D;
+    if (seq !== busSwapSeq) return;
+    const canvas = $('hud-bus-canvas');
+    if (!canvas) return;
+    bus?.dispose();
+    bus = factory(canvas);
+    busKind = kind;
+    if (lastAgents) bus?.setAgents(lastAgents);
+    if (!busVisible || document.hidden) bus?.stop();
+    // Demo mode only: a console handle for checking orbits/traffic without
+    // a screenshot. Never exposed in the shipped HUD.
+    if (HUD_DEMO) window.__hudBus = bus;
 }
 
 /** Let the wheel scroll a clipped readout instead of zooming the galaxy.
