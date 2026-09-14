@@ -1734,6 +1734,48 @@ export function createScene(canvas, callbacks = {}) {
         }, FOLLOW_IDLE_RETURN_MS);
     }
 
+    // One event, one camera move. A walk or a search touches a dozen notes
+    // inside a second, and following each of them whipped the camera across
+    // the picture and parked it inside the tissue by the last — so the one
+    // thing a burst IS, many places lighting at once, was the thing nobody got
+    // to see. The first touch of an event still gets its close-up. Once the
+    // same event has touched FOLLOW_BURST_WIDE notes, the camera stops chasing
+    // and pulls back to the whole picture from the side the burst began on,
+    // and holds there until the burst has gone quiet.
+    const FOLLOW_BURST_GAP_MS = 1200;   // quieter than this: the next touch is a new event
+    const FOLLOW_BURST_WIDE = 3;
+    let _followBurst = null;            // { lastAt, touched: Set of star idx, first, wide }
+    function followPulse(idx) {
+        const now = performance.now();
+        const b = _followBurst;
+        if (!b || now - b.lastAt > FOLLOW_BURST_GAP_MS) {
+            _followBurst = { lastAt: now, touched: new Set([idx]), first: idx, wide: false };
+            focusNode(idx);
+        } else {
+            b.lastAt = now;
+            // Distinct notes: one note read, then written, is still one place.
+            b.touched.add(idx);
+            if (!b.wide && b.touched.size >= FOLLOW_BURST_WIDE) {
+                b.wide = true;
+                frameBurst(b.first);
+            }
+        }
+        scheduleFollowIdleReturn();
+    }
+    function frameBurst(firstIdx) {
+        const n = universe?.nodes[firstIdx];
+        let toward = null;
+        if (n) {
+            universeGroup.updateMatrixWorld();
+            toward = new THREE.Vector3(n.position.x, n.position.y, n.position.z)
+                .applyMatrix4(universeGroup.matrixWorld);
+        }
+        // No star selected in a wide shot: a selection dims every fibre but
+        // its own, and Lock would slide the frame back onto that one star.
+        focusNode(-1);
+        fitToScreen({ toward, padding: 1.12, duration: 1.3, arc: ARC_FOCUS });
+    }
+
     // ── idle return after focusing a star ────────────────────────────
     // Follow mode has had a return-home for a while, but only follow mode:
     // click a star yourself in free or orbit and the camera stayed parked on
@@ -2352,10 +2394,7 @@ export function createScene(canvas, callbacks = {}) {
         // your brain right now" framing. Suppressed for fallback pulses
         // (focus=false) so node-less MCP calls don't yank the camera to a
         // random star on every brain_stats / brain_list tick.
-        if (focus && settings.cameraMode === 'follow') {
-            focusNode(idx);
-            scheduleFollowIdleReturn();
-        }
+        if (focus && settings.cameraMode === 'follow') followPulse(idx);
 
         // Edge arcs: pick up to MAX_ARCS_PER_PULSE incident edges and start
         // their lightning envelope. stepPulses composites the per-frame
@@ -3108,6 +3147,7 @@ export function createScene(canvas, callbacks = {}) {
             // Clear any pending idle-return timer so it doesn't fire after
             // we've already flown home via this mode-exit handler.
             if (_followIdleTimer) { clearTimeout(_followIdleTimer); _followIdleTimer = null; }
+            _followBurst = null;
             if (_followHomeTarget && _followHomeCam) {
                 flyTo(_followHomeTarget, _followHomeCam, 0.7);
             }
@@ -3289,6 +3329,8 @@ export function createScene(canvas, callbacks = {}) {
      * @param {number} [opts.padding=1.18]  Extra room around the bounding sphere; 1.0 = touch edges.
      * @param {number} [opts.duration=0.85] flyTo duration in seconds; pass 0 for snap.
      * @param {boolean} [opts.keepDirection=true] If true, preserve current camera angle; if false, use the default 3/4 viewing angle.
+     * @param {THREE.Vector3} [opts.toward] A world point: view the picture from the side it is on (overrides keepDirection).
+     * @param {number} [opts.arc=0] Swing round the picture instead of sliding through it (see flyTo).
      */
     function fitToScreen(opts = {}) {
         if (!universe || !universe.nodes.length) return;
@@ -3344,8 +3386,14 @@ export function createScene(canvas, callbacks = {}) {
             else dir.set(0.25, 0.55, 1);
         }
         dir.normalize();
+        // From `toward`'s side, lifted to look down across the picture, with a
+        // trace of the current angle so the move stays a swing, not a jump.
+        const side = opts.toward ? opts.toward.clone().sub(centroid) : null;
+        if (side && side.lengthSq() > 1e-6) {
+            dir = side.normalize().addScaledVector(WORLD_UP, 0.35).normalize().lerp(dir, 0.25).normalize();
+        }
         const camVec = centroid.clone().add(dir.multiplyScalar(distance));
-        flyTo(centroid, camVec, duration);
+        flyTo(centroid, camVec, duration, opts.arc ?? 0);
     }
 
     function getSettings() { return { ...settings }; }
