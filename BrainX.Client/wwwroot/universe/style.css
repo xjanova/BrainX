@@ -256,6 +256,16 @@ body.bg-nebula {
 
 .expertise-score { color: var(--accent); font-weight: 600; }
 .expertise-words { color: var(--ink-faint); }
+/* Brain theme: where in the brain this category lives. Last in the row and
+   allowed to truncate — the percentage is the reading, this is the caption. */
+.expertise-region {
+    color: var(--ink-dim);
+    font-style: italic;
+    max-width: 55%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
 
 /* ─── token-savings chip (top-center) ─────────────────── */
 .token-chip {
@@ -605,8 +615,13 @@ body.bg-nebula {
     font-weight: 600;
 }
 
+/* `display: grid` above has the same specificity as the browser's
+   `[hidden] { display: none }` and comes later, so without this a hidden row
+   (the retired 2D view picker, the brain-only fibre picker) still shows. */
+.setting-row[hidden] { display: none; }
+
 /* segmented controls for camera + view-mode pickers */
-.camera-row, .view-row {
+.camera-row, .view-row, .theme-row, .fiber-row {
     grid-template-columns: 50px 1fr;
     gap: 10px;
 }

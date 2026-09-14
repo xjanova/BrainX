@@ -13,6 +13,8 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { forceSimulation, forceManyBody, forceLink, forceCenter, forceCollide, forceX, forceY } from 'd3-force';
 import { buildUniverse } from './layout.js';
+import { buildBrainGraph, projectBrainNode, BRAIN_CENTER, BRAIN_VIEW_DIR } from './brainlayout.js';
+import { createBrainVisuals } from './brainvisuals.js';
 import { loadPanorama } from './panorama.js';
 
 // ── shaders ────────────────────────────────────────────────────────────
@@ -31,6 +33,7 @@ const starVert = /* glsl */`
     uniform float uHoverIndex;
     uniform float uMotion;
     uniform float uSizeScale;
+    uniform float uTwinkle;    // 0.30 for stars; a neuron glows steadily and FIRES instead
 
     varying vec3  vColor;
     varying float vBrightness;
@@ -44,7 +47,7 @@ const starVert = /* glsl */`
         // distance-attenuated point size; gl_PointSize is in pixels.
         // Twinkle amp scales with motion slider so a dead-still universe still
         // looks intentional (and 0 = literally frozen frame).
-        float twinkleAmp = 0.30 * uMotion;
+        float twinkleAmp = uTwinkle * uMotion;
         float twinkle = (1.0 - twinkleAmp) + twinkleAmp * sin(uTime * 1.4 + aPhase * 6.2831);
         float size = aSize * twinkle * (320.0 / -mv.z) * uPixelRatio * uSizeScale;
 
@@ -653,7 +656,8 @@ function buildStars(nodes) {
             uHoverIndex: { value: -1 },
             uMotion: { value: 1.0 },
             uStarScale: { value: 0.85 },
-            uSizeScale: { value: 1.0 }
+            uSizeScale: { value: 1.0 },
+            uTwinkle: { value: 0.30 }
         },
         vertexShader: starVert,
         fragmentShader: starFrag,
@@ -822,8 +826,33 @@ export function createScene(canvas, callbacks = {}) {
         lightningSpeed: 1.0,    // 0.5 = slow majestic strike, 1 = default, 2 = frantic flicker
         cameraMode: 'free', // 'free' | 'orbit' | 'follow' | 'random'
         background: 'nebula', // 'nebula' | 'black' — controls clearColor + nebula sprites + starfield
-        lockSelected: true    // when a star is selected, keep it at screen centre
+        lockSelected: true,   // when a star is selected, keep it at screen centre
+        theme: 'universe',    // 'universe' | 'brain' — see setTheme
+        fiberColor: 'category' // brain theme: 'category' | 'dti' (tractography direction colours)
     };
+
+    /* ── The brain theme ────────────────────────────────────────────────
+     * Same notes, same links, same physics — drawn as a human brain instead
+     * of a sky: categories become brain regions, notes become neurons in the
+     * cortex, links become fibres through white matter. Everything position-
+     * based in this file (focus, pulses, islands, walks, springs, the camera)
+     * is shared; what differs is confined to four seams — which layout builds
+     * the graph, how a physics particle is projected to world, what draws the
+     * edges, and what stands behind it all. brainVis is built the first time
+     * the theme is chosen and kept for the session: the folded cortex is
+     * ~0.3 s of real math and there is no reason to pay it twice. */
+    let brainVis = null;
+    /** The payload the scene was last mounted from, so a theme switch can
+     *  rebuild the same brain in the other form without asking the host. */
+    let lastBrainPayload = null;
+    /** Vertices carrying one edge's alpha: 2 for a universe chord, 9 for a
+     *  brain fibre. recomputeEdgeAlphas writes this many per edge. */
+    let edgeVPE = 2;
+    /** Brain theme: which neurons moved this frame, so only their fibres are
+     *  re-sampled. */
+    let movedMask = null;
+    let anyMoved = false;
+    const _bp = { x: 0, y: 0, z: 0 }, _bn = { x: 0, y: 1, z: 0 };
 
     // Camera modes:
     //   • free   — pure OrbitControls (default)
@@ -1011,31 +1040,40 @@ export function createScene(canvas, callbacks = {}) {
 
     function mount(brain) {
         dispose();
-        universe = buildUniverse(brain);
+        lastBrainPayload = brain;
+        const isBrain = settings.theme === 'brain';
+        universe = isBrain ? buildBrainGraph(brain) : buildUniverse(brain);
         if (!universe.nodes.length) {
             callbacks.onGalaxies?.([]);
             return universe;
         }
 
-        nebulaObj = buildNebulaSprites(universe.galaxies);
-        nebulaGroup.add(nebulaObj);
+        if (isBrain) {
+            // The cortex's own neurons, tinted where this brain's regions sit.
+            getBrainVis().mountRegions(universe);
+            movedMask = new Uint8Array(universe.nodes.length);
+        } else {
+            nebulaObj = buildNebulaSprites(universe.galaxies);
+            nebulaGroup.add(nebulaObj);
 
-        // Static spiral-arm dust — inside universeGroup (NOT nebulaGroup) so
-        // it rotates in lock-step with the note stars it traces. Hidden in
-        // 'black' background mode along with the other decorative layers.
-        dustObj = buildGalaxyDust(universe.galaxies);
-        if (dustObj) {
-            dustObj.visible = settings.background !== 'black';
-            universeGroup.add(dustObj);
+            // Static spiral-arm dust — inside universeGroup (NOT nebulaGroup) so
+            // it rotates in lock-step with the note stars it traces. Hidden in
+            // 'black' background mode along with the other decorative layers.
+            dustObj = buildGalaxyDust(universe.galaxies);
+            if (dustObj) {
+                dustObj.visible = settings.background !== 'black';
+                universeGroup.add(dustObj);
+            }
         }
 
-        edgesObj = buildEdges(universe.nodes, universe.edges);
+        edgesObj = isBrain ? brainVis.buildFibers(universe) : buildEdges(universe.nodes, universe.edges);
         if (edgesObj) {
             universeGroup.add(edgesObj);
             edgeAlphaAttr = edgesObj.geometry.getAttribute('aAlpha');
             edgePosAttr = edgesObj.geometry.getAttribute('position');
             edgeBaseAlpha = edgesObj.userData.baseAlpha;
             edgeIntra = edgesObj.userData.intra;
+            edgeVPE = edgesObj.userData.vpe ?? 2;
             pulseEdgeBoost = new Float32Array(universe.edges.length);
             activeEdgeBoosts.clear();
         }
@@ -1080,23 +1118,58 @@ export function createScene(canvas, callbacks = {}) {
         batches = [];
         cancelPendingReorg();
 
-        // fit camera: aim at centroid of all galaxy centers; back off enough
-        // that all galaxies fit comfortably in the frustum.
-        const ctr = new THREE.Vector3();
-        let maxR = 0;
-        for (const g of universe.galaxies) {
-            ctr.x += g.center.x; ctr.y += g.center.y; ctr.z += g.center.z;
-            const d = Math.hypot(g.center.x, g.center.y, g.center.z) + g.radius;
-            if (d > maxR) maxR = d;
+        if (isBrain) {
+            const home = brainHomePose();
+            camera.position.copy(home.cam);
+            controls.target.copy(home.target);
+            controls.update();
+        } else {
+            // fit camera: aim at centroid of all galaxy centers; back off enough
+            // that all galaxies fit comfortably in the frustum.
+            const ctr = new THREE.Vector3();
+            let maxR = 0;
+            for (const g of universe.galaxies) {
+                ctr.x += g.center.x; ctr.y += g.center.y; ctr.z += g.center.z;
+                const d = Math.hypot(g.center.x, g.center.y, g.center.z) + g.radius;
+                if (d > maxR) maxR = d;
+            }
+            ctr.divideScalar(Math.max(1, universe.galaxies.length));
+            const back = Math.max(220, maxR * 1.9);
+            camera.position.set(ctr.x + back * 0.25, ctr.y + back * 0.55, ctr.z + back);
+            controls.target.copy(ctr);
+            controls.update();
         }
-        ctr.divideScalar(Math.max(1, universe.galaxies.length));
-        const back = Math.max(220, maxR * 1.9);
-        camera.position.set(ctr.x + back * 0.25, ctr.y + back * 0.55, ctr.z + back);
-        controls.target.copy(ctr);
-        controls.update();
 
         callbacks.onGalaxies?.(universe.galaxies);
         return universe;
+    }
+
+    /** The brain framed whole from the classic left-lateral three-quarter
+     *  view, for the viewport's current shape. World-space: the brain's centre
+     *  run through universeGroup's current rotation. */
+    function brainHomePose() {
+        universeGroup.updateMatrixWorld();
+        const target = new THREE.Vector3(BRAIN_CENTER.x, BRAIN_CENTER.y, BRAIN_CENTER.z)
+            .applyMatrix4(universeGroup.matrixWorld);
+        const dir = new THREE.Vector3(BRAIN_VIEW_DIR.x, BRAIN_VIEW_DIR.y, BRAIN_VIEW_DIR.z).normalize();
+        const tanV = Math.tan(camera.fov * Math.PI / 360);
+        const tan = Math.min(tanV, tanV * (camera.aspect || 1));
+        // 150 = the brain's bounding radius, stem included.
+        const dist = (150 * 1.06) / tan;
+        return { target, cam: target.clone().addScaledVector(dir, dist) };
+    }
+
+    function getBrainVis() {
+        if (!brainVis) {
+            brainVis = createBrainVisuals();
+            universeGroup.add(brainVis.decor);
+            scene.add(brainVis.backdrop);
+            brainVis.setCortex(settings.sky);
+            brainVis.setMotion(settings.motion);
+            brainVis.setFiberColor(settings.fiberColor);
+        }
+        brainVis.ensureAnatomy();
+        return brainVis;
     }
 
     function dispose() {
@@ -1116,6 +1189,12 @@ export function createScene(canvas, callbacks = {}) {
             obj.material?.dispose?.();
         }
         starsObj = edgesObj = nebulaObj = dustObj = null;
+        // The brain's anatomy and backdrop stay (built once per session); only
+        // what was tinted for THIS payload goes.
+        brainVis?.unmountRegions();
+        movedMask = null;
+        anyMoved = false;
+        edgeVPE = 2;
         edgeAlphaAttr = null;
         edgeBaseAlpha = null;
         edgeIntra = null;
@@ -1249,6 +1328,7 @@ export function createScene(canvas, callbacks = {}) {
     // all sims hit alphaMin we skip this entirely.
     function projectAndUpload() {
         if (!starPosAttr || !universe) return;
+        if (settings.theme === 'brain') { projectBrain(); return; }
 
         // 1) project each galaxy's particles → world; write into node.position
         for (const ps of sims) {
@@ -1298,12 +1378,56 @@ export function createScene(canvas, callbacks = {}) {
         }
     }
 
+    /**
+     * Brain theme: the same particles, projected onto the cortex (or into a
+     * nucleus) instead of a galaxy disk. Only sims that ticked this frame are
+     * projected — a region at rest has not moved, and every neuron projected
+     * is a set of fibres re-sampled. Fibres are not written here; the moved
+     * mask is handed to brainVis once per frame from tick().
+     */
+    function projectBrain() {
+        for (const ps of sims) {
+            if (!ps.ticked) continue;
+            const g = ps.galaxy;
+            const r = g.radius * 1.05;
+            for (let k = 0; k < ps.particles.length; k++) {
+                const p = ps.particles[k];
+                const len = Math.hypot(p.x, p.y);
+                if (len > r) {
+                    const s = r / len;
+                    p.x *= s; p.y *= s;
+                    if (p.vx !== undefined) { p.vx *= 0.3; p.vy *= 0.3; }
+                }
+                const gi = ps.localToGlobalIdx[k];
+                const node = universe.nodes[gi];
+                // A neuron that has not really moved keeps its position — and,
+                // more to the point, its fibres. With Drift on, every sim stays
+                // warm forever and most particles only tremble; re-projecting
+                // them would re-sample thousands of fibres a frame for nothing.
+                if (Math.abs(p.x - node.local.u) < 0.004 && Math.abs(p.y - node.local.v) < 0.004) continue;
+                node.local.u = p.x;
+                node.local.v = p.y;
+                projectBrainNode(g, p.x, p.y, p.nz, _bp, _bn);
+                node.position.x = _bp.x; node.position.y = _bp.y; node.position.z = _bp.z;
+                node.normal.x = _bn.x; node.normal.y = _bn.y; node.normal.z = _bn.z;
+                starPosAttr.array[3 * gi + 0] = _bp.x;
+                starPosAttr.array[3 * gi + 1] = _bp.y;
+                starPosAttr.array[3 * gi + 2] = _bp.z;
+                if (movedMask) movedMask[gi] = 1;
+            }
+            anyMoved = true;
+        }
+        starPosAttr.needsUpdate = true;
+    }
+
     function stepPhysics() {
         if (!sims.length) return;
         let anyHot = false;
         for (const ps of sims) {
+            ps.ticked = false;
             if (ps.sim.alpha() <= ps.sim.alphaMin()) continue;
             ps.sim.tick();
+            ps.ticked = true;
             anyHot = true;
         }
         if (anyHot) projectAndUpload();
@@ -1338,6 +1462,7 @@ export function createScene(canvas, callbacks = {}) {
             u.uMotion.value = settings.motion;
             u.uStarScale.value = settings.stars;
             u.uSizeScale.value = settings.size;
+            u.uTwinkle.value = settings.theme === 'brain' ? 0.1 : 0.30;
         }
         if (edgesObj) {
             const u = edgesObj.material.uniforms;
@@ -1345,7 +1470,18 @@ export function createScene(canvas, callbacks = {}) {
             u.uStarScale.value = settings.stars;
             u.uEdgeAlpha.value = settings.edges;
         }
+        applySparkSettings();
+        brainVis?.setMotion(settings.motion);
         applyDrift();
+    }
+
+    /** The action potential rides the owner's Lightning controls: its
+     *  brightness is the flash intensity (0 = off), its speed the strike speed. */
+    function applySparkSettings() {
+        const u = edgesObj?.material.uniforms;
+        if (!u?.uSpark) return;
+        u.uSpark.value = Math.min(1.5, settings.lightning);
+        u.uSparkSpeed.value = 1.5 * settings.lightningSpeed;
     }
 
     /**
@@ -1465,9 +1601,13 @@ export function createScene(canvas, callbacks = {}) {
         // as a dolly, not as going somewhere. Approaching along the star's own
         // outward normal gives each one its own vantage, which is what makes
         // the swing exist in the first place.
-        const outward = target.lengthSq() > 1e-6
-            ? target.clone().normalize()
-            : fromDir.clone();
+        // A neuron is approached from outside the cortex it sits in — along
+        // its own normal, which is what "outward" means on a folded surface.
+        const outward = (settings.theme === 'brain' && n.normal)
+            ? new THREE.Vector3(n.normal.x, n.normal.y, n.normal.z).applyQuaternion(universeGroup.quaternion)
+            : target.lengthSq() > 1e-6
+                ? target.clone().normalize()
+                : fromDir.clone();
         const approach = outward.multiplyScalar(0.9)
             .addScaledVector(WORLD_UP, 0.32)      // look slightly down on it
             .normalize()
@@ -1532,6 +1672,8 @@ export function createScene(canvas, callbacks = {}) {
             && !_lastWriteHadPulses
             && _lastSelectionWriteIdx === selectedIndex) return;
 
+        const V = edgeVPE;
+        const arr = edgeAlphaAttr.array;
         for (let i = 0; i < N; i++) {
             const sel = selectionAlphaFor(i);
             const boost = pulseEdgeBoost[i];
@@ -1540,8 +1682,9 @@ export function createScene(canvas, callbacks = {}) {
             // both apply — the user-intended highlight wins.
             const pulse = edgeBaseAlpha[i] + boost * 0.85;
             const a = Math.max(sel, pulse);
-            edgeAlphaAttr.array[2 * i + 0] = a;
-            edgeAlphaAttr.array[2 * i + 1] = a;
+            // V vertices per edge: a chord's two ends, or every sample along
+            // a brain fibre.
+            for (let k = 0, o = V * i; k < V; k++) arr[o + k] = a;
         }
         edgeAlphaAttr.needsUpdate = true;
         _lastSelectionWriteIdx = selectedIndex;
@@ -1744,6 +1887,21 @@ export function createScene(canvas, callbacks = {}) {
         const target = new THREE.Vector3(g.center.x, g.center.y, g.center.z);
         universeGroup.updateMatrixWorld();
         target.applyMatrix4(universeGroup.matrixWorld);
+        if (settings.theme === 'brain') {
+            // A region is looked at from outside the skull, along the cortex's
+            // own normal — the brain's centre sits near the world origin, so
+            // the universe's "away from the origin" would put the camera
+            // inside the head for any deep nucleus.
+            const out = new THREE.Vector3(g.normal.x, g.normal.y, g.normal.z)
+                .applyQuaternion(universeGroup.quaternion).normalize();
+            if (g.kind === 'volume') {
+                // A nucleus is seen through the cortex, from the side it is on.
+                out.set(Math.sign(g.center.x) || 1, 0.35, 0.4)
+                    .applyQuaternion(universeGroup.quaternion).normalize();
+            }
+            flyTo(target, target.clone().addScaledVector(out, g.radius * 2.4 + 70), 0.8, ARC_FOCUS);
+            return;
+        }
         // pull camera back along the galaxy's "outward" normal (its center
         // vector from world origin) so we see the disk roughly face-on.
         const outward = target.length() > 0.001
@@ -1757,6 +1915,11 @@ export function createScene(canvas, callbacks = {}) {
     function resetView() {
         focusNode(-1, true);
         if (!universe) return;
+        if (settings.theme === 'brain') {
+            const home = brainHomePose();
+            flyTo(home.target, home.cam, 0.8);
+            return;
+        }
         const ctr = new THREE.Vector3();
         let maxR = 0;
         for (const g of universe.galaxies) {
@@ -1800,6 +1963,20 @@ export function createScene(canvas, callbacks = {}) {
 
         // Settle the per-galaxy d3-force sims (no-op after they cool down).
         stepPhysics();
+
+        // Brain theme: fibres follow the neurons that moved (budgeted — see
+        // FIBER_BUDGET), the anatomy's shaders tick, and neurons near the
+        // camera grow their dendrites.
+        if (settings.theme === 'brain' && brainVis) {
+            if (edgesObj && universe) {
+                brainVis.updateFibers(edgesObj, universe, anyMoved ? movedMask : null);
+                if (anyMoved) { movedMask?.fill(0); anyMoved = false; }
+            }
+            brainVis.tick({
+                now, dt, camera, universeGroup, universe,
+                pulse: pulseAttr ? pulseAttr.array : null,
+            });
+        }
 
         // The arrival flash, if the sims just finished. Must sit between
         // these two: it seeds into activePulses, and stepPulses is what
@@ -1897,6 +2074,8 @@ export function createScene(canvas, callbacks = {}) {
         canvas.removeEventListener('contextmenu', onContextMenu);
         window.removeEventListener('keydown', onKey);
         dispose();
+        brainVis?.dispose();
+        brainVis = null;
         composer.dispose?.();
         renderer.dispose();
     }
@@ -2182,12 +2361,16 @@ export function createScene(canvas, callbacks = {}) {
         // their lightning envelope. stepPulses composites the per-frame
         // amplitude into the GPU alpha buffer.
         if (!universe?.edges?.length || !pulseEdgeBoost) return;
+        const spikes = settings.theme === 'brain' && brainVis && settings.lightning > 0;
         let count = 0;
         for (let i = 0; i < universe.edges.length && count < MAX_ARCS_PER_PULSE; i++) {
             const e = universe.edges[i];
             if (e.a !== idx && e.b !== idx) continue;
             pulseEdgeBoost[i] = lightningAmpEdge(0);
             activeEdgeBoosts.set(i, now);
+            // In a brain the same event is an action potential: it leaves the
+            // neuron that fired and runs down each of its fibres, away from it.
+            if (spikes) brainVis.spark(edgesObj, i, e.a === idx ? 1 : -1, now / 1000);
             count++;
         }
     }
@@ -2751,6 +2934,10 @@ export function createScene(canvas, callbacks = {}) {
     function setSky(v) {
         settings.sky = clamp(v, 0, 1.5);
         milkyWayObj?.userData.setBrightness?.(settings.sky);
+        // Same knob in the brain theme, labelled "Cortex": how much of the
+        // anatomy (shell, tissue, the brain's own tracts) stands around the
+        // vault's neurons. Both are "the decor that competes with the notes".
+        brainVis?.setCortex(settings.sky);
     }
     function setStarSize(v) {
         settings.size = clamp(v, 0.3, 3.0);
@@ -2882,6 +3069,7 @@ export function createScene(canvas, callbacks = {}) {
         // moved but speed slider stayed).
         if (typeof intensity === 'number') settings.lightning = clamp(intensity, 0, 2);
         if (typeof speed === 'number')     settings.lightningSpeed = clamp(speed, 0.25, 3);
+        applySparkSettings();
     }
     function setEdgeAlpha(v) {
         settings.edges = clamp(v, 0, 2.0);
@@ -2987,14 +3175,65 @@ export function createScene(canvas, callbacks = {}) {
      * fade to pure void. Nebula mode restores the radial gradient + sprites.
      */
     function setBackground(which) {
-        const isBlack = which === 'black';
-        settings.background = isBlack ? 'black' : 'nebula';
-        renderer.setClearColor(isBlack ? 0x000000 : 0x02030a, 1);
-        if (nebulaGroup) nebulaGroup.visible = !isBlack;
+        settings.background = which === 'black' ? 'black' : 'nebula';
+        applyBackdrop();
+    }
+
+    /** One place decides what stands behind the graph, for both themes and
+     *  both backgrounds — four combinations that must never drift apart. */
+    function applyBackdrop() {
+        const isBlack = settings.background === 'black';
+        const isBrain = settings.theme === 'brain';
+        const clear = isBlack ? 0x000000 : isBrain ? 0x03050c : 0x02030a;
+        renderer.setClearColor(clear, 1);
+        skyGroup.visible = !isBrain;
+        if (nebulaGroup) nebulaGroup.visible = !isBlack && !isBrain;
         if (starfieldObj) starfieldObj.visible = !isBlack;
         if (milkyWayObj) milkyWayObj.visible = !isBlack;
         if (dustObj) dustObj.visible = !isBlack;
-        scene.fog.density = isBlack ? 0.0040 : 0.0025;
+        if (brainVis) {
+            brainVis.decor.visible = isBrain;
+            brainVis.backdrop.visible = isBrain;
+            brainVis.setBlack(isBlack);
+        }
+        scene.fog.color.setHex(clear);
+        scene.fog.density = isBrain ? (isBlack ? 0.0016 : 0.0011) : (isBlack ? 0.0040 : 0.0025);
+    }
+
+    /**
+     * Switch between the universe and the brain. Rebuilds the scene from the
+     * payload it already has — the host is not asked for anything, and the
+     * notes, links, selection rules and settings all carry across.
+     * @returns {boolean} whether anything changed
+     */
+    function setTheme(t) {
+        const next = t === 'brain' ? 'brain' : 'universe';
+        if (next === settings.theme) return false;
+        // Close the open note first: its position belongs to the old picture.
+        if (universe) focusNode(-1);
+        settings.theme = next;
+        if (next === 'brain') getBrainVis();
+        applyBackdrop();
+        // A pose the owner chose was chosen for the OTHER picture; the new
+        // one starts from its own framing.
+        _userPose = null;
+        fly = null;
+        if (lastBrainPayload) mount(lastBrainPayload);
+        if (settings.cameraMode === 'follow') {
+            const h = homePose();
+            _followHomeTarget = h.target;
+            _followHomeCam = h.cam;
+        }
+        applySettings();
+        return true;
+    }
+
+    function setFiberColor(mode) {
+        settings.fiberColor = mode === 'dti' ? 'dti' : 'category';
+        if (!brainVis) return;
+        brainVis.setFiberColor(settings.fiberColor,
+            settings.theme === 'brain' ? edgesObj : null,
+            settings.theme === 'brain' ? universe : null);
     }
 
     function setLockSelected(on) {
@@ -3100,7 +3339,10 @@ export function createScene(canvas, callbacks = {}) {
         //    on first mount or the camera coincides with the target, fall
         //    back to a pleasant 3/4 view.
         let dir = camera.position.clone().sub(controls.target);
-        if (!keepDir || dir.lengthSq() < 1e-6) dir.set(0.25, 0.55, 1);
+        if (!keepDir || dir.lengthSq() < 1e-6) {
+            if (settings.theme === 'brain') dir.set(BRAIN_VIEW_DIR.x, BRAIN_VIEW_DIR.y, BRAIN_VIEW_DIR.z);
+            else dir.set(0.25, 0.55, 1);
+        }
         dir.normalize();
         const camVec = centroid.clone().add(dir.multiplyScalar(distance));
         flyTo(centroid, camVec, duration);
@@ -3214,6 +3456,17 @@ export function createScene(canvas, callbacks = {}) {
         setDrift,
         setCameraMode,
         setBackground,
+        setTheme,
+        getTheme: () => settings.theme,
+        setFiberColor,
+        /** Internals for checking the picture from a console (the HUD demo
+         *  exposes this scene only under ?hudDemo=1). WebGL clears its buffer
+         *  after compositing, so pixels cannot be read back — numbers can. */
+        debugState: () => ({
+            theme: settings.theme, bloom: bloom.strength, camera: snapshotCamera(),
+            nodes: universe?.nodes.length ?? 0, edges: universe?.edges.length ?? 0,
+            edgeVPE, brainVis, edgesObj, starsObj, renderer,
+        }),
         setLockSelected,
         randomizeCamera,
         snapshotCamera,

@@ -94,7 +94,7 @@
 
     <!-- right-side legend: one row per category galaxy with expertise bar -->
     <aside id="legend" class="panel" hidden>
-        <div class="panel-title">Expertise &middot; Galaxies</div>
+        <div class="panel-title">Expertise &middot; <span data-label-brain="Brain regions">Galaxies</span></div>
         <div id="legend-rows"></div>
     </aside>
 
@@ -232,7 +232,7 @@
 
     <!-- bottom hint strip + controls reminder -->
     <div id="hud-bottom">
-        <span class="hint"><b>drag</b> orbit &middot; <b>wheel</b> zoom &middot; <b>right-drag</b> pan &middot; <b>click star</b> focus &middot; <b>right-click star</b> walk 2 hops &middot; <b>esc</b> reset<!--
+        <span class="hint"><b>drag</b> orbit &middot; <b>wheel</b> zoom &middot; <b>right-drag</b> pan &middot; <b>click <span data-label-brain="neuron">star</span></b> focus &middot; <b>right-click <span data-label-brain="neuron">star</span></b> walk 2 hops &middot; <b>esc</b> reset<!--
              The panels are movable, and a capability nobody is told about is a
              capability nobody has. Kept on the same line as the camera controls
              because it answers the same question — how do I operate this view.
@@ -261,7 +261,10 @@
             <span id="set-stars-val" class="setting-val">0.85</span>
         </div>
         <div class="setting-row">
-            <label for="set-sky">Milky Way</label>
+            <!-- One knob, two pictures: the Milky Way behind the universe, the
+                 anatomy (cortex shell, tissue, the brain's own tracts) around
+                 the neural brain. Both are the decor competing with the notes. -->
+            <label for="set-sky" data-label-brain="Cortex">Milky Way</label>
             <input id="set-sky" type="range" min="0" max="1.5" step="0.05" value="1.0" />
             <span id="set-sky-val" class="setting-val">1.00</span>
         </div>
@@ -286,12 +289,12 @@
             <span id="set-motion-val" class="setting-val">1.00</span>
         </div>
         <div class="setting-row">
-            <label for="set-lightning" title="Brightness of the read/write flash. 0 = disabled.">Lightning</label>
+            <label for="set-lightning" title="Brightness of the read/write flash. 0 = disabled." data-label-brain="Impulse">Lightning</label>
             <input id="set-lightning" type="range" min="0" max="2" step="0.05" value="1.0" />
             <span id="set-lightning-val" class="setting-val">1.00</span>
         </div>
         <div class="setting-row">
-            <label for="set-lightning-speed" title="Speed of the flicker. 0.5 = slow majestic strike, 2 = frantic.">Strike speed</label>
+            <label for="set-lightning-speed" title="Speed of the flicker. 0.5 = slow majestic strike, 2 = frantic." data-label-brain="Impulse speed">Strike speed</label>
             <input id="set-lightning-speed" type="range" min="0.25" max="3" step="0.05" value="1.0" />
             <span id="set-lightning-speed-val" class="setting-val">1.00</span>
         </div>
@@ -312,7 +315,33 @@
                 <button type="button" class="cam-btn" data-lock="off">Off</button>
             </div>
         </div>
-        <div class="setting-row view-row">
+        <!-- Theme: the same notes as a universe or as a human brain. Both are
+             3D and every card, slider and gesture works in either. -->
+        <div class="setting-row theme-row">
+            <label>Theme</label>
+            <div class="camera-modes">
+                <button type="button" class="cam-btn active" data-theme="universe"
+                        title="Categories are galaxies, notes are stars, links are light across space.">&#x1F30C; Universe</button>
+                <button type="button" class="cam-btn" data-theme="brain"
+                        title="Categories are brain regions, notes are neurons, links are fibres through white matter. Zoom in close and the neurons grow dendrites.">&#x1F9E0; Neural Brain</button>
+            </div>
+        </div>
+        <!-- Brain theme only: how the fibres are coloured. DTI is the
+             tractography convention — red left-right, green front-back, blue
+             up-down — so the picture reads as a real diffusion scan. -->
+        <div class="setting-row fiber-row" hidden>
+            <label>Fibres</label>
+            <div class="camera-modes">
+                <button type="button" class="cam-btn active" data-fiber="category"
+                        title="Each fibre shades from one region's colour to the other's.">Category</button>
+                <button type="button" class="cam-btn" data-fiber="dti"
+                        title="Colour by direction, as in diffusion tractography: red left–right, green front–back, blue up–down.">DTI</button>
+            </div>
+        </div>
+        <!-- The 2D graph is retired from the view, not deleted: this row and the
+             switchView → SwitchUniverseView path in MainWindow.xaml.cs still
+             work, so bringing it back is removing one `hidden`. -->
+        <div class="setting-row view-row" hidden>
             <label>View</label>
             <div class="camera-modes">
                 <button type="button" class="cam-btn active" data-view="3d">3D Universe</button>
@@ -325,7 +354,7 @@
                 <!-- Label only. `data-bg` stays "nebula": it is the value that
                      is persisted in settings and validated on load, so renaming
                      it would silently reset everyone's saved background. -->
-                <button type="button" class="cam-btn active" data-bg="nebula">Milky Way</button>
+                <button type="button" class="cam-btn active" data-bg="nebula" data-label-brain="Lightbox">Milky Way</button>
                 <button type="button" class="cam-btn" data-bg="black">Black</button>
             </div>
         </div>
@@ -473,12 +502,15 @@
         <!-- Agent Bus: a solar system in a floating card. The brain is the
              star, each connected agent a planet on its own orbit; traffic
              falls in as a mote and comes back out. The picture is the whole
-             panel — zoom in on a planet to read its name. -->
+             panel — zoom in on a planet to read its name.
+             In the Neural Brain theme the same card is an anatomical body
+             (agentbody3d.js): the brain sits in the head, each agent is an
+             organ, and a message is a nerve impulse up the spinal cord. -->
         <section class="hud-panel hud-bl hud-panel-bus">
             <div class="hud-title"><span class="hud-dot"></span>Agent Bus
                 <span class="hud-sub" id="hud-agents-count">—</span>
             </div>
-            <canvas id="hud-bus-canvas" aria-label="Agents orbiting the brain"></canvas>
+            <canvas id="hud-bus-canvas" aria-label="Agents connected to the brain"></canvas>
             <!-- The motes above say that something moved. This says what, and
                  who moved it. Both are driven by the same events, so the
                  picture can always be checked against the words — which is the

@@ -5,6 +5,7 @@
 // agnostic of the surrounding chrome.
 
 import { createScene } from './scene.js';
+import { publishTheme } from './theme.js';
 
 const $status   = document.getElementById('status');
 const $stats    = document.getElementById('stats');
@@ -118,7 +119,12 @@ const DEFAULT_SETTINGS = {
     background: 'nebula',   // 'nebula' | 'black'
     lockSelected: true,     // true = clicked star sticks to screen centre
     legendVisible: true,    // true = show galaxy/expertise legend on the right
-    cameraMode: 'free'      // 'free' | 'orbit' | 'follow' | 'random'
+    cameraMode: 'free',     // 'free' | 'orbit' | 'follow' | 'random'
+    // Added without a schema bump: a save that predates them simply has no
+    // key, and loadSettings falls back to these — so nobody's picture changes
+    // on update until they choose the brain themselves.
+    theme: 'universe',      // 'universe' | 'brain'
+    fiberColor: 'category'  // brain theme fibres: 'category' | 'dti'
 };
 
 function setStatus(text, isError = false) {
@@ -199,6 +205,7 @@ function renderLegend(galaxies) {
             <div class="expertise-meta">
                 <span class="expertise-score">${pct}%</span>
                 ${wordsK ? `<span class="expertise-words">${wordsK} words</span>` : ''}
+                ${g.regionLabel ? `<span class="expertise-region">${escapeHtml(g.regionLabel)}</span>` : ''}
             </div>
         `;
         row.addEventListener('click', () => scene.focusGalaxy(g.category));
@@ -823,6 +830,11 @@ function onHostMessage(evt) {
                 b.classList.toggle('active', b.dataset.view === msg.view);
             });
             break;
+        case 'setTheme':
+            // The WPF pill over the view (Universe · Brain). Same path as the
+            // settings row, so the choice is saved and the pill is told back.
+            chooseTheme(msg.theme);
+            break;
         case 'noteContent':
             // C# returned the full Markdown body of the note we asked for.
             // Ignore if user clicked another star meanwhile (id mismatch).
@@ -865,13 +877,28 @@ function handleBrain(brain) {
     if (scene) mountScene(brain);
 }
 
+/** The status line after a mount, in the vocabulary of the picture on screen. */
+function renderedStatus(universe) {
+    if (!universe) return '';
+    const n = universe.nodes.length.toLocaleString();
+    const e = universe.edges.length.toLocaleString();
+    return scene?.getTheme?.() === 'brain'
+        ? `Neural brain rendered · ${n} neurons · ${e} fibres · ${universe.galaxies.length} regions`
+        : `Universe rendered · ${n} stars · ${e} wiki-links · ${universe.galaxies.length} galaxies`;
+}
+let _lastUniverse = null;
+
 function mountScene(brain) {
     try {
         const universe = scene.mount(brain);
+        _lastUniverse = universe;
+        // Same as a theme switch: a re-mount must not silently drop an
+        // islands highlight whose button is still lit.
+        if ($setIslands?.classList.contains('active')) scene.toggleIslands?.(true);
         if (universe.nodes.length === 0) {
             setStatus('Brain has 0 notes yet — open BrainX and add some.');
         } else {
-            setStatus(`Universe rendered · ${universe.nodes.length.toLocaleString()} stars · ${universe.edges.length.toLocaleString()} wiki-links · ${universe.galaxies.length} galaxies`);
+            setStatus(renderedStatus(universe));
         }
         // Dashboard preview: galaxy must always sit nicely in frame +
         // camera should auto-fly to MCP-pulsed stars (user spec
@@ -960,7 +987,11 @@ function loadSettings() {
             legendVisible: typeof parsed.legendVisible === 'boolean'
                 ? parsed.legendVisible : DEFAULT_SETTINGS.legendVisible,
             cameraMode: (['free','orbit','follow','random'].includes(parsed.cameraMode))
-                ? parsed.cameraMode : DEFAULT_SETTINGS.cameraMode
+                ? parsed.cameraMode : DEFAULT_SETTINGS.cameraMode,
+            theme: (parsed.theme === 'brain' || parsed.theme === 'universe')
+                ? parsed.theme : DEFAULT_SETTINGS.theme,
+            fiberColor: (parsed.fiberColor === 'dti' || parsed.fiberColor === 'category')
+                ? parsed.fiberColor : DEFAULT_SETTINGS.fiberColor
         };
     } catch {
         return { ...DEFAULT_SETTINGS };
@@ -1012,7 +1043,30 @@ function applySettingsToUI(s) {
         b.classList.toggle('active', (b.dataset.legend === 'on') === s.legendVisible));
     document.querySelectorAll('.cam-btn[data-mode]').forEach(b =>
         b.classList.toggle('active', b.dataset.mode === s.cameraMode));
+    applyThemeToUI(s);
     applyLegendVisibility(s.legendVisible);
+}
+
+/**
+ * The words on the panel follow the picture. Anything carrying
+ * `data-label-brain` swaps to it in the brain theme and back to its original
+ * text (remembered on first swap) in the universe — "Milky Way" is not a
+ * thing a brain has, and a slider still named after one would be a slider
+ * nobody can guess the meaning of.
+ */
+function applyThemeToUI(s) {
+    const brain = s.theme === 'brain';
+    document.querySelectorAll('.cam-btn[data-theme]').forEach(b =>
+        b.classList.toggle('active', b.dataset.theme === s.theme));
+    document.querySelectorAll('.cam-btn[data-fiber]').forEach(b =>
+        b.classList.toggle('active', b.dataset.fiber === s.fiberColor));
+    const fiberRow = document.querySelector('.fiber-row');
+    if (fiberRow) fiberRow.hidden = !brain;
+    document.querySelectorAll('[data-label-brain]').forEach(el => {
+        if (el.dataset.labelUniverse === undefined) el.dataset.labelUniverse = el.textContent;
+        el.textContent = brain ? el.dataset.labelBrain : el.dataset.labelUniverse;
+    });
+    document.body.classList.toggle('theme-brain', brain);
 }
 
 // Track whether the legend has galaxies to display. The "Show" toggle is a
@@ -1036,7 +1090,13 @@ function applyBackground(which) {
 }
 
 function applySettingsToScene(s) {
+    // The HUD swaps its agent-bus picture off this, scene or no scene.
+    publishTheme(s.theme);
     if (!scene) return;
+    // Theme FIRST: switching rebuilds the scene from its last payload, and
+    // every setter below then lands on the rebuilt materials.
+    const switched = scene.setTheme?.(s.theme);
+    scene.setFiberColor?.(s.fiberColor);
     scene.setGlow(s.glow);
     scene.setStars(s.stars);
     scene.setSky?.(s.sky);
@@ -1057,6 +1117,31 @@ function applySettingsToScene(s) {
     scene.setLockSelected?.(s.lockSelected);
     scene.setCameraMode?.(s.cameraMode);
     applyBackground(s.background);
+    if (switched) {
+        postThemeState(s.theme);
+        if (_lastGalaxies?.length) setStatus(renderedStatus(_lastUniverse));
+        // The rebuild drops the islands highlight with everything else, but
+        // the button is still lit — carry the owner's choice across instead of
+        // leaving a control that says ON over a picture that is not.
+        if ($setIslands?.classList.contains('active')) scene.toggleIslands?.(true);
+    }
+}
+
+/** Tell the host which theme is showing, so the WPF pill over the view can
+ *  light the right half. Sent on every switch and once at start-up. */
+function postThemeState(theme) {
+    postToHost({ type: 'themeState', theme: theme === 'brain' ? 'brain' : 'universe' });
+}
+
+/** One setter for every way a theme can be chosen — the settings row, the WPF
+ *  pill, a URL — so all of them persist, redraw and report identically. */
+function chooseTheme(theme) {
+    const t = theme === 'brain' ? 'brain' : 'universe';
+    if (t === currentSettings.theme) { postThemeState(t); return; }
+    currentSettings = { ...currentSettings, theme: t };
+    applySettingsToUI(currentSettings);
+    applySettingsToScene(currentSettings);
+    saveSettings(currentSettings);
 }
 
 let currentSettings = loadSettings();
@@ -1077,6 +1162,20 @@ if (_URL_CAMERA_OVERRIDE) {
     currentSettings = { ...currentSettings, cameraMode: _URL_CAMERA_OVERRIDE };
 }
 
+// ?theme=brain / ?theme=universe pins the picture the same way — for a host
+// embed that wants one look regardless of what was saved, and for opening the
+// page standalone straight into either theme.
+const _URL_THEME_OVERRIDE = (() => {
+    const t = new URLSearchParams(location.search).get('theme');
+    return (t === 'brain' || t === 'universe') ? t : null;
+})();
+if (_URL_THEME_OVERRIDE) {
+    currentSettings = { ...currentSettings, theme: _URL_THEME_OVERRIDE };
+}
+// Published at module load, before hud.js initialises, so the agent bus is
+// built as the right picture the first time rather than swapped a beat later.
+publishTheme(currentSettings.theme);
+
 // Cross-WebView live sync: when the wallpaper (setup window OR finalized
 // clone) saves new appearance settings, WebView2 instances sharing the
 // same UserDataFolder + origin fire a `storage` event in every OTHER
@@ -1095,7 +1194,8 @@ if (window.location.search.includes('mode=wallpaper-active')) {
         currentSettings = {
             ...currentSettings,
             ...prefs.settings,
-            cameraMode: _URL_CAMERA_OVERRIDE || currentSettings.cameraMode
+            cameraMode: _URL_CAMERA_OVERRIDE || currentSettings.cameraMode,
+            theme: _URL_THEME_OVERRIDE || prefs.settings.theme || currentSettings.theme
         };
         try { applySettingsToUI(currentSettings); } catch {}
         try { applySettingsToScene(currentSettings); } catch {}
@@ -1129,7 +1229,9 @@ function wireSettingsPanel() {
         onSlide('lightningSpeed', $setLightningSpeed, $setLightningSpeedV));
 
     $setReset?.addEventListener('click', () => {
-        currentSettings = { ...DEFAULT_SETTINGS };
+        // Reset is "put the sliders back", not "change what I am looking at":
+        // the theme and its fibre colouring survive it.
+        currentSettings = { ...DEFAULT_SETTINGS, theme: currentSettings.theme, fiberColor: currentSettings.fiberColor };
         applySettingsToUI(currentSettings);
         applySettingsToScene(currentSettings);
         saveSettings(currentSettings);
@@ -1211,7 +1313,27 @@ function wireSettingsPanel() {
         });
     });
 
+    // Theme: universe ↔ neural brain. Both are this same scene, so unlike the
+    // 2D graph below nothing leaves the WebView — scene.setTheme rebuilds the
+    // picture from the payload it already holds.
+    document.querySelectorAll('.cam-btn[data-theme]').forEach(btn => {
+        btn.addEventListener('click', () => chooseTheme(btn.dataset.theme));
+    });
+
+    // Brain fibres: category colours or tractography (DTI) direction colours.
+    document.querySelectorAll('.cam-btn[data-fiber]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            currentSettings = { ...currentSettings, fiberColor: btn.dataset.fiber === 'dti' ? 'dti' : 'category' };
+            applyThemeToUI(currentSettings);
+            scene?.setFiberColor?.(currentSettings.fiberColor);
+            saveSettings(currentSettings);
+        });
+    });
+
     // View toggle: 3D Universe (WebView2 default) ↔ 2D Graph (WPF Graph2DRenderer).
+    // RETIRED from the panel (its row is `hidden` in index.html) — the brain
+    // theme replaced it as the second way to see the graph. Still wired, so
+    // un-hiding the row is the whole rollback.
     // The 2D renderer lives on the WPF side, so JS just posts; C# flips
     // visibility of the WebView vs the embedded Graph2DRenderer.
     document.querySelectorAll('.cam-btn[data-view]').forEach(btn => {
@@ -1320,6 +1442,10 @@ async function init() {
         return;
     }
 
+    // Demo-only console handle, same idea as hud.js's __hudBus: the picture can
+    // be checked by numbers from a plain browser. Never exposed in the host.
+    if (new URLSearchParams(location.search).get('hudDemo') === '1') window.__scene = scene;
+
     // restore persisted UI + push to scene so the user's last preference
     // (e.g. low glow) survives a reload.
     applySettingsToUI(currentSettings);
@@ -1346,6 +1472,8 @@ async function init() {
         window.chrome.webview.addEventListener('message', onHostMessage);
         setStatus('Waiting for brain snapshot…');
         postToHost({ type: 'ready' });
+        // The pill over the view starts out knowing which half to light.
+        postThemeState(currentSettings.theme);
     } else {
         // Standalone preview path: try fetching the JSON directly so devs can
         // open index.html from a static server (e.g. `npx serve`).

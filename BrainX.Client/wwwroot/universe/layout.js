@@ -31,7 +31,7 @@ const GALAXY_PALETTE = {
 };
 
 // Deterministic hash → uint32 for seeded RNG. Quick + good enough; not crypto.
-function hashStr(s) {
+export function hashStr(s) {
     let h = 2166136261 >>> 0;
     for (let i = 0; i < s.length; i++) {
         h ^= s.charCodeAt(i);
@@ -41,7 +41,7 @@ function hashStr(s) {
 }
 
 // mulberry32 — small, fast, decent distribution.
-function rng(seed) {
+export function rng(seed) {
     let t = seed >>> 0;
     return () => {
         t = (t + 0x6D2B79F5) >>> 0;
@@ -52,7 +52,7 @@ function rng(seed) {
 }
 
 // Box-Muller; uses the rng above.
-function gauss(rand) {
+export function gauss(rand) {
     const u = Math.max(rand(), 1e-9);
     const v = rand();
     return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
@@ -113,20 +113,7 @@ export function buildUniverse(brain) {
     // and the layout puts the chunkiest galaxies at deterministic positions.
     const sortedCats = [...byCat.entries()].sort((a, b) => b[1].length - a[1].length);
 
-    // Expertise lookup: brain-export ships { Category, Score, NoteCount, ... }
-    // for each top-level category. We join by category name so the legend
-    // can render a progress bar reflecting the brain's actual depth, not
-    // just node count. Missing = score 0 (rare — only in toy brains).
-    const expertiseByCat = new Map();
-    for (const e of (brain.Expertise ?? brain.expertise ?? [])) {
-        const k = e.Category ?? e.category;
-        if (k) expertiseByCat.set(k, {
-            score: e.Score ?? e.score ?? 0,
-            noteCount: e.NoteCount ?? e.noteCount ?? 0,
-            totalWords: e.TotalWords ?? e.totalWords ?? 0,
-            growthRate: e.GrowthRate ?? e.growthRate ?? 0
-        });
-    }
+    const expertiseByCat = expertiseByCategory(brain);
 
     // 2) Place each galaxy on a Fibonacci sphere. The sphere radius scales
     //    with the LARGEST disk so big galaxies (Programming can hit r≈60)
@@ -136,7 +123,7 @@ export function buildUniverse(brain) {
     const maxDiskR = Math.max(...sortedCats.map(([, list]) => 12 + Math.sqrt(list.length) * 2.4));
     const galaxyR = Math.max(80, maxDiskR * 2.1);
     const galaxies = sortedCats.map(([category, list], i) => {
-        const pal = GALAXY_PALETTE[category] ?? { hex: hueFromCategory(category), label: prettifyCategory(category) };
+        const pal = paletteFor(category);
         const expertise = expertiseByCat.get(category) ?? { score: 0, noteCount: list.length, totalWords: 0, growthRate: 0 };
         const center = sortedCats.length === 1
             ? { x: 0, y: 0, z: 0 }
@@ -240,13 +227,49 @@ export function buildUniverse(brain) {
         });
     }
 
-    // 4) Wiki-link edges. Skip self-loops + edges to nodes we never indexed
-    //    (orphan ids occur when an import is partial).
-    //
-    //    LinkedNodeIds is DIRECTIONAL (outgoing links only), so dedupe must
-    //    normalize the pair — the old `if (i < j)` shortcut silently dropped
-    //    every one-way link that happened to point from a higher node index
-    //    to a lower one (roughly half of all single-direction wiki-links).
+    return { nodes, edges: linkEdges(nodes, idIndex), galaxies };
+}
+
+/**
+ * Expertise lookup: brain-export ships { Category, Score, NoteCount, ... }
+ * for each top-level category. Joined by category name so the legend can
+ * render a progress bar reflecting the brain's actual depth, not just node
+ * count. Missing = score 0 (rare — only in toy brains).
+ *
+ * Exported with paletteFor and linkEdges because the brain theme
+ * (brainlayout.js) builds the same { nodes, edges, galaxies } shape from the
+ * same payload — two copies of the join would be two answers to one question.
+ */
+export function expertiseByCategory(brain) {
+    const expertiseByCat = new Map();
+    for (const e of (brain.Expertise ?? brain.expertise ?? [])) {
+        const k = e.Category ?? e.category;
+        if (k) expertiseByCat.set(k, {
+            score: e.Score ?? e.score ?? 0,
+            noteCount: e.NoteCount ?? e.noteCount ?? 0,
+            totalWords: e.TotalWords ?? e.totalWords ?? 0,
+            growthRate: e.GrowthRate ?? e.growthRate ?? 0
+        });
+    }
+    return expertiseByCat;
+}
+
+/** Colour + display label for a category, with a stable fallback for one the
+ *  palette has never heard of. */
+export function paletteFor(category) {
+    return GALAXY_PALETTE[category] ?? { hex: hueFromCategory(category), label: prettifyCategory(category) };
+}
+
+/**
+ * Wiki-link edges. Skip self-loops + edges to nodes we never indexed (orphan
+ * ids occur when an import is partial).
+ *
+ * LinkedNodeIds is DIRECTIONAL (outgoing links only), so dedupe must
+ * normalize the pair — the old `if (i < j)` shortcut silently dropped every
+ * one-way link that happened to point from a higher node index to a lower one
+ * (roughly half of all single-direction wiki-links).
+ */
+export function linkEdges(nodes, idIndex) {
     const edges = [];
     const seenPairs = new Set();
     for (let i = 0; i < nodes.length; i++) {
@@ -259,8 +282,7 @@ export function buildUniverse(brain) {
             edges.push(i < j ? { a: i, b: j } : { a: j, b: i });
         }
     }
-
-    return { nodes, edges, galaxies };
+    return edges;
 }
 
 function unit(v) {
