@@ -114,6 +114,16 @@ internal static partial class Program
             try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
             return RunSessionStartHook(args.Skip(1).ToArray());
         }
+        // The broker. Long-running, so it is declared after the hooks (which
+        // run on a keystroke) but before everything else — it is the only
+        // subcommand that is meant to stay up, and a typo that fell through to
+        // the MCP server would leave a stdio server waiting on a pipe nobody
+        // is writing to.
+        if (args.Length > 0 && args[0].Equals("broker", StringComparison.OrdinalIgnoreCase))
+        {
+            try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
+            return await RunBroker(args.Skip(1).ToArray()).ConfigureAwait(false);
+        }
         if (args.Length > 0 && args[0].Equals("reap", StringComparison.OrdinalIgnoreCase))
         {
             try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
@@ -816,6 +826,25 @@ internal static partial class Program
                 "its unread inbox is. Call before agent_send to see whether the other side is live, or when " +
                 "the user asks 'codex เปิดอยู่ไหม' / 'who's connected'.",
                 new JObject { ["type"] = "object", ["properties"] = new JObject() }),
+            Tool("agent_ask_user",
+                "STOP and ask the OWNER. Use this the moment a choice is genuinely theirs — scope, money, " +
+                "anything destructive or hard to undo, or two options you could defend equally well. " +
+                "The question is delivered to the owner everywhere at once (Telegram, the dashboard, and " +
+                "any other agent that is live right now), the broker parks this agent's work so nothing " +
+                "else is spawned on it, and the answer comes back to you as a normal message in your inbox. " +
+                "Do NOT use it for something a peer can answer — that is agent_send. Do not guess and " +
+                "carry on: a wrong autonomous decision costs more than a wait.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["question"] = new JObject { ["type"] = "string", ["description"] = "the decision, in the owner's language, with enough context to answer it without opening anything" },
+                        ["options"] = new JObject { ["type"] = "array", ["items"] = new JObject { ["type"] = "string" }, ["description"] = "2-4 short answers. They become one-tap buttons in Telegram, so phrase them as choices, not questions." },
+                        ["work"] = new JObject { ["type"] = "string", ["description"] = "the workstream / task id this blocks, so the answer comes back labelled" }
+                    },
+                    ["required"] = new JArray { "question" }
+                }),
             Tool("agent_activity",
                 "What the other agents have actually been DOING — a live feed of every tool call they served, " +
                 "newest last, with a one-line summary of each. agent_peers says who is online and this says what " +
@@ -1446,6 +1475,7 @@ internal static partial class Program
                 "agent_inbox"               => AgentInbox(args),
                 "agent_peers"               => AgentPeers(),
                 "agent_activity"            => AgentActivity(args),
+                "agent_ask_user"            => AgentAskUser(args),
                 "bridge_status"             => McpBridgeHub.StatusJson(),
                 _ => throw new InvalidOperationException($"unknown tool: {name}")
             };

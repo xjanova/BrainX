@@ -676,7 +676,24 @@ body.hud-active #settings-toggle {
        chat that spans the viewport buries the galaxy it sits on. */
     max-width: min(46vw, 620px);
     max-height: calc(34vh - var(--hud-gap) * 2);
+
+    /* Same principle as .hud-tr: the title carries the WORK chip and the
+       count, so it must NOT scroll away with the transcript under it — and
+       that means the panel stops being the scroller and the list becomes it.
+       Without this the panel is a plain block, the <ol> grows to its full
+       content height and its own overflow-y never engages: hud.js pinning
+       `el.scrollTop` was writing to a box that does not scroll, so the card
+       sat on the OLDEST message and never followed the conversation. */
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
 }
+
+/* The list takes whatever height the title leaves. `min-height: 0` (set on
+   .hud-chat below) is the half that makes it scroll at all — a flex item's
+   automatic minimum is its content, which would let the list push the panel
+   open again and put the scroller straight back on the panel. */
+.hud-panel-chat > .hud-chat { flex: 1 1 auto; }
 
 .hud-chat {
     list-style: none;
@@ -691,6 +708,10 @@ body.hud-active #settings-toggle {
     flex-direction: column;
     gap: 5px;
     box-sizing: border-box;
+    /* Same reason as #hud-activity-body: the list is rebuilt wholesale on
+       every payload, and scroll anchoring would try to hold whichever row it
+       had latched onto — fighting the pin that puts us on the newest one. */
+    overflow-anchor: none;
 }
 
 .hud-chat > li {
@@ -894,7 +915,8 @@ body.hud-active #settings-toggle {
    fade is decoration that lies about there being more. hud.js sets
    .is-scrollable from a real measurement. */
 .hud-panel.is-scrollable,
-.hud-feed.is-scrollable {
+.hud-feed.is-scrollable,
+.hud-chat.is-scrollable {
     mask-image: linear-gradient(180deg, #000 88%, transparent 100%);
     -webkit-mask-image: linear-gradient(180deg, #000 88%, transparent 100%);
 }

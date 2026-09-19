@@ -573,6 +573,17 @@ const FLOW_COLORS = {
    window every tick, and keying off the array would re-fire the flight
    animation for messages that have merely been re-listed. */
 const CHAT_KEEP = 60;
+
+/** Was the chat pinned to the newest row at the last render?
+ *
+ *  Kept as state rather than re-measured from scratch every time, because a
+ *  measurement can be taken when there is nothing to measure. A card switched
+ *  off in Settings ▸ Cards has zero height, so the pin at render time lands
+ *  nowhere; switch it back on and the list opens on the OLDEST message — and
+ *  the NEXT render measures that as a reader who scrolled back and latches it
+ *  there for good. The intent survives a card with no height; the measurement
+ *  does not. */
+let _chatStuck = true;
 const _chatSeen = new Set();
 let _chatPrimed = false;
 
@@ -613,7 +624,10 @@ function renderChat(d = {}) {
     // scrollTop, which would yank a reader back to the oldest message every
     // time anything arrived. Measure before the wipe — an emptied list reports
     // no scroll at all.
-    const stick = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    // A box with no height cannot have a reader position to preserve, so it
+    // counts as pinned — see _chatStuck.
+    const stick = _chatStuck =
+        el.clientHeight === 0 || el.scrollHeight - el.scrollTop - el.clientHeight < 24;
     // Which messages were open stays open across the rebuild; a re-render
     // every two seconds would otherwise collapse whatever is being read.
     const open = new Set([...el.querySelectorAll('li.is-open')].map(li => li.dataset.id));
@@ -679,6 +693,24 @@ function renderChat(d = {}) {
  *  on the host — trimming to a different depth than the host sends would
  *  either waste the payload or cut history the panel promised to scroll. */
 const WORK_KEEP = 40;
+
+/** Re-pin the transcript when the list changes SIZE — the card switched back
+ *  on, the window resized, the panel re-laid out by hudlayout.
+ *
+ *  Observing the BOX and not the content is the whole point: content growing
+ *  under a reader who scrolled back must never yank them forward, and a
+ *  border-box observer does not fire for that. It fires for the cases where
+ *  the render-time pin had no height to land on.
+ *
+ *  Paired with the CSS that made this list the scroller in the first place.
+ *  Before that the panel scrolled and `el.scrollTop` here went nowhere. */
+function initChatStickiness() {
+    const el = document.getElementById('hud-chat');
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    new ResizeObserver(() => {
+        if (_chatStuck) el.scrollTop = el.scrollHeight;
+    }).observe(el);
+}
 
 /** The WORK chip in the chat title. Re-renders from the last payload rather
  *  than waiting for the next tick, so the toggle feels like a switch and not
@@ -1373,7 +1405,7 @@ function wireWheelScroll() {
 /** Mark panels whose content is clipped, so the fade only appears when there
  *  is genuinely more to see — a permanent fade would be decoration that lies. */
 function markScrollable() {
-    document.querySelectorAll('.hud-panel, .hud-feed').forEach(p => {
+    document.querySelectorAll('.hud-panel, .hud-feed, .hud-chat').forEach(p => {
         p.classList.toggle('is-scrollable', p.scrollHeight - p.clientHeight > 1);
     });
 }
@@ -1426,6 +1458,7 @@ export function initHud() {
     // Before the first payload lands, so the chip is already painted in the
     // owner's remembered state rather than flipping once data arrives.
     initChatWorkToggle();
+    initChatStickiness();
     initBus();
     // Grid first, then the owner's own arrangement on top of it: the layout
     // module measures the panels where the grid put them, so it has to run
