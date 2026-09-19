@@ -344,6 +344,7 @@ internal static partial class Program
     private static void TellLiveSessions(BrokerDecision d)
     {
         var opts = d.Options.Count > 0 ? "\nOptions: " + string.Join(" · ", d.Options) : "";
+        var about = string.IsNullOrWhiteSpace(d.Work) ? "" : $" (workstream: {d.Work})";
         foreach (var agent in KnownAgents())
         {
             if (agent.Equals(d.Agent, StringComparison.OrdinalIgnoreCase)) continue;
@@ -351,12 +352,22 @@ internal static partial class Program
             try
             {
                 DeliverBusMessage("broker", agent,
-                    $"The broker needs the OWNER to decide something before '{d.Agent}' can continue.\n\n"
+                    $"The broker needs the OWNER to decide something before '{d.Agent}' can continue{about}.\n\n"
                     + d.Question + opts
                     + "\n\nShow this to your user and ask. When they answer, tell the broker by writing "
                     + $"the `answer` field into .obsidianx/agent-bus/broker/decisions/{SanitizeAgentSlug(d.Id)}.json — "
                     + "do NOT decide it yourself.",
-                    topic: "needs-decision", work: d.Work);
+                    // UNLABELLED, deliberately — the one place in this system
+                    // where that is right. agent_inbox is work-scoped, so a
+                    // labelled message is readable only by a session already on
+                    // that workstream. A question for the OWNER has to reach
+                    // whoever is actually at the keyboard, and which job they
+                    // are on is exactly what cannot be assumed. Labelling it
+                    // made it invisible to the only live session — caught
+                    // within a minute of shipping, by the escalation failing to
+                    // escalate. The workstream is named in the TEXT instead,
+                    // where a human reads it.
+                    topic: "needs-decision", work: null);
             }
             catch (Exception ex) { BrokerLog($"telling {agent} — " + Redact(ex.Message)); }
         }
