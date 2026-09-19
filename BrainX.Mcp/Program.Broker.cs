@@ -306,10 +306,27 @@ internal static partial class Program
             // twice is worse than not asking: the second spawn cannot see the
             // first question, so it asks its own version of it and the owner
             // gets two notifications for one decision.
-            if (HasOpenDecision(agent))
+            // But only the parked WORKSTREAM stops — the agent keeps its
+            // other jobs. Anything else and one unanswered question freezes an
+            // agent completely, which is the stall this system exists to end.
+            // Caught the moment a second job was queued: codex was waiting on
+            // an image-source choice for gpuxmine-wpf, and that alone would
+            // have blocked an unrelated build check with no decision in it.
+            var (allBlocked, blockedWorks) = OpenDecisionScope(agent);
+            if (allBlocked)
             {
                 BrokerSay(agent, $"{agent}: {Describe(work)} — waiting on the owner, not spawning");
                 continue;
+            }
+            if (blockedWorks.Count > 0)
+            {
+                work = WithoutBlockedWork(work, blockedWorks);
+                if (work.Mail == 0 && work.Tasks == 0)
+                {
+                    BrokerSay(agent, $"{agent}: everything waiting is parked on the owner ({string.Join(", ", blockedWorks)})");
+                    continue;
+                }
+                BrokerSay(agent, $"{agent}: {string.Join(", ", blockedWorks)} parked on the owner; carrying on with {Describe(work)}");
             }
 
             var state = ReadRunnerState(agent);
@@ -1029,6 +1046,19 @@ internal static partial class Program
         return new WaitingWork(mail, tasks, works.ToList(), oldest);
     }
 
+    /// <summary>
+    /// The same waiting work with the parked labels removed, so a spawn is
+    /// told to read only what it can actually act on. Unlabelled mail belongs
+    /// to no workstream and survives every block.
+    /// </summary>
+    private static WaitingWork WithoutBlockedWork(WaitingWork work, HashSet<string> blocked)
+    {
+        var keep = work.Works.Where(w => !blocked.Contains(w)).ToList();
+        if (keep.Count == work.Works.Count) return work;
+        var mail = keep.Count == 0 ? 0 : work.Mail;
+        return work with { Works = keep, Mail = mail };
+    }
+
     private static IEnumerable<string> BoxesFor(string agent)
     {
         yield return agent;
@@ -1168,6 +1198,12 @@ internal static partial class Program
 
         /// <summary>Where to look for a folder named after a work label.</summary>
         public List<string> WorkRoots { get; init; } = new();
+
+        /// <summary>
+        /// Push decision notices into live agent sessions as well as the
+        /// dashboard. Off by default — see EscalateAsync.
+        /// </summary>
+        public bool RelayDecisionsToSessions { get; init; }
         public Dictionary<string, RunnerSpec> Runners { get; init; } = new(StringComparer.OrdinalIgnoreCase);
         public JObject Escalation { get; init; } = new();
     }
@@ -1227,6 +1263,7 @@ internal static partial class Program
             MaxConsecutiveFailures = Math.Max(1, b["maxConsecutiveFailures"]?.ToObject<int?>() ?? 2),
             ParkedSpawnAfterMinutes = Math.Max(1, o["parkedSpawnAfterMinutes"]?.ToObject<int?>() ?? 20),
             WorkDirs = workDirs,
+            RelayDecisionsToSessions = (o["escalation"] as JObject)?["relayToSessions"]?.ToObject<bool?>() ?? false,
             WorkRoots = o["workRoots"]?.ToObject<List<string>>()?
                             .Select(Environment.ExpandEnvironmentVariables).ToList()
                         ?? new List<string>(),
@@ -1265,7 +1302,9 @@ internal static partial class Program
   "escalation": {
     "telegram": { "botToken": "", "chatId": "" },
     "toast": true,
-    "chatCard": true
+    "chatCard": true,
+    "//relayToSessions": "Push questions into live agent sessions too. Off: the Agent Chat card is the room to watch and answer in, without it landing in your own chats.",
+    "relayToSessions": false
   },
 
   "//runners": "{prompt} and {cwd} are substituted. NOTHING from a peer message is ever interpolated.",

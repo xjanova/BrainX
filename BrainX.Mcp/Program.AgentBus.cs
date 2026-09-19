@@ -87,6 +87,26 @@ internal static partial class Program
     /// same slug rules as identities. Rejecting anything else is what
     /// keeps a hostile `to: "../../secrets"` from escaping the bus root.
     /// </summary>
+    /// <summary>
+    /// Names no agent may hold, because messages carrying them are TRUSTED
+    /// differently by every reader.
+    ///
+    /// "owner" is the one the owner types as, from the cowork room in the
+    /// client — and agents are told to treat it as their own user speaking,
+    /// which outranks every peer message. "broker" issues the wake and spawn
+    /// notices. If a handshake could claim either, any local process could
+    /// hand every agent on this brain an instruction they would obey.
+    ///
+    /// This is the same rule the bus already lives by: identity comes from the
+    /// handshake, never from a tool argument. The reservation just closes the
+    /// last door — a client that ANNOUNCES itself as "owner" is turned into
+    /// "owner-agent" and is an ordinary peer like everybody else.
+    /// </summary>
+    private static readonly string[] ReservedIdentities = { "owner", "broker" };
+
+    internal static bool IsReservedIdentity(string slug) =>
+        ReservedIdentities.Contains(slug, StringComparer.OrdinalIgnoreCase);
+
     private static string SanitizeAgentSlug(string raw)
     {
         var slug = new string(raw.Trim().ToLowerInvariant()
@@ -121,6 +141,14 @@ internal static partial class Program
     /// Anything else is delivered as addressed; if that agent later connects
     /// under a coarser identity, AdoptStrayFineBoxMail recovers the mail.
     /// </summary>
+    /// <summary>
+    /// Force a handshake-derived identity out of the reserved set. Applied
+    /// where identity is decided, not where it is used, so every later
+    /// consumer — presence, inbox, journal, the card — sees the same answer.
+    /// </summary>
+    private static string DemoteReservedIdentity(string slug) =>
+        IsReservedIdentity(slug) ? slug + "-agent" : slug;
+
     private static string CollapseToReadableBox(string slug)
     {
         var known = KnownAgents();
@@ -338,6 +366,14 @@ internal static partial class Program
             ? SanitizeAgentSlug(w)
             : null;
         var msgId = $"m-{DateTime.UtcNow.Ticks}-{Guid.NewGuid().ToString("N")[..6]}";
+
+        // Files travel WITH the message, not as paths pointing at the sender's
+        // disk. An agent's picture is usually in a temp directory it is about
+        // to clean up, a headless run's working directory disappears with the
+        // run, and on a remote agent the path is meaningless here — so a
+        // reference would be a broken link by the time the owner looked at it.
+        // Copying is the only version that still works tomorrow.
+        var attachments = CopyAttachmentsIntoBus(args["attachments"], msgId);
         var delivered = new JArray();
         var anyOnline = false;
         var everSeen = KnownAgents();
@@ -359,6 +395,7 @@ internal static partial class Program
                 ["body"] = body
             };
             if (!string.IsNullOrWhiteSpace(topic)) payload["topic"] = topic;
+            if (attachments.Count > 0) payload["attachments"] = (JArray)attachments.DeepClone();
             if (!string.IsNullOrWhiteSpace(replyTo)) payload["replyTo"] = replyTo;
             if (work != null) payload["work"] = work;
             // Keep the sender's finer address as provenance: any session of
@@ -394,6 +431,83 @@ internal static partial class Program
                 : "Recipient is OFFLINE — the message is parked in their inbox and delivered when they next connect to this brain. Don't block waiting; tell the user."
         };
     }
+
+    /// <summary>How many files one message may carry, and how big each may be.</summary>
+    private const int MaxAttachments = 8;
+    private const long MaxAttachmentBytes = 25L * 1024 * 1024;
+
+    /// <summary>
+    /// Copy each attachment into <c>agent-bus/files/&lt;msgId&gt;/</c> and
+    /// describe it for the card.
+    ///
+    /// Never fails the send. A message whose picture could not be copied is
+    /// still a message worth delivering — the body usually says what the
+    /// picture was going to show — and an agent that loses a whole exchange
+    /// because one file was locked is worse off than one that loses the file.
+    /// The failure is recorded in the attachment entry instead, so the owner
+    /// sees that something was meant to be there.
+    /// </summary>
+    private static JArray CopyAttachmentsIntoBus(JToken? raw, string msgId)
+    {
+        var result = new JArray();
+        if (raw == null || raw.Type == JTokenType.Null) return result;
+
+        var paths = raw.Type == JTokenType.String
+            ? new List<string> { raw.ToString() }
+            : raw.Select(t => t.ToString()).ToList();
+
+        var dir = Path.Combine(BusRoot, "files", msgId);
+        foreach (var src in paths.Where(p => !string.IsNullOrWhiteSpace(p)).Take(MaxAttachments))
+        {
+            var entry = new JObject { ["name"] = Path.GetFileName(src) };
+            try
+            {
+                var info = new FileInfo(src);
+                if (!info.Exists) { entry["error"] = "file not found"; result.Add(entry); continue; }
+                if (info.Length > MaxAttachmentBytes)
+                {
+                    entry["error"] = $"too large ({info.Length / (1024 * 1024)} MB, max {MaxAttachmentBytes / (1024 * 1024)})";
+                    entry["bytes"] = info.Length;
+                    result.Add(entry);
+                    continue;
+                }
+
+                Directory.CreateDirectory(dir);
+                // The stored name is sanitised, and the ORIGINAL is kept as a
+                // separate field: a name like "..\..\evil.exe" must not decide
+                // where the file lands, but the owner should still see what the
+                // sender called it.
+                var safe = SanitizeFileName(info.Name);
+                var dest = Path.Combine(dir, safe);
+                info.CopyTo(dest, overwrite: true);
+
+                entry["name"] = safe;
+                entry["originalName"] = info.Name;
+                entry["bytes"] = info.Length;
+                // Relative to the bus root, so the path stays valid if the
+                // vault moves — the card resolves it against its own root.
+                entry["path"] = Path.Combine("files", msgId, safe).Replace('\\', '/');
+                entry["kind"] = IsImageName(safe) ? "image" : "file";
+            }
+            catch (Exception ex) { entry["error"] = ex.Message; }
+            result.Add(entry);
+        }
+        return result;
+    }
+
+    /// <summary>A file name that cannot escape the directory it is written to.</summary>
+    private static string SanitizeFileName(string name)
+    {
+        var cleaned = new string(Path.GetFileName(name)
+            .Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c).ToArray());
+        cleaned = cleaned.Trim().TrimStart('.');
+        if (cleaned.Length == 0) cleaned = "attachment";
+        return cleaned.Length > 120 ? cleaned[^120..] : cleaned;
+    }
+
+    private static bool IsImageName(string name) =>
+        Path.GetExtension(name).ToLowerInvariant()
+            is ".png" or ".jpg" or ".jpeg" or ".gif" or ".webp" or ".bmp" or ".svg";
 
     // ───────────── agent_inbox ─────────────
 

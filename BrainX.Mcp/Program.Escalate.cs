@@ -145,25 +145,44 @@ internal static partial class Program
         catch (Exception ex) { BrokerLog("escalate failed — " + Redact(ex.Message)); }
     }
 
-    /// <summary>Is this agent's work parked on the owner right now?</summary>
-    private static bool HasOpenDecision(string agent)
+    /// <summary>
+    /// Which of this agent's workstreams are parked on the owner.
+    ///
+    /// Per WORKSTREAM, not per agent — the distinction is the difference
+    /// between a loop that keeps moving and one that stops dead. Caught the
+    /// moment a second job was queued: codex was waiting on the owner to
+    /// choose an image source for gpuxmine-wpf, and that single open question
+    /// would have blocked an unrelated build-check task that had no decision
+    /// in it at all. One stuck job must not become a stuck agent.
+    ///
+    /// A decision with NO work label is the exception and blocks everything,
+    /// correctly: those are raised about the AGENT itself — its runner will
+    /// not start, it has no folder to run in — and none of its work can move
+    /// until that is answered.
+    /// </summary>
+    private static (bool AllBlocked, HashSet<string> BlockedWorks) OpenDecisionScope(string agent)
     {
+        var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         try
         {
-            if (!Directory.Exists(BrokerDecisionDir)) return false;
+            if (!Directory.Exists(BrokerDecisionDir)) return (false, blocked);
             foreach (var f in Directory.GetFiles(BrokerDecisionDir, "*.json"))
             {
                 try
                 {
                     var o = JObject.Parse(File.ReadAllText(f));
                     if (!string.Equals(o["status"]?.ToString(), "open", StringComparison.OrdinalIgnoreCase)) continue;
-                    if (string.Equals(o["agent"]?.ToString(), agent, StringComparison.OrdinalIgnoreCase)) return true;
+                    if (!string.Equals(o["agent"]?.ToString(), agent, StringComparison.OrdinalIgnoreCase)) continue;
+
+                    var work = o["work"]?.ToString();
+                    if (string.IsNullOrWhiteSpace(work)) return (true, blocked);   // about the agent itself
+                    blocked.Add(work!);
                 }
                 catch { }
             }
         }
         catch { }
-        return false;
+        return (false, blocked);
     }
 
     // ───────────── answers coming back ─────────────
