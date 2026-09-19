@@ -41,6 +41,10 @@ const overlay = document.getElementById('overlay');
  *  Gathered rather than hardcoded so a desk that moves takes its light with it. */
 let LIGHTS = [];
 
+/** The darkness, with holes cut in it. See castDarkness(). */
+const shadowLayer = document.createElement('canvas');
+const shctx = shadowLayer.getContext('2d');
+
 let CW = 320, CH = 200;             // logical canvas size, recomputed on resize
 let ORIGIN = { x: 160, y: 40 };     // where grid cell (0,0) lands
 
@@ -62,6 +66,8 @@ function resize() {
     // something better than the sprite grid to draw on.
     cv.width = CW * SCALE;
     cv.height = CH * SCALE;
+    shadowLayer.width = cv.width;
+    shadowLayer.height = cv.height;
     ctx.imageSmoothingEnabled = false;
     layoutDesks();
 }
@@ -205,6 +211,53 @@ function tile(gx, gy, c) {
     ctx.lineTo(p.x - TILE_W / 2, p.y + TILE_H / 2);
     ctx.closePath();
     ctx.fill();
+}
+
+/**
+ * A floor tile with a SURFACE.
+ *
+ * The room was two navies in a checkerboard, which is a grid rather than a
+ * floor: nothing caught light, nothing had an edge, and every tile was the
+ * same as every other. Three things fix that, and none of them is a new
+ * colour — a grout line so tiles have edges, a lit top-left bevel so the
+ * light has a direction, and a per-tile value wobble so the surface has
+ * grain instead of a repeat.
+ */
+function floorTile(gx, gy) {
+    const p = iso(gx, gy);
+    // Deterministic per-cell noise. Random would shimmer on every frame.
+    const n = ((gx * 73856093) ^ (gy * 19349663)) >>> 0;
+    const wob = ((n >>> 3) % 3) - 1;                 // -1, 0 or 1
+    const base = (gx + gy) % 2 ? 22 : 16;
+    const v = Math.max(10, base + wob * 2);
+    const fill = `rgb(${(v * 0.72) | 0},${(v * 0.86) | 0},${(v * 2.0) | 0})`;
+
+    ctx.fillStyle = fill;
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+    ctx.lineTo(p.x + TILE_W / 2, p.y + TILE_H / 2);
+    ctx.lineTo(p.x, p.y + TILE_H);
+    ctx.lineTo(p.x - TILE_W / 2, p.y + TILE_H / 2);
+    ctx.closePath();
+    ctx.fill();
+
+    // Grout along the two far edges only — a full outline turns a floor into
+    // graph paper, and light comes from the back-right of this room.
+    ctx.strokeStyle = 'rgba(4,5,14,0.55)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(p.x - TILE_W / 2, p.y + TILE_H / 2);
+    ctx.lineTo(p.x, p.y + TILE_H);
+    ctx.lineTo(p.x + TILE_W / 2, p.y + TILE_H / 2);
+    ctx.stroke();
+
+    // And a lit bevel along the near-top edges.
+    ctx.strokeStyle = 'rgba(150,180,255,0.07)';
+    ctx.beginPath();
+    ctx.moveTo(p.x - TILE_W / 2, p.y + TILE_H / 2);
+    ctx.lineTo(p.x, p.y);
+    ctx.lineTo(p.x + TILE_W / 2, p.y + TILE_H / 2);
+    ctx.stroke();
 }
 
 /** A box in the same projection as the floor: a diamond lid with a left and
@@ -527,8 +580,9 @@ function drawRoom() {
     drawWalls();
     for (let gy = 0; gy < ROOM.R; gy++)
         for (let gx = 0; gx < ROOM.C; gx++)
-            tile(gx, gy, (gx + gy) % 2 ? '#141838' : '#10142e');
+            floorTile(gx, gy);
 
+    floorAO();
     drawProps();
 
     // Light on the floor, warm under the lamp and cold from the screen. Two
@@ -569,6 +623,33 @@ function drawRoom() {
     drawPackets();
 }
 
+/**
+ * Shadow in the corners.
+ *
+ * A room lit evenly everywhere has no corners — every surface reads at the
+ * same distance and the whole thing flattens into a pattern. Darkening where
+ * the floor meets each wall is the cheapest depth cue there is, and it is the
+ * single biggest reason the first version looked like a diagram.
+ */
+function floorAO() {
+    const A = iso(0, ROOM.R), B = iso(0, 0), C = iso(ROOM.C, 0);
+    const band = (p1, p2, depth) => {
+        const g = ctx.createLinearGradient(
+            (p1.x + p2.x) / 2, (p1.y + p2.y) / 2,
+            (p1.x + p2.x) / 2 + depth.dx, (p1.y + p2.y) / 2 + depth.dy);
+        g.addColorStop(0, 'rgba(3,4,12,0.55)');
+        g.addColorStop(1, 'rgba(3,4,12,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y);
+        ctx.lineTo(p2.x + depth.dx, p2.y + depth.dy);
+        ctx.lineTo(p1.x + depth.dx, p1.y + depth.dy);
+        ctx.closePath(); ctx.fill();
+    };
+    band(A, B, { dx: TILE_W * 0.9, dy: TILE_H * 0.45 });    // along the left wall
+    band(B, C, { dx: -TILE_W * 0.9, dy: TILE_H * 0.45 });   // along the right wall
+}
+
 /** The two back walls, with the things an office has on them.
  *
  *  Drawn before the floor so the floor's front edge overlaps their base — the
@@ -579,17 +660,55 @@ function drawWalls() {
     const b = iso(0, 0);               // back corner
     const c = iso(ROOM.C, 0);          // right corner
 
-    const quad = (p1, p2, fill) => {
-        ctx.fillStyle = fill;
+    /** One wall plane: a vertical gradient, vertical panelling, and a rail.
+     *
+     *  Flat fills were the other half of why this read as a backdrop. A wall
+     *  in a lit room is lighter where it faces the ceiling and darker at the
+     *  skirting, and it has SOMETHING on it at a regular interval — panels,
+     *  studs, a rail — or the eye has nothing to measure the room against. */
+    const quad = (p1, p2, top, bottom, panel) => {
+        const g = ctx.createLinearGradient(0, p1.y - H, 0, p1.y);
+        g.addColorStop(0, top);
+        g.addColorStop(1, bottom);
+        ctx.save();
         ctx.beginPath();
         ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y);
         ctx.lineTo(p2.x, p2.y - H); ctx.lineTo(p1.x, p1.y - H);
-        ctx.closePath(); ctx.fill();
+        ctx.closePath();
+        ctx.clip();
+        ctx.fillStyle = g;
+        ctx.fill();
+
+        // Panelling: a lit seam every few cells, running with the wall.
+        const steps = 10;
+        ctx.strokeStyle = panel;
+        ctx.lineWidth = 1;
+        for (let i = 1; i < steps; i++) {
+            const t = i / steps;
+            const x = p1.x + (p2.x - p1.x) * t, y = p1.y + (p2.y - p1.y) * t;
+            ctx.beginPath();
+            ctx.moveTo(x, y); ctx.lineTo(x, y - H + 4);
+            ctx.stroke();
+        }
+
+        // A dado rail two thirds up, which is what gives the wall a height
+        // the eye can actually read.
+        ctx.strokeStyle = 'rgba(8,10,24,0.55)';
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y - H * 0.62); ctx.lineTo(p2.x, p2.y - H * 0.62);
+        ctx.stroke();
+        ctx.strokeStyle = 'rgba(160,190,255,0.10)';
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y - H * 0.62 - 1); ctx.lineTo(p2.x, p2.y - H * 0.62 - 1);
+        ctx.stroke();
+        ctx.restore();
     };
     // Clearly lighter than the floor or the room has no back, and the two
     // walls clearly different from each other or the corner disappears.
-    quad(a, b, '#242a52');             // left wall, away from the window
-    quad(b, c, '#333b73');             // right wall, catching what light there is
+    // Clearly lighter than the floor, and clearly different from each other,
+    // or the corner between them disappears.
+    quad(a, b, '#2b3260', '#191e40', 'rgba(150,180,255,0.05)');
+    quad(b, c, '#3c4585', '#232a58', 'rgba(170,200,255,0.08)');
 
     // A skirting board along the bottom of each wall. Four pixels of trim is
     // the difference between a painted backdrop and a built room.
@@ -730,6 +849,63 @@ function castShadow(x, y, rx) {
     ctx.globalAlpha = 1;
 }
 
+/**
+ * The cubicle: two fabric panels meeting behind the desk.
+ *
+ * Owner: "ควรเป็นที่ทำงาน มี พาติชั่นกั้นชัดเจน แบบมืออาชีพ". This is the
+ * thing that turns desks-on-a-floor into an office. It also does real work
+ * for the picture: each panel is a large flat plane at a known angle, so the
+ * room finally has surfaces catching light at two different orientations
+ * instead of one floor and two distant walls.
+ *
+ * Drawn BEFORE the desk and whoever is at it, because the panels stand behind
+ * them — an office divider in front of the person would read as a fence.
+ */
+function drawCubicle(cx, cy, dim) {
+    const PW = TILE_W * 1.05, PD = TILE_H * 1.05, H = 26;
+
+    // The tile's corners, relative to its centre.
+    const left = { x: cx - PW / 2, y: cy };
+    const back = { x: cx, y: cy - PD / 2 };
+    const right = { x: cx + PW / 2, y: cy };
+
+    const panel = (p1, p2, face, lip, rail) => {
+        ctx.fillStyle = face;
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y);
+        ctx.lineTo(p2.x, p2.y - H); ctx.lineTo(p1.x, p1.y - H);
+        ctx.closePath(); ctx.fill();
+
+        // Fabric: faint horizontal weave. Two values, four pixels apart — any
+        // more and it reads as corrugated metal.
+        ctx.strokeStyle = lip;
+        ctx.lineWidth = 1;
+        for (let k = 4; k < H - 3; k += 4) {
+            ctx.beginPath();
+            ctx.moveTo(p1.x, p1.y - k); ctx.lineTo(p2.x, p2.y - k);
+            ctx.stroke();
+        }
+
+        // The top rail, given thickness by drawing the same edge twice two
+        // pixels apart. That lip is most of what makes a flat quad read as a
+        // panel you could rest a coffee on.
+        ctx.strokeStyle = rail;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y - H + 1); ctx.lineTo(p2.x, p2.y - H + 1);
+        ctx.stroke();
+        ctx.strokeStyle = 'rgba(6,8,18,0.5)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y - H + 3); ctx.lineTo(p2.x, p2.y - H + 3);
+        ctx.stroke();
+    };
+
+    // Left panel faces away from the light, right panel toward it.
+    panel(left, back, dim ? '#242a47' : '#333b63', 'rgba(10,12,28,0.30)', dim ? '#3b4470' : '#59639c');
+    panel(back, right, dim ? '#2b3252' : '#3e4776', 'rgba(10,12,28,0.22)', dim ? '#454f80' : '#6b76b4');
+}
+
 /** Desk, monitor, chair, and whoever is sitting in it. */
 function drawWorkstation(a) {
     const d = DESKS.get(a.id);
@@ -757,6 +933,7 @@ function drawWorkstation(a) {
     const mx = x - 6, hx = x + 6;      // screen left, person right
     const mBase = deskTop(-6), hBase = deskTop(6);
 
+    drawCubicle(x, y, off);
     castShadow(x, y + 14, 26);
 
     // Chair, then person, then the desk over them: seated is an overlap, not a
@@ -1226,6 +1403,8 @@ function present() {
     vctx.imageSmoothingEnabled = false;
     vctx.drawImage(scene, 0, 0, W, H);
 
+    castDarkness();
+
     // Bloom. `lighter` so overlapping lamps build up rather than flatten each
     // other, and a soft radial falloff so the pixels underneath stay readable
     // through it instead of being washed out.
@@ -1252,6 +1431,58 @@ function present() {
     vg.addColorStop(1, 'rgba(3,4,11,0.80)');
     vctx.fillStyle = vg;
     vctx.fillRect(0, 0, W, H);
+}
+
+/**
+ * The office is DARK, and each working agent lights their own corner of it.
+ *
+ * Owner: "เราทำเป็น เกม พวก เกม ดังเจี้ยน ได้ไหม แต่เป็นห้องทำงานฉากแบบนั้น".
+ * This is the whole look of a dungeon crawler in one idea — the room exists,
+ * but you only see the parts something is lighting — and here it costs
+ * nothing to make honest, because the light sources ARE the live agents. A
+ * cubicle whose owner went offline sinks into the dark. An empty office is a
+ * dark office. Nothing has to be invented for that to be true.
+ *
+ * Built as a separate layer: fill it with darkness, cut holes with
+ * destination-out, then lay the whole thing over the scene. Darkening the
+ * visible canvas directly and then trying to lighten it back would crush the
+ * pixels first and recover a grey smear.
+ */
+function castDarkness() {
+    const W = cv.width, H = cv.height;
+    shctx.globalCompositeOperation = 'source-over';
+    shctx.clearRect(0, 0, W, H);
+
+    // Never pitch black: a room you cannot see at all is not atmospheric, it
+    // is broken. This much still reads as "unlit" while leaving the furniture
+    // legible enough to know it is there.
+    shctx.fillStyle = 'rgba(3,4,12,0.80)';
+    shctx.fillRect(0, 0, W, H);
+
+    // Cut a hole per light. Two stops with a wide soft tail, because a hard
+    // edge reads as a spotlight rather than as a lamp in a room.
+    shctx.globalCompositeOperation = 'destination-out';
+    for (const L of LIGHTS) {
+        const cx = L.x * SCALE, cy = L.y * SCALE, r = L.r * SCALE * 1.9;
+        const g = shctx.createRadialGradient(cx, cy, r * 0.10, cx, cy, r);
+        g.addColorStop(0, 'rgba(0,0,0,1)');
+        g.addColorStop(0.45, 'rgba(0,0,0,0.72)');
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        shctx.fillStyle = g;
+        shctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+    }
+
+    // And a permanent dim glow over the middle of the floor, so an office with
+    // nobody in it is still a room and not a black rectangle.
+    const cx = W / 2, cy = H * 0.52, r = Math.max(W, H) * 0.42;
+    const amb = shctx.createRadialGradient(cx, cy, r * 0.1, cx, cy, r);
+    amb.addColorStop(0, 'rgba(0,0,0,0.34)');
+    amb.addColorStop(1, 'rgba(0,0,0,0)');
+    shctx.fillStyle = amb;
+    shctx.fillRect(0, 0, W, H);
+
+    shctx.globalCompositeOperation = 'source-over';
+    vctx.drawImage(shadowLayer, 0, 0);
 }
 
 /** A faint CRT banding over the whole room. Cheap, and it ties the procedural
