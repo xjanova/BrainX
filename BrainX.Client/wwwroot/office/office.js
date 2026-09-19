@@ -258,10 +258,156 @@ function glyph(ch, x, y, col) {
     return 4;
 }
 
+/* Desk marks.
+ *
+ * Simplified pixel glyphs that identify which product sits at a desk — an
+ * isometric cube for Unity, a ring for Unreal, a burst for Claude, and so on.
+ * They are drawn in the room's own style at nine pixels square, which is
+ * identification rather than reproduction; the marks themselves belong to
+ * their respective owners, and this is a local dashboard saying who is here.
+ *
+ * Anything not in this table falls back to a monogram, so a new agent still
+ * gets a readable plate on the day it first connects.
+ */
+const MARKS = {
+    // Unity: the isometric cube its own mark is built from.
+    unity: [
+        '....#....',
+        '...###...',
+        '..##.##..',
+        '.##...##.',
+        '##..#..##',
+        '#.##.##.#',
+        '#..###..#',
+        '.#..#..#.',
+        '..#####..',
+    ],
+    // Unreal: a heavy ring with the U inside it.
+    unreal: [
+        '..#####..',
+        '.##...##.',
+        '##.....##',
+        '#..#.#..#',
+        '#..#.#..#',
+        '#..#.#..#',
+        '##..#..##',
+        '.##...##.',
+        '..#####..',
+    ],
+    // Claude: the radial burst.
+    claude: [
+        '....#....',
+        '.#..#..#.',
+        '..#.#.#..',
+        '...###...',
+        '##.###.##',
+        '...###...',
+        '..#.#.#..',
+        '.#..#..#.',
+        '....#....',
+    ],
+    // Codex: the hexagonal knot, reduced to a hexagon and its centre.
+    codex: [
+        '..#####..',
+        '.#.....#.',
+        '#..###..#',
+        '#.#...#.#',
+        '#.#...#.#',
+        '#.#...#.#',
+        '#..###..#',
+        '.#.....#.',
+        '..#####..',
+    ],
+    // Gemini: the four-point spark.
+    gemini: [
+        '....#....',
+        '....#....',
+        '...###...',
+        '.#.###.#.',
+        '##..#..##',
+        '.#.###.#.',
+        '...###...',
+        '....#....',
+        '....#....',
+    ],
+    // Grok: the slashed X.
+    grok: [
+        '#.......#',
+        '.#.....#.',
+        '..#...#..',
+        '...#.#...',
+        '....#....',
+        '...#.#...',
+        '..#...#..',
+        '.#.....#.',
+        '#.......#',
+    ],
+    // CluadeX: a diamond, for the one that is ours.
+    cluadex: [
+        '....#....',
+        '...###...',
+        '..##.##..',
+        '.##...##.',
+        '##.....##',
+        '.##...##.',
+        '..##.##..',
+        '...###...',
+        '....#....',
+    ],
+};
+
+/** The mark for an agent, matched on the vendor prefix so `claude-code` and
+ *  `codex-cli` get the same plate as their parent. */
+function markFor(id) {
+    const key = (id || '').toLowerCase();
+    for (const k in MARKS) if (key === k || key.startsWith(k)) return MARKS[k];
+    return null;
+}
+
+function drawMark(rows, x, y, col) {
+    const hi = shade(col, 0.22), lo = shade(col, -0.35);
+    for (let r = 0; r < rows.length; r++)
+        for (let c = 0; c < rows[r].length; c++)
+            if (rows[r][c] === '#')
+                // One lit row at the top gives nine flat pixels a little form.
+                px(x + c, y + r, 1, 1, r === 0 ? hi : (r > 6 ? lo : col));
+}
+
+/**
+ * Two letters that are UNIQUE in this room.
+ *
+ * The obvious "first two characters" gives unity and unreal the same plate —
+ * both UN — which is the one thing a nameplate must never do. So the second
+ * letter is whichever position first tells this id apart from every other id
+ * in the room, and it is recomputed when the roster changes rather than
+ * hardcoded, because the next collision will be between two agents nobody has
+ * connected yet.
+ */
+function monogramFor(id) {
+    const clean = (s2) => (s2 || '').replace(/[^a-z]/gi, '').toUpperCase();
+    const me = clean(id);
+    if (!me) return '?';
+    const others = AGENTS.map(a => clean(a.id)).filter(o => o && o !== me);
+    for (let i = 1; i < Math.max(2, me.length); i++) {
+        const cand = me[0] + me[i];
+        if (!others.some(o => o.length > i && o[0] === me[0] && o[i] === me[i])) return cand;
+    }
+    return me.slice(0, 2);
+}
+
 /** The nameplate standing on the desk. Two letters at most: the point is to
- *  tell four desks apart at a glance, not to spell anything. */
+ *  tell six desks apart at a glance, not to spell anything. */
 function drawPlaque(x, yBase, id, col) {
-    const mono = (id || '?').replace(/[^a-z]/gi, '').slice(0, 2).toUpperCase() || '?';
+    const mark = markFor(id);
+    if (mark) {
+        // A mark gets a stand rather than a plate: it is a thing propped up on
+        // the desk, and a frame around it at this size just eats the glyph.
+        px(x - 1, yBase - 2, 3, 3, '#12162c');
+        drawMark(mark, x - 4, yBase - 12, col);
+        px(x - 5, yBase, 11, 1, '#0b0e1c');
+        return;
+    }
+    const mono = monogramFor(id);
     const w = mono.length * 4 + 3;
     px(x - (w >> 1), yBase - 8, w, 8, '#12162c');
     px(x - (w >> 1) + 1, yBase - 7, w - 2, 6, shade(col, -0.45));
