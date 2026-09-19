@@ -69,6 +69,7 @@ let MESSAGES = [];      // newest last
 let DECISIONS = [];
 const DESKS = new Map();  // agent id → {gx,gy,seat:{x,y},screen:{x,y}}
 const SEEN = new Set();   // message ids already shown as bubbles
+const EMOTES_PLAYED = new Set();  // agent|atUtc, so one emote sounds once
 let PRIMED = false;       // first payload is backlog: show it, don't perform it
 const BUBBLES = [];       // {agent,text,color,until}
 const PACKETS = [];       // {from,to,color,t0,ms}
@@ -113,7 +114,9 @@ function layoutRoom() {
 /** How many desks fit across this room. */
 function deskCols(n) {
     const fits = Math.max(1, Math.floor((ROOM.C - 1) / SPACING) + 1);
-    return Math.max(1, Math.min(fits, Math.min(4, Math.ceil(Math.sqrt(n * 1.4)))));
+    // Square-ish, so four agents are a 2x2 block filling the floor rather than
+    // four desks strung out along one diagonal with the rest of the room bare.
+    return Math.max(1, Math.min(fits, Math.min(4, Math.ceil(Math.sqrt(n)))));
 }
 
 function layoutDesks() {
@@ -123,16 +126,24 @@ function layoutDesks() {
     const cols = deskCols(n);
     const rows = Math.ceil(n / cols);
 
-    // Desks sit one cell in from the back walls, and the block is centred in
-    // whatever floor is left — so an office with two people in it is not two
-    // desks huddled in a corner of a large room.
-    const usedC = (cols - 1) * SPACING, usedR = (rows - 1) * SPACING;
-    const padC = Math.max(1, Math.floor((ROOM.C - 1 - usedC) / 2));
-    const padR = Math.max(1, Math.floor((ROOM.R - 1 - usedR) / 2));
+    // Spread across the floor rather than packed at SPACING and centred. Four
+    // agents in a room sized for a dozen were drawn as a tight cluster in the
+    // middle of a large empty diamond, which read as an unfinished picture —
+    // the desks take the room they have, and only fall back to the minimum
+    // spacing when there genuinely is not enough of it.
+    // Spread, but capped: at full spread four desks ended up one in each
+    // corner of the room with nothing between them, which reads as four people
+    // avoiding each other rather than as an office.
+    const spread = (span, n) => Math.max(SPACING, Math.min(4, Math.floor((span - 3) / Math.max(1, n - 1)) || SPACING));
+    const stepC = spread(ROOM.C, cols);
+    const stepR = spread(ROOM.R, rows);
+    const usedC = (cols - 1) * stepC, usedR = (rows - 1) * stepR;
+    const padC = Math.max(1, Math.round((ROOM.C - 1 - usedC) / 2));
+    const padR = Math.max(1, Math.round((ROOM.R - 1 - usedR) / 2));
 
     AGENTS.forEach((a, i) => {
-        const gx = padC + (i % cols) * SPACING;
-        const gy = padR + Math.floor(i / cols) * SPACING;
+        const gx = padC + (i % cols) * stepC;
+        const gy = padR + Math.floor(i / cols) * stepR;
         const p = iso(gx, gy);
         DESKS.set(a.id, {
             gx, gy,
@@ -295,66 +306,330 @@ function drawWorkstation(a) {
     const { x, y } = d.desk;
     const c = agentColor(a.id);
     const off = a.state === 'offline';
-
-    // Desk, as an isometric box rather than a flat bar — the first version
-    // drew it as a rectangle and it read as a shelf hovering over the tiles,
-    // because it was the only thing in the room not in the room's projection.
-    isoSolid(x, y - 4, 15, 7, 5,
-        off ? '#262a49' : '#343a63',
-        off ? '#171a2e' : '#1f2340',
-        off ? '#1d2138' : '#282d4d');
-
     const lit = a.state === 'working';
 
-    // Monitor: a thin slab standing on the desk, screen facing the viewer.
-    px(x - 2, y - 11, 4, 3, '#1b1f38');                       // stand
-    px(x - 8, y - 22, 16, 12, '#10132a');                     // bezel
-    px(x - 7, y - 21, 14, 10, off ? '#0b0d1a' : (lit ? c : '#1d2244'));
+    // ONE anchor, and everything is measured from it.
+    //
+    // The lid is an isometric diamond, so its top edge is at a different
+    // height for every horizontal offset — which is the trap this drawing fell
+    // into twice. Placing the monitor and the figure relative to the lid's top
+    // VERTEX put them both well above the surface they were supposed to be on.
+    // deskTop(dx) answers the only question that matters: where is the desk,
+    // under this thing, at this x.
+    const HW = 17, HH = 8;
+    const deskTop = (dx) => (y + 2) - HH * (1 - Math.min(Math.abs(dx), HW) / HW);
+
+    // Pulled IN from the lid's corners. At dx = -8 the diamond has already
+    // narrowed to a sliver, so a 15px monitor centred there had half its width
+    // hanging over the edge — geometrically standing on the desk, and reading
+    // as floating beside it.
+    const mx = x - 6, hx = x + 6;      // screen left, person right
+    const mBase = deskTop(-6), hBase = deskTop(6);
+
+    // Chair, then person, then the desk over them: seated is an overlap, not a
+    // stacking order.
+    px(hx - 8, hBase - 3, 16, 3, off ? '#1a1d33' : '#242845');
+    if (!off) drawPerson(hx, hBase, c, a);
+
+    // The desk. Proportioned to the figure rather than the room — at 23 half-
+    // widths it was a slab with a small person behind it, which is a diorama,
+    // not an office.
+    isoSolid(x, y + 2, HW, HH, 6,
+        off ? '#2a2f52' : '#3c4370',
+        off ? '#171a2e' : '#252a4a',
+        off ? '#1f2339' : '#2f3559');
+
+    // Monitor, standing on the lid at its own x. The contact shadow is what
+    // sells it: without one, anything resting on a flat isometric surface
+    // reads as hovering a few pixels above it.
+    ctx.globalAlpha = 0.35;
+    px(mx - 6, mBase, 12, 2, '#0a0c18');
+    ctx.globalAlpha = 1;
+    px(mx - 2, mBase - 4, 4, 5, '#1b1f38');
+    px(mx - 7, mBase - 15, 14, 11, '#10132a');
+    px(mx - 6, mBase - 14, 12, 9, off ? '#0b0d1a' : (lit ? c : '#232a52'));
     if (!off && lit) {
-        // Content, faked as rows that scroll — the flicker is what makes a lit
-        // screen read as "being used" rather than "switched on".
-        ctx.globalAlpha = 0.38;
+        // Rows that scroll. The flicker is what makes a lit screen read as
+        // "being used" rather than "switched on".
+        ctx.globalAlpha = 0.42;
         for (let i = 0; i < 4; i++) {
-            const w = 3 + ((T / 6 + i * 3) | 0) % 10;
-            px(x - 6, y - 20 + i * 2, w, 1, '#06121c');
+            const w = 3 + ((T / 6 + i * 3) | 0) % 9;
+            px(mx - 5, mBase - 13 + i * 2, w, 1, '#06121c');
         }
         ctx.globalAlpha = 1;
     }
-    // Keyboard, so the typing animation has something to land on.
-    px(x - 6, y - 4, 12, 2, off ? '#22263f' : '#2b3050');
 
-    if (off) { isoSolid(x, y + 7, 6, 3, 4, '#1e2239', '#14172a', '#191d33'); return; }
-    drawPerson(x, y - 2, c, a);
+    // Keyboard, under the hands on the front of the lid.
+    px(hx - 6, hBase + 2, 12, 2, off ? '#242845' : '#2f3559');
+    // A mug, because an office has one and it costs four pixels.
+    if (!off) { px(x + 13, deskTop(13) - 3, 3, 3, '#d4695a'); px(x + 16, deskTop(13) - 2, 1, 1, '#d4695a'); }
 }
 
-/** A person, about sixteen logical pixels tall. */
+/** ── avatars ──────────────────────────────────────────────────────────
+ *
+ * An agent chooses its own face with agent_avatar; anything it has not chosen
+ * is DERIVED from its name rather than defaulted. That distinction is the
+ * whole reason the room has characters in it instead of coloured dots: a grey
+ * unset mannequin says "nobody has filled this in", a derived one says "this
+ * is who that is", and it is the same on every machine because the derivation
+ * is a hash.
+ */
+const SKINS = ['#f6d9bd', '#eec39a', '#d9a06b', '#b97a4e', '#8d5524', '#5c3a1e'];
+const HAIRS = ['short', 'buzz', 'bob', 'long', 'ponytail', 'bun', 'curly', 'mohawk', 'bald'];
+const HAIR_COLORS = ['#2b2430', '#4a3222', '#7a4a20', '#a8622c', '#c9a227', '#d8d8e0',
+    '#6b4fa8', '#2f7ea8', '#a8324f', '#3f7a4a'];
+const ACCESSORIES = ['none', 'glasses', 'headphones', 'cap', 'beanie', 'visor'];
+const GENDERS = ['f', 'm', 'nb'];
+
+function hash32(str) {
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+    return h;
+}
+
+/** The avatar to draw: what the agent chose, filled in from its name. */
+function avatarOf(a) {
+    const h = hash32(a.id || '');
+    const v = a.avatar || {};
+    return {
+        gender: GENDERS.includes(v.gender) ? v.gender : GENDERS[h % GENDERS.length],
+        hair: HAIRS.includes(v.hair) ? v.hair : HAIRS[(h >>> 3) % HAIRS.length],
+        hairColor: v.hairColor || HAIR_COLORS[(h >>> 7) % HAIR_COLORS.length],
+        skin: v.skin || SKINS[(h >>> 13) % SKINS.length],
+        accessory: ACCESSORIES.includes(v.accessory) ? v.accessory : ACCESSORIES[(h >>> 17) % ACCESSORIES.length],
+        outfit: v.outfit || agentColor(a.id),
+    };
+}
+
+/** ── the character ────────────────────────────────────────────────────
+ *
+ * Drawn from the shoulders up, because that is all a desk leaves visible and
+ * pretending otherwise wastes the pixels. Everything is built from flat
+ * rectangles with one shade above and one below, which is what gives a pixel
+ * figure volume without needing a single curve.
+ */
 function drawPerson(x, y, c, a) {
+    const av = avatarOf(a);
+    const em = liveEmote(a);
     const working = a.state === 'working';
-    // Typing is a two-frame bob. Slow enough to read at a glance, fast enough
-    // that "typing" and "sitting still" are never confused.
-    const bob = working ? ((T >> 2) % 2) : 0;
-    const top = y + 1 - bob;
 
-    px(x - 4, top + 6, 8, 6, shade(c, -0.35));   // torso
-    px(x - 3, top, 6, 6, '#f0cfae');             // head
-    px(x - 3, top, 6, 2, shade(c, -0.55));       // hair
+    // A gesture overrides the typing bob: waving and typing at once reads as
+    // a glitch rather than as enthusiasm.
+    const gesture = em && em.gesture && em.gesture !== 'none' ? em.gesture : null;
+    const bob = gesture ? 0 : (working ? ((T >> 2) % 2) : 0);
 
-    // Eyes, and a blink every few seconds so an idle agent still reads as
-    // alive rather than as a switched-off portrait.
-    const blink = (T % 220) < 6;
-    if (!blink) {
-        px(x - 2, top + 3, 1, 1, '#2a2438');
-        px(x + 1, top + 3, 1, 1, '#2a2438');
+    // `y` is the desk surface under this figure. The lid crosses the body at
+    // the chest, so the head sits fourteen pixels above it.
+    const top = y - 17 - bob + (gesture === 'cheer' ? -((T >> 2) % 2) : 0);
+
+    const outfit = av.outfit;
+    const dark = shade(outfit, -0.32), mid = shade(outfit, -0.12), lite = shade(outfit, 0.10);
+    const skin = av.skin, skinLo = shade(skin, -0.18), skinHi = shade(skin, 0.09);
+
+    // Silhouette is what reads first at this size, so it is the one thing
+    // gender actually changes: narrow and sloped, square, or between.
+    const sw = av.gender === 'f' ? 6 : av.gender === 'm' ? 8 : 7;
+
+    px(x - sw, top + 11, sw * 2, 9, mid);              // torso
+    px(x - sw, top + 11, sw * 2, 1, lite);             // lit shoulder line
+    if (av.gender === 'f') { px(x - sw - 1, top + 13, 1, 6, dark); px(x + sw, top + 13, 1, 6, dark); }
+
+    px(x - 2, top + 9, 5, 3, skinLo);                  // neck
+
+    // Head: 10 wide, 10 tall, with a lit brow and a shaded jaw.
+    px(x - 5, top, 10, 10, skin);
+    px(x - 5, top, 10, 1, skinHi);
+    px(x - 5, top + 9, 10, 1, skinLo);
+    px(x - 6, top + 3, 1, 3, skin);                    // ears
+    px(x + 5, top + 3, 1, 3, skin);
+
+    drawHair(x, top, av);
+    drawFace(x, top, em);
+    drawAccessory(x, top, av);
+    drawArms(x, top, a, av, gesture, bob, skin, mid, dark);
+}
+
+function drawHair(x, top, av) {
+    const hc = av.hairColor, hl = shade(hc, 0.14), hd = shade(hc, -0.24);
+    switch (av.hair) {
+        case 'bald': px(x - 5, top, 10, 1, shade(av.skin, 0.14)); return;
+        case 'buzz':
+            px(x - 5, top - 1, 10, 3, hd); px(x - 5, top - 1, 10, 1, hc); return;
+        case 'short':
+            px(x - 5, top - 2, 10, 4, hc); px(x - 5, top - 2, 10, 1, hl);
+            px(x - 6, top, 1, 4, hc); px(x + 5, top, 1, 4, hc);
+            px(x + 2, top + 1, 3, 1, hl); return;
+        case 'bob':
+            px(x - 6, top - 2, 12, 5, hc); px(x - 6, top - 2, 12, 1, hl);
+            px(x - 7, top + 1, 1, 8, hc); px(x + 6, top + 1, 1, 8, hc);
+            px(x - 7, top + 9, 1, 1, hd); px(x + 6, top + 9, 1, 1, hd); return;
+        case 'long':
+            px(x - 6, top - 2, 12, 5, hc); px(x - 6, top - 2, 12, 1, hl);
+            px(x - 8, top + 1, 2, 17, hc); px(x + 6, top + 1, 2, 17, hc);
+            px(x - 8, top + 16, 2, 2, hd); px(x + 6, top + 16, 2, 2, hd); return;
+        case 'ponytail':
+            px(x - 5, top - 2, 10, 4, hc); px(x - 5, top - 2, 10, 1, hl);
+            px(x + 5, top + 1, 2, 12, hc); px(x + 6, top + 10, 2, 4, hd); return;
+        case 'bun':
+            px(x - 5, top - 2, 10, 4, hc); px(x - 5, top - 2, 10, 1, hl);
+            px(x - 3, top - 6, 6, 4, hc); px(x - 3, top - 6, 6, 1, hl); return;
+        case 'curly':
+            px(x - 6, top - 4, 12, 5, hc);
+            px(x - 7, top - 2, 1, 5, hc); px(x + 6, top - 2, 1, 5, hc);
+            px(x - 5, top - 5, 3, 1, hl); px(x + 2, top - 5, 3, 1, hl);
+            px(x - 2, top - 6, 4, 1, hc); return;
+        case 'mohawk':
+            px(x - 2, top - 6, 4, 8, hc); px(x - 2, top - 6, 4, 1, hl);
+            px(x - 5, top, 3, 1, hd); px(x + 2, top, 3, 1, hd); return;
+    }
+}
+
+/** Moods, in a handful of pixels. Brows do most of the work — the eyes barely
+ *  change, which is how faces actually read at this size. Eyes are ONE pixel
+ *  tall by default: two made every character look furious. */
+function drawFace(x, top, em) {
+    const mood = em?.mood || 'neutral';
+    const ink = '#2a2438';
+    const soft = '#5b5170';
+    const blink = (T % 230) < 5 && mood !== 'surprised';
+    const ey = top + 4;
+
+    if (blink) {
+        px(x - 4, ey + 1, 3, 1, ink); px(x + 2, ey + 1, 3, 1, ink);
+    } else if (mood === 'happy' || mood === 'proud') {
+        // A proper ^ ^. A straight bar with one raised end read as a scowl,
+        // which is how a cheering agent came out looking furious.
+        px(x - 4, ey + 1, 1, 1, ink); px(x - 3, ey, 1, 1, ink); px(x - 2, ey + 1, 1, 1, ink);
+        px(x + 2, ey + 1, 1, 1, ink); px(x + 3, ey, 1, 1, ink); px(x + 4, ey + 1, 1, 1, ink);
+    } else if (mood === 'surprised') {
+        px(x - 4, ey, 3, 3, ink); px(x + 2, ey, 3, 3, ink);
+        px(x - 3, ey, 1, 1, '#ffffff'); px(x + 3, ey, 1, 1, '#ffffff');
+    } else if (mood === 'tired') {
+        px(x - 4, ey + 1, 3, 1, ink); px(x + 2, ey + 1, 3, 1, ink);
+        px(x - 4, ey - 1, 3, 1, soft); px(x + 2, ey - 1, 3, 1, soft);
     } else {
-        px(x - 2, top + 3, 4, 1, '#2a2438');
+        px(x - 4, ey, 2, 2, ink); px(x + 3, ey, 2, 2, ink);
     }
 
-    // Arms: on the desk when typing, in the lap when idle.
-    const armY = working ? top + 7 + (bob ? 0 : 1) : top + 9;
-    px(x - 6, armY, 2, 2, '#f0cfae');
-    px(x + 4, armY, 2, 2, '#f0cfae');
+    // Brows.
+    if (mood === 'thinking') { px(x - 4, ey - 3, 3, 1, ink); px(x + 2, ey - 4, 3, 1, ink); }
+    else if (mood === 'annoyed' || mood === 'stuck') {
+        px(x - 4, ey - 3, 3, 1, ink); px(x + 2, ey - 3, 3, 1, ink);
+        px(x - 4, ey - 2, 1, 1, ink); px(x + 4, ey - 2, 1, 1, ink);
+    } else if (mood === 'proud') { px(x - 4, ey - 4, 3, 1, ink); px(x + 2, ey - 4, 3, 1, ink); }
 
-    px(x - 5, y + 10, 10, 3, shade(c, -0.6));    // chair back
+    // Mouth — small. A wide bar reads as a grimace on every mood.
+    const my = top + 7;
+    if (mood === 'happy' || mood === 'proud') {
+        px(x - 1, my + 1, 3, 1, ink); px(x - 2, my, 1, 1, ink); px(x + 2, my, 1, 1, ink);
+    } else if (mood === 'stuck' || mood === 'annoyed') {
+        px(x - 1, my + 1, 3, 1, ink); px(x - 2, my + 2, 1, 1, ink); px(x + 2, my + 2, 1, 1, ink);
+    } else if (mood === 'surprised') { px(x - 1, my, 2, 2, ink); }
+    else if (mood === 'tired') { px(x - 1, my + 1, 3, 1, soft); }
+    else px(x - 1, my + 1, 2, 1, ink);
+
+    // The little marks that carry a whole state on their own.
+    if (mood === 'thinking') {
+        const k = (T >> 4) % 3;
+        px(x + 8, top - 3 - k, 2, 2, '#cdd6f5');
+    } else if (mood === 'stuck') {
+        px(x + 7, top - 1, 2, 3, '#7fd4ff'); px(x + 7, top + 2, 2, 1, '#7fd4ff');
+    } else if ((mood === 'proud' || mood === 'happy') && ((T >> 3) % 2)) {
+        px(x + 8, top - 4, 1, 3, '#ffe27a'); px(x + 7, top - 3, 3, 1, '#ffe27a');
+    }
+}
+
+function drawAccessory(x, top, av) {
+    switch (av.accessory) {
+        case 'glasses': {
+            // FRAMES, not lenses. Filled rectangles hid the eyes completely and
+            // the face turned into a visor — the one accessory that must not
+            // cover the feature the mood is expressed with.
+            const fr = '#3a3f66';
+            const lens = (lx) => {
+                px(lx, top + 3, 5, 1, fr); px(lx, top + 6, 5, 1, fr);
+                px(lx, top + 4, 1, 2, fr); px(lx + 4, top + 4, 1, 2, fr);
+                ctx.globalAlpha = 0.22; px(lx + 1, top + 4, 3, 2, '#9fd9ff'); ctx.globalAlpha = 1;
+            };
+            lens(x - 6); lens(x + 1);
+            px(x - 1, top + 4, 2, 1, fr);      // bridge
+            return;
+        }
+        case 'headphones':
+            // A band and two slim cups — a solid block over the ears read as a
+            // helmet and hid half the face.
+            px(x - 7, top + 2, 2, 5, '#2c3350'); px(x + 6, top + 2, 2, 5, '#2c3350');
+            px(x - 6, top - 3, 12, 1, '#39416b');
+            px(x - 7, top - 2, 1, 4, '#39416b'); px(x + 6, top - 2, 1, 4, '#39416b');
+            px(x - 7, top + 3, 1, 1, '#6cf0ff'); return;
+        case 'cap':
+            px(x - 6, top - 3, 12, 3, '#2f7ea8'); px(x - 6, top - 3, 12, 1, shade('#2f7ea8', .18));
+            px(x - 10, top, 7, 1, '#276a8d'); return;
+        case 'beanie':
+            px(x - 6, top - 5, 12, 6, '#a8324f'); px(x - 6, top - 5, 12, 1, shade('#a8324f', .2));
+            px(x - 6, top, 12, 1, '#7d2540'); px(x - 1, top - 7, 2, 2, '#c8506c'); return;
+        case 'visor':
+            px(x - 6, top + 2, 12, 4, '#12162e');
+            px(x - 5, top + 3, 10, 1, '#6cf0ff'); return;
+    }
+}
+
+/** Arms: typing, folded, or doing whatever the gesture says. */
+function drawArms(x, top, a, av, gesture, bob, skin, mid, dark) {
+    const working = a.state === 'working';
+    const sw = av.gender === 'f' ? 6 : av.gender === 'm' ? 8 : 7;
+    const wave = (T >> 2) % 2;
+    const sleeve = mid, hand = skin;
+
+    const arm = (ax, ay, len) => { px(ax, ay, 3, len, sleeve); px(ax, ay + len, 3, 3, hand); };
+
+    switch (gesture) {
+        case 'wave':
+            arm(x - sw - 3, top + 13, 3);
+            px(x + sw, top + 4 - wave, 3, 8, sleeve); px(x + sw, top + 1 - wave, 3, 3, hand);
+            return;
+        case 'thumbsup':
+            arm(x - sw - 3, top + 13, 3);
+            px(x + sw, top + 8, 3, 5, sleeve); px(x + sw, top + 5, 3, 3, hand);
+            px(x + sw + 1, top + 2, 1, 3, hand);
+            return;
+        case 'cheer':
+            px(x - sw - 3, top + 2 - wave, 3, 10, sleeve); px(x - sw - 3, top - 1 - wave, 3, 3, hand);
+            px(x + sw, top + 2 + wave, 3, 10, sleeve); px(x + sw, top - 1 + wave, 3, 3, hand);
+            return;
+        case 'shrug':
+            px(x - sw - 4, top + 11, 3, 4, sleeve); px(x - sw - 4, top + 8, 3, 3, hand);
+            px(x + sw + 1, top + 11, 3, 4, sleeve); px(x + sw + 1, top + 8, 3, 3, hand);
+            return;
+        case 'facepalm':
+            arm(x - sw - 3, top + 13, 3);
+            px(x + sw - 1, top + 7, 3, 6, sleeve); px(x + 1, top + 3, 5, 5, hand);
+            return;
+        case 'stretch':
+            px(x - sw - 3, top, 3, 12, sleeve); px(x - sw - 3, top - 3, 3, 3, hand);
+            px(x + sw, top, 3, 12, sleeve); px(x + sw, top - 3, 3, 3, hand);
+            return;
+        case 'point':
+            arm(x - sw - 3, top + 13, 3);
+            px(x + sw, top + 11, 6, 3, sleeve); px(x + sw + 6, top + 11, 3, 2, hand);
+            return;
+        default: {
+            const ay = working ? top + 14 + (bob ? 0 : 1) : top + 16;
+            arm(x - sw - 2, ay - 3, 3);
+            arm(x + sw - 1, ay - 3, 3);
+            return;
+        }
+    }
+}
+
+/** The agent's live emote, or null. Expiry is checked here as well as on the
+ *  host, because the room keeps rendering between polls and a cheer that
+ *  outlived its two seconds is worse than no cheer at all. */
+function liveEmote(a) {
+    const e = a.emote;
+    if (!e) return null;
+    if (e.expiresUtc && Date.parse(e.expiresUtc) < Date.now()) return null;
+    return e;
 }
 
 /** The owner, standing in the middle of the room. Not at a desk, on purpose —
@@ -456,6 +731,64 @@ function drawOverlay() {
 
     overlay.innerHTML = html.join('');
     while (BUBBLES.length && T >= BUBBLES[0].until) BUBBLES.shift();
+}
+
+// ── 16-bit sound ────────────────────────────────────────────────────
+/*
+ * Synthesised, never sampled. A square wave with a hard envelope IS how these
+ * machines made sound, so generating it is more faithful than a recording of
+ * one — and it means no audio asset to ship, nothing to keep decoding, and no
+ * way for an agent to make the owner's speakers play something arbitrary: it
+ * can name a sound from a fixed list and nothing else.
+ */
+let AC = null;
+const SOUND_ON_KEY = 'brainx.office.sound';
+let SOUND_ON = (() => { try { return localStorage.getItem(SOUND_ON_KEY) !== 'off'; } catch { return true; } })();
+
+/** Browsers refuse to start audio until the page has been interacted with, so
+ *  the context is created on the first click or key rather than at load. */
+function audio() {
+    if (AC) return AC;
+    try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch { AC = null; }
+    return AC;
+}
+addEventListener('pointerdown', audio, { once: true });
+addEventListener('keydown', audio, { once: true });
+
+/** One note. `type` picks the chip voice: square for melody, triangle for the
+ *  soft low notes, sawtooth for anything that should feel like an error. */
+function note(freq, start, dur, type = 'square', gain = 0.07) {
+    const ac = audio();
+    if (!ac) return;
+    const t0 = ac.currentTime + start;
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(freq, t0);
+    // A hard attack and an exponential tail — the envelope is most of what
+    // makes a square wave read as "chiptune" rather than as a test tone.
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(gain, t0 + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    o.connect(g); g.connect(ac.destination);
+    o.start(t0); o.stop(t0 + dur + 0.02);
+}
+
+const N = { c4: 261.6, e4: 329.6, g4: 392.0, a4: 440.0, c5: 523.3, e5: 659.3, g5: 784.0, c6: 1046.5 };
+
+function playSound(name) {
+    if (!SOUND_ON || !name || name === 'none') return;
+    switch (name) {
+        case 'ping': note(N.e5, 0, 0.09); break;
+        case 'ok': note(N.c5, 0, 0.07); note(N.g5, 0.07, 0.10); break;
+        case 'done': note(N.c5, 0, 0.06); note(N.e5, 0.06, 0.06); note(N.g5, 0.12, 0.14); break;
+        case 'levelup':
+            note(N.c5, 0, 0.05); note(N.e5, 0.05, 0.05);
+            note(N.g5, 0.10, 0.05); note(N.c6, 0.15, 0.20); break;
+        case 'oops': note(N.g4, 0, 0.09, 'sawtooth'); note(N.c4, 0.09, 0.16, 'sawtooth'); break;
+        case 'hmm': note(N.c4, 0, 0.14, 'triangle', 0.09); note(N.e4 * 0.97, 0.14, 0.18, 'triangle', 0.09); break;
+        case 'alert': note(N.a4, 0, 0.06, 'square', 0.09); note(N.a4, 0.10, 0.06, 'square', 0.09); break;
+        case 'type': note(1200, 0, 0.02, 'square', 0.03); break;
+    }
 }
 
 // ── side panel ──────────────────────────────────────────────────────
@@ -565,6 +898,22 @@ function apply(p) {
     }
     PRIMED = true;
 
+    // Emotes: play each one ONCE. Keyed on the emote's own timestamp because
+    // the payload repeats every two seconds and the same cheer would otherwise
+    // fire twenty times before it expired.
+    for (const a of AGENTS) {
+        const e = liveEmote(a);
+        if (!e || !e.atUtc) continue;
+        const key = a.id + '|' + e.atUtc;
+        if (EMOTES_PLAYED.has(key)) continue;
+        EMOTES_PLAYED.add(key);
+        if (PRIMED) {
+            playSound(e.sound);
+            if (e.say) BUBBLES.push({ agent: a.id, text: firstLine(e.say), color: agentColor(a.id), until: T + 240 });
+        }
+    }
+    if (EMOTES_PLAYED.size > 200) EMOTES_PLAYED.clear();
+
     const online = AGENTS.filter(a => a.state !== 'offline').length;
     document.getElementById('room-sub').textContent =
         `${online} อยู่ในห้อง · ${AGENTS.length} ที่นั่ง`;
@@ -622,11 +971,22 @@ document.getElementById('log').addEventListener('click', (e) => {
  *  looked at (and screenshotted) without the WPF app running. */
 function demo() {
     const now = Date.now();
+    const em = (mood, gesture, sound, say) => ({
+        mood, gesture, sound, say, atUtc: new Date().toISOString(),
+        expiresUtc: new Date(Date.now() + 3600e3).toISOString(),
+    });
     const agents = [
-        { id: 'claude', label: 'Claude', state: 'working', lastTool: 'brain_search', pending: 0 },
-        { id: 'codex', label: 'Codex', state: 'working', lastTool: 'agent_inbox', pending: 2, spawned: true },
-        { id: 'cluadex', label: 'CluadeX', state: 'idle', lastTool: '', pending: 0 },
-        { id: 'gemini', label: 'Gemini', state: 'offline', lastTool: '', pending: 1 },
+        { id: 'claude', label: 'Claude', state: 'working', lastTool: 'brain_search', pending: 0,
+          avatar: { gender: 'f', hair: 'long', hairColor: '#4a3222', skin: '#eec39a', accessory: 'glasses' },
+          emote: em('thinking', 'none', 'none') },
+        { id: 'codex', label: 'Codex', state: 'working', lastTool: 'agent_inbox', pending: 2, spawned: true,
+          avatar: { gender: 'm', hair: 'short', hairColor: '#2b2430', skin: '#d9a06b', accessory: 'headphones' },
+          emote: em('happy', 'thumbsup', 'none', 'ชุดภาพเสร็จแล้ว') },
+        { id: 'cluadex', label: 'CluadeX', state: 'idle', lastTool: '', pending: 0,
+          avatar: { gender: 'nb', hair: 'curly', hairColor: '#6b4fa8', skin: '#b97a4e', accessory: 'beanie' },
+          emote: em('tired', 'none', 'none') },
+        { id: 'gemini', label: 'Gemini', state: 'offline', lastTool: '', pending: 1,
+          avatar: { gender: 'f', hair: 'bun', hairColor: '#c9a227', skin: '#f6d9bd', accessory: 'none' } },
     ];
     const mk = (i, from, to, body, extra) => ({
         id: 'd' + i, at: now - (9 - i) * 60000,

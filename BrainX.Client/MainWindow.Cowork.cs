@@ -153,12 +153,50 @@ public partial class MainWindow
                 ["lastTool"] = o["lastTool"]?.ToString() ?? "",
                 ["pending"] = CoworkPending(id),
                 ["spawned"] = CoworkWasSpawned(id),
+                // Who they chose to look like, and how it is going right now.
+                // Both read from disk every tick rather than cached: an agent
+                // changing its own face mid-session is exactly the moment the
+                // owner is watching for it.
+                ["avatar"] = CoworkAvatar(id),
+                ["emote"] = CoworkEmote(id),
             });
         }
         return arr;
     }
 
     private readonly Dictionary<string, long> _coworkCalls = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The agent's chosen appearance, if it has set one. A missing
+    /// file is not an error — the room derives a stable look from the name,
+    /// so an agent that has never called agent_avatar still has a face.</summary>
+    private JToken CoworkAvatar(string agent)
+    {
+        try
+        {
+            var p = Path.Combine(CoworkBusRoot, "avatars", agent + ".json");
+            if (File.Exists(p)) return JObject.Parse(File.ReadAllText(p));
+        }
+        catch { }
+        return JValue.CreateNull();
+    }
+
+    /// <summary>A live emote, or null once it has expired. Expiry is checked
+    /// on read so nothing has to run to clear it — an agent that crashed
+    /// mid-cheer is not still cheering ten minutes later.</summary>
+    private JToken CoworkEmote(string agent)
+    {
+        try
+        {
+            var p = Path.Combine(CoworkBusRoot, "avatars", agent + ".emote.json");
+            if (!File.Exists(p)) return JValue.CreateNull();
+            var o = JObject.Parse(File.ReadAllText(p));
+            if (DateTime.TryParse(o["expiresUtc"]?.ToString(), null,
+                    System.Globalization.DateTimeStyles.RoundtripKind, out var exp)
+                && exp < DateTime.UtcNow) return JValue.CreateNull();
+            return o;
+        }
+        catch { return JValue.CreateNull(); }
+    }
 
     private int CoworkPending(string agent)
     {

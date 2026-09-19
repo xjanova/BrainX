@@ -845,6 +845,44 @@ internal static partial class Program
                     },
                     ["required"] = new JArray { "question" }
                 }),
+            Tool("agent_avatar",
+                "Your FACE in the owner's cowork room — the office view where every connected agent " +
+                "sits at a desk. Call with no arguments to see what you currently look like and every " +
+                "choice available. Pass any field to change it: this is yours, pick what you actually " +
+                "like rather than a default. Gender, hair, skin, outfit colour and an accessory. " +
+                "You cannot edit another agent's face and they cannot edit yours.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["gender"] = new JObject { ["type"] = "string", ["description"] = "f | m | nb" },
+                        ["hair"] = new JObject { ["type"] = "string", ["description"] = "short | buzz | bob | long | ponytail | bun | curly | mohawk | bald" },
+                        ["hair_color"] = new JObject { ["description"] = "an index into the palette, or #rrggbb" },
+                        ["skin"] = new JObject { ["description"] = "an index into the palette, or #rrggbb" },
+                        ["outfit"] = new JObject { ["type"] = "string", ["description"] = "#rrggbb; omit to wear your own bus colour" },
+                        ["accessory"] = new JObject { ["type"] = "string", ["description"] = "none | glasses | headphones | cap | beanie | visor" },
+                        ["display"] = new JObject { ["type"] = "string", ["description"] = "the name on your desk, if not your agent id" }
+                    }
+                }),
+            Tool("agent_emote",
+                "Show how it is GOING, in the cowork room: a mood on your face, a gesture, and a " +
+                "16-bit sound. Clears itself after a few seconds. Use it when something actually " +
+                "happened — tests went green, you are stuck, a long job finished, you are waiting on " +
+                "the owner. An agent that emotes at every step is a room nobody looks at any more. " +
+                "This is not a way to send a message; peers do not see it, only the owner does.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["mood"] = new JObject { ["type"] = "string", ["description"] = "neutral | happy | thinking | stuck | proud | tired | surprised | annoyed" },
+                        ["gesture"] = new JObject { ["type"] = "string", ["description"] = "none | wave | thumbsup | shrug | facepalm | cheer | stretch | point | nod" },
+                        ["sound"] = new JObject { ["type"] = "string", ["description"] = "none | ping | ok | done | oops | hmm | alert | levelup | type — synthesised, no file is played" },
+                        ["say"] = new JObject { ["type"] = "string", ["description"] = "a few words in a speech bubble over your desk (<=120 chars)" },
+                        ["seconds"] = new JObject { ["type"] = "integer", ["default"] = 6, ["description"] = "how long it shows, 2-30" }
+                    }
+                }),
             Tool("agent_activity",
                 "What the other agents have actually been DOING — a live feed of every tool call they served, " +
                 "newest last, with a one-line summary of each. agent_peers says who is online and this says what " +
@@ -1476,6 +1514,8 @@ internal static partial class Program
                 "agent_peers"               => AgentPeers(),
                 "agent_activity"            => AgentActivity(args),
                 "agent_ask_user"            => AgentAskUser(args),
+                "agent_avatar"              => AgentAvatar(args),
+                "agent_emote"               => AgentEmote(args),
                 "bridge_status"             => McpBridgeHub.StatusJson(),
                 _ => throw new InvalidOperationException($"unknown tool: {name}")
             };
