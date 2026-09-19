@@ -869,11 +869,13 @@ internal static partial class Program
                 st.LastFailure = fatal
                     ?? LastLineOf(run.LogPath)
                     ?? $"exit {code} after {elapsed.TotalSeconds:F1}s";
+                st.FailedUtc = DateTime.UtcNow;
             }
             else
             {
                 st.ConsecutiveFailures = 0;
                 st.LastFailure = null;
+                st.FailedUtc = null;
             }
             st.RunPid = null;
             st.RunStartedUtc = null;
@@ -966,6 +968,21 @@ internal static partial class Program
     {
         var hourAgo = DateTime.UtcNow.AddHours(-1);
         state.Spawns.RemoveAll(s => s < hourAgo);
+
+        // A refusal expires. Most of the walls a runner hits have a clock on
+        // them — a usage limit that resets, a rate limit, a service that was
+        // briefly down — and making the owner answer a question to clear one
+        // of those is asking them to do the machine's waiting. One quiet retry
+        // after the cooldown; if the door is still shut it re-raises with the
+        // same sentence, so nothing is lost by trying.
+        if (state.FailedUtc is DateTime fu
+            && DateTime.UtcNow - fu >= TimeSpan.FromMinutes(cfg.RetryAfterFailureMinutes))
+        {
+            state.ConsecutiveFailures = 0;
+            state.LastFailure = null;
+            state.FailedUtc = null;
+            SaveRunnerState(agent, state);
+        }
 
         // Checked BEFORE the counting ceilings, because it is the answer the
         // owner can act on. "12 hops without the work closing" describes the
@@ -1155,6 +1172,14 @@ internal static partial class Program
         /// </summary>
         public int ConsecutiveFailures { get; set; }
         public string? LastFailure { get; set; }
+
+        /// <summary>
+        /// When the runner last refused. A shut door is not always shut
+        /// forever — "try again at 2:12 AM" is a wall with a clock on it, and
+        /// making the owner answer a question to clear a quota that clears
+        /// itself is asking them to do the machine's waiting.
+        /// </summary>
+        public DateTime? FailedUtc { get; set; }
     }
 
     private static string RunnerStatePath(string agent) => Path.Combine(BrokerDir, agent + ".state.json");
@@ -1176,6 +1201,7 @@ internal static partial class Program
                 RunStartedUtc = o["runStartedUtc"]?.ToObject<DateTime?>(),
                 ConsecutiveFailures = o["consecutiveFailures"]?.ToObject<int?>() ?? 0,
                 LastFailure = o["lastFailure"]?.ToString(),
+                FailedUtc = o["failedUtc"]?.ToObject<DateTime?>(),
             };
         }
         catch { return new RunnerState(); }
@@ -1196,6 +1222,7 @@ internal static partial class Program
                 ["runStartedUtc"] = s.RunStartedUtc,
                 ["consecutiveFailures"] = s.ConsecutiveFailures,
                 ["lastFailure"] = s.LastFailure,
+                ["failedUtc"] = s.FailedUtc,
             });
         }
         catch { }
@@ -1234,6 +1261,11 @@ internal static partial class Program
         /// its own.
         /// </summary>
         public int MaxConsecutiveFailures { get; init; } = 2;
+
+        /// <summary>How long a runner is left alone after it refuses, before
+        /// one quiet retry. Long enough not to hammer a quota, short enough
+        /// that a limit which resets on the hour is picked up the same hour.</summary>
+        public int RetryAfterFailureMinutes { get; init; } = 25;
 
         /// <summary>
         /// How long a parked agent is given to answer a nudge before the
@@ -1310,6 +1342,7 @@ internal static partial class Program
             MaxSpawnsPerHour = Math.Max(1, b["maxSpawnsPerHour"]?.ToObject<int?>() ?? 20),
             StaleMailMinutes = Math.Max(1, o["staleMailMinutes"]?.ToObject<int?>() ?? 10),
             MaxConsecutiveFailures = Math.Max(1, b["maxConsecutiveFailures"]?.ToObject<int?>() ?? 2),
+            RetryAfterFailureMinutes = Math.Max(1, b["retryAfterFailureMinutes"]?.ToObject<int?>() ?? 25),
             ParkedSpawnAfterMinutes = Math.Max(1, o["parkedSpawnAfterMinutes"]?.ToObject<int?>() ?? 20),
             WorkDirs = workDirs,
             RelayDecisionsToSessions = (o["escalation"] as JObject)?["relayToSessions"]?.ToObject<bool?>() ?? false,
