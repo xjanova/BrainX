@@ -119,6 +119,16 @@ internal static partial class Program
         }
 
         _brokerIsCli = true;
+
+        // `--clear <work>` retires a workstream and exits. Called off work
+        // that stays in the queue is not neutral: it keeps every agent it is
+        // addressed to looking "behind", so the broker keeps spawning runs to
+        // clear a backlog nobody wants cleared, and the real work queues
+        // behind it.
+        for (var i = 0; i < args.Length - 1; i++)
+            if (args[i].Equals("--clear", StringComparison.OrdinalIgnoreCase))
+                return ClearWorkstream(SanitizeAgentSlug(args[i + 1]));
+
         var once = args.Any(a => a.Equals("--once", StringComparison.OrdinalIgnoreCase));
         var dryRun = args.Any(a => a.Equals("--dry-run", StringComparison.OrdinalIgnoreCase));
 
@@ -184,6 +194,94 @@ internal static partial class Program
         }
     }
 
+    /// <summary>
+    /// Retire every pending message carrying a work label, and tell whoever
+    /// sent them.
+    ///
+    /// Nothing is destroyed. Messages move to the read/ audit folder exactly
+    /// as a normal consume would, with a `clearedBy` stamp so a later reader
+    /// can tell "the owner called this off" from "an agent read and acted on
+    /// it" — the two look identical once a file is in read/, and only one of
+    /// them means the work happened.
+    ///
+    /// The sender is told, because the whole premise of this bus is that
+    /// delivered mail was read. Silently retiring three days of somebody's
+    /// requests leaves them waiting on a reply that is never coming, which is
+    /// the failure this system exists to end, dressed as housekeeping.
+    /// </summary>
+    private static int ClearWorkstream(string work)
+    {
+        var root = Path.Combine(BusRoot, "inbox");
+        if (!Directory.Exists(root)) { BrokerLog($"no inbox directory — nothing to clear"); return 0; }
+
+        var cleared = 0;
+        var senders = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var box in Directory.GetDirectories(root))
+        {
+            foreach (var f in Directory.GetFiles(box, "*.json"))
+            {
+                JObject o;
+                try { o = JObject.Parse(File.ReadAllText(f)); } catch { continue; }
+                if (!string.Equals(o["work"]?.ToString(), work, StringComparison.OrdinalIgnoreCase)) continue;
+
+                o["clearedBy"] = "owner";
+                o["clearedUtc"] = DateTime.UtcNow.ToString("o");
+                var from = o["from"]?.ToString();
+                if (!string.IsNullOrWhiteSpace(from)) senders.Add(from!);
+
+                var readDir = Path.Combine(BusRoot, "read", Path.GetFileName(box));
+                Directory.CreateDirectory(readDir);
+                try
+                {
+                    AtomicWriteJson(Path.Combine(readDir, Path.GetFileName(f)), o);
+                    File.Delete(f);
+                    cleared++;
+                }
+                catch (Exception ex) { BrokerLog($"could not clear {Path.GetFileName(f)} — {Redact(ex.Message)}"); }
+            }
+        }
+
+        // Decisions raised ABOUT this workstream go with it. A question about
+        // where called-off work should run is not a question any more.
+        var closed = 0;
+        if (Directory.Exists(BrokerDecisionDir))
+            foreach (var f in Directory.GetFiles(BrokerDecisionDir, "*.json"))
+            {
+                try
+                {
+                    var o = JObject.Parse(File.ReadAllText(f));
+                    if (!string.Equals(o["status"]?.ToString(), "open", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!string.Equals(o["work"]?.ToString(), work, StringComparison.OrdinalIgnoreCase)) continue;
+                    o["status"] = "answered";
+                    o["answer"] = "workstream cleared by the owner";
+                    o["answeredUtc"] = DateTime.UtcNow.ToString("o");
+                    AtomicWriteJson(f, o);
+                    closed++;
+                }
+                catch { }
+            }
+
+        foreach (var from in senders)
+        {
+            if (from.Equals("broker", StringComparison.OrdinalIgnoreCase)) continue;
+            try
+            {
+                DeliverBusMessage("broker", from,
+                    $"The owner has CALLED OFF the '{work}' workstream. Your pending messages on it were "
+                    + "retired unread and nobody is going to answer them. Do not resend, and do not treat "
+                    + "silence on that thread as work still in progress. Anything you were waiting on there "
+                    + "is cancelled; say so to your user if it came from them.",
+                    topic: "work-cleared", work: null);
+            }
+            catch (Exception ex) { BrokerLog($"telling {from} — {Redact(ex.Message)}"); }
+        }
+
+        BrokerLog($"cleared '{work}': {cleared} message(s) retired, {closed} decision(s) closed"
+                  + (senders.Count > 0 ? $", told {string.Join(", ", senders)}" : ""));
+        return 0;
+    }
+
     // ───────────── one tick ─────────────
 
     private static async Task BrokerTick(BrokerConfig cfg, Dictionary<string, BrokerRun> live, bool dryRun)
@@ -209,7 +307,7 @@ internal static partial class Program
             // gets two notifications for one decision.
             if (HasOpenDecision(agent))
             {
-                BrokerLog($"{agent}: {Describe(work)} — waiting on the owner, not spawning");
+                BrokerSay(agent, $"{agent}: {Describe(work)} — waiting on the owner, not spawning");
                 continue;
             }
 
@@ -247,7 +345,7 @@ internal static partial class Program
                     // but SAY so. A skip with no log line is indistinguishable
                     // from an empty queue, which is the report that hid the
                     // three-day-old mail in the first place.
-                    BrokerLog($"{agent}: {Describe(work)} — session is active, the piggyback has it");
+                    BrokerSay(agent, $"{agent}: {Describe(work)} — session is active, the piggyback has it");
                     continue;
 
                 case SessionVerdict.Parked:
@@ -287,7 +385,7 @@ internal static partial class Program
                         // The honest failure. Silence here is how the owner
                         // ends up believing the loop is running when the mail
                         // is simply piling up for an agent nobody can start.
-                        BrokerLog($"{agent}: {Describe(work)} waiting, no session and no runner in runners.json — nobody can pick this up");
+                        BrokerSay(agent, $"{agent}: {Describe(work)} waiting, no session and no runner in runners.json — nobody can pick this up");
                         await EscalateAsync(cfg, new BrokerDecision(
                             Id: "norunner-" + agent,
                             Agent: agent,
@@ -305,8 +403,8 @@ internal static partial class Program
                             Id: "budget-" + agent,
                             Agent: agent,
                             Work: "",
-                            Question: $"'{agent}' hit a broker budget: {gate}. The work is still open.",
-                            Options: new[] { "let it keep going", "stop and leave it for me" })).ConfigureAwait(false);
+                            Question: $"'{agent}' cannot pick up its work ({Describe(work)}). {gate}",
+                            Options: new[] { "I fixed it — try again", "leave that work for me" })).ConfigureAwait(false);
                         continue;
                     }
 
@@ -314,7 +412,7 @@ internal static partial class Program
                     // is the expensive kind of wrong: a headless agent pointed
                     // at the wrong repo does real work in the wrong place. The
                     // runner's cwd is a default for unlabelled work only.
-                    var unmapped = work.Works.Where(w => !cfg.WorkDirs.ContainsKey(w)).ToList();
+                    var unmapped = work.Works.Where(w => ResolveWorkDir(cfg, w) == null).ToList();
                     if (unmapped.Count > 0)
                     {
                         await EscalateAsync(cfg, new BrokerDecision(
@@ -476,7 +574,15 @@ internal static partial class Program
         public required Process Process { get; init; }
         public required string Agent { get; init; }
         public required DateTime StartedUtc { get; init; }
+        /// <summary>Where this run's output went, so a failure can quote it.</summary>
+        public required string LogPath { get; init; }
     }
+
+    /// <summary>
+    /// Under this, a run did not do any work — it refused to start. A real
+    /// agent turn cannot finish in three seconds; an auth or credit error can.
+    /// </summary>
+    private static readonly TimeSpan RunTooFastToBeReal = TimeSpan.FromSeconds(3);
 
     private static void SpawnRunner(BrokerConfig cfg, string agent, RunnerSpec runner,
                                     WaitingWork work, Dictionary<string, BrokerRun> live, RunnerState state)
@@ -534,7 +640,7 @@ internal static partial class Program
             p.BeginErrorReadLine();
 
             var startedUtc = DateTime.UtcNow;
-            live[agent] = new BrokerRun { Process = p, Agent = agent, StartedUtc = startedUtc };
+            live[agent] = new BrokerRun { Process = p, Agent = agent, StartedUtc = startedUtc, LogPath = log };
             state.Spawns.Add(startedUtc);
             state.Hops++;
             state.RunPid = p.Id;
@@ -554,8 +660,49 @@ internal static partial class Program
     private static string WorkDirFor(BrokerConfig cfg, RunnerSpec runner, WaitingWork work)
     {
         foreach (var w in work.Works)
-            if (cfg.WorkDirs.TryGetValue(w, out var dir) && Directory.Exists(dir)) return dir;
+            if (ResolveWorkDir(cfg, w) is { } dir) return dir;
         return Directory.Exists(runner.Cwd) ? runner.Cwd : _vaultPath;
+    }
+
+    /// <summary>
+    /// Where a work label lives: the explicit mapping first, then a look under
+    /// the configured roots for a folder with that name.
+    ///
+    /// Asking the owner where 'xmanstudio-art' lives when D:\Code\xmanstudio
+    /// is sitting right there is a question that should never have been asked.
+    /// Labels are named after the thing they are about, so the label minus its
+    /// trailing qualifier is usually the folder: xmanstudio-art → xmanstudio,
+    /// gpuxmine-wpf → gpuxmine → GpuXmine (the match is case-insensitive
+    /// because a label is a slug and a folder is not).
+    ///
+    /// Only the trailing segment is stripped at a time, and a guess is only
+    /// ever a real directory — this narrows the question, it does not invent
+    /// an answer. Nothing found still asks.
+    /// </summary>
+    private static string? ResolveWorkDir(BrokerConfig cfg, string work)
+    {
+        if (cfg.WorkDirs.TryGetValue(work, out var mapped) && Directory.Exists(mapped)) return mapped;
+
+        var roots = cfg.WorkRoots.Where(Directory.Exists).ToList();
+        if (roots.Count == 0) return null;
+
+        for (var candidate = work; candidate.Length > 0;)
+        {
+            foreach (var root in roots)
+            {
+                try
+                {
+                    foreach (var dir in Directory.GetDirectories(root))
+                        if (string.Equals(Path.GetFileName(dir), candidate, StringComparison.OrdinalIgnoreCase))
+                            return dir;
+                }
+                catch { }
+            }
+            var cut = candidate.LastIndexOf('-');
+            if (cut <= 0) break;
+            candidate = candidate[..cut];
+        }
+        return null;
     }
 
     /// <summary>
@@ -643,10 +790,29 @@ internal static partial class Program
             }
 
             var code = run.Process.HasExited ? run.Process.ExitCode : -1;
-            BrokerLog($"{agent}: run finished, exit {code}, {(DateTime.UtcNow - run.StartedUtc).TotalSeconds:F0}s");
+            var elapsed = DateTime.UtcNow - run.StartedUtc;
+            BrokerLog($"{agent}: run finished, exit {code}, {elapsed.TotalSeconds:F0}s");
             run.Process.Dispose();
             live.Remove(agent);
-            ClearRunRecord(agent);
+
+            // A run that came back before it could possibly have done anything
+            // did not do anything. Count it, and keep what it said — that text
+            // is the only thing that tells the owner WHY, and it is the
+            // difference between "a budget was hit" and "there is no credit".
+            var st = ReadRunnerState(agent);
+            if (code != 0 && elapsed < RunTooFastToBeReal)
+            {
+                st.ConsecutiveFailures++;
+                st.LastFailure = LastLineOf(run.LogPath) ?? $"exit {code} after {elapsed.TotalSeconds:F1}s";
+            }
+            else
+            {
+                st.ConsecutiveFailures = 0;
+                st.LastFailure = null;
+            }
+            st.RunPid = null;
+            st.RunStartedUtc = null;
+            SaveRunnerState(agent, st);
         }
     }
 
@@ -678,7 +844,7 @@ internal static partial class Program
                     ClearRunRecord(agent);
                     return false;
                 }
-                BrokerLog($"{agent}: run pid {pid} still going ({(DateTime.UtcNow - started).TotalSeconds:F0}s) — leaving it");
+                BrokerSay(agent, $"{agent}: run pid {pid} still going ({(DateTime.UtcNow - started).TotalSeconds:F0}s) — leaving it");
                 return true;
             }
         }
@@ -694,6 +860,18 @@ internal static partial class Program
         st.RunPid = null;
         st.RunStartedUtc = null;
         SaveRunnerState(agent, st);
+    }
+
+    /// <summary>The last non-empty line a run printed — its complaint.</summary>
+    private static string? LastLineOf(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return null;
+            var line = File.ReadLines(path).LastOrDefault(l => !string.IsNullOrWhiteSpace(l));
+            return line?.Trim() is { Length: > 0 } t ? (t.Length > 300 ? t[..300] : t) : null;
+        }
+        catch { return null; }
     }
 
     private static void KillAll(Dictionary<string, BrokerRun> live)
@@ -723,6 +901,14 @@ internal static partial class Program
     {
         var hourAgo = DateTime.UtcNow.AddHours(-1);
         state.Spawns.RemoveAll(s => s < hourAgo);
+
+        // Checked BEFORE the counting ceilings, because it is the answer the
+        // owner can act on. "12 hops without the work closing" describes the
+        // symptom of a runner that cannot start; "Credit balance is too low"
+        // is the thing to go and fix.
+        if (state.ConsecutiveFailures >= cfg.MaxConsecutiveFailures)
+            return $"the {agent} runner is not starting — {state.LastFailure ?? "it exits immediately"} "
+                 + $"({state.ConsecutiveFailures} runs in a row). Retrying will not change that.";
 
         if (state.Spawns.Count >= cfg.MaxSpawnsPerHour)
             return $"{state.Spawns.Count} spawns in the last hour (max {cfg.MaxSpawnsPerHour})";
@@ -875,6 +1061,20 @@ internal static partial class Program
         /// </summary>
         public int? RunPid { get; set; }
         public DateTime? RunStartedUtc { get; set; }
+
+        /// <summary>
+        /// Runs that died immediately, in a row, and what the last one said.
+        ///
+        /// A runner can fail for a reason that will never improve — no credit,
+        /// not logged in, binary missing, wrong flags. Retrying that on a
+        /// 15-second poll is not resilience, it is a loop. Measured: twelve
+        /// `claude -p` spawns in four minutes, every one of them exiting in
+        /// under a second with "Credit balance is too low", until the hop
+        /// ceiling stopped it — and the ceiling then told the owner only that
+        /// a budget had been hit, which is the one fact that did not matter.
+        /// </summary>
+        public int ConsecutiveFailures { get; set; }
+        public string? LastFailure { get; set; }
     }
 
     private static string RunnerStatePath(string agent) => Path.Combine(BrokerDir, agent + ".state.json");
@@ -894,6 +1094,8 @@ internal static partial class Program
                 Spawns = o["spawns"]?.ToObject<List<DateTime>>() ?? new List<DateTime>(),
                 RunPid = o["runPid"]?.ToObject<int?>(),
                 RunStartedUtc = o["runStartedUtc"]?.ToObject<DateTime?>(),
+                ConsecutiveFailures = o["consecutiveFailures"]?.ToObject<int?>() ?? 0,
+                LastFailure = o["lastFailure"]?.ToString(),
             };
         }
         catch { return new RunnerState(); }
@@ -912,6 +1114,8 @@ internal static partial class Program
                 ["spawns"] = JArray.FromObject(s.Spawns),
                 ["runPid"] = s.RunPid,
                 ["runStartedUtc"] = s.RunStartedUtc,
+                ["consecutiveFailures"] = s.ConsecutiveFailures,
+                ["lastFailure"] = s.LastFailure,
             });
         }
         catch { }
@@ -944,6 +1148,14 @@ internal static partial class Program
         public int StaleMailMinutes { get; init; } = 10;
 
         /// <summary>
+        /// How many instant failures in a row mean the runner itself is
+        /// broken. Two, not one: a single failure can be a transient lock or a
+        /// machine waking up, two in a row is a state that will not clear on
+        /// its own.
+        /// </summary>
+        public int MaxConsecutiveFailures { get; init; } = 2;
+
+        /// <summary>
         /// How long a parked agent is given to answer a nudge before the
         /// broker stops believing it can. Generous, because a spawn costs real
         /// money and a session that IS about to look is the cheaper outcome.
@@ -952,6 +1164,9 @@ internal static partial class Program
 
         /// <summary>Work label to the folder that work lives in.</summary>
         public Dictionary<string, string> WorkDirs { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Where to look for a folder named after a work label.</summary>
+        public List<string> WorkRoots { get; init; } = new();
         public Dictionary<string, RunnerSpec> Runners { get; init; } = new(StringComparer.OrdinalIgnoreCase);
         public JObject Escalation { get; init; } = new();
     }
@@ -1008,8 +1223,12 @@ internal static partial class Program
             MaxHopsPerWork = Math.Max(1, b["maxHopsPerWork"]?.ToObject<int?>() ?? 12),
             MaxSpawnsPerHour = Math.Max(1, b["maxSpawnsPerHour"]?.ToObject<int?>() ?? 20),
             StaleMailMinutes = Math.Max(1, o["staleMailMinutes"]?.ToObject<int?>() ?? 10),
+            MaxConsecutiveFailures = Math.Max(1, b["maxConsecutiveFailures"]?.ToObject<int?>() ?? 2),
             ParkedSpawnAfterMinutes = Math.Max(1, o["parkedSpawnAfterMinutes"]?.ToObject<int?>() ?? 20),
             WorkDirs = workDirs,
+            WorkRoots = o["workRoots"]?.ToObject<List<string>>()?
+                            .Select(Environment.ExpandEnvironmentVariables).ToList()
+                        ?? new List<string>(),
             Runners = runners,
             Escalation = o["escalation"] as JObject ?? new JObject(),
         };
@@ -1033,7 +1252,10 @@ internal static partial class Program
   "//parkedSpawnAfterMinutes": "A parked session cannot be pushed to - the harness owns stdin. After this long, stop nudging and spawn a fresh headless run instead.",
   "parkedSpawnAfterMinutes": 20,
 
-  "//workDirs": "Which folder each work label lives in. Unmapped labels are NEVER guessed - the broker asks you instead, because a headless agent in the wrong repo does real work in the wrong place.",
+  "//workRoots": "Searched for a folder named after the work label (or the label minus its trailing qualifier: xmanstudio-art -> xmanstudio). Only ever matches a real directory.",
+  "workRoots": ["D:\\Code", "D:\\Cowork"],
+
+  "//workDirs": "Explicit overrides, for labels whose folder is not named after them. A label that resolves to nothing is NEVER guessed - the broker asks, because a headless agent in the wrong repo does real work in the wrong place.",
   "workDirs": {},
 
   "budget": { "maxRunSeconds": 900, "maxHopsPerWork": 12, "maxSpawnsPerHour": 20 },
@@ -1070,6 +1292,32 @@ internal static partial class Program
     }
 
     // ───────────── logging ─────────────
+
+    /// <summary>
+    /// The last line printed for each agent, so a steady state is stated once
+    /// instead of every tick.
+    ///
+    /// The broker parked correctly on two owner decisions and then printed the
+    /// same two lines every 15 seconds — 5,760 a day, none of them new. A log
+    /// that repeats itself is a log nobody reads, which is the same disease as
+    /// the silent skip it replaced, just with the opposite symptom: the lines
+    /// that matter are still invisible, now because they are buried instead of
+    /// missing.
+    /// </summary>
+    private static readonly Dictionary<string, string> _lastSaid = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Log a per-agent status line only when it differs from the last one for
+    /// that agent. Events (spawned, killed, answered) use BrokerLog directly —
+    /// those are never repetition, and suppressing one would hide a real thing
+    /// that happened.
+    /// </summary>
+    private static void BrokerSay(string agent, string line)
+    {
+        if (_lastSaid.TryGetValue(agent, out var prev) && prev == line) return;
+        _lastSaid[agent] = line;
+        BrokerLog(line);
+    }
 
     private static void BrokerLog(string line)
     {

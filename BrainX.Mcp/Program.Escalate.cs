@@ -219,6 +219,12 @@ internal static partial class Program
                 // next tick.
                 var st = ReadRunnerState(agent);
                 st.Hops = 0;
+                // The owner answering is the only evidence a PERMANENT failure
+                // has stopped being permanent. Nothing else clears this, or the
+                // broker goes straight back to retrying a runner that still
+                // cannot start — twelve times in four minutes, as measured.
+                st.ConsecutiveFailures = 0;
+                st.LastFailure = null;
                 SaveRunnerState(agent, st);
 
                 BrokerLog($"decision [{o["id"]}] answered: {answer}"
