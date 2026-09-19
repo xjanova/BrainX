@@ -54,19 +54,53 @@ internal static partial class Program
     private static string BrokerDecisionDir => Path.Combine(BrokerDir, "decisions");
 
     /// <summary>
-    /// What a spawned agent is told. Deliberately short and parameterless —
-    /// see the header note on why no message content crosses this boundary.
-    /// Written as an order, not a notification: a headless run gets exactly
-    /// one prompt, and "you have mail" without a next step burns a whole run
-    /// producing a sentence.
+    /// What a spawned agent is told. Carries no message CONTENT (see the
+    /// header note) but it must carry the work LABELS, and that distinction
+    /// cost three days of stalled mail.
+    ///
+    /// <c>agent_inbox</c> is work-scoped: labelled mail is invisible to a
+    /// plain call and comes back only as an `otherWork` count. So a prompt
+    /// that said "call agent_inbox" sent the agent looking in the one place
+    /// the mail was guaranteed not to be — it found nothing, exited, and the
+    /// next tick spawned it again. An infinite spawn loop that makes no
+    /// progress, and from the outside indistinguishable from an empty queue.
+    ///
+    /// Found on the owner's real vault, never in the tests: every message in
+    /// the temp vaults was unlabelled, so this path was not once exercised.
+    /// The oldest stuck message was three days old.
     /// </summary>
-    private const string BrokerSpawnPrompt =
-        "BrainX broker: work is queued for you on this brain and nobody is driving this session. "
-        + "Call agent_inbox and task_queue now, read what is waiting, and do it. "
-        + "Close the loop with task_update {status:'done'|'blocked', note:'...'} and reply to whoever "
-        + "wrote to you with agent_send. Do not stop while work you can do is still open. "
-        + "If a choice needs the OWNER (not a peer) - scope, money, anything destructive, or two "
-        + "defensible options - call agent_ask_user instead of guessing, then stop.";
+    private static string BuildSpawnPrompt(WaitingWork work)
+    {
+        var sb = new StringBuilder(
+            "BrainX broker: work is queued for you on this brain and nobody is driving this session. ");
+
+        if (work.Works.Count > 0)
+        {
+            // Named explicitly, one call per label. An agent told only that
+            // "labels exist" still has to guess them, and a wrong guess is
+            // indistinguishable from an empty inbox.
+            sb.Append("The mail waiting for you is LABELLED, and a plain agent_inbox will not return it. ")
+              .Append("Read every one of these: ")
+              .Append(string.Join(", ", work.Works.Select(InboxCallFor)))
+              .Append(". ");
+        }
+        else
+        {
+            sb.Append("Call agent_inbox now. ");
+        }
+
+        sb.Append("Also call task_queue. Read what is waiting and do it. ")
+          .Append("Close the loop with task_update, and reply to whoever wrote to you with agent_send ")
+          .Append("KEEPING THE SAME work label, or your answer is invisible to them for the same reason. ")
+          .Append("Do not stop while work you can do is still open. ")
+          .Append("If a choice needs the OWNER (not a peer) - scope, money, anything destructive, or two ")
+          .Append("defensible options - call agent_ask_user instead of guessing, then stop.");
+        return sb.ToString();
+    }
+
+    /// <summary>One work-scoped inbox call, written the way an agent types it.</summary>
+    private static string InboxCallFor(string work) =>
+        "agent_inbox {work:'" + work + "'}";
 
     /// <summary>
     /// <c>brainx-mcp broker --vault PATH [--once] [--dry-run]</c>.
@@ -186,8 +220,34 @@ internal static partial class Program
             switch (verdict)
             {
                 case SessionVerdict.Working:
-                    // Tool calls are still landing. Leave it alone — this is
-                    // the case the hooks already handle well.
+                    // Tool calls are still landing, so the piggyback will put
+                    // anything new in front of this session on its own. That
+                    // reasoning holds for mail that ARRIVED while it was
+                    // working; it does not hold for mail that was already old
+                    // when this session started.
+                    //
+                    // The owner caught this on the real vault: codex was
+                    // online and active (30 calls, mid brain_append_note) with
+                    // four messages pending, the oldest THREE DAYS old. The
+                    // broker classified it Working and skipped it — silently,
+                    // which is why nobody could see it was happening. "Busy"
+                    // never meant "busy with this".
+                    //
+                    // A nudge to a working session is the cheapest delivery
+                    // there is: it rides the piggyback onto its very next tool
+                    // call. It is safe to repeat because HasPendingNudge keeps
+                    // exactly one outstanding.
+                    if (work.OldestHours * 60 >= cfg.StaleMailMinutes)
+                    {
+                        if (dryRun) { BrokerLog($"{agent}: would nudge busy session about stale work ({Describe(work)})"); continue; }
+                        NudgeParkedSession(agent, work);
+                        continue;
+                    }
+                    // Fresh work on an active session: genuinely nothing to do,
+                    // but SAY so. A skip with no log line is indistinguishable
+                    // from an empty queue, which is the report that hid the
+                    // three-day-old mail in the first place.
+                    BrokerLog($"{agent}: {Describe(work)} — session is active, the piggyback has it");
                     continue;
 
                 case SessionVerdict.Parked:
@@ -317,9 +377,14 @@ internal static partial class Program
 
         try
         {
+            var scoped = work.Works.Count > 0
+                ? "That mail is LABELLED — a plain agent_inbox will not return it. Read "
+                  + string.Join(", ", work.Works.Select(InboxCallFor)) + ". "
+                : "Call agent_inbox. ";
             var body = $"BrainX broker: you have {Describe(work)} waiting and this session has been idle. "
-                     + "Call agent_inbox and task_queue, do the work, and close it with task_update. "
-                     + "If the OWNER has to decide something, call agent_ask_user rather than guessing.";
+                     + scoped
+                     + "Also call task_queue, do the work, and close it with task_update, replying with the "
+                     + "same work label. If the OWNER has to decide something, call agent_ask_user.";
             DeliverBusMessage("broker", agent, body, topic: "broker-nudge", work: null);
             BrokerLog($"{agent}: nudged parked session ({Describe(work)})");
         }
@@ -402,7 +467,7 @@ internal static partial class Program
         // and that is precisely the class of bug the Codex headless note cost
         // a session to find.
         foreach (var a in runner.Args)
-            psi.ArgumentList.Add(a.Replace("{prompt}", BrokerSpawnPrompt)
+            psi.ArgumentList.Add(a.Replace("{prompt}", BuildSpawnPrompt(work))
                                   .Replace("{cwd}", psi.WorkingDirectory)
                                   .Replace("{agent}", agent));
 
@@ -618,15 +683,25 @@ internal static partial class Program
 
     // ───────────── what is waiting ─────────────
 
-    private readonly record struct WaitingWork(int Mail, int Tasks);
+    private readonly record struct WaitingWork(
+        int Mail, int Tasks, IReadOnlyList<string> Works, double OldestHours);
 
     private static string Describe(WaitingWork w)
     {
         var parts = new List<string>();
         if (w.Mail > 0) parts.Add($"{w.Mail} message(s)");
         if (w.Tasks > 0) parts.Add($"{w.Tasks} task(s)");
-        return parts.Count == 0 ? "nothing" : string.Join(" and ", parts);
+        if (parts.Count == 0) return "nothing";
+        // The label belongs in the description, not in a detail view: a log
+        // line reading "4 message(s)" while the agent it spawned keeps finding
+        // an empty inbox is the exact report that hid this bug for three days.
+        return string.Join(" and ", parts)
+             + (w.Works.Count > 0 ? $" [work: {string.Join(", ", w.Works)}]" : "")
+             + (w.OldestHours >= 1 ? $" [oldest {AgeLabel(w.OldestHours)}]" : "");
     }
+
+    private static string AgeLabel(double hours) =>
+        hours < 48 ? $"{(int)hours}h" : $"{(int)(hours / 24)}d";
 
     /// <summary>
     /// Every agent that has something waiting: anyone with an inbox directory,
@@ -672,6 +747,8 @@ internal static partial class Program
     private static WaitingWork WaitingWorkFor(string agent)
     {
         var mail = 0;
+        var oldest = 0.0;
+        var works = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
         try
         {
             // Same both-boxes rule the wake hook uses: the bus collapses every
@@ -680,14 +757,39 @@ internal static partial class Program
             foreach (var box in BoxesFor(agent))
             {
                 var dir = Path.Combine(BusRoot, "inbox", box);
-                if (Directory.Exists(dir)) mail += Directory.GetFiles(dir, "*.json").Length;
+                if (!Directory.Exists(dir)) continue;
+                foreach (var f in Directory.GetFiles(dir, "*.json"))
+                {
+                    mail++;
+                    try
+                    {
+                        var age = (DateTime.UtcNow - File.GetLastWriteTimeUtc(f)).TotalHours;
+                        if (age > oldest) oldest = age;
+                    }
+                    catch { }
+                    // Opening the file is the price of knowing the label. The
+                    // dashboard counts from filenames alone and is right to —
+                    // it only ever needs a number. A spawn needs the label.
+                    try
+                    {
+                        var w = JObject.Parse(File.ReadAllText(f))["work"]?.ToString();
+                        if (!string.IsNullOrWhiteSpace(w)) works.Add(w!);
+                    }
+                    catch { /* half-written message: next tick's problem */ }
+                }
             }
         }
         catch { }
 
         var tasks = 0;
-        try { tasks = OpenTasksForWake(agent).Count; } catch { }
-        return new WaitingWork(mail, tasks);
+        try
+        {
+            var open = OpenTasksForWake(agent);
+            tasks = open.Count;
+            foreach (var t in open) if (t.AgeHours > oldest) oldest = t.AgeHours;
+        }
+        catch { }
+        return new WaitingWork(mail, tasks, works.ToList(), oldest);
     }
 
     private static IEnumerable<string> BoxesFor(string agent)
@@ -782,6 +884,14 @@ internal static partial class Program
         public int MaxRunSeconds { get; init; } = 900;
         public int MaxHopsPerWork { get; init; } = 12;
         public int MaxSpawnsPerHour { get; init; } = 20;
+
+        /// <summary>
+        /// How old waiting work has to be before a BUSY agent is told about it
+        /// anyway. Ten minutes: long enough that a message and its reply in the
+        /// same conversation never trip it, short enough that nothing spends a
+        /// working day unread.
+        /// </summary>
+        public int StaleMailMinutes { get; init; } = 10;
         public Dictionary<string, RunnerSpec> Runners { get; init; } = new(StringComparer.OrdinalIgnoreCase);
         public JObject Escalation { get; init; } = new();
     }
@@ -828,6 +938,7 @@ internal static partial class Program
             MaxRunSeconds = Math.Max(60, b["maxRunSeconds"]?.ToObject<int?>() ?? 900),
             MaxHopsPerWork = Math.Max(1, b["maxHopsPerWork"]?.ToObject<int?>() ?? 12),
             MaxSpawnsPerHour = Math.Max(1, b["maxSpawnsPerHour"]?.ToObject<int?>() ?? 20),
+            StaleMailMinutes = Math.Max(1, o["staleMailMinutes"]?.ToObject<int?>() ?? 10),
             Runners = runners,
             Escalation = o["escalation"] as JObject ?? new JObject(),
         };
@@ -844,8 +955,10 @@ internal static partial class Program
   "//pollSeconds": "How often the queue is checked.",
   "//idleGraceSeconds": "A live session whose tool-call counter has not moved for this long is parked, not working.",
   "//budget": "Ceilings, because an autonomous loop with no ceiling is a bill.",
+  "//staleMailMinutes": "Work older than this is put in front of a BUSY agent too. Busy never meant busy with THIS.",
   "pollSeconds": 15,
   "idleGraceSeconds": 45,
+  "staleMailMinutes": 10,
   "budget": { "maxRunSeconds": 900, "maxHopsPerWork": 12, "maxSpawnsPerHour": 20 },
 
   "//escalation": "Where a question for the OWNER goes. Telegram token is read from the BRAINX_TELEGRAM_TOKEN env var if left blank here.",

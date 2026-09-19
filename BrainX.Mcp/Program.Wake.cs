@@ -228,9 +228,31 @@ internal static partial class Program
         {
             lines.Add("");
             foreach (var m in mail)
-                lines.Add($"  ✉ from {m.From}" + (m.Topic.Length > 0 ? $" — {m.Topic}" : "") + AgeSuffix(m.AgeHours));
-            lines.Add("Call agent_inbox NOW to read them, act on what they say, and reply with");
-            lines.Add("agent_send. A peer that gets no answer assumes the work is still moving.");
+                lines.Add($"  ✉ from {m.From}" + (m.Topic.Length > 0 ? $" — {m.Topic}" : "")
+                          + (m.Work.Length > 0 ? $"  [work: {m.Work}]" : "") + AgeSuffix(m.AgeHours));
+
+            // Naming the label is not a nicety — it is the difference between
+            // a wake that works and one that cannot. agent_inbox is
+            // work-scoped: labelled mail is invisible to a plain call and
+            // comes back only as an `otherWork` count, so "Call agent_inbox
+            // NOW" pointed every woken session at the one place the mail was
+            // guaranteed not to be. It then reported an empty inbox, the
+            // cooldown stamp said this message had already woken somebody, and
+            // the mail sat. Four messages were stuck on this brain that way,
+            // the oldest for three days.
+            var labels = mail.Select(m => m.Work).Where(w => w.Length > 0).Distinct().ToList();
+            if (labels.Count > 0)
+            {
+                lines.Add("Read them NOW — they are LABELLED, so a plain agent_inbox returns nothing:");
+                foreach (var w in labels) lines.Add($"  agent_inbox {{work:'{w}'}}");
+                lines.Add("Reply with agent_send using the SAME work label, or your answer is invisible");
+                lines.Add("to them for exactly the same reason.");
+            }
+            else
+            {
+                lines.Add("Call agent_inbox NOW to read them, act on what they say, and reply with");
+                lines.Add("agent_send. A peer that gets no answer assumes the work is still moving.");
+            }
         }
 
         if (tasks.Count > 0)
@@ -344,6 +366,7 @@ internal static partial class Program
                         id!,
                         o["from"]?.ToString() ?? "another agent",
                         o["topic"]?.ToString() ?? "",
+                        o["work"]?.ToString() ?? "",
                         (DateTime.UtcNow - file.LastWriteTimeUtc).TotalHours));
                 }
                 catch { /* a half-written message is next tick's problem */ }
@@ -354,7 +377,7 @@ internal static partial class Program
         return found;
     }
 
-    private sealed record WakeMail(string Id, string From, string Topic, double AgeHours);
+    private sealed record WakeMail(string Id, string From, string Topic, string Work, double AgeHours);
 
     // ───────────── cooldown ─────────────
 
