@@ -346,6 +346,15 @@ internal static partial class Program
     /// Only ONLINE agents, and never the one that asked: mail to an offline
     /// agent would sit until it next starts and then announce a decision that
     /// was probably made hours ago.
+    ///
+    /// And never an agent the BROKER started. "Show this to your user and ask"
+    /// is an instruction with a hidden premise — that there is a user. A
+    /// headless run has nobody attached, so a conscientious agent does the
+    /// only thing left and escalates it ITSELF: a decision about a decision,
+    /// which is told to the live peers, one of which asks again. Observed on
+    /// the live vault within minutes — codex relayed a broker budget question
+    /// back as a fresh agent_ask_user. A spawned agent is told the decision
+    /// exists and explicitly told not to re-raise it.
     /// </summary>
     private static void TellLiveSessions(BrokerDecision d)
     {
@@ -355,6 +364,11 @@ internal static partial class Program
         {
             if (agent.Equals(d.Agent, StringComparison.OrdinalIgnoreCase)) continue;
             if (!IsOnline(PresenceAgeSeconds(agent))) continue;
+            if (WasSpawnedByBroker(agent))
+            {
+                BrokerLog($"not relaying [{d.Id}] to {agent} — broker-spawned, it has no user to ask");
+                continue;
+            }
             try
             {
                 DeliverBusMessage("broker", agent,
@@ -362,7 +376,8 @@ internal static partial class Program
                     + d.Question + opts
                     + "\n\nShow this to your user and ask. When they answer, tell the broker by writing "
                     + $"the `answer` field into .obsidianx/agent-bus/broker/decisions/{SanitizeAgentSlug(d.Id)}.json — "
-                    + "do NOT decide it yourself.",
+                    + "do NOT decide it yourself, and do NOT raise a new question about it — "
+                    + "this one is already with the owner.",
                     // UNLABELLED, deliberately — the one place in this system
                     // where that is right. agent_inbox is work-scoped, so a
                     // labelled message is readable only by a session already on
@@ -376,6 +391,50 @@ internal static partial class Program
                     topic: "needs-decision", work: null);
             }
             catch (Exception ex) { BrokerLog($"telling {agent} — " + Redact(ex.Message)); }
+        }
+    }
+
+    /// <summary>
+    /// Is this agent's current session one the broker started? A run record
+    /// with a live pid means yes, and yes means there is no human in it.
+    /// </summary>
+    private static bool WasSpawnedByBroker(string agent)
+    {
+        var st = ReadRunnerState(agent);
+        if (st.RunPid is not int pid) return false;
+        try
+        {
+            using var p = System.Diagnostics.Process.GetProcessById(pid);
+            return !p.HasExited;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// Drain the broker's own mailbox.
+    ///
+    /// Agents reply to whoever wrote to them, and the broker writes to all of
+    /// them — so "broker" accrues an inbox that nothing has ever read, because
+    /// the broker is a process, not an agent. Three replies were stranded
+    /// there within an hour of it going live. They are moved to read/ and
+    /// logged, so an agent answering the broker is not answering a wall.
+    /// </summary>
+    private static void DrainBrokerInbox()
+    {
+        var dir = BusInboxDir("broker");
+        if (!Directory.Exists(dir)) return;
+        foreach (var f in Directory.GetFiles(dir, "*.json"))
+        {
+            try
+            {
+                var o = JObject.Parse(File.ReadAllText(f));
+                BrokerLog($"reply to broker from {o["from"]}: {o["body"]?.ToString()?.ReplaceLineEndings(" ")}");
+                var readDir = Path.Combine(BusRoot, "read", "broker");
+                Directory.CreateDirectory(readDir);
+                AtomicWriteJson(Path.Combine(readDir, Path.GetFileName(f)), o);
+                File.Delete(f);
+            }
+            catch { }
         }
     }
 

@@ -287,6 +287,7 @@ internal static partial class Program
     private static async Task BrokerTick(BrokerConfig cfg, Dictionary<string, BrokerRun> live, bool dryRun)
     {
         ReapFinishedRuns(cfg, live);
+        DrainBrokerInbox();
 
         foreach (var agent in AgentsWithWaitingWork())
         {
