@@ -14,7 +14,11 @@
 
 /** Logical pixels per screen pixel. Three is the smallest that still reads as
  *  deliberate pixel art rather than a low-resolution accident. */
-const SCALE = 4;
+/** Logical pixels per screen pixel. Two, not four: the painted room has a
+ *  far finer scale than the one this file used to draw, so the sprite grid
+ *  has to get finer with it or every character stands a head above the
+ *  furniture. */
+const SCALE = 2;
 const TILE_W = 32, TILE_H = 16;     // isometric tile, 2:1 like every iso game
 
 /* The picture is built in two passes, and that split is what separates
@@ -34,12 +38,67 @@ const TILE_W = 32, TILE_H = 16;     // isometric tile, 2:1 like every iso game
 const cv = document.getElementById('floor');
 const vctx = cv.getContext('2d', { alpha: false });   // visible, full res
 const scene = document.createElement('canvas');
-const ctx = scene.getContext('2d', { alpha: false }); // logical, every sprite
+const ctx = scene.getContext('2d');                   // logical, sprites only, TRANSPARENT
 const overlay = document.getElementById('overlay');
 
 /** Lamps and screens, collected while the scene draws, lit in the second pass.
  *  Gathered rather than hardcoded so a desk that moves takes its light with it. */
 let LIGHTS = [];
+
+/**
+ * The room itself, as a painted plate.
+ *
+ * Everything before this drew the office out of rectangles - floor tiles,
+ * wall planes, cubicle panels, props - and got about as far as that approach
+ * goes: a diagram with lighting on it. The owner supplied a proper isometric
+ * interior instead, so the room is ART now and this file's job narrows to the
+ * half it is actually good at: who is in the room, where, doing what, and
+ * what is lit.
+ *
+ * STATIONS are the bridge. The plate has fixed furniture, so an agent cannot
+ * stand anywhere - it has to stand at a desk that exists in the picture.
+ * Normalised to the plate, so they survive any canvas size.
+ */
+const ROOM_PLATE = new Image();
+let PLATE_READY = false;
+ROOM_PLATE.onload = () => { PLATE_READY = true; };
+ROOM_PLATE.src = 'art/room.webp';
+
+const STATIONS = [
+    // Measured off THIS plate, not off the reference render. The reference
+    // has a big table in the middle of the room; this plate has a rug there
+    // and its desks are all around the edges, so stations copied from the
+    // other picture put four people standing on a carpet.
+    { x: 0.800, y: 0.620, r: 34, warm: true },   // desk by the bookshelf, right
+    { x: 0.165, y: 0.235, r: 30, warm: true },   // cabinets, back left
+    { x: 0.470, y: 0.185, r: 30, warm: false },  // in front of the server racks
+    { x: 0.700, y: 0.265, r: 28, warm: false },  // the glass meeting room
+    { x: 0.205, y: 0.580, r: 30, warm: true },   // standing at the coffee bar
+    { x: 0.430, y: 0.755, r: 28, warm: true },   // the sofa
+    { x: 0.500, y: 0.520, r: 26, warm: true },   // on the rug, middle of the room
+    { x: 0.880, y: 0.430, r: 26, warm: true },   // by the whiteboard, far right
+];
+
+
+/** Plate coordinates -> logical canvas pixels. The plate is drawn to COVER,
+ *  so the same transform has to serve the art and everything placed on it,
+ *  or the characters drift off their desks as the window changes. */
+let PLATE_FIT = { x: 0, y: 0, w: 1, h: 1 };
+
+function plateFit() {
+    const iw = ROOM_PLATE.naturalWidth || 1448, ih = ROOM_PLATE.naturalHeight || 1086;
+    // `min`, not `max`: COVER crops the room to fill the canvas, and this
+    // plate is the subject rather than a background texture — losing the
+    // coffee bar off one edge to avoid letterboxing is a bad trade.
+    const k = Math.min(CW / iw, CH / ih);
+    PLATE_FIT = { x: (CW - iw * k) / 2, y: (CH - ih * k) / 2, w: iw * k, h: ih * k };
+    return PLATE_FIT;
+}
+
+const stationPt = (st) => ({
+    x: PLATE_FIT.x + st.x * PLATE_FIT.w,
+    y: PLATE_FIT.y + st.y * PLATE_FIT.h,
+});
 
 /** The darkness, with holes cut in it. See castDarkness(). */
 const shadowLayer = document.createElement('canvas');
@@ -120,81 +179,23 @@ let T = 0;                // frame counter, drives every idle animation
  *  small window still each get a desk instead of the last two being drawn off
  *  the edge. The order is stable (sorted by id) so a desk does not jump to the
  *  other side of the room when somebody connects. */
-/** Cells between neighbouring desks, so there is floor to walk on and the
- *  name plates under each desk do not collide with the desk behind it. */
-const SPACING = 2;
-
-/** The room's own size in cells. A BOUNDED floor with two walls behind it,
- *  rather than tiles to the edge of the canvas: an unbounded floor has no
- *  back, so the desks read as furniture floating on a plain instead of people
- *  sitting in a room. Recomputed on resize to fill whatever space there is. */
-let ROOM = { C: 6, R: 6 };
-
-/** Wall height in logical pixels. Tall enough to hang something on. */
-const WALL_H = 42;
-
-function layoutRoom() {
-    // Fill the HEIGHT and let the width run off the sides.
-    //
-    // An isometric diamond is twice as wide as it is tall, so sizing it to fit
-    // both dimensions of a 4:3 canvas leaves the floor as a small lozenge in a
-    // field of black — which is what the room looked like, and why it read as
-    // an object rather than as a place. Sizing from the height instead puts
-    // the viewer INSIDE the room: the side walls run past the frame, the way
-    // they would if you were standing in one.
-    const byH = Math.floor((CH - WALL_H - 18) / (TILE_H / 2));
-    const S = Math.max(6, byH);
-    ROOM.C = Math.max(3, Math.round(S / 2));
-    ROOM.R = Math.max(3, S - ROOM.C);
-
-    ORIGIN = {
-        x: Math.round(CW / 2 - (ROOM.C - ROOM.R) * (TILE_W / 4)),
-        y: Math.round((CH - ((ROOM.C + ROOM.R - 2) * (TILE_H / 2) + TILE_H)) / 2) + Math.round(WALL_H * 0.45),
-    };
-}
-
-/** How many desks fit across this room. */
-function deskCols(n) {
-    const fits = Math.max(1, Math.floor((ROOM.C - 1) / SPACING) + 1);
-    // Square-ish, so four agents are a 2x2 block filling the floor rather than
-    // four desks strung out along one diagonal with the rest of the room bare.
-    return Math.max(1, Math.min(fits, Math.min(4, Math.ceil(Math.sqrt(n)))));
-}
-
+/**
+ * Give every agent a place in the painted room.
+ *
+ * The plate has fixed furniture, so this is an ASSIGNMENT rather than a
+ * layout: the first agent takes the best seat and the rest fill outward in a
+ * stable order, so nobody's chair moves when somebody else connects.
+ */
 function layoutDesks() {
-    layoutRoom();
+    plateFit();
     DESKS.clear();
-    const n = AGENTS.length || 1;
-    const cols = deskCols(n);
-    const rows = Math.ceil(n / cols);
-
-    // Spread across the floor rather than packed at SPACING and centred. Four
-    // agents in a room sized for a dozen were drawn as a tight cluster in the
-    // middle of a large empty diamond, which read as an unfinished picture —
-    // the desks take the room they have, and only fall back to the minimum
-    // spacing when there genuinely is not enough of it.
-    // Spread, but capped: at full spread four desks ended up one in each
-    // corner of the room with nothing between them, which reads as four people
-    // avoiding each other rather than as an office.
-    const spread = (span, n) => Math.max(SPACING, Math.min(4, Math.floor((span - 3) / Math.max(1, n - 1)) || SPACING));
-    const stepC = spread(ROOM.C, cols);
-    const stepR = spread(ROOM.R, rows);
-    const usedC = (cols - 1) * stepC, usedR = (rows - 1) * stepR;
-    const padC = Math.max(1, Math.round((ROOM.C - 1 - usedC) / 2));
-    const padR = Math.max(1, Math.round((ROOM.R - 1 - usedR) / 2));
-
     AGENTS.forEach((a, i) => {
-        const gx = padC + (i % cols) * stepC;
-        const gy = padR + Math.floor(i / cols) * stepR;
-        const p = iso(gx, gy);
-        DESKS.set(a.id, {
-            gx, gy,
-            desk: { x: p.x, y: p.y + TILE_H / 2 },
-            seat: { x: p.x, y: p.y + TILE_H / 2 + 4 },
-            screen: { x: p.x, y: p.y - 8 },
-        });
+        const st = STATIONS[i % STATIONS.length];
+        const pt = stationPt(st);
+        DESKS.set(a.id, { st, desk: pt, screen: { x: pt.x, y: pt.y - 16 } });
     });
 }
+
 
 // ── drawing primitives ──────────────────────────────────────────────
 
@@ -575,53 +576,41 @@ function drawPlaque(x, yBase, id, col) {
 
 function drawRoom() {
     LIGHTS = [];
-    px(0, 0, CW, CH, '#070812');
+    ctx.clearRect(0, 0, CW, CH);   // sprites only; the plate is drawn beneath
+    plateFit();
 
-    drawWalls();
-    for (let gy = 0; gy < ROOM.R; gy++)
-        for (let gx = 0; gx < ROOM.C; gx++)
-            floorTile(gx, gy);
-
-    floorAO();
-    drawProps();
-
-    // Light on the floor, warm under the lamp and cold from the screen. Two
-    // sources rather than one flat glow: a single blue wash over everything is
-    // what made the whole picture read as one dark colour with shapes in it.
+    // Each occupied station contributes its light, which is what the darkness
+    // pass cuts holes with. A station nobody is at stays dark - that is the
+    // whole reason this is a list and not a constant.
     for (const a of AGENTS) {
         const d = DESKS.get(a.id);
-        if (!d) continue;
-        const off = a.state === 'offline';
-        const cx = d.desk.x, cy = d.desk.y + 10;
-
-        const warm = ctx.createRadialGradient(cx + 14, cy - 2, 2, cx + 14, cy - 2, off ? 20 : 40);
-        warm.addColorStop(0, off ? 'rgba(255,190,120,0.04)' : 'rgba(255,186,110,0.17)');
-        warm.addColorStop(1, 'rgba(255,186,110,0)');
-        ctx.fillStyle = warm;
-        ctx.fillRect(cx - 30, cy - 34, 80, 56);
-
-        if (off) continue;
-        const cold = ctx.createRadialGradient(cx - 8, cy - 4, 2, cx - 8, cy - 4, 30);
-        cold.addColorStop(0, 'rgba(120,200,255,0.13)');
-        cold.addColorStop(1, 'rgba(120,200,255,0)');
-        ctx.fillStyle = cold;
-        ctx.fillRect(cx - 40, cy - 34, 70, 52);
+        if (!d || a.state === 'offline') continue;
+        LIGHTS.push({
+            x: d.desk.x, y: d.desk.y - 8,
+            r: d.st.r,
+            c: d.st.warm ? [255, 186, 110] : hexToRgb(agentColor(a.id)),
+            i: a.state === 'working' ? 0.50 : 0.34,
+        });
     }
 
-    // Back to front, so a desk nearer the viewer covers the one behind it.
-    const order = [...AGENTS].sort((a, b) => {
-        const A = DESKS.get(a.id), B = DESKS.get(b.id);
-        return (A.gx + A.gy) - (B.gx + B.gy);
-    });
-    for (const a of order) drawWorkstation(a);
-
-    // Walkers last, so somebody crossing the room passes in FRONT of the desks
-    // rather than through them.
+    // Back to front, so somebody nearer the viewer covers whoever is behind.
+    const order = [...AGENTS].sort((x, y) => DESKS.get(x.id).desk.y - DESKS.get(y.id).desk.y);
+    for (const a of order) if (a.state !== 'offline' && !VISITS.has(a.id)) drawSeated(a);
     for (const a of order) drawWalker(a);
 
     if (BOSS && T < BOSS.until) drawBoss();
     drawPackets();
 }
+
+/** Somebody at their station. The desk, the chair and the monitor are all in
+ *  the plate already - this draws the person and nothing else. */
+function drawSeated(a) {
+    const d = DESKS.get(a.id);
+    if (!d) return;
+    castShadow(d.desk.x, d.desk.y + 5, 9);
+    drawPerson(d.desk.x, d.desk.y, agentColor(a.id), a);
+}
+
 
 /**
  * Shadow in the corners.
@@ -1400,6 +1389,20 @@ function hexToRgb(h) {
  */
 function present() {
     const W = cv.width, H = cv.height;
+
+    // The plate is ART, not part of the sprite grid, so it is drawn straight
+    // onto the visible canvas at full device resolution. Routing it through
+    // the logical canvas first would throw away most of what makes it good.
+    vctx.fillStyle = '#080a16';
+    vctx.fillRect(0, 0, W, H);
+    if (PLATE_READY) {
+        vctx.imageSmoothingEnabled = true;
+        vctx.imageSmoothingQuality = 'high';
+        const f = PLATE_FIT;
+        vctx.drawImage(ROOM_PLATE, f.x * SCALE, f.y * SCALE, f.w * SCALE, f.h * SCALE);
+    }
+
+    // Sprites on top, blown up with smoothing off so they stay crisp.
     vctx.imageSmoothingEnabled = false;
     vctx.drawImage(scene, 0, 0, W, H);
 
