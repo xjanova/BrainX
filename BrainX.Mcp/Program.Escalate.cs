@@ -140,7 +140,19 @@ internal static partial class Program
             // best-effort on its own — losing one channel must not cost the
             // others, or a stale Telegram token silently disables the toast.
             await SendTelegramAsync(cfg, d).ConfigureAwait(false);
-            TellLiveSessions(d);
+
+            // OFF by default (owner, 2026-09-19): "ให้มีพื้นที่ที่ฉันรู้ว่าพวกคุณ
+            // สื่อสารอะไรกัน ... โดยไม่ต้องส่งไปหน้าแชทของพวกคุณ".
+            //
+            // The cowork room exists precisely so the owner can watch the
+            // agents work without the traffic landing in their own
+            // conversations. Pushing a question into a live session works, but
+            // it works by interrupting the very chats the room was built to
+            // keep clear — and it makes the agent the messenger, which is how
+            // a headless run ended up escalating a decision about a decision.
+            // The room is the channel; this is the fallback for a machine
+            // where the client is not running.
+            if (cfg.RelayDecisionsToSessions) TellLiveSessions(d);
         }
         catch (Exception ex) { BrokerLog("escalate failed — " + Redact(ex.Message)); }
     }

@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<!--
+  The cowork room.
+
+  Owner (2026-09-19): "ให้มีพื้นที่ที่ฉันรู้ว่าพวกคุณสื่อสารอะไรกัน ... เหมือนเป็น
+  cowork space ไม่ว่าจะเชื่อมต่อกับใครก็คุยกันในนั้น เหมือนห้องทำงานไง ... ฉันเข้าไป
+  พิมพ์ ทุกคนต้องฟัง ตรงนั้น เหมือนบอสเข้าไปสั่งการ เรียกงานดู".
+
+  Every agent that has ever connected to this brain gets a desk. The room is
+  the bus, drawn: presence decides whether anyone is sitting there, the tool
+  counter decides whether they are typing, and every message that crosses is a
+  bubble travelling from one desk to another. Nothing here is decoration for
+  its own sake — each thing that moves is a fact from disk that was previously
+  only legible as a number on a card.
+
+  The room renders on a canvas at a small internal resolution and is scaled up
+  with smoothing off, so it is genuinely pixel art rather than a blurred vector
+  drawing. Text is HTML positioned over the canvas: a pixel font small enough
+  to fit the scene would be unreadable, and the owner has to be able to read
+  what the agents said.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BrainX — Cowork Room</title>
+<link rel="stylesheet" href="office.css">
+</head>
+<body>
+  <div id="room">
+    <canvas id="floor" aria-label="The office, drawn from who is connected"></canvas>
+    <!-- Name plates, speech bubbles and status chips ride above the canvas so
+         they stay crisp at any scale. office.js positions them from the same
+         isometric projection the canvas draws with. -->
+    <div id="overlay"></div>
+
+    <div id="room-head">
+      <span class="dot" id="room-dot"></span>
+      <strong>COWORK ROOM</strong>
+      <span id="room-sub">—</span>
+    </div>
+  </div>
+
+  <aside id="side">
+    <header id="side-head">
+      <strong>ห้องประชุม</strong>
+      <span id="side-count">—</span>
+    </header>
+
+    <!-- Questions the agents have stopped on. Above the transcript on purpose:
+         the whole loop is parked until one of these is answered, so it must not
+         be something the owner has to scroll back to find. -->
+    <ol id="decisions" aria-label="Waiting on you"></ol>
+
+    <ol id="log" aria-label="What the agents said"></ol>
+
+    <form id="say" autocomplete="off">
+      <input id="say-text" type="text" maxlength="4000"
+             placeholder="พิมพ์สั่งงานที่นี่ — ทุกตัวที่อยู่ในห้องจะได้ยิน">
+      <button type="submit" id="say-send" title="ส่งเข้าห้อง">ส่ง</button>
+    </form>
+  </aside>
+
+  <script src="office.js"></script>
+</body>
+</html>

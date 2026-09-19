@@ -539,6 +539,12 @@
                                             Visibility="Collapsed"/>
                                     <Button x:Name="NavNetwork" Content="&#x2B22;  Network"
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Network"/>
+                                    <!-- The cowork room. Owner, 2026-09-19: "ให้มีพื้นที่ที่ฉันรู้ว่า
+                                         พวกคุณสื่อสารอะไรกัน ... เหมือนห้องทำงานไง". Sits next to
+                                         Network because both answer "who is connected" — this one
+                                         answers it with the conversation instead of a topology. -->
+                                    <Button x:Name="NavCowork" Content="&#x1F3E2;  Cowork Room"
+                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Cowork"/>
                                     <TextBlock Text="VAULT" Style="{StaticResource TypeNavSectionLabel}"
                                                Margin="22,18,0,8"/>
                                     <Button x:Name="NavEditor" Style="{StaticResource NavButton}"
@@ -4885,6 +4891,16 @@
                              InitializeUniverseAsync already runs 250 ms after
                              Window_Loaded, so the galaxy is building while the splash is
                              still fading. -->
+                        <!-- The cowork room: an isometric office drawn from the agent
+                             bus. Every desk is a presence file, every bubble a message
+                             that actually crossed. The page is wwwroot/office; this view
+                             is only the frame it lives in. -->
+                        <Grid x:Name="CoworkView" Visibility="Collapsed">
+                            <Border Background="#FF05060E" ClipToBounds="True">
+                                <wv2:WebView2 x:Name="CoworkWebView" DefaultBackgroundColor="#FF05060E"/>
+                            </Border>
+                        </Grid>
+
                         <Grid x:Name="UniverseView" Visibility="Visible">
                             <!-- User: "เอาแถบบนออกทั้งแถบ" — Brain Graph view header
                                  (title + subtitle + 3D/2D + Filter + Re-layout) removed.
