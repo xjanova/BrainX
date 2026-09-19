@@ -258,6 +258,108 @@ function glyph(ch, x, y, col) {
     return 4;
 }
 
+/* ── sprites as grids ─────────────────────────────────────────────────
+ *
+ * Drawn, not computed.
+ *
+ * Every figure in this room started life as a stack of `px(x-5, top+7, 10, 9)`
+ * calls, and that is a bad way to make pixel art for one reason: you cannot
+ * see it while you write it. Each change was a guess, then a render, then a
+ * screenshot, then another guess — which is why the monitor sat on nobody's
+ * desk for three passes and the happy face came out furious.
+ *
+ * A grid is the picture. One character per pixel, a palette per sprite, and
+ * what is written here is what appears. The desk marks were done this way and
+ * came out right first time.
+ *
+ * Palette keys are shared across every body sprite so hair, accessories and
+ * poses can be authored independently and stacked:
+ *   .  transparent      1  skin        2  skin shadow   3  skin highlight
+ *   4  hair             5  hair light  6  hair dark
+ *   7  outfit           8  outfit dark 9  outfit light
+ *   x  ink (eyes, line) o  white       -  neutral dark
+ */
+function drawGrid(rows, x, y, pal) {
+    for (let r = 0; r < rows.length; r++) {
+        const row = rows[r];
+        for (let c = 0; c < row.length; c++) {
+            const k = row[c];
+            if (k === '.') continue;
+            const col = pal[k];
+            if (col) px(x + c, y + r, 1, 1, col);
+        }
+    }
+}
+
+/** Palette for one agent's body, derived from its avatar. */
+function bodyPal(av) {
+    return {
+        '1': av.skin, '2': shade(av.skin, -0.20), '3': shade(av.skin, 0.10),
+        '4': av.hairColor, '5': shade(av.hairColor, 0.16), '6': shade(av.hairColor, -0.26),
+        '7': av.outfit, '8': shade(av.outfit, -0.30), '9': shade(av.outfit, 0.12),
+        'x': '#241f30', 'o': '#ffffff', '-': '#1a1d33',
+    };
+}
+
+/* The seated body: 16 wide, 18 tall, cut off where the desk crosses it.
+ * Two rows of shading on the torso and a lit edge along the shoulders — the
+ * thing the rectangle version never had, because volume at this size is one
+ * pixel of highlight and one of shadow in the right place. */
+const BODY_F = [
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '.....2....2.....',
+    '....999999......',
+    '...977777789....',
+    '..97777777789...',
+    '..87777777779...',
+    '..87777777778...',
+    '..88777777788...',
+    '..888888888888..',
+    '..888888888888..',
+];
+const BODY_M = [
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '....2......2....',
+    '...99999999.....',
+    '..97777777789...',
+    '.977777777778...',
+    '.877777777778...',
+    '.877777777778...',
+    '.887777777788...',
+    '.8888888888888..',
+    '.8888888888888..',
+];
+
+/** The head, 10x10, with a lit brow and a shaded jaw. */
+const HEAD = [
+    '...333333...',
+    '..31111113..',
+    '.3111111113.',
+    '.1111111111.',
+    '.1111111111.',
+    '.1111111111.',
+    '.1111111111.',
+    '.2111111112.',
+    '..21111112..',
+    '...222222...',
+];
+
 /* Desk marks.
  *
  * Simplified pixel glyphs that identify which product sits at a desk — an
@@ -792,18 +894,13 @@ function drawPerson(x, y, c, a) {
     // gender actually changes: narrow and sloped, square, or between.
     const sw = av.gender === 'f' ? 6 : av.gender === 'm' ? 8 : 7;
 
-    px(x - sw, top + 11, sw * 2, 9, mid);              // torso
-    px(x - sw, top + 11, sw * 2, 1, lite);             // lit shoulder line
-    if (av.gender === 'f') { px(x - sw - 1, top + 13, 1, 6, dark); px(x + sw, top + 13, 1, 6, dark); }
-
-    px(x - 2, top + 9, 5, 3, skinLo);                  // neck
-
-    // Head: 10 wide, 10 tall, with a lit brow and a shaded jaw.
-    px(x - 5, top, 10, 10, skin);
-    px(x - 5, top, 10, 1, skinHi);
-    px(x - 5, top + 9, 10, 1, skinLo);
-    px(x - 6, top + 3, 1, 3, skin);                    // ears
-    px(x + 5, top + 3, 1, 3, skin);
+    // Body and head from grids — see the note above drawGrid on why these are
+    // written as pictures rather than built from rectangles.
+    const pal = bodyPal(av);
+    drawGrid(av.gender === 'f' ? BODY_F : BODY_M, x - 8, top, pal);
+    drawGrid(HEAD, x - 6, top, pal);
+    px(x - 6, top + 4, 1, 3, skin);                    // ears
+    px(x + 5, top + 4, 1, 3, skin);
 
     drawHair(x, top, av);
     drawFace(x, top, em);
