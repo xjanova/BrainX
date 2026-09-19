@@ -597,10 +597,52 @@ internal static partial class Program
     }
 
     /// <summary>
-    /// Under this, a run did not do any work — it refused to start. A real
-    /// agent turn cannot finish in three seconds; an auth or credit error can.
+    /// Under this, a run did not do any work — it refused to start.
+    ///
+    /// Three seconds was far too tight. Codex takes about fifteen to boot, say
+    /// "you have hit your usage limit" and exit, which sailed past the old
+    /// threshold and was counted as a genuine attempt — so the broker kept
+    /// respawning it until the hop ceiling stopped the loop and reported "12
+    /// hops without the work closing", which tells the owner nothing they can
+    /// act on. A real agent turn does not finish inside a minute.
     /// </summary>
-    private static readonly TimeSpan RunTooFastToBeReal = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan RunTooFastToBeReal = TimeSpan.FromSeconds(45);
+
+    /// <summary>
+    /// Things a runner says when it is not going to work THIS TIME no matter
+    /// how often it is asked.
+    ///
+    /// Timing alone is a proxy; this is the fact itself. A quota message or a
+    /// missing login is not a task that failed, it is a door that is shut, and
+    /// the owner needs the sentence rather than a hop count — "codex has hit
+    /// its usage limit, resets at 2:12 AM" is actionable, "12 hops" is not.
+    /// </summary>
+    private static readonly string[] FatalRunnerSigns =
+    {
+        "usage limit", "credit balance", "quota", "rate limit",
+        "not logged in", "please log in", "authentication", "unauthorized",
+        "is not recognized", "command not found", "no such file",
+    };
+
+    /// <summary>The run's own complaint, when it is one of the fatal kind.</summary>
+    private static string? FatalComplaint(string logPath)
+    {
+        try
+        {
+            if (!File.Exists(logPath)) return null;
+            // Only the tail: an agent that worked for ten minutes and mentioned
+            // the word "quota" in passing has not hit one.
+            var tail = File.ReadLines(logPath).Reverse().Take(12).ToList();
+            foreach (var line in tail)
+            {
+                var low = line.ToLowerInvariant();
+                if (FatalRunnerSigns.Any(low.Contains))
+                    return line.Trim() is { Length: > 0 } t ? (t.Length > 300 ? t[..300] : t) : null;
+            }
+        }
+        catch { }
+        return null;
+    }
 
     private static void SpawnRunner(BrokerConfig cfg, string agent, RunnerSpec runner,
                                     WaitingWork work, Dictionary<string, BrokerRun> live, RunnerState state)
@@ -818,10 +860,15 @@ internal static partial class Program
             // is the only thing that tells the owner WHY, and it is the
             // difference between "a budget was hit" and "there is no credit".
             var st = ReadRunnerState(agent);
-            if (code != 0 && elapsed < RunTooFastToBeReal)
+            var fatal = code != 0 ? FatalComplaint(run.LogPath) : null;
+            if (fatal != null || (code != 0 && elapsed < RunTooFastToBeReal))
             {
                 st.ConsecutiveFailures++;
-                st.LastFailure = LastLineOf(run.LogPath) ?? $"exit {code} after {elapsed.TotalSeconds:F1}s";
+                // The runner's own words beat both the timing and the exit
+                // code: it is the only one of the three that says WHY.
+                st.LastFailure = fatal
+                    ?? LastLineOf(run.LogPath)
+                    ?? $"exit {code} after {elapsed.TotalSeconds:F1}s";
             }
             else
             {
@@ -924,7 +971,9 @@ internal static partial class Program
         // owner can act on. "12 hops without the work closing" describes the
         // symptom of a runner that cannot start; "Credit balance is too low"
         // is the thing to go and fix.
-        if (state.ConsecutiveFailures >= cfg.MaxConsecutiveFailures)
+        if (state.ConsecutiveFailures >= cfg.MaxConsecutiveFailures
+            || (state.ConsecutiveFailures >= 1 && state.LastFailure is { } lf
+                && FatalRunnerSigns.Any(sign => lf.Contains(sign, StringComparison.OrdinalIgnoreCase))))
             return $"the {agent} runner is not starting — {state.LastFailure ?? "it exits immediately"} "
                  + $"({state.ConsecutiveFailures} runs in a row). Retrying will not change that.";
 
