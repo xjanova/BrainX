@@ -161,7 +161,108 @@ public partial class MainWindow
                 ["emote"] = CoworkEmote(id),
             });
         }
+
+        AddBridgeSeats(arr);
         return arr;
+    }
+
+    /// <summary>
+    /// Unity and Unreal get desks too, and they have to come from somewhere
+    /// else entirely.
+    ///
+    /// A bridge is the OPPOSITE of an agent: an agent connects IN and
+    /// announces itself in the MCP handshake, which is what writes presence. A
+    /// bridge is something the brain calls OUT to, so it never announces
+    /// anything and never writes a presence file — which is exactly why the
+    /// Unity node on the old bus card could never light up, and why a room
+    /// built only from presence/ would have no seat for either of them.
+    ///
+    /// The roster is mcp-bridges.json (what is configured, and switched on)
+    /// and the liveness is whatever the bridge last published under
+    /// agent-bus/bridges/&lt;id&gt;/. A configured bridge that has published
+    /// nothing still gets a desk: an empty chair with a nameplate is the
+    /// honest picture of "wired up, not running".
+    /// </summary>
+    private void AddBridgeSeats(JArray arr)
+    {
+        JObject cfg;
+        try
+        {
+            var p = Path.Combine(_vaultPath, ".obsidianx", "mcp-bridges.json");
+            if (!File.Exists(p)) return;
+            cfg = JObject.Parse(File.ReadAllText(p));
+        }
+        catch { return; }
+
+        foreach (var (id, def) in EnumerateBridges(cfg))
+        {
+            if (def["enabled"]?.ToObject<bool?>() != true) continue;
+            if (arr.Any(a => string.Equals(a["id"]?.ToString(), id, StringComparison.OrdinalIgnoreCase))) continue;
+
+            var st = LatestBridgeStatus(id);
+            var connected = st?["connected"]?.ToObject<bool?>() == true;
+            // Tri-state, and the middle one matters: null means no probe is
+            // configured, and "I did not ask" must never be drawn as "it said
+            // no". Only an explicit false puts the engine out of the room.
+            var reachable = st?["reachable"]?.ToObject<bool?>();
+            var fresh = st != null
+                && DateTime.TryParse(st["lastSeenUtc"]?.ToString(), null,
+                       System.Globalization.DateTimeStyles.RoundtripKind, out var seen)
+                && (DateTime.UtcNow - seen).TotalSeconds <= (st["ttlSeconds"]?.ToObject<double?>() ?? 120);
+
+            var state = (fresh && connected && reachable != false) ? "idle" : "offline";
+
+            arr.Add(new JObject
+            {
+                ["id"] = id,
+                ["label"] = id,
+                ["state"] = state,
+                ["lastTool"] = st?["lastTool"]?.ToString() ?? "",
+                ["pending"] = 0,
+                ["spawned"] = false,
+                ["bridge"] = true,
+                ["avatar"] = CoworkAvatar(id),
+                ["emote"] = CoworkEmote(id),
+            });
+        }
+    }
+
+    /// <summary>The bridges in the config, however that file spells them.</summary>
+    private static IEnumerable<(string Id, JObject Def)> EnumerateBridges(JObject cfg)
+    {
+        foreach (var key in new[] { "bridges", "servers", "mcpServers" })
+        {
+            if (cfg[key] is JArray list)
+            {
+                foreach (var t in list.OfType<JObject>())
+                    if (t["id"]?.ToString() is { Length: > 0 } id) yield return (id, t);
+                yield break;
+            }
+            if (cfg[key] is JObject map)
+            {
+                foreach (var (k, v) in map)
+                    if (v is JObject o && !k.StartsWith("_") && !k.StartsWith("$")) yield return (k, o);
+                yield break;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The freshest status a bridge published. One file PER PROCESS, because
+    /// several agents can hold a bridge to the same engine open at once — so
+    /// the newest write is the one that describes the engine now.
+    /// </summary>
+    private JObject? LatestBridgeStatus(string id)
+    {
+        try
+        {
+            var dir = Path.Combine(CoworkBusRoot, "bridges", id);
+            if (!Directory.Exists(dir)) return null;
+            var newest = new DirectoryInfo(dir).GetFiles("*.json")
+                .OrderByDescending(f => f.LastWriteTimeUtc).FirstOrDefault();
+            return newest == null ? null : JObject.Parse(File.ReadAllText(newest.FullName));
+        }
+        catch { return null; }
     }
 
     private readonly Dictionary<string, long> _coworkCalls = new(StringComparer.OrdinalIgnoreCase);

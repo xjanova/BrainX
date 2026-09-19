@@ -14,12 +14,32 @@
 
 /** Logical pixels per screen pixel. Three is the smallest that still reads as
  *  deliberate pixel art rather than a low-resolution accident. */
-const SCALE = 3;
+const SCALE = 4;
 const TILE_W = 32, TILE_H = 16;     // isometric tile, 2:1 like every iso game
 
+/* The picture is built in two passes, and that split is what separates
+ * "pixel art" from "low resolution".
+ *
+ *   1. the SCENE, drawn at logical resolution into an offscreen canvas. Every
+ *      rectangle in this file lands here, so the art stays on a hard pixel
+ *      grid with no half-pixels anywhere.
+ *   2. the LIGHT, drawn on the visible canvas at full device resolution after
+ *      the scene has been blitted up with smoothing off.
+ *
+ * Doing both on one canvas forces a choice nobody should have to make: either
+ * the glow is as chunky as the sprites, or the sprites are as soft as the
+ * glow. Owner (2026-09-19): "คิดว่าสร้างเกม แบบ 128 bit อยู่ก็ได้" — that is
+ * exactly this. Crisp sprites, cinematic lighting over the top.
+ */
 const cv = document.getElementById('floor');
-const ctx = cv.getContext('2d', { alpha: false });
+const vctx = cv.getContext('2d', { alpha: false });   // visible, full res
+const scene = document.createElement('canvas');
+const ctx = scene.getContext('2d', { alpha: false }); // logical, every sprite
 const overlay = document.getElementById('overlay');
+
+/** Lamps and screens, collected while the scene draws, lit in the second pass.
+ *  Gathered rather than hardcoded so a desk that moves takes its light with it. */
+let LIGHTS = [];
 
 let CW = 320, CH = 200;             // logical canvas size, recomputed on resize
 let ORIGIN = { x: 160, y: 40 };     // where grid cell (0,0) lands
@@ -36,8 +56,12 @@ function resize() {
     const r = cv.parentElement.getBoundingClientRect();
     CW = Math.max(240, Math.round(r.width / SCALE));
     CH = Math.max(150, Math.round(r.height / SCALE));
-    cv.width = CW;
-    cv.height = CH;
+    scene.width = CW;
+    scene.height = CH;
+    // The visible canvas carries the real pixels, so the lighting pass has
+    // something better than the sprite grid to draw on.
+    cv.width = CW * SCALE;
+    cv.height = CH * SCALE;
     ctx.imageSmoothingEnabled = false;
     layoutDesks();
 }
@@ -74,6 +98,12 @@ let PRIMED = false;       // first payload is backlog: show it, don't perform it
 const BUBBLES = [];       // {agent,text,color,until}
 const PACKETS = [];       // {from,to,color,t0,ms}
 let BOSS = null;          // {until,text} — the owner, standing in the room
+/** Agents currently out of their chair: id -> {to, t0, dur}.
+ *
+ *  Started by REAL traffic — when one agent writes to another, the sender
+ *  walks over. Nothing here is on a timer for decoration; if somebody is
+ *  crossing the room it is because a message crossed the bus. */
+const VISITS = new Map();
 let T = 0;                // frame counter, drives every idle animation
 
 // ── desk layout ─────────────────────────────────────────────────────
@@ -94,20 +124,26 @@ const SPACING = 2;
  *  sitting in a room. Recomputed on resize to fill whatever space there is. */
 let ROOM = { C: 6, R: 6 };
 
-function layoutRoom() {
-    // The diamond is twice as wide as it is tall, so width and height give two
-    // different budgets for the same number of cells; the smaller wins.
-    const byW = Math.floor((CW - 26) / (TILE_W / 2));
-    const byH = Math.floor((CH - 52) / (TILE_H / 2));
-    const S = Math.max(4, Math.min(byW, byH));
-    ROOM.C = Math.max(2, Math.round(S / 2));
-    ROOM.R = Math.max(2, S - ROOM.C);
+/** Wall height in logical pixels. Tall enough to hang something on. */
+const WALL_H = 42;
 
-    // Place cell (0,0) so the finished diamond sits in the middle of the room,
-    // with the extra headroom going to the top where the walls are drawn.
+function layoutRoom() {
+    // Fill the HEIGHT and let the width run off the sides.
+    //
+    // An isometric diamond is twice as wide as it is tall, so sizing it to fit
+    // both dimensions of a 4:3 canvas leaves the floor as a small lozenge in a
+    // field of black — which is what the room looked like, and why it read as
+    // an object rather than as a place. Sizing from the height instead puts
+    // the viewer INSIDE the room: the side walls run past the frame, the way
+    // they would if you were standing in one.
+    const byH = Math.floor((CH - WALL_H - 18) / (TILE_H / 2));
+    const S = Math.max(6, byH);
+    ROOM.C = Math.max(3, Math.round(S / 2));
+    ROOM.R = Math.max(3, S - ROOM.C);
+
     ORIGIN = {
         x: Math.round(CW / 2 - (ROOM.C - ROOM.R) * (TILE_W / 4)),
-        y: Math.round((CH - ((ROOM.C + ROOM.R - 2) * (TILE_H / 2) + TILE_H)) / 2) + 8,
+        y: Math.round((CH - ((ROOM.C + ROOM.R - 2) * (TILE_H / 2) + TILE_H)) / 2) + Math.round(WALL_H * 0.45),
     };
 }
 
@@ -194,9 +230,50 @@ function isoSolid(x, y, hw, hh, h, top, left, right) {
     ctx.closePath(); ctx.fill();
 }
 
+/* A 3x5 pixel alphabet, one number per glyph: each column is 5 bits, low bit
+ * at the top. Fifteen pixels is enough to read a letter and small enough to
+ * sit on a desk without becoming a label.
+ *
+ * Monograms, NOT logos. A nameplate with an initial says whose desk it is
+ * just as clearly as a mark would, and this room has no business reproducing
+ * anybody's trademark in pixels. */
+const GLYPHS = {
+    A: [0x1e, 0x05, 0x1e], B: [0x1f, 0x15, 0x0a], C: [0x0e, 0x11, 0x11],
+    D: [0x1f, 0x11, 0x0e], E: [0x1f, 0x15, 0x15], F: [0x1f, 0x05, 0x05],
+    G: [0x0e, 0x11, 0x1d], H: [0x1f, 0x04, 0x1f], I: [0x11, 0x1f, 0x11],
+    J: [0x18, 0x10, 0x1f], K: [0x1f, 0x04, 0x1b], L: [0x1f, 0x10, 0x10],
+    M: [0x1f, 0x02, 0x1f], N: [0x1f, 0x06, 0x1f], O: [0x0e, 0x11, 0x0e],
+    P: [0x1f, 0x05, 0x02], Q: [0x0e, 0x19, 0x1e], R: [0x1f, 0x0d, 0x12],
+    S: [0x12, 0x15, 0x09], T: [0x01, 0x1f, 0x01], U: [0x0f, 0x10, 0x0f],
+    V: [0x07, 0x18, 0x07], W: [0x1f, 0x08, 0x1f], X: [0x1b, 0x04, 0x1b],
+    Y: [0x03, 0x1c, 0x03], Z: [0x19, 0x15, 0x13],
+};
+
+function glyph(ch, x, y, col) {
+    const g = GLYPHS[ch.toUpperCase()];
+    if (!g) return 4;
+    for (let c = 0; c < 3; c++)
+        for (let r = 0; r < 5; r++)
+            if (g[c] & (1 << r)) px(x + c, y + r, 1, 1, col);
+    return 4;
+}
+
+/** The nameplate standing on the desk. Two letters at most: the point is to
+ *  tell four desks apart at a glance, not to spell anything. */
+function drawPlaque(x, yBase, id, col) {
+    const mono = (id || '?').replace(/[^a-z]/gi, '').slice(0, 2).toUpperCase() || '?';
+    const w = mono.length * 4 + 3;
+    px(x - (w >> 1), yBase - 8, w, 8, '#12162c');
+    px(x - (w >> 1) + 1, yBase - 7, w - 2, 6, shade(col, -0.45));
+    let gx = x - (w >> 1) + 2;
+    for (const ch of mono) gx += glyph(ch, gx, yBase - 6, col);
+    px(x - (w >> 1), yBase, w, 1, '#0b0e1c');
+}
+
 // ── the room ────────────────────────────────────────────────────────
 
 function drawRoom() {
+    LIGHTS = [];
     px(0, 0, CW, CH, '#070812');
 
     drawWalls();
@@ -206,16 +283,27 @@ function drawRoom() {
 
     drawProps();
 
-    // A soft pool of light under each occupied desk. Drawn before the desks so
-    // it reads as light on the floor rather than a halo around the furniture.
+    // Light on the floor, warm under the lamp and cold from the screen. Two
+    // sources rather than one flat glow: a single blue wash over everything is
+    // what made the whole picture read as one dark colour with shapes in it.
     for (const a of AGENTS) {
         const d = DESKS.get(a.id);
-        if (!d || a.state === 'offline') continue;
-        const g = ctx.createRadialGradient(d.desk.x, d.desk.y + 8, 2, d.desk.x, d.desk.y + 8, 26);
-        g.addColorStop(0, 'rgba(120,200,255,0.13)');
-        g.addColorStop(1, 'rgba(120,200,255,0)');
-        ctx.fillStyle = g;
-        ctx.fillRect(d.desk.x - 28, d.desk.y - 14, 56, 40);
+        if (!d) continue;
+        const off = a.state === 'offline';
+        const cx = d.desk.x, cy = d.desk.y + 10;
+
+        const warm = ctx.createRadialGradient(cx + 14, cy - 2, 2, cx + 14, cy - 2, off ? 20 : 40);
+        warm.addColorStop(0, off ? 'rgba(255,190,120,0.04)' : 'rgba(255,186,110,0.17)');
+        warm.addColorStop(1, 'rgba(255,186,110,0)');
+        ctx.fillStyle = warm;
+        ctx.fillRect(cx - 30, cy - 34, 80, 56);
+
+        if (off) continue;
+        const cold = ctx.createRadialGradient(cx - 8, cy - 4, 2, cx - 8, cy - 4, 30);
+        cold.addColorStop(0, 'rgba(120,200,255,0.13)');
+        cold.addColorStop(1, 'rgba(120,200,255,0)');
+        ctx.fillStyle = cold;
+        ctx.fillRect(cx - 40, cy - 34, 70, 52);
     }
 
     // Back to front, so a desk nearer the viewer covers the one behind it.
@@ -225,9 +313,12 @@ function drawRoom() {
     });
     for (const a of order) drawWorkstation(a);
 
+    // Walkers last, so somebody crossing the room passes in FRONT of the desks
+    // rather than through them.
+    for (const a of order) drawWalker(a);
+
     if (BOSS && T < BOSS.until) drawBoss();
     drawPackets();
-    scanlines();
 }
 
 /** The two back walls, with the things an office has on them.
@@ -235,7 +326,7 @@ function drawRoom() {
  *  Drawn before the floor so the floor's front edge overlaps their base — the
  *  join is what makes the room look built rather than assembled. */
 function drawWalls() {
-    const H = 30;
+    const H = WALL_H;
     const a = iso(0, ROOM.R);          // left corner
     const b = iso(0, 0);               // back corner
     const c = iso(ROOM.C, 0);          // right corner
@@ -247,55 +338,147 @@ function drawWalls() {
         ctx.lineTo(p2.x, p2.y - H); ctx.lineTo(p1.x, p1.y - H);
         ctx.closePath(); ctx.fill();
     };
-    // The walls have to be clearly LIGHTER than the floor or the room has no
-    // back — the first pass used #161a3a against a #141838 floor and the two
-    // were indistinguishable, so the office read as furniture on a plain.
-    quad(a, b, '#242a52');             // left wall, in shadow
-    quad(b, c, '#2e3566');             // right wall, catching the light
+    // Clearly lighter than the floor or the room has no back, and the two
+    // walls clearly different from each other or the corner disappears.
+    quad(a, b, '#242a52');             // left wall, away from the window
+    quad(b, c, '#333b73');             // right wall, catching what light there is
+
+    // A skirting board along the bottom of each wall. Four pixels of trim is
+    // the difference between a painted backdrop and a built room.
+    const trim = (p1, p2, fill) => {
+        ctx.fillStyle = fill;
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y);
+        ctx.lineTo(p2.x, p2.y - 4); ctx.lineTo(p1.x, p1.y - 4);
+        ctx.closePath(); ctx.fill();
+    };
+    trim(a, b, '#1a1f40');
+    trim(b, c, '#252c5a');
 
     // Where the walls meet, so the corner is a corner and not a seam.
-    px(b.x - 1, b.y - H, 2, H, '#39417a');
+    px(b.x - 1, b.y - H, 2, H, '#414a8e');
 
-    // A window on the right wall. Night outside, because this room is mostly
-    // watched in the evening and a bright window would blow out the scene.
-    const wx = b.x + (c.x - b.x) * 0.55, wy = b.y + (c.y - b.y) * 0.55;
-    px(wx - 9, wy - 25, 18, 12, '#0a1226');
-    px(wx - 8, wy - 24, 16, 10, '#0d1b3a');
-    for (let i = 0; i < 5; i++)
-        px(wx - 7 + ((i * 7) % 15), wy - 22 + ((i * 5) % 8), 1, 1, '#7fd4ff');
-
-    // A whiteboard on the left wall, with something already on it.
-    const bx = a.x + (b.x - a.x) * 0.5, by = a.y + (b.y - a.y) * 0.5;
-    px(bx - 8, by - 26, 17, 12, '#2a2f55');
-    px(bx - 7, by - 25, 15, 10, '#cdd6f5');
-    px(bx - 5, by - 22, 9, 1, '#6a7299');
-    px(bx - 5, by - 19, 6, 1, '#6a7299');
-    px(bx - 5, by - 16, 11, 1, '#e08a5a');
+    // Props live in drawProps now. This function draws the ROOM itself:
+    // two planes, a corner and a skirting board. It used to hang a window
+    // and a whiteboard of its own, and once drawProps arrived the result
+    // was two of each a few pixels apart — invisible at thumbnail size,
+    // obvious the moment the picture was looked at properly.
 }
 
 /** The things that make it an office rather than a room with desks in it.
+ *
  *  Placed relative to the room, so they move out of the way instead of being
- *  sat on when a fifth agent connects and the desk block grows. */
+ *  sat on when a fifth agent connects and the desk block grows. None of it is
+ *  load-bearing information — it is here because four desks on an empty floor
+ *  read as a diagram, and the owner asked for somewhere people work.
+ */
 function drawProps() {
-    // A plant in the back corner.
-    const pl = iso(ROOM.C - 1, 0);
-    isoSolid(pl.x, pl.y + 6, 4, 2, 5, '#4a3a2a', '#2a2018', '#37291e');
-    px(pl.x - 4, pl.y - 2, 3, 5, '#3e7a4a');
-    px(pl.x + 1, pl.y - 4, 3, 7, '#4b9159');
-    px(pl.x - 1, pl.y - 6, 3, 8, '#43824f');
+    const A = iso(0, ROOM.R), B = iso(0, 0), C = iso(ROOM.C, 0);
 
-    // A rug at the front, where the owner stands. The room's empty half was
-    // reading as unfinished rather than as floor.
+    // ── on the left wall ────────────────────────────────────────────
+    // The room deliberately runs off the sides of the frame, so anything hung
+    // near the far end of a wall is hung off-screen. Every `t` below stays in
+    // the middle stretch of its wall, which is the part the viewer can see.
+    const onLeft = (t, h) => ({ x: A.x + (B.x - A.x) * t, y: A.y + (B.y - A.y) * t - h });
+    const onRight = (t, h) => ({ x: B.x + (C.x - B.x) * t, y: B.y + (C.y - B.y) * t - h });
+
+    // Whiteboard, with something half-erased on it.
+    let q = onLeft(0.60, 28);
+    px(q.x - 11, q.y, 23, 15, '#2a2f55');
+    px(q.x - 10, q.y + 1, 21, 13, '#cdd6f5');
+    px(q.x - 8, q.y + 4, 12, 1, '#6a7299');
+    px(q.x - 8, q.y + 7, 8, 1, '#6a7299');
+    px(q.x - 8, q.y + 10, 14, 1, '#e08a5a');
+    px(q.x + 6, q.y + 13, 4, 1, '#8b93b8');        // pen tray
+
+    // A poster.
+    q = onLeft(0.36, 24);
+    px(q.x - 7, q.y, 14, 18, '#1b2044');
+    px(q.x - 6, q.y + 1, 12, 16, '#3b2f6b');
+    px(q.x - 4, q.y + 4, 8, 1, '#ffb86c');
+    px(q.x - 4, q.y + 12, 8, 4, '#6cf0ff');
+    px(q.x - 2, q.y + 7, 4, 4, '#ffe27a');
+
+    // ── on the right wall ───────────────────────────────────────────
+    // The window. Night outside, because this room is mostly watched in the
+    // evening and a bright window would blow the whole picture out.
+    q = onRight(0.46, 30);
+    px(q.x - 14, q.y, 28, 18, '#0a1226');
+    px(q.x - 13, q.y + 1, 26, 16, '#0d1b3a');
+    for (let i = 0; i < 9; i++)
+        px(q.x - 11 + ((i * 11) % 24), q.y + 3 + ((i * 7) % 12), 1, 1, '#7fd4ff');
+    px(q.x - 1, q.y + 1, 1, 16, '#16224a');        // mullion
+    px(q.x - 13, q.y + 8, 26, 1, '#16224a');
+    px(q.x - 15, q.y + 17, 30, 2, '#2b3566');      // sill
+
+    // A clock, whose hands actually move.
+    q = onRight(0.64, 26);
+    px(q.x - 6, q.y - 1, 13, 13, '#8b93b8');
+    px(q.x - 5, q.y, 11, 11, '#e6ebff');
+    px(q.x - 4, q.y + 1, 9, 9, '#1b2044');
+    px(q.x, q.y + 1, 1, 1, '#8b93b8'); px(q.x, q.y + 9, 1, 1, '#8b93b8');
+    px(q.x - 4, q.y + 5, 1, 1, '#8b93b8'); px(q.x + 4, q.y + 5, 1, 1, '#8b93b8');
+    const mm = (Date.now() / 60000) % 60, hh = (Date.now() / 3600000) % 12;
+    const hand = (ang, len, col) => {
+        const a2 = (ang - 0.25) * Math.PI * 2;
+        px(q.x + Math.cos(a2) * len, q.y + 5 + Math.sin(a2) * len, 1, 1, col);
+    };
+    hand(mm / 60, 4, '#ffffff'); hand(hh / 12, 3, '#9aa3cc');
+
+    // A shelf with books.
+    q = onRight(0.28, 16);
+    px(q.x - 9, q.y + 10, 19, 2, '#3a3050');
+    const bc = ['#a8324f', '#2f7ea8', '#c9a227', '#3f7a4a', '#6b4fa8'];
+    for (let i = 0; i < 6; i++)
+        px(q.x - 8 + i * 3, q.y + 10 - (4 + (i * 3) % 4), 2, 4 + (i * 3) % 4, bc[i % bc.length]);
+
+    // ── on the floor ────────────────────────────────────────────────
+    // A plant in the back corner.
+    const pl = iso(ROOM.C - 1, 0.6);
+    isoSolid(pl.x, pl.y + 8, 5, 3, 6, '#5a4430', '#31241a', '#40301f');
+    px(pl.x - 5, pl.y - 1, 3, 7, '#3e7a4a');
+    px(pl.x + 2, pl.y - 4, 3, 10, '#4b9159');
+    px(pl.x - 1, pl.y - 7, 3, 12, '#43824f');
+    px(pl.x - 3, pl.y - 4, 2, 4, '#356b42');
+
+    // A water cooler by the other wall.
+    const wc = iso(0.6, ROOM.R - 1);
+    isoSolid(wc.x, wc.y + 6, 5, 3, 12, '#3a4270', '#20253f', '#2c3358');
+    px(wc.x - 4, wc.y - 10, 8, 8, '#6fd0e8');
+    px(wc.x - 3, wc.y - 9, 6, 6, '#9fe4f5');
+
+    // A rug where the owner stands, so the front of the room is floor rather
+    // than unfinished space.
     const r0 = bossSpot();
-    ctx.globalAlpha = 0.5;
-    ctx.fillStyle = '#2a2450';
+    ctx.globalAlpha = 0.55;
+    ctx.fillStyle = '#3a2d5e';
     ctx.beginPath();
-    ctx.moveTo(r0.x, r0.y + 4 - TILE_H);
-    ctx.lineTo(r0.x + TILE_W, r0.y + 4);
-    ctx.lineTo(r0.x, r0.y + 4 + TILE_H);
-    ctx.lineTo(r0.x - TILE_W, r0.y + 4);
-    ctx.closePath();
-    ctx.fill();
+    ctx.moveTo(r0.x, r0.y + 4 - TILE_H * 1.4);
+    ctx.lineTo(r0.x + TILE_W * 1.4, r0.y + 4);
+    ctx.lineTo(r0.x, r0.y + 4 + TILE_H * 1.4);
+    ctx.lineTo(r0.x - TILE_W * 1.4, r0.y + 4);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#4a3a76';
+    ctx.beginPath();
+    ctx.moveTo(r0.x, r0.y + 4 - TILE_H * 0.8);
+    ctx.lineTo(r0.x + TILE_W * 0.8, r0.y + 4);
+    ctx.lineTo(r0.x, r0.y + 4 + TILE_H * 0.8);
+    ctx.lineTo(r0.x - TILE_W * 0.8, r0.y + 4);
+    ctx.closePath(); ctx.fill();
+    ctx.globalAlpha = 1;
+}
+
+/** A soft dark diamond on the floor. Everything that stands in this room gets
+ *  one — without contact shadows an isometric scene is a set of cut-outs. */
+function castShadow(x, y, rx) {
+    ctx.globalAlpha = 0.30;
+    ctx.fillStyle = '#05060f';
+    ctx.beginPath();
+    ctx.moveTo(x, y - rx / 2);
+    ctx.lineTo(x + rx, y);
+    ctx.lineTo(x, y + rx / 2);
+    ctx.lineTo(x - rx, y);
+    ctx.closePath(); ctx.fill();
     ctx.globalAlpha = 1;
 }
 
@@ -326,10 +509,15 @@ function drawWorkstation(a) {
     const mx = x - 6, hx = x + 6;      // screen left, person right
     const mBase = deskTop(-6), hBase = deskTop(6);
 
+    castShadow(x, y + 14, 26);
+
     // Chair, then person, then the desk over them: seated is an overlap, not a
     // stacking order.
-    px(hx - 8, hBase - 3, 16, 3, off ? '#1a1d33' : '#242845');
-    if (!off) drawPerson(hx, hBase, c, a);
+    px(hx - 8, hBase - 3, 16, 4, off ? '#1a1d33' : '#242845');
+    px(hx - 8, hBase - 3, 16, 1, off ? '#22263f' : '#2f3455');
+    // Out of their chair: the desk is drawn empty and they are drawn on the
+    // floor further down, in front of everything.
+    if (!off && !VISITS.has(a.id)) drawPerson(hx, hBase, c, a);
 
     // The desk. Proportioned to the figure rather than the room — at 23 half-
     // widths it was a slab with a small person behind it, which is a diorama,
@@ -359,10 +547,38 @@ function drawWorkstation(a) {
         ctx.globalAlpha = 1;
     }
 
+    // Nameplate on the NEAR edge, facing the viewer. Its first home was the
+    // far-left corner, which is behind the monitor from here — a nameplate
+    // nobody can read is just a shape on a desk.
+    drawPlaque(x - 7, deskTop(-7) + 9, a.id, off ? '#5b6390' : c);
+
     // Keyboard, under the hands on the front of the lid.
-    px(hx - 6, hBase + 2, 12, 2, off ? '#242845' : '#2f3559');
-    // A mug, because an office has one and it costs four pixels.
-    if (!off) { px(x + 13, deskTop(13) - 3, 3, 3, '#d4695a'); px(x + 16, deskTop(13) - 2, 1, 1, '#d4695a'); }
+    px(hx - 6, hBase + 2, 12, 3, off ? '#242845' : '#2f3559');
+    px(hx - 6, hBase + 2, 12, 1, off ? '#2a2f4c' : '#3a4270');
+
+    // A desk lamp, which is where the warm light on the floor comes from.
+    const lx = x - 15, lb = deskTop(-15);
+    if (!off) {
+        LIGHTS.push({ x: lx, y: lb - 7, r: 46, c: [255, 182, 104], i: 0.55 });
+        if (lit) LIGHTS.push({ x: mx, y: mBase - 9, r: 34, c: hexToRgb(c), i: 0.42 });
+    }
+    px(lx, lb - 5, 2, 5, '#3a4270');
+    px(lx - 2, lb - 9, 5, 4, off ? '#2c3352' : '#5a6398');
+    if (!off) {
+        px(lx - 1, lb - 6, 3, 1, '#ffd79a');
+        ctx.globalAlpha = 0.5;
+        px(lx - 3, lb - 5, 7, 5, '#ffb86c');
+        ctx.globalAlpha = 1;
+    }
+
+    if (!off) {
+        // A mug and a couple of sheets of paper. Four pixels each, and they do
+        // more for "somebody works here" than another readout would.
+        px(x + 13, deskTop(13) - 3, 3, 3, '#d4695a');
+        px(x + 16, deskTop(13) - 2, 1, 1, '#d4695a');
+        px(x + 4, deskTop(4) + 4, 6, 3, '#cdd6f5');
+        px(x + 5, deskTop(5) + 3, 6, 3, '#e6ebff');
+    }
 }
 
 /** ── avatars ──────────────────────────────────────────────────────────
@@ -632,6 +848,80 @@ function liveEmote(a) {
     return e;
 }
 
+/**
+ * Somebody walking to another desk, standing there, and walking back.
+ *
+ * Three phases over the visit: out, talk, back. Eased so they slow down as
+ * they arrive — constant velocity reads as a sprite being dragged rather than
+ * as a person crossing a room.
+ */
+function drawWalker(a) {
+    const v = VISITS.get(a.id);
+    if (!v) return;
+    const from = DESKS.get(a.id), to = DESKS.get(v.to);
+    if (!from || !to) { VISITS.delete(a.id); return; }
+
+    const k = (performance.now() - v.t0) / v.dur;
+    if (k >= 1) { VISITS.delete(a.id); return; }
+
+    // Stand a little in FRONT of each desk rather than on it.
+    const A = { x: from.desk.x, y: from.desk.y + 16 };
+    const B = { x: to.desk.x, y: to.desk.y + 16 };
+
+    let p, walking, phase;
+    if (k < 0.3) { phase = k / 0.3; p = lerpPt(A, B, ease(phase)); walking = true; }
+    else if (k < 0.7) { p = B; walking = false; }
+    else { phase = (k - 0.7) / 0.3; p = lerpPt(B, A, ease(phase)); walking = true; }
+
+    castShadow(p.x, p.y + 1, 7);
+    drawStanding(p.x, p.y, a, walking, B.x < A.x);
+
+    // While they are over there, they are talking to whoever sits there.
+    if (!walking && !BUBBLES.some(b => b.agent === a.id))
+        BUBBLES.push({ agent: a.id, text: '…', color: agentColor(a.id), until: T + 90 });
+}
+
+const ease = (t) => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+const lerpPt = (A, B, t) => ({ x: A.x + (B.x - A.x) * t, y: A.y + (B.y - A.y) * t });
+
+/** The same character, on their feet. The seated sprite is a bust — it has no
+ *  legs, because a desk hides them; crossing a room needs the rest. */
+function drawStanding(x, yFloor, a, walking, facingLeft) {
+    const av = avatarOf(a);
+    const outfit = av.outfit;
+    const mid = shade(outfit, -0.12), dark = shade(outfit, -0.34), lite = shade(outfit, 0.10);
+    const skin = av.skin;
+    const step = walking ? ((T >> 2) % 4) : 0;      // 4-frame walk cycle
+    const lift = (step === 1 || step === 3) ? 1 : 0;
+
+    const top = yFloor - 30 - lift;
+    const sw = av.gender === 'f' ? 6 : av.gender === 'm' ? 8 : 7;
+
+    // Legs, alternating.
+    const la = step === 1 ? 2 : step === 3 ? -2 : 0;
+    px(x - 4 + la, yFloor - 9, 3, 9, dark);
+    px(x + 1 - la, yFloor - 9, 3, 9, shade(outfit, -0.42));
+    px(x - 4 + la, yFloor - 1, 4, 2, '#1d2138');
+    px(x + 1 - la, yFloor - 1, 4, 2, '#1d2138');
+
+    px(x - sw, top + 11, sw * 2, 10, mid);
+    px(x - sw, top + 11, sw * 2, 1, lite);
+    px(x - 2, top + 9, 5, 3, shade(skin, -0.18));
+
+    px(x - 5, top, 10, 10, skin);
+    px(x - 5, top, 10, 1, shade(skin, 0.09));
+    drawHair(x, top, av);
+    drawFace(x, top, liveEmote(a));
+    drawAccessory(x, top, av);
+
+    // Arms swing opposite the legs.
+    const aa = walking ? (step === 1 ? 2 : step === 3 ? -2 : 0) : 0;
+    px(x - sw - 3, top + 12 - aa, 3, 8, mid);
+    px(x - sw - 3, top + 20 - aa, 3, 3, skin);
+    px(x + sw, top + 12 + aa, 3, 8, mid);
+    px(x + sw, top + 20 + aa, 3, 3, skin);
+}
+
 /** The owner, standing in the middle of the room. Not at a desk, on purpose —
  *  the boss walks in, says the thing, and everyone else is still sitting. */
 function bossSpot() {
@@ -675,13 +965,61 @@ function drawPackets() {
     }
 }
 
+function hexToRgb(h) {
+    if (!h || h[0] !== '#') return [140, 190, 255];
+    const n = parseInt(h.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+/**
+ * Blit the scene up, then light it.
+ *
+ * Every step here is at DEVICE resolution, which is the whole point — a glow
+ * drawn on the logical canvas would be a staircase of chunky rings, and the
+ * first version of this room had exactly that.
+ */
+function present() {
+    const W = cv.width, H = cv.height;
+    vctx.imageSmoothingEnabled = false;
+    vctx.drawImage(scene, 0, 0, W, H);
+
+    // Bloom. `lighter` so overlapping lamps build up rather than flatten each
+    // other, and a soft radial falloff so the pixels underneath stay readable
+    // through it instead of being washed out.
+    vctx.globalCompositeOperation = 'lighter';
+    for (const L of LIGHTS) {
+        const cx = L.x * SCALE, cy = L.y * SCALE, r = L.r * SCALE;
+        const g = vctx.createRadialGradient(cx, cy, 1, cx, cy, r);
+        const [R, G, B] = L.c;
+        g.addColorStop(0, `rgba(${R},${G},${B},${L.i})`);
+        g.addColorStop(0.35, `rgba(${R},${G},${B},${L.i * 0.28})`);
+        g.addColorStop(1, `rgba(${R},${G},${B},0)`);
+        vctx.fillStyle = g;
+        vctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+    }
+    vctx.globalCompositeOperation = 'source-over';
+
+    // A vignette, and a cool grade in the corners. This is what stops a flat
+    // field of navy reading as flat: the eye needs somewhere darker to judge
+    // the lit parts against.
+    const vg = vctx.createRadialGradient(W / 2, H * 0.46, Math.min(W, H) * 0.32,
+                                         W / 2, H * 0.46, Math.max(W, H) * 0.78);
+    vg.addColorStop(0, 'rgba(0,0,0,0)');
+    vg.addColorStop(0.6, 'rgba(4,5,14,0.30)');
+    vg.addColorStop(1, 'rgba(3,4,11,0.80)');
+    vctx.fillStyle = vg;
+    vctx.fillRect(0, 0, W, H);
+}
+
 /** A faint CRT banding over the whole room. Cheap, and it ties the procedural
  *  sprites together into one picture instead of a set of drawings. */
 function scanlines() {
-    ctx.globalAlpha = 0.06;
-    ctx.fillStyle = '#000';
-    for (let y = 0; y < CH; y += 2) ctx.fillRect(0, y, CW, 1);
-    ctx.globalAlpha = 1;
+    // Drawn on the PRESENTED image at device resolution: one-logical-pixel
+    // bands would be SCALE pixels thick on screen and read as blinds.
+    vctx.globalAlpha = 0.05;
+    vctx.fillStyle = '#000';
+    for (let y = 0; y < cv.height; y += 3) vctx.fillRect(0, y, cv.width, 1);
+    vctx.globalAlpha = 1;
 }
 
 function shade(hex, k) {
@@ -695,7 +1033,7 @@ function shade(hex, k) {
 
 function drawOverlay() {
     const r = cv.getBoundingClientRect();
-    const sx = r.width / CW, sy = r.height / CH;
+    const sx = r.width / CW, sy = r.height / CH;   // CSS px per logical px
     const html = [];
 
     for (const a of AGENTS) {
@@ -892,8 +1230,13 @@ function apply(p) {
             } else {
                 BUBBLES.push({ agent: m.from, text: firstLine(m.body), color: c, until: T + 240 });
             }
-            if (DESKS.has(m.from) && DESKS.has(m.to))
+            if (DESKS.has(m.from) && DESKS.has(m.to)) {
                 PACKETS.push({ from: m.from, to: m.to, color: c, t0: performance.now(), ms: 900 });
+                // One visit at a time per agent, and never to your own desk.
+                const sender = AGENTS.find(x => x.id === m.from);
+                if (m.from !== m.to && sender && sender.state !== 'offline' && !VISITS.has(m.from))
+                    VISITS.set(m.from, { to: m.to, t0: performance.now(), dur: 9000 });
+            }
         }
     }
     PRIMED = true;
@@ -987,6 +1330,12 @@ function demo() {
           emote: em('tired', 'none', 'none') },
         { id: 'gemini', label: 'Gemini', state: 'offline', lastTool: '', pending: 1,
           avatar: { gender: 'f', hair: 'bun', hairColor: '#c9a227', skin: '#f6d9bd', accessory: 'none' } },
+        // The two BRIDGES. They never write presence — the brain calls out to
+        // them — so in the real room their seats come from mcp-bridges.json.
+        { id: 'unity', label: 'Unity', state: 'idle', lastTool: 'manage_scene', pending: 0, bridge: true,
+          avatar: { gender: 'm', hair: 'buzz', hairColor: '#2b2430', skin: '#f6d9bd', accessory: 'visor', outfit: '#c9ccd6' } },
+        { id: 'unreal', label: 'Unreal', state: 'working', lastTool: 'call_tool', pending: 0, bridge: true,
+          avatar: { gender: 'nb', hair: 'short', hairColor: '#d8d8e0', skin: '#8d5524', accessory: 'cap', outfit: '#3a3f55' } },
     ];
     const mk = (i, from, to, body, extra) => ({
         id: 'd' + i, at: now - (9 - i) * 60000,
@@ -1023,7 +1372,9 @@ function demo() {
 
 function frame() {
     T++;
-    drawRoom();
+    drawRoom();     // sprites, onto the logical canvas
+    present();      // blitted up, then lit, at device resolution
+    scanlines();
     drawOverlay();
     requestAnimationFrame(frame);
 }
