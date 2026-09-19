@@ -251,15 +251,35 @@ internal static partial class Program
                     continue;
 
                 case SessionVerdict.Parked:
-                    // A live session that has gone quiet: Claude Code between
-                    // turns. Its Stop hook already fired and found nothing, or
-                    // fired once and spent its one continuation. Cheapest
-                    // correct nudge is a bus message, which the piggyback puts
-                    // in front of it the instant anything touches a tool —
-                    // and, failing that, its next Stop hook wakes on.
-                    if (dryRun) { BrokerLog($"{agent}: would nudge parked session ({Describe(work)})"); continue; }
-                    NudgeParkedSession(agent, work);
-                    continue;
+                    // A live session that has gone quiet. A bus message is the
+                    // cheapest thing to try: the piggyback puts it in front of
+                    // the session the instant anything touches a tool.
+                    //
+                    // But it is only a TRY, and the difference matters. A
+                    // nudge reaches a parked agent through the piggyback (which
+                    // needs a tool call), its Stop hook (which needs a turn to
+                    // end) or SessionStart (which needs a new session) — and a
+                    // session parked at a prompt does none of the three. The
+                    // harness owns stdin; nothing here can make it read.
+                    //
+                    // Measured on the live vault: codex heartbeating every few
+                    // seconds with `calls` frozen at 30 and five messages
+                    // behind it, the oldest three days old. The nudge landed
+                    // in a box nothing was going to open.
+                    //
+                    // So a nudge that has not been answered becomes a spawn. A
+                    // headless run is a NEW session with its own identity, and
+                    // the work label is what keeps it off the parked session's
+                    // other mail.
+                    if (work.OldestHours * 60 < cfg.ParkedSpawnAfterMinutes)
+                    {
+                        if (dryRun) { BrokerLog($"{agent}: would nudge parked session ({Describe(work)})"); continue; }
+                        NudgeParkedSession(agent, work);
+                        continue;
+                    }
+
+                    BrokerLog($"{agent}: parked and unresponsive with {Describe(work)} — a nudge cannot reach it, spawning");
+                    goto case SessionVerdict.Absent;
 
                 case SessionVerdict.Absent:
                     if (!cfg.Runners.TryGetValue(agent, out var runner))
@@ -290,7 +310,25 @@ internal static partial class Program
                         continue;
                     }
 
-                    if (dryRun) { BrokerLog($"{agent}: would spawn {runner.Exe} ({Describe(work)})"); continue; }
+                    // Where the work LIVES is not guessable, and guessing it
+                    // is the expensive kind of wrong: a headless agent pointed
+                    // at the wrong repo does real work in the wrong place. The
+                    // runner's cwd is a default for unlabelled work only.
+                    var unmapped = work.Works.Where(w => !cfg.WorkDirs.ContainsKey(w)).ToList();
+                    if (unmapped.Count > 0)
+                    {
+                        await EscalateAsync(cfg, new BrokerDecision(
+                            Id: "workdir-" + unmapped[0],
+                            Agent: agent,
+                            Work: unmapped[0],
+                            Question: $"'{agent}' has work labelled '{unmapped[0]}' waiting ({Describe(work)}) and no session to do it in. "
+                                    + $"Which folder should it run in? Right now it would default to {runner.Cwd}, which is probably wrong. "
+                                    + "Add it under \"workDirs\" in runners.json.",
+                            Options: new[] { $"use {runner.Cwd} anyway", "I will add it to runners.json" })).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    if (dryRun) { BrokerLog($"{agent}: would spawn {runner.Exe} in {WorkDirFor(cfg, runner, work)} ({Describe(work)})"); continue; }
                     SpawnRunner(cfg, agent, runner, work, live, state);
                     continue;
             }
@@ -457,7 +495,7 @@ internal static partial class Program
             CreateNoWindow = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            WorkingDirectory = Directory.Exists(runner.Cwd) ? runner.Cwd : _vaultPath,
+            WorkingDirectory = WorkDirFor(cfg, runner, work),
         };
 
         // ArgumentList, never a joined string. The runner's own arguments come
@@ -506,6 +544,18 @@ internal static partial class Program
             BrokerLog($"{agent}: spawned {Path.GetFileName(exe)} pid {p.Id} for {Describe(work)} · log {Path.GetFileName(log)}");
         }
         catch (Exception ex) { BrokerLog($"{agent}: spawn failed — {Redact(ex.Message)}"); }
+    }
+
+    /// <summary>
+    /// The folder a run happens in: the one mapped to this work label, else
+    /// the runner's default, else the vault. Labelled work whose folder is
+    /// unknown never reaches here — BrokerTick asks the owner instead.
+    /// </summary>
+    private static string WorkDirFor(BrokerConfig cfg, RunnerSpec runner, WaitingWork work)
+    {
+        foreach (var w in work.Works)
+            if (cfg.WorkDirs.TryGetValue(w, out var dir) && Directory.Exists(dir)) return dir;
+        return Directory.Exists(runner.Cwd) ? runner.Cwd : _vaultPath;
     }
 
     /// <summary>
@@ -892,6 +942,16 @@ internal static partial class Program
         /// working day unread.
         /// </summary>
         public int StaleMailMinutes { get; init; } = 10;
+
+        /// <summary>
+        /// How long a parked agent is given to answer a nudge before the
+        /// broker stops believing it can. Generous, because a spawn costs real
+        /// money and a session that IS about to look is the cheaper outcome.
+        /// </summary>
+        public int ParkedSpawnAfterMinutes { get; init; } = 20;
+
+        /// <summary>Work label to the folder that work lives in.</summary>
+        public Dictionary<string, string> WorkDirs { get; init; } = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, RunnerSpec> Runners { get; init; } = new(StringComparer.OrdinalIgnoreCase);
         public JObject Escalation { get; init; } = new();
     }
@@ -930,6 +990,15 @@ internal static partial class Program
                 };
             }
 
+        var workDirs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (o["workDirs"] is JObject wd)
+            foreach (var (k, v) in wd)
+            {
+                if (k.StartsWith("//", StringComparison.Ordinal)) continue;
+                var dir = Environment.ExpandEnvironmentVariables(v?.ToString() ?? "");
+                if (dir.Length > 0) workDirs[k] = dir;
+            }
+
         var b = o["budget"] as JObject ?? new JObject();
         return new BrokerConfig
         {
@@ -939,6 +1008,8 @@ internal static partial class Program
             MaxHopsPerWork = Math.Max(1, b["maxHopsPerWork"]?.ToObject<int?>() ?? 12),
             MaxSpawnsPerHour = Math.Max(1, b["maxSpawnsPerHour"]?.ToObject<int?>() ?? 20),
             StaleMailMinutes = Math.Max(1, o["staleMailMinutes"]?.ToObject<int?>() ?? 10),
+            ParkedSpawnAfterMinutes = Math.Max(1, o["parkedSpawnAfterMinutes"]?.ToObject<int?>() ?? 20),
+            WorkDirs = workDirs,
             Runners = runners,
             Escalation = o["escalation"] as JObject ?? new JObject(),
         };
@@ -959,6 +1030,12 @@ internal static partial class Program
   "pollSeconds": 15,
   "idleGraceSeconds": 45,
   "staleMailMinutes": 10,
+  "//parkedSpawnAfterMinutes": "A parked session cannot be pushed to - the harness owns stdin. After this long, stop nudging and spawn a fresh headless run instead.",
+  "parkedSpawnAfterMinutes": 20,
+
+  "//workDirs": "Which folder each work label lives in. Unmapped labels are NEVER guessed - the broker asks you instead, because a headless agent in the wrong repo does real work in the wrong place.",
+  "workDirs": {},
+
   "budget": { "maxRunSeconds": 900, "maxHopsPerWork": 12, "maxSpawnsPerHour": 20 },
 
   "//escalation": "Where a question for the OWNER goes. Telegram token is read from the BRAINX_TELEGRAM_TOKEN env var if left blank here.",
