@@ -124,6 +124,14 @@ internal static partial class Program
             try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
             return await RunBroker(args.Skip(1).ToArray()).ConfigureAwait(false);
         }
+        // Installing/inspecting the Windows Service that hosts the broker when
+        // the app is closed. Kept as its own verb rather than a flag on
+        // `broker`, because install needs elevation and the others do not.
+        if (args.Length > 0 && args[0].Equals("broker-service", StringComparison.OrdinalIgnoreCase))
+        {
+            try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
+            return await RunBrokerServiceCommand(args).ConfigureAwait(false);
+        }
         if (args.Length > 0 && args[0].Equals("reap", StringComparison.OrdinalIgnoreCase))
         {
             try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
@@ -883,6 +891,67 @@ internal static partial class Program
                         ["seconds"] = new JObject { ["type"] = "integer", ["default"] = 6, ["description"] = "how long it shows, 2-30" }
                     }
                 }),
+            // ── The cowork room: a lane of its own, deliberately NOT mail ──
+            // Owner (2026-09-20): "ให้คำสั่งที่ผ่านระบบ cowork ไม่ไปปะปนกับระบบแชทเดิมเลย
+            // ไม่ต้องส่งเมลไป ... เป็นคนละเลนไปเลย". A session hears the room only
+            // after it joins, which is what keeps an unrelated chat quiet.
+            Tool("cowork_join",
+                "TAKE A SEAT in the owner's cowork room — the office where the owner types and every " +
+                "agent working with them can hear it. Call this when you start working on something the " +
+                "owner is watching, or when they tell you to go into the room. Until you join, nothing " +
+                "said there ever reaches you: this lane is separate from agent_send/agent_inbox on purpose, " +
+                "so a session doing unrelated work is never interrupted by office chatter. Once in, the " +
+                "owner's lines arrive as a `cowork` notice on your next tool response.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["work"] = new JObject { ["type"] = "string", ["description"] = "what you are in the room for, e.g. 'office-avatars' — shown on your seat so the owner knows which job you are on" },
+                        ["display"] = new JObject { ["type"] = "string", ["description"] = "the name on your seat, if not your agent id" },
+                        ["catch_up"] = new JObject { ["type"] = "integer", ["default"] = 12, ["description"] = "how many recent lines to hand you on the way in (0-100). You start listening from NOW — these are for context only." }
+                    }
+                }),
+            Tool("cowork_read",
+                "Read what has been said in the cowork room since you last looked. Nothing is consumed — " +
+                "a room is a wall everyone reads, not mail, so two sessions in the room both hear the " +
+                "owner. Pass wait_seconds to hold the door open (max 10), or history:true to re-read the " +
+                "recent transcript from the start. You rarely need to poll: while you are in the room, " +
+                "every other tool response carries a `cowork` notice when there is something new.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["wait_seconds"] = new JObject { ["type"] = "integer", ["default"] = 0, ["description"] = "0 = return immediately; N>0 = block up to N seconds waiting for someone to speak (server clamps to 10)" },
+                        ["limit"] = new JObject { ["type"] = "integer", ["default"] = 30, ["description"] = "max lines per call (1-100)" },
+                        ["history"] = new JObject { ["type"] = "boolean", ["default"] = false, ["description"] = "true = the last N lines whether or not you have seen them; false = only what is new to you" }
+                    }
+                }),
+            Tool("cowork_say",
+                "SAY something in the cowork room — the owner sees it in their office window, and so does " +
+                "every other agent in the room. This is how you report progress, ask the room a question, " +
+                "or hand over a file while the owner is watching: attachments are copied into the room and " +
+                "shown inline. Use this INSTEAD of agent_send for anything that belongs to work the owner " +
+                "is watching; the owner keeps the two lanes apart so their other sessions stay quiet.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["message"] = new JObject { ["type"] = "string", ["description"] = "what the room hears (markdown ok, ≤64KB)" },
+                        ["to"] = new JObject { ["type"] = "string", ["description"] = "optional: who this line is aimed at ('codex', 'owner'). Everyone still sees it — this only says who should act." },
+                        ["attachments"] = new JObject { ["type"] = "array", ["items"] = new JObject { ["type"] = "string" }, ["description"] = "absolute paths to files to hand over. They are COPIED into the room, so they survive your temp directory." },
+                        ["topic"] = new JObject { ["type"] = "string", ["description"] = "optional short thread label" },
+                        ["work"] = new JObject { ["type"] = "string", ["description"] = "which job this belongs to" }
+                    },
+                    ["required"] = new JArray { "message" }
+                }),
+            Tool("cowork_leave",
+                "Leave the cowork room. Use it when you finish the work you came in for — after this, " +
+                "nothing said in the room reaches this session until you join again. Leaving is not " +
+                "disconnecting: your desk stays in the office while your brainx-mcp process is alive.",
+                new JObject { ["type"] = "object", ["properties"] = new JObject() }),
             Tool("agent_activity",
                 "What the other agents have actually been DOING — a live feed of every tool call they served, " +
                 "newest last, with a one-line summary of each. agent_peers says who is online and this says what " +
@@ -1516,6 +1585,10 @@ internal static partial class Program
                 "agent_ask_user"            => AgentAskUser(args),
                 "agent_avatar"              => AgentAvatar(args),
                 "agent_emote"               => AgentEmote(args),
+                "cowork_join"               => CoworkJoin(args),
+                "cowork_read"               => CoworkRead(args),
+                "cowork_say"                => CoworkSay(args),
+                "cowork_leave"              => CoworkLeave(),
                 "bridge_status"             => McpBridgeHub.StatusJson(),
                 _ => throw new InvalidOperationException($"unknown tool: {name}")
             };
@@ -1561,6 +1634,17 @@ internal static partial class Program
                 {
                     ["type"] = "text",
                     ["text"] = new JObject { ["taskQueue"] = taskNotice }.ToString(Formatting.Indented)
+                });
+
+            // The cowork room, which is a LANE OF ITS OWN: this block appears
+            // only for a session that joined the room, so a session working on
+            // something else never hears the office at all.
+            var coworkNotice = TryBuildCoworkNotice(name);
+            if (coworkNotice != null)
+                content.Add(new JObject
+                {
+                    ["type"] = "text",
+                    ["text"] = new JObject { ["cowork"] = coworkNotice }.ToString(Formatting.Indented)
                 });
 
             return BuildResult(id, new JObject { ["content"] = content });
@@ -1634,6 +1718,14 @@ internal static partial class Program
                 {
                     ["type"] = "text",
                     ["text"] = new JObject { ["taskQueue"] = taskNotice }.ToString(Formatting.Indented)
+                });
+
+            var coworkNotice = TryBuildCoworkNotice(name);
+            if (coworkNotice != null)
+                content.Add(new JObject
+                {
+                    ["type"] = "text",
+                    ["text"] = new JObject { ["cowork"] = coworkNotice }.ToString(Formatting.Indented)
                 });
 
             return BuildResult(id, envelope);

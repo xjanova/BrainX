@@ -74,6 +74,28 @@ internal static partial class Program
         var sb = new StringBuilder(
             "BrainX broker: work is queued for you on this brain and nobody is driving this session. ");
 
+        // The room first, when the room is why this session exists. An order
+        // the owner typed into the office outranks queued mail, and a spawn
+        // sent looking for mail that does not exist finds an empty inbox and
+        // exits — the same no-progress loop the labelled-mail bug caused.
+        if (work.Room > 0)
+        {
+            sb.Append("THE OWNER SPOKE IN THE COWORK ROOM and nobody was in it. That is your user talking. ")
+              .Append("Call cowork_join {work:'...'} FIRST, then cowork_read, do what was asked, and report back ")
+              .Append("with cowork_say — in the room, not by mail. The owner is watching that window. ")
+              .Append("cowork_leave when the work is done. ");
+        }
+
+        if (work.Mail == 0 && work.Tasks == 0 && work.Room > 0)
+        {
+            // Nothing else is waiting: do not send it hunting through an empty
+            // inbox and an empty queue, which reads as "no work" and ends the
+            // run before it has looked at the only thing there is.
+            sb.Append("There is no mail and no queued task — the room is the whole job. ");
+            sb.Append(HeadlessNote());
+            return sb.ToString();
+        }
+
         if (work.Works.Count > 0)
         {
             // Named explicitly, one call per label. An agent told only that
@@ -96,17 +118,41 @@ internal static partial class Program
         // jobs were specced as "open the ChatGPT conversation at this link",
         // and both burned a whole run discovering `apps=[], browsers=[]`
         // before stopping to ask. One sentence here saves that every time.
-        sb.Append("You are running HEADLESS: no browser, no GUI, no logged-in web session, ")
-          .Append("and no access to the owner's screen. If the work names a web page or a chat ")
-          .Append("conversation to open, you cannot reach it — say so and use a tool you do have, ")
-          .Append("or ask the owner once with agent_ask_user. Do not spend the run finding out. ")
-          .Append("Also call task_queue. Read what is waiting and do it. ")
+        sb.Append("Also call task_queue. Read what is waiting and do it. ")
           .Append("Close the loop with task_update, and reply to whoever wrote to you with agent_send ")
           .Append("KEEPING THE SAME work label, or your answer is invisible to them for the same reason. ")
           .Append("Do not stop while work you can do is still open. ")
-          .Append("If a choice needs the OWNER (not a peer) - scope, money, anything destructive, or two ")
-          .Append("defensible options - call agent_ask_user instead of guessing, then stop.");
+          .Append(HeadlessNote());
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// What every spawned run needs to know about itself, mail or not.
+    ///
+    /// A broker-spawned run has no browser, no GUI and none of the owner's
+    /// logged-in sessions — and nothing told it so. Two separate artwork jobs
+    /// were specced as "open the ChatGPT conversation at this link", and both
+    /// burned a whole run discovering `apps=[], browsers=[]` before stopping
+    /// to ask. One sentence here saves that every time.
+    /// </summary>
+    private static string HeadlessNote() =>
+        "You are running HEADLESS: no browser, no GUI, no logged-in web session, and no access to the "
+      + "owner's screen. If the work names a web page or a chat conversation to open, you cannot reach it "
+      + "— say so and use a tool you do have, or ask the owner once with agent_ask_user. Do not spend the "
+      + "run finding out. If a choice needs the OWNER (not a peer) - scope, money, anything destructive, "
+      + "or two defensible options - call agent_ask_user instead of guessing, then stop.";
+
+    /// <summary>
+    /// A stable, filename-safe key for one vault path, for the single-instance
+    /// mutex. Case-insensitive and trailing-slash-insensitive, because
+    /// "G:\Obsidian" and "g:\obsidian\" are the same vault and two brokers
+    /// started from those two spellings would not see each other.
+    /// </summary>
+    private static string VaultKeyHash(string vault)
+    {
+        var norm = (vault ?? "").TrimEnd('\\', '/').ToLowerInvariant();
+        var bytes = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(norm));
+        return Convert.ToHexString(bytes)[..16].ToLowerInvariant();
     }
 
     /// <summary>One work-scoped inbox call, written the way an agent types it.</summary>
@@ -143,6 +189,74 @@ internal static partial class Program
         var once = args.Any(a => a.Equals("--once", StringComparison.OrdinalIgnoreCase));
         var dryRun = args.Any(a => a.Equals("--dry-run", StringComparison.OrdinalIgnoreCase));
 
+        // ONE broker per vault, enforced here rather than by whoever starts it.
+        //
+        // Two brokers on the same vault is not a tidiness problem: both read
+        // the same queue, both decide the same agent has work, and both spawn
+        // it — two headless runs consuming one consume-on-read inbox, which is
+        // the exact race the bus was built to avoid. It became reachable the
+        // moment the client started hosting the broker itself, because a
+        // Scheduled Task left enabled from before is a second starter nobody
+        // remembers. A named mutex is the only check that holds across
+        // processes, schedulers and reboots.
+        //
+        // `--once` and `--dry-run` are exempt: they are how a person inspects a
+        // vault that already has a broker running, and refusing them would make
+        // the supervised case impossible to debug.
+        // `--service` hands over to the Windows Service host, which owns the
+        // lifetime from there (see Program.BrokerService.cs).
+        if (args.Any(a => a.Equals("--service", StringComparison.OrdinalIgnoreCase)))
+            return await RunBrokerServiceHost().ConfigureAwait(false);
+
+        Mutex? solo = null;
+        if (!once && !dryRun)
+        {
+            solo = new Mutex(initiallyOwned: false, name: BrokerMutexName(_vaultPath));
+            // WaitOne(0) rather than `initiallyOwned: true, out mine`, because
+            // the service host WAITS on this same mutex to take over when the
+            // app releases it. An owner that never releases makes the handover
+            // impossible; this shape both tests and releases.
+            if (!solo.WaitOne(TimeSpan.Zero))
+            {
+                BrokerLog("another broker is already running on this vault — exiting");
+                Console.Error.WriteLine("broker: already running for this vault.");
+                solo.Dispose();
+                return 3;   // distinct from a failure: the job IS being done
+            }
+        }
+
+        using var stopping = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, e) => { e.Cancel = true; stopping.Cancel(); };
+
+        try
+        {
+            return await BrokerRunLoop(once, dryRun, stopping.Token).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (solo != null)
+            {
+                try { solo.ReleaseMutex(); } catch { /* never owned it */ }
+                solo.Dispose();
+            }
+        }
+    }
+
+    /// <summary>The mutex that means "one broker per vault". Shared by the CLI,
+    /// the app-hosted broker and the Windows Service — all three of which can
+    /// be started independently by three different things.</summary>
+    internal static string BrokerMutexName(string vault) =>
+        "Global\\BrainXBroker-" + VaultKeyHash(vault);
+
+    /// <summary>
+    /// The loop itself, with the lifetime owned by the caller.
+    ///
+    /// Split out so the CLI (Ctrl-C), the app (process kill) and the Windows
+    /// Service (SCM stop) can each end it their own way without three copies
+    /// of the tick, the supervision and the cleanup.
+    /// </summary>
+    internal static async Task<int> BrokerRunLoop(bool once, bool dryRun, CancellationToken ct)
+    {
         Directory.CreateDirectory(BrokerDir);
         var cfg = LoadBrokerConfig();
 
@@ -154,9 +268,8 @@ internal static partial class Program
         // watching them. A spawned agent is a process with write access; it
         // must not outlive the thing that is supposed to be supervising it.
         var live = new Dictionary<string, BrokerRun>(StringComparer.OrdinalIgnoreCase);
-        using var stopping = new CancellationTokenSource();
-        Console.CancelKeyPress += (_, e) => { e.Cancel = true; stopping.Cancel(); };
-        AppDomain.CurrentDomain.ProcessExit += (_, _) => KillAll(live);
+        void OnExit(object? s, EventArgs e) => KillAll(live);
+        AppDomain.CurrentDomain.ProcessExit += OnExit;
 
         try
         {
@@ -166,14 +279,18 @@ internal static partial class Program
                 catch (Exception ex) { BrokerLog("tick failed: " + Redact(ex.Message)); }
 
                 if (once) { await SuperviseToCompletion(cfg, live).ConfigureAwait(false); break; }
-                try { await Task.Delay(TimeSpan.FromSeconds(cfg.PollSeconds), stopping.Token).ConfigureAwait(false); }
+                try { await Task.Delay(TimeSpan.FromSeconds(cfg.PollSeconds), ct).ConfigureAwait(false); }
                 catch (OperationCanceledException) { break; }
-            } while (!stopping.IsCancellationRequested);
+            } while (!ct.IsCancellationRequested);
         }
         // Whatever this broker started, it takes with it. A spawned agent has
         // write access to the owner's repos and must never outlive the thing
         // supervising it.
-        finally { KillAll(live); }
+        finally
+        {
+            AppDomain.CurrentDomain.ProcessExit -= OnExit;
+            KillAll(live);
+        }
 
         BrokerLog("broker down");
         return 0;
@@ -300,7 +417,15 @@ internal static partial class Program
         ReapFinishedRuns(cfg, live);
         DrainBrokerInbox();
 
-        foreach (var agent in AgentsWithWaitingWork())
+        // The cowork room, read once per tick. `onCall` runners are the
+        // fallback when the owner gives an order to an empty room; a line
+        // addressed to somebody, or said while people are sitting in there,
+        // never reaches them.
+        var coworkCalls = CoworkCallsWaiting(
+            cfg.Runners.Where(r => r.Value.OnCall).Select(r => r.Key));
+        var coworkHandled = false;
+
+        foreach (var agent in AgentsWithWaitingWork(coworkCalls.Keys))
         {
             // A run is still going: that IS the session. Spawning a second
             // one would have two agents consuming the same consume-on-read
@@ -311,7 +436,9 @@ internal static partial class Program
             if (AdoptOrClearOrphanRun(cfg, agent)) continue;
 
             var work = WaitingWorkFor(agent);
-            if (work.Mail == 0 && work.Tasks == 0) continue;
+            if (coworkCalls.TryGetValue(agent, out var called) && called > work.Room)
+                work = work with { Room = called };
+            if (work.Mail == 0 && work.Tasks == 0 && work.Room == 0) continue;
 
             // Work that is parked on the OWNER does not wake anybody. Asking
             // twice is worse than not asking: the second spawn cannot see the
@@ -356,6 +483,23 @@ internal static partial class Program
             switch (verdict)
             {
                 case SessionVerdict.Working:
+                    // A room order for a session that is NOT in the room does
+                    // not reach it, and must not be made to. The cowork notice
+                    // is delivered to members only — that is the separation the
+                    // owner asked for, and leaning on the piggyback here would
+                    // interrupt a session working on something else with an
+                    // order that was never addressed to it.
+                    //
+                    // So the room gets its own session instead of borrowing
+                    // somebody's. A spawn is a NEW session with its own
+                    // identity: the running one keeps its work, the room gets
+                    // somebody who joined it on purpose.
+                    if (work.Room > 0 && CoworkUnreadFor(agent) == 0)
+                    {
+                        BrokerLog($"{agent}: called into the cowork room but this session never joined it — spawning one that will");
+                        goto case SessionVerdict.Absent;
+                    }
+
                     // Tool calls are still landing, so the piggyback will put
                     // anything new in front of this session on its own. That
                     // reasoning holds for mail that ARRIVED while it was
@@ -387,6 +531,18 @@ internal static partial class Program
                     continue;
 
                 case SessionVerdict.Parked:
+                    // A room order never becomes mail. NudgeParkedSession
+                    // delivers a bus message, and a bus message is the lane the
+                    // owner separated the room from — nudging here would put
+                    // the office back into everybody's inbox through the side
+                    // door. When the room is the only thing waiting, the answer
+                    // is a session that joins the room.
+                    if (work.Mail == 0 && work.Tasks == 0 && work.Room > 0)
+                    {
+                        BrokerLog($"{agent}: parked, and the only thing waiting is the cowork room — spawning rather than mailing");
+                        goto case SessionVerdict.Absent;
+                    }
+
                     // A live session that has gone quiet. A bus message is the
                     // cheapest thing to try: the piggyback puts it in front of
                     // the session the instant anything touches a tool.
@@ -466,8 +622,33 @@ internal static partial class Program
 
                     if (dryRun) { BrokerLog($"{agent}: would spawn {runner.Exe} in {WorkDirFor(cfg, runner, work)} ({Describe(work)})"); continue; }
                     SpawnRunner(cfg, agent, runner, work, live, state);
+                    if (work.Room > 0)
+                    {
+                        // Say it IN THE ROOM. The owner is looking at the room
+                        // — that is where they typed — so "somebody is coming"
+                        // belongs there and not only in the broker's log.
+                        CoworkSystemLine($"เรียก {agent} เข้ามาทำงานให้แล้ว (ยังไม่มีใครอยู่ในห้องตอนที่สั่ง)");
+                        coworkHandled = true;
+                    }
                     continue;
             }
+        }
+
+        // An order nobody could be called for must not sit silent. Saying so in
+        // the room is the honest report — the owner watches the room, and
+        // "ฟังอยู่ 0" plus silence is indistinguishable from a broken bus.
+        // The cursor moves either way, so this is said once per order rather
+        // than once every fifteen seconds.
+        if (coworkCalls.Count > 0 || CoworkCallsWaiting().Count > 0)
+        {
+            if (!coworkHandled && !dryRun)
+            {
+                var named = coworkCalls.Keys.ToList();
+                CoworkSystemLine(named.Count == 0
+                    ? "ไม่มีใครอยู่ในห้อง และไม่มี runner ที่ตั้ง onCall ไว้ใน runners.json — คำสั่งนี้ยังไม่มีใครรับ"
+                    : $"ยังเรียก {string.Join(", ", named)} เข้ามาไม่ได้ (session กำลังทำงานอยู่ หรือชนเพดานงบ) — ดู broker log");
+            }
+            if (!dryRun) CoworkMarkCalled();
         }
 
         await PumpDecisionsAsync(cfg).ConfigureAwait(false);
@@ -1051,14 +1232,22 @@ internal static partial class Program
 
     // ───────────── what is waiting ─────────────
 
+    /// <summary>
+    /// <c>Room</c> is the cowork room: lines the owner said that this agent has
+    /// not been called for. It counts as work for the same reason mail does —
+    /// somebody asked for something and nothing is running to do it — but it
+    /// is a SEPARATE number because the answer goes back to a different place.
+    /// Mail is answered with agent_send; the room is answered in the room.
+    /// </summary>
     private readonly record struct WaitingWork(
-        int Mail, int Tasks, IReadOnlyList<string> Works, double OldestHours);
+        int Mail, int Tasks, IReadOnlyList<string> Works, double OldestHours, int Room = 0);
 
     private static string Describe(WaitingWork w)
     {
         var parts = new List<string>();
         if (w.Mail > 0) parts.Add($"{w.Mail} message(s)");
         if (w.Tasks > 0) parts.Add($"{w.Tasks} task(s)");
+        if (w.Room > 0) parts.Add($"{w.Room} cowork line(s)");
         if (parts.Count == 0) return "nothing";
         // The label belongs in the description, not in a detail view: a log
         // line reading "4 message(s)" while the agent it spawned keeps finding
@@ -1078,9 +1267,12 @@ internal static partial class Program
     /// still be the assignee of a task, and that is exactly the case the owner
     /// has to be told about rather than have silently skipped.
     /// </summary>
-    private static List<string> AgentsWithWaitingWork()
+    private static List<string> AgentsWithWaitingWork(IEnumerable<string>? alsoCalled = null)
     {
         var set = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Agents the cowork room is calling. They may have an empty inbox and
+        // no task — being spoken to by the owner is work in itself.
+        if (alsoCalled != null) foreach (var a in alsoCalled) set.Add(a);
         try
         {
             var root = Path.Combine(BusRoot, "inbox");
@@ -1157,7 +1349,12 @@ internal static partial class Program
             foreach (var t in open) if (t.AgeHours > oldest) oldest = t.AgeHours;
         }
         catch { }
-        return new WaitingWork(mail, tasks, works.ToList(), oldest);
+        // The room. An agent that took a seat and has fallen behind counts as
+        // having work even with an empty inbox — that is what "the owner said
+        // something and nobody is listening" looks like from here.
+        var room = 0;
+        try { room = CoworkUnreadFor(agent); } catch { }
+        return new WaitingWork(mail, tasks, works.ToList(), oldest, room);
     }
 
     /// <summary>
@@ -1310,6 +1507,13 @@ internal static partial class Program
         public List<string> ExeFallbacks { get; init; } = new();
         public List<string> Args { get; init; } = new();
         public string Cwd { get; init; } = "";
+
+        /// <summary>
+        /// Answers the cowork room when the owner gives an order with nobody
+        /// sitting in it. Opt-in per runner, because "spawn everybody whenever
+        /// the boss says anything" is how one sentence becomes five sessions.
+        /// </summary>
+        public bool OnCall { get; init; }
     }
 
     private sealed class BrokerConfig
@@ -1394,6 +1598,7 @@ internal static partial class Program
                     ExeFallbacks = r["exeFallbacks"]?.ToObject<List<string>>() ?? new(),
                     Args = r["args"]?.ToObject<List<string>>() ?? new(),
                     Cwd = Environment.ExpandEnvironmentVariables(r["cwd"]?.ToString() ?? ""),
+                    OnCall = r["onCall"]?.ToObject<bool?>() ?? false,
                 };
             }
 
