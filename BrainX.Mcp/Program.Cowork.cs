@@ -1,4 +1,5 @@
 using System.Text;
+using BrainX.Core.Services;
 using Newtonsoft.Json.Linq;
 
 namespace BrainX.Mcp;
@@ -194,6 +195,172 @@ internal static partial class Program
                      + "cowork_say. This lane is separate from agent_send/agent_inbox on purpose: do not "
                      + "mail people about what was said here, say it in the room. cowork_leave when you stop working."
         };
+    }
+
+    // ───────────── cowork_who ─────────────
+
+    /* "Who is good at this?" answered from the record, not from a list.
+     *
+     * Owner: "ระบบต้องมีบันทึกว่าใครมีสกิลอะไรทำอะไรได้บ้าง แล้วจึงค้นและคุยกัน
+     * เหมือน rag พวกเขาก็จะเรียนรู้ซึ่งกันและกัน".
+     *
+     * The declared roster (skills.json, cowork_join) says what an agent
+     * CLAIMS. It is written by hand, so it goes stale, and it can only cover
+     * topics somebody thought to list. The brain holds the other half and
+     * keeps itself current for free: every note carries `source: claude-mcp`
+     * or `source: codex-mcp`, so the vault is a log of what each of us has
+     * actually done — one that grows every time either of us saves anything.
+     *
+     * Ranking is the same scorer brain_search uses, so "who has done this"
+     * and "what do we know about this" agree with each other by construction.
+     */
+    private static readonly Dictionary<string, string?> _coworkAuthorCache = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Which agent wrote this note, from its frontmatter `source`.
+    /// Only the header is read — the body can be twenty thousand words and
+    /// none of them say who typed it.</summary>
+    private static string? CoworkAuthorOf(string fullPath)
+    {
+        if (_coworkAuthorCache.TryGetValue(fullPath, out var hit)) return hit;
+
+        string? author = null;
+        try
+        {
+            using var r = new StreamReader(fullPath, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+            for (var i = 0; i < 20; i++)
+            {
+                var line = r.ReadLine();
+                if (line == null) break;
+                if (i > 0 && line.StartsWith("---", StringComparison.Ordinal)) break;   // end of frontmatter
+                if (!line.StartsWith("source:", StringComparison.OrdinalIgnoreCase)) continue;
+
+                var v = line["source:".Length..].Trim().Trim('"', '\'');
+                // codex-mcp → codex, claude-mcp → claude. Anything else is
+                // kept as written: a source this code has never heard of is
+                // information, not an error.
+                if (v.EndsWith("-mcp", StringComparison.OrdinalIgnoreCase)) v = v[..^4];
+                author = SanitizeAgentSlug(v);
+                break;
+            }
+        }
+        catch { /* unreadable note: it simply has no author for this purpose */ }
+
+        _coworkAuthorCache[fullPath] = author;
+        return author;
+    }
+
+    private static JToken CoworkWho(JObject args)
+    {
+        StartPresenceHeartbeat();
+        var me = BusIdentity();
+        var topic = args["topic"]?.ToString();
+        var roster = CoworkMembersSnapshot();
+
+        var result = new JObject { ["asking"] = me, ["room"] = roster };
+
+        if (string.IsNullOrWhiteSpace(topic))
+        {
+            result["hint"] = "That is what each member SAYS it is for. Pass `topic` to also get what the brain "
+                           + "says each of them has actually DONE — evidence beats a list somebody wrote once.";
+            return result;
+        }
+
+        result["topic"] = topic;
+
+        var export = LoadExport();
+        if (export == null)
+        {
+            result["hint"] = "No brain-export.json, so only declared skills are available. The room still works; "
+                           + "ask in it with cowork_say.";
+            return result;
+        }
+
+        var scan = Math.Clamp(args["scan"]?.ToObject<int>() ?? 40, 5, 120);
+        var ql = topic.ToLowerInvariant();
+
+        var byAgent = new Dictionary<string, JArray>(StringComparer.OrdinalIgnoreCase);
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var known = KnownAgents();
+
+        foreach (var n in export.Nodes
+                     .Select(n => (n, s: ScoreNode(n, ql)))
+                     .Where(x => x.s > 0)
+                     .OrderByDescending(x => x.s)
+                     .Take(scan)
+                     .Select(x => x.n))
+        {
+            string full;
+            try { full = Path.Combine(export.VaultPath, n.RelativePath); } catch { continue; }
+            var author = CoworkAuthorOf(full);
+            if (string.IsNullOrEmpty(author) || IsReservedIdentity(author)) continue;
+
+            // `source:` is a provenance string, and most of its values were
+            // never agents: "local-agent-mode-...", or the path of an
+            // imported document. Only identities that have actually connected
+            // to this bus are colleagues you can hand work to.
+            if (!known.Contains(author, StringComparer.OrdinalIgnoreCase)) continue;
+
+            counts[author] = counts.TryGetValue(author, out var c) ? c + 1 : 1;
+            if (!byAgent.TryGetValue(author, out var arr)) byAgent[author] = arr = new JArray();
+            if (arr.Count < 3)
+                arr.Add(new JObject
+                {
+                    ["title"] = n.Title,
+                    // InvariantCulture, or this machine writes 2569 — Thai
+                    // locale, Buddhist era — into a field meant for a machine.
+                    ["modified"] = n.ModifiedAt.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture),
+                    ["id"] = n.Id,
+                });
+        }
+
+        var done = new JArray();
+        foreach (var kv in counts.OrderByDescending(k => k.Value))
+        {
+            // The declared lines travel WITH the count, because the count on
+            // its own is read as capability and it is not capability. Asked
+            // "generate an image", this ranked claude first on 35 notes — and
+            // claude cannot generate an image. It writes the session notes,
+            // including the ones about work codex did. Whoever reads this has
+            // to see "35 notes" and "CANNOT generate images" in the same
+            // breath or they will hand the job to the wrong agent.
+            var (can, cannot) = CoworkSkillsFor(kv.Key);
+            var seat = roster.FirstOrDefault(m => string.Equals(m["agent"]?.ToString(), kv.Key, StringComparison.OrdinalIgnoreCase));
+            var entry = new JObject
+            {
+                ["agent"] = kv.Key,
+                ["notesOnThis"] = kv.Value,
+                ["inRoom"] = CoworkIsMember(kv.Key),
+                ["says"] = (seat?["skills"] as JArray) ?? can,
+                ["cannot"] = (seat?["cannot"] as JArray) ?? cannot,
+                ["wroteAbout"] = byAgent[kv.Key],
+            };
+            done.Add(entry);
+        }
+        result["hasWrittenAboutThis"] = done;
+
+        var best = counts.Where(k => !k.Key.Equals(me, StringComparison.OrdinalIgnoreCase))
+                         .OrderByDescending(k => k.Value)
+                         .Select(k => k.Key)
+                         .FirstOrDefault();
+
+        result["howToReadThis"] =
+            "Two different questions, kept apart on purpose. CAN they — `says` and `cannot`, which the agent "
+          + "declares about itself and the owner can edit; that is the one that decides who does the job. "
+          + "HAVE THEY TOUCHED IT — `notesOnThis`, counted from who authored the matching notes; that tells you "
+          + "who already has the context, the history and the scars. They come apart often: the agent that "
+          + "WRITES UP a job is not always the agent that DID it.";
+
+        result["hint"] = done.Count == 0
+            ? "Nobody on this brain has written about that yet. No evidence either way — settle it in the room "
+            + "with cowork_say rather than assuming it belongs to nobody."
+            : best != null
+                ? $"'{best}' has the most written history on this, so ask them before starting — they will know "
+                + "what was already tried. Then check the `cannot` lines above, because those decide who actually "
+                + $"does it: hand the piece over with cowork_say to:<agent> and say what you need back."
+                : "The written history on this is mostly your own — you are probably the one to take it. Say so "
+                + "in the room so nobody doubles up.";
+
+        return result;
     }
 
     // ───────────── cowork_leave ─────────────
@@ -540,7 +707,11 @@ internal static partial class Program
       + "list from cowork_read says what every member is good at and what it CANNOT do. If a piece of the job "
       + "needs something you cannot do — claude cannot generate an image, codex can — hand THAT PIECE over by "
       + "name with cowork_say and say what you need back; attachments come home the same way. Doing a poor "
-      + "version of something the agent sitting next to you does well is not independence, it is waste.";
+      + "version of something the agent sitting next to you does well is not independence, it is waste. "
+      + "(5) IF YOU DO NOT KNOW WHO IS BEST AT IT, LOOK IT UP: cowork_who with a topic answers from what each "
+      + "agent has actually DONE on this brain, with the notes as evidence — not from a list somebody wrote "
+      + "once. That record grows on its own every time any of us saves a note, which is how this room learns "
+      + "who is who.";
 
     // ───────────── what the broker sees ─────────────
 

@@ -933,6 +933,22 @@ internal static partial class Program
                         ["history"] = new JObject { ["type"] = "boolean", ["default"] = false, ["description"] = "true = the last N lines whether or not you have seen them; false = only what is new to you" }
                     }
                 }),
+            Tool("cowork_who",
+                "WHO IS GOOD AT WHAT in the cowork room — ask this before deciding a job is yours, and before " +
+                "doing a poor version of something the agent next to you does well. Returns what each member " +
+                "DECLARES it can and cannot do, and with `topic`, what the brain says each of them has actually " +
+                "DONE about it: matching notes they authored, most recent first. The evidence half keeps itself " +
+                "current — every note any agent saves adds to it — so this is how the room learns who is who " +
+                "instead of guessing. Hand work over by name with cowork_say.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["topic"] = new JObject { ["type"] = "string", ["description"] = "what the job needs, e.g. 'generate an image', 'laravel migration', 'wpf theming'. Omit for the declared roster alone." },
+                        ["scan"] = new JObject { ["type"] = "integer", ["default"] = 40, ["description"] = "how many top-ranked notes to attribute (5-120)" }
+                    }
+                }),
             Tool("cowork_say",
                 "SAY something in the cowork room — the owner sees it in their office window, and so does " +
                 "every other agent in the room. This is how you report progress, ask the room a question, " +
@@ -1592,6 +1608,7 @@ internal static partial class Program
                 "agent_emote"               => AgentEmote(args),
                 "cowork_join"               => CoworkJoin(args),
                 "cowork_read"               => CoworkRead(args),
+                "cowork_who"                => CoworkWho(args),
                 "cowork_say"                => CoworkSay(args),
                 "cowork_leave"              => CoworkLeave(),
                 "bridge_status"             => McpBridgeHub.StatusJson(),
