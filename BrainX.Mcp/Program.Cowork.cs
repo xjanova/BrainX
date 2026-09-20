@@ -158,7 +158,13 @@ internal static partial class Program
         {
             ["agent"] = me,
             ["client"] = _clientName ?? "unknown",
-            ["joinedUtc"] = existing?["joinedUtc"]?.ToString() ?? DateTime.UtcNow.ToString("o"),
+            // Round-trip through DateTime, never through ToString(). Newtonsoft
+            // parses an ISO timestamp into a Date token, and `.ToString()` on
+            // that renders it in the machine's culture — on this one, Thai with
+            // a Buddhist year: codex's seat came back as "20/9/2569 12:32:51"
+            // and was written back that way, one rejoin at a time.
+            ["joinedUtc"] = existing?["joinedUtc"]?.ToObject<DateTime?>()?.ToUniversalTime().ToString("o")
+                            ?? DateTime.UtcNow.ToString("o"),
             ["lastSeenUtc"] = DateTime.UtcNow.ToString("o"),
             ["cursor"] = cursor,
         };
