@@ -439,6 +439,13 @@ internal static partial class Program
             var work = WaitingWorkFor(agent);
             if (coworkCalls.TryGetValue(agent, out var called) && called > work.Room)
                 work = work with { Room = called };
+            // Fresh call vs. standing backlog. work.Room counts what this
+            // agent has not read, which for a parked session is every room
+            // line ever written and never goes down; the ledger counts what
+            // the BROKER has not handed out yet, and is cleared at the end of
+            // the tick. Act on the second, or the fix below becomes a spawn
+            // loop that never runs dry.
+            var calledIntoRoom = coworkCalls.ContainsKey(agent);
             if (work.Mail == 0 && work.Tasks == 0 && work.Room == 0) continue;
 
             // Work that is parked on the OWNER does not wake anybody. Asking
@@ -469,7 +476,7 @@ internal static partial class Program
             if (blockedWorks.Count > 0)
             {
                 work = WithoutBlockedWork(work, blockedWorks);
-                if (work.Mail == 0 && work.Tasks == 0)
+                if (work.Mail == 0 && work.Tasks == 0 && work.Room == 0)
                 {
                     BrokerSay(agent, $"{agent}: everything waiting is parked on the owner ({string.Join(", ", blockedWorks)})");
                     continue;
@@ -563,9 +570,15 @@ internal static partial class Program
                     // which happened to have an empty box — did, and answered
                     // alone. One stale message must not be able to keep an
                     // agent out of the room.
-                    if (work.Room > 0 && !CoworkIsMember(agent))
+                    if (calledIntoRoom)
                     {
-                        spawnReason = "parked and called into the cowork room — spawning a session that joins it";
+                        // Membership is NOT consulted here, and that is the fix
+                        // for the silence the owner caught: a member file is
+                        // written on connect and never withdrawn, so a session
+                        // that has since gone quiet still reads as "in the
+                        // room". Parked means nothing is reading, whatever the
+                        // membership says, so the room gets a session that will.
+                        spawnReason = "parked and called into the cowork room — spawning a session that will read it";
                         goto case SessionVerdict.Absent;
                     }
 
@@ -591,8 +604,14 @@ internal static partial class Program
                     // other mail.
                     if (work.OldestHours * 60 < cfg.ParkedSpawnAfterMinutes)
                     {
-                        if (dryRun) { BrokerLog($"{agent}: would nudge parked session ({Describe(work)})"); continue; }
-                        NudgeParkedSession(agent, work);
+                        // Mail lane only, and the room is deliberately not in
+                        // it. A room order that reaches an agent as a bus
+                        // message is the separation undone, whoever wrote the
+                        // message — including the broker.
+                        var byMail = work with { Room = 0 };
+                        if (byMail.Mail == 0 && byMail.Tasks == 0) continue;
+                        if (dryRun) { BrokerLog($"{agent}: would nudge parked session ({Describe(byMail)})"); continue; }
+                        NudgeParkedSession(agent, byMail);
                         continue;
                     }
 
