@@ -53,9 +53,85 @@ internal static partial class Program
     private const int CoworkMaxWaitSeconds = 10;
 
     private static string CoworkRoot => Path.Combine(BusRoot, "cowork");
+    private static string CoworkSkillsPath => Path.Combine(CoworkRoot, "skills.json");
     private static string CoworkMessagesDir => Path.Combine(CoworkRoot, "messages");
     private static string CoworkMembersDir => Path.Combine(CoworkRoot, "members");
     private static string CoworkMemberFile(string agent) => Path.Combine(CoworkMembersDir, agent + ".json");
+
+    // ───────────── who is good at what ─────────────
+
+    /* The room is a team, and a team splits work by skill. Nothing recorded
+     * skill, so the floor rule "decide whether it is yours" could only be
+     * decided from the wording of the order and from who happened to read it
+     * first — which is how a job lands on the agent that does it worst.
+     *
+     * The half that changes behaviour is CANNOT. "I am good at code" rarely
+     * stops anybody doing anything; "I cannot generate an image, codex can"
+     * routes the work in one line. Owner, giving the founding example:
+     * "cluade สร้างรูปเองไม่ได้ แต่ codex มีเจนรูปสวย ๆ ได้".
+     *
+     * Three sources, most specific first: what the agent declared on
+     * cowork_join, then cowork/skills.json (the OWNER's file — they know the
+     * line-up better than any default and can add gemini or grok without a
+     * rebuild), then the defaults below so that an auto-joined session which
+     * never declared anything still appears as something other than a name.
+     */
+    private static readonly Dictionary<string, (string[] Can, string[] Cannot)> CoworkDefaultSkills =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["claude"] = (
+                new[]
+                {
+                    "code, refactors and audits across the repos",
+                    "digging into production — ssh diagnostics, logs, artisan, DB reads",
+                    "long written analysis and brain notes",
+                    "Windows, .NET, WPF, the BrainX client itself",
+                },
+                new[] { "generate images, video or audio — hand that to codex" }),
+
+            ["codex"] = (
+                new[]
+                {
+                    "image generation that actually looks good",
+                    "long autonomous coding runs",
+                    "code review and a second opinion on design",
+                },
+                Array.Empty<string>()),
+        };
+
+    /// <summary>What this agent can and cannot do, as the room should see it.
+    /// Declared &gt; owner's skills.json &gt; built-in default.</summary>
+    private static (JArray? Can, JArray? Cannot) CoworkSkillsFor(string agent)
+    {
+        try
+        {
+            var o = ReadJsonOrNull(CoworkSkillsPath)?[agent] as JObject;
+            var can = o?["can"] as JArray;
+            var cannot = o?["cannot"] as JArray;
+            if (can != null || cannot != null) return (can, cannot);
+        }
+        catch { /* the owner's file is theirs to break; fall through */ }
+
+        if (CoworkDefaultSkills.TryGetValue(agent, out var d))
+            return (new JArray(d.Can), d.Cannot.Length > 0 ? new JArray(d.Cannot) : null);
+
+        return (null, null);
+    }
+
+    /// <summary>One line naming everybody else in the room and what they are
+    /// for, short enough to ride a notice that goes out on every tool call.</summary>
+    private static string CoworkRosterLine(string me)
+    {
+        var parts = new List<string>();
+        foreach (var m in CoworkMembersSnapshot())
+        {
+            var agent = m["agent"]?.ToString() ?? "";
+            if (agent.Length == 0 || agent.Equals(me, StringComparison.OrdinalIgnoreCase)) continue;
+            var can = (m["skills"] as JArray)?.Select(t => t.ToString()).Take(2).ToArray() ?? Array.Empty<string>();
+            parts.Add(can.Length > 0 ? $"{agent} ({string.Join("; ", can)})" : agent);
+        }
+        return parts.Count == 0 ? "" : string.Join(" · ", parts);
+    }
 
     // ───────────── cowork_join ─────────────
 
@@ -87,6 +163,17 @@ internal static partial class Program
         };
         if (!string.IsNullOrWhiteSpace(display)) member["display"] = display;
         if (work != null) member["work"] = work;
+
+        // Declaring beats inheriting: an agent that says what it is for this
+        // session (a narrow runner, a session with a tool the others lack)
+        // knows better than any table. Joining again is how you update it —
+        // no second tool to remember, and the member file is idempotent.
+        var (defCan, defCannot) = CoworkSkillsFor(me);
+        var skills = args["skills"] as JArray ?? existing?["skills"] as JArray ?? defCan;
+        var cannot = args["cannot"] as JArray ?? existing?["cannot"] as JArray ?? defCannot;
+        if (skills != null) member["skills"] = skills;
+        if (cannot != null) member["cannot"] = cannot;
+
         AtomicWriteJson(CoworkMemberFile(me), member);
 
         var recent = CoworkReadMessages(CoworkMessageFiles().TakeLast(
@@ -170,7 +257,7 @@ internal static partial class Program
         Directory.CreateDirectory(CoworkMessagesDir);
         Directory.CreateDirectory(CoworkMembersDir);
         var latest = CoworkMessageFiles().LastOrDefault();
-        AtomicWriteJson(f, new JObject
+        var seat = new JObject
         {
             ["agent"] = me,
             ["client"] = _clientName ?? "unknown",
@@ -178,7 +265,11 @@ internal static partial class Program
             ["lastSeenUtc"] = DateTime.UtcNow.ToString("o"),
             ["cursor"] = latest is null ? "" : Path.GetFileName(latest),
             ["auto"] = true,
-        });
+        };
+        var (autoCan, autoCannot) = CoworkSkillsFor(me);
+        if (autoCan != null) seat["skills"] = autoCan;
+        if (autoCannot != null) seat["cannot"] = autoCannot;
+        AtomicWriteJson(f, seat);
     }
 
     // ───────────── cowork_say ─────────────
@@ -369,6 +460,10 @@ internal static partial class Program
         {
             var o = ReadJsonOrNull(f);
             if (o == null) continue;
+            // A leave tombstone is a file, and it is not a seat. Listing it
+            // as one means handing work to somebody who left the room.
+            if (o["optedOut"]?.ToObject<bool?>() == true) continue;
+
             var agent = o["agent"]?.ToString() ?? Path.GetFileNameWithoutExtension(f);
             var age = PresenceAgeSeconds(agent);
             var entry = new JObject
@@ -379,6 +474,15 @@ internal static partial class Program
             };
             if (o["work"] != null) entry["work"] = o["work"];
             if (o["display"] != null) entry["display"] = o["display"];
+
+            // What this member is for. The room cannot split work by skill
+            // while the only thing it knows about its members is their names.
+            var (can, cannot) = CoworkSkillsFor(agent);
+            var skills = o["skills"] as JArray ?? can;
+            var no = o["cannot"] as JArray ?? cannot;
+            if (skills != null) entry["skills"] = skills;
+            if (no != null) entry["cannot"] = no;
+
             arr.Add(entry);
         }
         return arr;
@@ -425,7 +529,12 @@ internal static partial class Program
       + "If it is, do it and report back in the room. If it plainly is not, say so in one line and leave it. "
       + "(3) If it is AMBIGUOUS who should do it, do not guess and do not both start: either agree it in the "
       + "room with the other agents (cowork_say), or ask the owner directly — they are right there. "
-      + "Two agents doing the same job is worse than one asking.";
+      + "Two agents doing the same job is worse than one asking. "
+      + "(4) SPLIT IT BY SKILL, not by who read it first. This room is one team working in parts: the `room` "
+      + "list from cowork_read says what every member is good at and what it CANNOT do. If a piece of the job "
+      + "needs something you cannot do — claude cannot generate an image, codex can — hand THAT PIECE over by "
+      + "name with cowork_say and say what you need back; attachments come home the same way. Doing a poor "
+      + "version of something the agent sitting next to you does well is not independence, it is waste.";
 
     // ───────────── what the broker sees ─────────────
 
@@ -670,10 +779,17 @@ internal static partial class Program
                        + "touches your work. Do not answer on their behalf — but do not sit on something you know "
                        + "that would change their answer either; say that part in one line.";
             else
+            {
+                var roster = CoworkRosterLine(me);
                 action = "Someone spoke to the cowork room without naming anybody. Call cowork_read, and if the work "
                        + "could be yours SAY SO IN ONE LINE — an unaddressed line that everybody assumes belongs to "
                        + "somebody else is exactly how a question ends up with no answer at all. Reply with "
-                       + "cowork_say rather than agent_send.";
+                       + "cowork_say rather than agent_send."
+                       + (roster.Length > 0
+                           ? $" Also in the room: {roster}. Split the job by skill and say which part you are taking; "
+                           + "hand anything that needs a skill you do not have to whoever does have it, by name."
+                           : "");
+            }
 
             return new JObject
             {
