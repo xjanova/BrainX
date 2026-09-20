@@ -134,12 +134,98 @@ internal static partial class Program
         return parts.Count == 0 ? "" : string.Join(" · ", parts);
     }
 
+    // ───────────── the light switch ─────────────
+
+    /* Owner (2026-09-20): "การปิดไฟปิดห้อง ทุกคนออกไปหมด เมื่อเปิดไฟ เจ้าของจะมา
+     * ก่อนเพื่อนเพื่อเริ่มตั้งวง คุยหรือรับคำสั่งจากบอส".
+     *
+     * This is the stop the room did not have. A study could open a
+     * conversation and nothing could end one — two agents with something to
+     * say to each other keep having something to say, and every round costs.
+     * Writing "two rounds each" into the opening line is an instruction, and
+     * an instruction is not a mechanism.
+     *
+     * Dark is a mechanism: no seats, no notices, no calls, no studies. A
+     * conversation cannot continue in a room nobody is in, for the same
+     * reason a meeting cannot continue in a locked building — and it needs no
+     * cooperation from the people who were talking.
+     *
+     * Missing file means ON, because a room that goes dark the moment this
+     * ships would look exactly like the bug I spent the morning fixing.
+     */
+    private static string CoworkRoomStatePath => Path.Combine(CoworkRoot, "room.json");
+
+    internal static bool CoworkRoomIsOpen()
+    {
+        try
+        {
+            var o = ReadJsonOrNull(CoworkRoomStatePath);
+            return o == null || o["open"]?.ToObject<bool?>() != false;
+        }
+        catch { return true; }
+    }
+
+    /// <summary>Lights on. Seats nobody: the owner is first through the door,
+    /// and everybody else takes a chair when they next say hello.</summary>
+    internal static void CoworkOpenRoom(string by, string? reason = null)
+    {
+        if (CoworkRoomIsOpen()) return;
+        try
+        {
+            Directory.CreateDirectory(CoworkRoot);
+            AtomicWriteJson(CoworkRoomStatePath, new JObject
+            {
+                ["open"] = true,
+                ["sinceUtc"] = DateTime.UtcNow.ToString("o"),
+                ["by"] = by,
+                ["reason"] = reason,
+            });
+        }
+        catch { }
+    }
+
+    /// <summary>
+    /// Lights off, and everybody out. The seats are REMOVED rather than
+    /// tombstoned: a tombstone means "I chose to leave and want to stay out",
+    /// which is a decision belonging to the agent. Closing the room is not
+    /// about anybody's preference — they come back in when the light does.
+    /// </summary>
+    internal static void CoworkCloseRoom(string by, string reason)
+    {
+        try
+        {
+            Directory.CreateDirectory(CoworkRoot);
+            AtomicWriteJson(CoworkRoomStatePath, new JObject
+            {
+                ["open"] = false,
+                ["sinceUtc"] = DateTime.UtcNow.ToString("o"),
+                ["by"] = by,
+                ["reason"] = reason,
+            });
+
+            if (Directory.Exists(CoworkMembersDir))
+                foreach (var f in Directory.GetFiles(CoworkMembersDir, "*.json"))
+                    try { File.Delete(f); } catch { /* it will be gone next time */ }
+        }
+        catch { }
+    }
+
     // ───────────── cowork_join ─────────────
 
     private static JToken CoworkJoin(JObject args)
     {
         StartPresenceHeartbeat();
         var me = BusIdentity();
+
+        if (!CoworkRoomIsOpen() && !IsReservedIdentity(me))
+            return new JObject
+            {
+                ["joined"] = false,
+                ["roomOpen"] = false,
+                ["note"] = "ห้องปิดไฟอยู่ — ยังเข้าไม่ได้ ไม่ต้องลองซ้ำและไม่ต้องรอ "
+                         + "เจ้าของจะเป็นคนเปิดไฟเองเมื่อจะเริ่มวง แล้วคุณจะถูกเชิญเข้ามา "
+                         + "(The room is dark. It opens when the owner opens it; polling it costs tokens and changes nothing.)",
+            };
         Directory.CreateDirectory(CoworkMessagesDir);
         Directory.CreateDirectory(CoworkMembersDir);
 
@@ -440,6 +526,11 @@ internal static partial class Program
         var me = BusIdentity();
         if (IsReservedIdentity(me)) return;
 
+        // The light is off. Nobody sits down, nobody is told anything, and the
+        // seat this would have written is the one thing that would make the
+        // room start talking again on its own.
+        if (!CoworkRoomIsOpen()) return;
+
         var f = CoworkMemberFile(me);
         var existing = ReadJsonOrNull(f);
         if (existing != null) return;   // already seated, or deliberately out
@@ -472,6 +563,28 @@ internal static partial class Program
 
         var body = args["message"]?.ToString();
         if (string.IsNullOrWhiteSpace(body)) throw new ArgumentException("message is required — this is what the room hears");
+
+        // Dark room: an agent may not speak into it. This is the actual stop —
+        // the conversation ends because there is nowhere to have it, not
+        // because somebody remembered to stop.
+        //
+        // The owner is the exception, and not as a privilege: their line IS
+        // the light going on. "เมื่อเปิดไฟ เจ้าของจะมาก่อนเพื่อน" — they arrive
+        // first, and the room exists again because they are in it.
+        if (!CoworkRoomIsOpen())
+        {
+            if (me.Equals("owner", StringComparison.OrdinalIgnoreCase))
+                CoworkOpenRoom("owner", "the owner spoke");
+            else
+                return new JObject
+                {
+                    ["said"] = (string?)null,
+                    ["roomOpen"] = false,
+                    ["note"] = "ห้องปิดไฟอยู่ ข้อความนี้ไม่ถูกส่ง — วงคุยจบแล้ว อย่าพยายามพูดซ้ำ "
+                             + "ถ้ามีเรื่องต้องบอกจริง ๆ ให้บันทึกเป็นโน้ตในสมองแล้วรอบอสเปิดไฟ "
+                             + "(The room is dark: this was not delivered. Do not retry — that is the loop this switch exists to end.)",
+                };
+        }
         if (Encoding.UTF8.GetByteCount(body) > MaxMessageBytes)
             throw new ArgumentException($"message too large (>{MaxMessageBytes / 1024}KB) — park the payload in a brain note and say its id");
 
@@ -766,6 +879,12 @@ internal static partial class Program
     internal static Dictionary<string, int> CoworkCallsWaiting(IEnumerable<string>? onCall = null)
     {
         var result = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        // A dark room calls nobody. The owner's own line turns the light on
+        // before it is ever written, so an order still reaches people — this
+        // only stops the broker starting sessions for a room that is closed.
+        if (!CoworkRoomIsOpen()) return result;
+
         try
         {
             var cursor = ReadJsonOrNull(CoworkBrokerCursorPath)?["cursor"]?.ToString() ?? "";
@@ -906,6 +1025,12 @@ internal static partial class Program
     private static JObject? TryBuildCoworkNotice(string? tool)
     {
         if (tool is "cowork_read" or "cowork_join" or "cowork_say" or "cowork_leave") return null;
+
+        // No notices out of a dark room. This is what stops a finished
+        // conversation from restarting itself: the piggyback is how an idle
+        // session finds out there is something to answer, and there is not.
+        if (!CoworkRoomIsOpen()) return null;
+
         try
         {
             var me = BusIdentity();

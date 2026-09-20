@@ -129,6 +129,7 @@ public partial class MainWindow
                 ["agents"] = CoworkAgents(),
                 ["messages"] = CoworkMessages(),
                 ["decisions"] = CoworkDecisions(),
+                ["roomOpen"] = CoworkRoomIsOpen(),
             };
             CoworkWebView.CoreWebView2?.PostWebMessageAsJson(
                 new JObject { ["type"] = "officeState", ["payload"] = payload }.ToString());
@@ -460,6 +461,14 @@ public partial class MainWindow
                 // and stopping a process that spawns agents belongs to a
                 // process the owner controls, not to a document.
                 case "officeBroker": ToggleBrokerHost(); break;
+                // The light. Off sends everybody home and stops the room
+                // talking to itself; on lets them back in.
+                case "officeRoomLight":
+                    CoworkSetRoomLight(m["on"]?.ToObject<bool>() ?? true, "owner");
+                    if (m["on"]?.ToObject<bool>() == false)
+                        CoworkWriteRoomLine("broker", "🔌 บอสปิดไฟปิดห้อง — ทุกคนออกจากห้องแล้ว", "room");
+                    PostCowork();
+                    break;
                 // Installing or removing the Windows Service. Elevation is
                 // asked for by the client, never by the page.
                 case "officeBrokerService":
@@ -500,6 +509,13 @@ public partial class MainWindow
         // In its own lane the framing belongs in the TOOL description, which
         // an agent reads once, instead of in front of every sentence the owner
         // types — the room should read like a room.
+        // The owner is always first through the door.
+        //
+        // Owner (2026-09-20): "เมื่อเปิดไฟ เจ้าของจะมาก่อนเพื่อนเพื่อเริ่มตั้งวง".
+        // brainx-mcp enforces this for agents, but the owner's line is written
+        // here and never passes through it — so without this the boss would
+        // type into a dark room and nothing would carry it.
+        CoworkSetRoomLight(true, "owner");
         CoworkWriteRoomLine("owner", text, "owner-order");
         PostCowork();
     }
@@ -513,6 +529,60 @@ public partial class MainWindow
     /// Nothing here is addressed to anybody: a room has one transcript, and
     /// who is listening is decided by who joined, not by who was written to.
     /// </summary>
+    /// <summary>
+    /// The light switch, from the owner's side.
+    ///
+    /// Dark is what stops a circle of agents talking to each other until the
+    /// tokens run out: no seats, no notices, nobody called in. Turning it back
+    /// on seats nobody — the room fills as agents say hello.
+    /// </summary>
+    private void CoworkSetRoomLight(bool on, string by)
+    {
+        try
+        {
+            var dir = Path.Combine(CoworkBusRoot, "cowork");
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, "room.json");
+
+            if (on && CoworkRoomIsOpen()) return;   // already lit; leave the reason alone
+
+            var payload = new JObject
+            {
+                ["open"] = on,
+                ["sinceUtc"] = DateTime.UtcNow.ToString("o"),
+                ["by"] = by,
+            };
+            var tmp = path + ".tmp";
+            File.WriteAllText(tmp, payload.ToString(), new System.Text.UTF8Encoding(false));
+            File.Move(tmp, path, overwrite: true);
+
+            // Everybody out. Seats are removed rather than tombstoned: leaving
+            // is an agent's own decision and should survive; being sent home
+            // when the room closes is not.
+            if (!on)
+            {
+                var members = Path.Combine(dir, "members");
+                if (Directory.Exists(members))
+                    foreach (var f in Directory.GetFiles(members, "*.json"))
+                        try { File.Delete(f); } catch { }
+            }
+        }
+        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"CoworkSetRoomLight: {ex.Message}"); }
+    }
+
+    /// <summary>Is the room lit? A missing file means yes — a room that went
+    /// dark the moment this shipped would look exactly like a bug.</summary>
+    private bool CoworkRoomIsOpen()
+    {
+        try
+        {
+            var path = Path.Combine(CoworkBusRoot, "cowork", "room.json");
+            if (!File.Exists(path)) return true;
+            return JObject.Parse(File.ReadAllText(path))["open"]?.ToObject<bool?>() != false;
+        }
+        catch { return true; }
+    }
+
     private void CoworkWriteRoomLine(string from, string body, string topic)
     {
         var dir = Path.Combine(CoworkBusRoot, "cowork", "messages");

@@ -45,30 +45,59 @@ internal static partial class Program
     /// </summary>
     private static void BrokerIdleStudy(BrokerConfig cfg, Dictionary<string, BrokerRun> live, bool hadWork, bool dryRun)
     {
-        if (!cfg.IdleStudy) return;
+        void Why(string reason) { if (dryRun) BrokerLog("study: none — " + reason); }
+
+        if (!cfg.IdleStudy) { Why("idleStudy is off in runners.json"); return; }
 
         // Idle means idle: nothing queued anywhere and no session mid-run. A
         // "spare moment" that is actually the gap between two pieces of work
         // is not spare.
-        if (hadWork || live.Count > 0) return;
+        if (hadWork) { Why("there is work waiting"); return; }
+        if (live.Count > 0) { Why($"{live.Count} run(s) still going"); return; }
+
+        if (!CoworkRoomIsOpen())
+        {
+            // The owner turned the light off, or the last circle closed
+            // itself. Either way the room is shut and a study would be the
+            // one thing reopening it behind their back.
+            Why("the room is dark — it reopens when the owner opens it");
+            return;
+        }
 
         var state = ReadJsonOrNull(StudyStatePath);
         var lastTopic = state?["topic"]?.ToString();
         var unanswered = state?["unanswered"]?.ToObject<int?>() ?? 0;
-        var lastUtc = DateTime.TryParse(state?["lastUtc"]?.ToString(), null,
-            System.Globalization.DateTimeStyles.RoundtripKind, out var t) ? t : DateTime.MinValue;
+        // Utc(), not TryParse: this file's own comment explains why, and the
+        // dry run proved it by reporting a study that happened "-412 minutes
+        // ago" — an offset-bearing timestamp read as local time, seven hours
+        // into the future, so nothing could ever come due.
+        var lastUtc = Utc(state?["lastUtc"]) ?? DateTime.MinValue;
 
         // Nobody said a word after the last one? Then the room is not a room
         // right now — it is a wall with a note pinned to it. Back off instead
         // of pinning more: 6h, 12h, 24h, and no further.
         var wait = TimeSpan.FromHours(cfg.IdleStudyHours * Math.Pow(2, Math.Min(unanswered, 2)));
-        if (DateTime.UtcNow - lastUtc < wait) return;
+        if (DateTime.UtcNow - lastUtc < wait)
+        {
+            Why($"last one was {(DateTime.UtcNow - lastUtc).TotalMinutes:0} min ago, waiting {wait.TotalHours:0}h"
+                + (unanswered > 0 ? $" ({unanswered} unanswered, so the gap is doubled)" : ""));
+            return;
+        }
 
         var answered = lastUtc > DateTime.MinValue && StudyGotAnswered(lastUtc);
         if (lastUtc > DateTime.MinValue) unanswered = answered ? 0 : unanswered + 1;
 
         var topic = PickStudyTopic(lastTopic);
-        if (topic == null) return;      // a brain with no measured gaps needs no study
+        if (topic == null)
+        {
+            Why("no measured retrieval gap worth two sessions");
+            return;
+        }
+
+        // The study opens the room and, when it is over, closes it again. One
+        // owner for the light, so it can never be left on by whoever was last
+        // to speak.
+        CoworkOpenRoom("broker", "study: " + topic.Question);
 
         // Who has already been near this. Not an assignment — the room decides
         // that between themselves — but "you wrote three of the notes that
@@ -151,6 +180,97 @@ internal static partial class Program
         catch { /* a study that cannot record itself simply repeats later */ }
     }
 
+    /// <summary>
+    /// Close the circle when it is over — or when it will not end on its own.
+    ///
+    /// Runs every tick, not only when idle: a study that is still talking
+    /// while real work arrives is exactly the case that needs stopping, and
+    /// the work loop above has already had the machine's attention.
+    /// </summary>
+    private static void BrokerStudyBreaker(BrokerConfig cfg, bool dryRun)
+    {
+        if (!CoworkRoomIsOpen()) return;
+
+        void Why(string reason) { if (dryRun) BrokerLog("breaker: " + reason); }
+
+        var st = ReadJsonOrNull(StudyStatePath);
+        if (st == null) { Why("no study has ever been opened"); return; }
+        if (st["closedUtc"] != null) { Why("the last circle is already closed"); return; }
+        if (Utc(st["lastUtc"]) is not DateTime opened) { Why("study.json has no readable opening time"); return; }
+
+        // Only a study's own conversation is counted. A room the OWNER is
+        // using is not a meeting to be timed out — they close it themselves,
+        // or the next study does.
+        var lines = 0;
+        var speakers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var finished = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var last = opened;
+        var ownerSpoke = false;
+
+        try
+        {
+            foreach (var f in CoworkMessageFiles())
+            {
+                var n = Path.GetFileNameWithoutExtension(f);
+                var dash = n.IndexOf('-');
+                if (dash <= 0 || !long.TryParse(n[..dash], out var ticks)) continue;
+                var when = new DateTime(ticks, DateTimeKind.Utc);
+                if (when <= opened) continue;
+
+                var lastDash = n.LastIndexOf('-');
+                var from = lastDash > dash ? n[(dash + 1)..lastDash] : "";
+                if (from.Equals("owner", StringComparison.OrdinalIgnoreCase)) { ownerSpoke = true; break; }
+                if (IsReservedIdentity(from)) continue;
+
+                lines++;
+                if (when > last) last = when;
+                speakers.Add(from);
+
+                // `done` is the agreed way out, and it has to be cheap to say:
+                // a line that STARTS with it counts, so nobody has to choose
+                // between signing off and explaining themselves.
+                var body = ReadJsonOrNull(f)?["body"]?.ToString()?.TrimStart() ?? "";
+                if (body.StartsWith("done", StringComparison.OrdinalIgnoreCase)) finished.Add(from);
+            }
+        }
+        catch { return; }
+
+        if (ownerSpoke) { Why("the owner is using the room — not a study to time out"); return; }
+
+        var quietFor = DateTime.UtcNow - last;
+        var ranFor = DateTime.UtcNow - opened;
+
+        string? why = null;
+        if (speakers.Count > 0 && finished.Count >= speakers.Count) why = "ทุกคนบอก done แล้ว";
+        else if (lines >= cfg.StudyMaxLines) why = $"คุยครบ {lines} บรรทัดตามเพดาน";
+        else if (ranFor.TotalMinutes >= cfg.StudyMaxMinutes) why = $"วงเปิดมา {ranFor.TotalMinutes:0} นาทีแล้ว";
+        else if (lines > 0 && quietFor.TotalMinutes >= cfg.StudyQuietMinutes) why = $"เงียบมา {quietFor.TotalMinutes:0} นาที";
+        else if (lines == 0 && ranFor.TotalMinutes >= cfg.StudyQuietMinutes) why = "ไม่มีใครเข้ามาคุยเลย";
+        if (why == null)
+        {
+            Why($"still going: {lines} line(s), open {ranFor.TotalMinutes:0} min, quiet {quietFor.TotalMinutes:0} min "
+                + $"(caps: {cfg.StudyMaxLines} lines / {cfg.StudyMaxMinutes} min / {cfg.StudyQuietMinutes} min quiet)");
+            return;
+        }
+
+        if (dryRun) { BrokerLog($"study: would close the room — {why} ({lines} line(s))"); return; }
+
+        CoworkSystemLine($"🔌 ปิดไฟปิดห้อง — {why} ({lines} บรรทัด) ทุกคนออกจากห้องแล้ว "
+                       + "ไม่มีใครถูกเรียกและไม่มีใครพูดได้จนกว่าบอสจะเปิดไฟอีกครั้ง");
+        CoworkCloseRoom("broker", why);
+        BrokerLog($"study: room closed — {why} ({lines} line(s), {speakers.Count} speaker(s))");
+
+        try
+        {
+            st["closedUtc"] = DateTime.UtcNow.ToString("o");
+            st["closedWhy"] = why;
+            st["lines"] = lines;
+            AtomicWriteJson(StudyStatePath, (JObject)st);
+        }
+        catch { }
+    }
+
+
     /// <summary>Did anybody other than the broker speak after the last study
     /// was opened? Read off the file names, so nothing is opened to find out.</summary>
     private static bool StudyGotAnswered(DateTime since)
@@ -183,7 +303,13 @@ internal static partial class Program
     {
         try
         {
-            var report = new QueryGapAnalyzer().Analyze(_vaultPath, windowDays: 14, limit: 8);
+            // Ask for a wide slate, not a shortlist. The analyzer ranks by how
+            // OFTEN something is asked, and the filter below throws out
+            // everything the brain already answers well — so a small limit
+            // starves it. Measured: a day of my own searching filled the top
+            // eight with well-answered queries and the study went quiet
+            // while a real gap sat at position nine.
+            var report = new QueryGapAnalyzer().Analyze(_vaultPath, windowDays: 14, limit: 25);
             foreach (var s in report.Suggestions)
             {
                 if (string.IsNullOrWhiteSpace(s.Query)) continue;

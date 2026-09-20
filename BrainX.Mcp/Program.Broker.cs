@@ -426,6 +426,11 @@ internal static partial class Program
             cfg.Runners.Where(r => r.Value.OnCall).Select(r => r.Key));
         var coworkHandled = false;
 
+        // Before anything else: is a circle still running that should not be?
+        // Checked every tick rather than only when idle — a study still
+        // talking while real work arrives is precisely the case to cut off.
+        BrokerStudyBreaker(cfg, dryRun);
+
         var waiting = AgentsWithWaitingWork(coworkCalls.Keys);
         foreach (var agent in waiting)
         {
@@ -1728,6 +1733,18 @@ internal static partial class Program
         public int IdleStudyMaxSpawns { get; init; } = 1;
 
         /// <summary>
+        /// When the circle is cut off. Owner (2026-09-20): "ต้องมีระบบตัดการ
+        /// ตั้งวงคุย เพื่อไม่ให้เสียโทเค็นไปเรื่อย ๆ ไม่หยุดด้วย".
+        ///
+        /// Lines and minutes are the ones that matter, because they do not
+        /// require either agent to notice anything. Twelve lines is three or
+        /// four rounds — past that a conversation is repeating itself.
+        /// </summary>
+        public int StudyMaxLines { get; init; } = 12;
+        public int StudyMaxMinutes { get; init; } = 30;
+        public int StudyQuietMinutes { get; init; } = 10;
+
+        /// <summary>
         /// How old waiting work has to be before a BUSY agent is told about it
         /// anyway. Ten minutes: long enough that a message and its reply in the
         /// same conversation never trip it, short enough that nothing spends a
@@ -1825,6 +1842,9 @@ internal static partial class Program
             IdleStudy = o["idleStudy"]?.ToObject<bool?>() ?? true,
             IdleStudyHours = Math.Max(1, o["idleStudyHours"]?.ToObject<int?>() ?? 6),
             IdleStudyMaxSpawns = Math.Max(0, o["idleStudyMaxSpawns"]?.ToObject<int?>() ?? 1),
+            StudyMaxLines = Math.Max(2, o["studyMaxLines"]?.ToObject<int?>() ?? 12),
+            StudyMaxMinutes = Math.Max(2, o["studyMaxMinutes"]?.ToObject<int?>() ?? 30),
+            StudyQuietMinutes = Math.Max(1, o["studyQuietMinutes"]?.ToObject<int?>() ?? 10),
             StaleMailMinutes = Math.Max(1, o["staleMailMinutes"]?.ToObject<int?>() ?? 10),
             MaxConsecutiveFailures = Math.Max(1, b["maxConsecutiveFailures"]?.ToObject<int?>() ?? 2),
             RetryAfterFailureMinutes = Math.Max(1, b["retryAfterFailureMinutes"]?.ToObject<int?>() ?? 25),
@@ -1854,9 +1874,15 @@ internal static partial class Program
   "//idleStudy": "When nothing is waiting, open a measured retrieval gap in the cowork room so the agents fill it. false turns it off entirely.",
   "//idleStudyHours": "Never more often than this, and it doubles itself (up to 4x) while nobody answers.",
   "//idleStudyMaxSpawns": "How many sessions may be STARTED for a study. 0 = never start one; the topic waits in the room for whoever is next alive.",
+  "//studyMaxLines": "Hard stop for a study conversation. The room goes dark at this many lines whatever anybody thinks.",
+  "//studyMaxMinutes": "Hard stop by the clock, for a circle that talks slowly.",
+  "//studyQuietMinutes": "A study that has gone this quiet is over; the lights go out.",
   "idleStudy": true,
   "idleStudyHours": 6,
   "idleStudyMaxSpawns": 1,
+  "studyMaxLines": 12,
+  "studyMaxMinutes": 30,
+  "studyQuietMinutes": 10,
   "pollSeconds": 15,
   "idleGraceSeconds": 45,
   "staleMailMinutes": 10,

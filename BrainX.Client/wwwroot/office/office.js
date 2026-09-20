@@ -2359,6 +2359,9 @@ function post(msg) { try { window.chrome?.webview?.postMessage(msg); } catch { /
  *  the bus root; the host tells us the root once, because the page has no way
  *  to know where the vault is and a wrong guess renders every picture broken. */
 let BUS_URL = '';
+/** Is the room lit? Dark = everybody has gone home and nothing may be said.
+ *  Owner (2026-09-20): "ปิดไฟปิดห้อง ทุกคนออกไปหมด". */
+let ROOM_OPEN = true;
 function fileUrl(rel) { return rel && BUS_URL ? BUS_URL + rel : ''; }
 function kb(b) { return b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB'; }
 
@@ -2377,6 +2380,17 @@ function apply(p) {
 
     MESSAGES = p.messages || [];
     DECISIONS = p.decisions || [];
+    if (typeof p.roomOpen === 'boolean') {
+        ROOM_OPEN = p.roomOpen;
+        const lb = document.getElementById('room-light');
+        if (lb) {
+            lb.textContent = ROOM_OPEN ? '💡' : '🌑';
+            lb.title = ROOM_OPEN
+                ? 'ไฟห้องเปิดอยู่ — กดเพื่อปิดห้องและให้ทุกคนออก'
+                : 'ห้องปิดไฟอยู่ — ไม่มีใครอยู่ในห้อง กดเพื่อเปิด';
+        }
+        document.body.classList.toggle('room-dark', !ROOM_OPEN);
+    }
     BROKER = p.broker || null;
 
     // Perform only what is NEW. The first payload is the backlog, and replaying
@@ -2497,6 +2511,14 @@ document.getElementById('say').addEventListener('submit', (e) => {
 // no business starting a process that spawns agents, so all it does is ask.
 document.getElementById('room-broker')?.addEventListener('click', () => {
     post({ type: 'officeBroker' });
+});
+
+// The light switch. Turning it off is the owner sending everybody home; the
+// room cannot talk to itself in the dark, which is the whole point of it.
+document.getElementById('room-light')?.addEventListener('click', () => {
+    const on = !ROOM_OPEN;
+    if (!on && !confirm('ปิดไฟปิดห้อง?\n\nทุกคนจะออกจากห้อง ไม่มีใครถูกเรียกและไม่มีใครพูดได้จนกว่าจะเปิดไฟใหม่')) return;
+    post({ type: 'officeRoomLight', on });
 });
 
 // Right-click installs or removes the Windows Service — the half that keeps
