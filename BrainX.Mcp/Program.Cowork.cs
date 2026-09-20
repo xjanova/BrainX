@@ -165,12 +165,17 @@ internal static partial class Program
         if (work != null) member["work"] = work;
 
         // Declaring beats inheriting: an agent that says what it is for this
-        // session (a narrow runner, a session with a tool the others lack)
+        // session (a narrow runner, a session holding a tool the others lack)
         // knows better than any table. Joining again is how you update it —
         // no second tool to remember, and the member file is idempotent.
-        var (defCan, defCannot) = CoworkSkillsFor(me);
-        var skills = args["skills"] as JArray ?? existing?["skills"] as JArray ?? defCan;
-        var cannot = args["cannot"] as JArray ?? existing?["cannot"] as JArray ?? defCannot;
+        //
+        // ONLY what was declared is stored. Writing the fallback here would
+        // freeze it onto the seat, and the snapshot prefers the seat — so the
+        // owner could edit cowork/skills.json, see nothing change, and
+        // conclude the file does not work. Resolving at read time is what
+        // keeps that file live.
+        var skills = args["skills"] as JArray ?? existing?["skills"] as JArray;
+        var cannot = args["cannot"] as JArray ?? existing?["cannot"] as JArray;
         if (skills != null) member["skills"] = skills;
         if (cannot != null) member["cannot"] = cannot;
 
@@ -256,8 +261,13 @@ internal static partial class Program
 
         Directory.CreateDirectory(CoworkMessagesDir);
         Directory.CreateDirectory(CoworkMembersDir);
+        // No skills written here on purpose: a seat carries what its agent
+        // declared, and an auto-joined session has declared nothing yet. The
+        // roster fills that in from skills.json or the defaults every time it
+        // is read, so an agent that never says a word about itself still
+        // shows up as something other than a name.
         var latest = CoworkMessageFiles().LastOrDefault();
-        var seat = new JObject
+        AtomicWriteJson(f, new JObject
         {
             ["agent"] = me,
             ["client"] = _clientName ?? "unknown",
@@ -265,11 +275,7 @@ internal static partial class Program
             ["lastSeenUtc"] = DateTime.UtcNow.ToString("o"),
             ["cursor"] = latest is null ? "" : Path.GetFileName(latest),
             ["auto"] = true,
-        };
-        var (autoCan, autoCannot) = CoworkSkillsFor(me);
-        if (autoCan != null) seat["skills"] = autoCan;
-        if (autoCannot != null) seat["cannot"] = autoCannot;
-        AtomicWriteJson(f, seat);
+        });
     }
 
     // ───────────── cowork_say ─────────────
