@@ -90,7 +90,7 @@ internal static partial class Program
         AtomicWriteJson(CoworkMemberFile(me), member);
 
         var recent = CoworkReadMessages(CoworkMessageFiles().TakeLast(
-            Math.Clamp(args["catch_up"]?.ToObject<int>() ?? 12, 0, 100)));
+            Math.Clamp(args["catch_up"]?.ToObject<int>() ?? 12, 0, 100)), me);
 
         return new JObject
         {
@@ -224,15 +224,30 @@ internal static partial class Program
         CoworkTrim();
 
         var listeners = CoworkMembersSnapshot();
+        var others = listeners.Select(m => m["agent"]!.ToString())
+                              .Where(a => !a.Equals(me, StringComparison.OrdinalIgnoreCase))
+                              .ToList();
+        var target = payload["to"]?.ToString() ?? "";
+
+        string? note;
+        if (listeners.Count <= 1)
+            note = "Nobody else is in the room right now — the owner still sees this in the cowork window, and members read it when they join.";
+        else if (target.Length == 0)
+            note = "No `to` on this line, so everyone hears it and nobody owns it. If you want one agent to act or "
+                 + "answer, pass `to` — they are told by name and know the reply is theirs to write.";
+        else if (!others.Contains(target, StringComparer.OrdinalIgnoreCase))
+            note = $"'{target}' is not in the room, so this will not reach them until they join. The broker only "
+                 + "calls agents in for the OWNER's lines, not for ours — if you need them now, say so to the owner.";
+        else
+            note = null;
+
         return new JObject
         {
             ["said"] = msgId,
-            ["heardBy"] = new JArray(listeners.Select(m => m["agent"]!.ToString()).Where(a => a != me)),
+            ["heardBy"] = new JArray(others),
             ["room"] = listeners,
             ["attachments"] = attachments,
-            ["note"] = listeners.Count <= 1
-                ? "Nobody else is in the room right now — the owner still sees this in the cowork window, and members read it when they join."
-                : null,
+            ["note"] = note,
         };
     }
 
@@ -268,7 +283,7 @@ internal static partial class Program
         var files = history
             ? CoworkMessageFiles().TakeLast(limit).ToList()
             : pending.Take(limit).ToList();
-        var messages = CoworkReadMessages(files);
+        var messages = CoworkReadMessages(files, me);
 
         // Only a member has a cursor to move. Advancing one for a non-member
         // would silently make its first join miss everything it had peeked at.
@@ -302,13 +317,25 @@ internal static partial class Program
             .ToList();
     }
 
-    private static JArray CoworkReadMessages(IEnumerable<string> files)
+    private static JArray CoworkReadMessages(IEnumerable<string> files, string me)
     {
         var arr = new JArray();
         foreach (var f in files)
         {
             var o = ReadJsonOrNull(f);
-            if (o != null) arr.Add(o);
+            if (o == null) continue;
+
+            // Said to me, said to somebody else, or said to the room. The raw
+            // `to` field makes the reader compare names to find out, and a
+            // reader that has to work it out is a reader that gets it wrong.
+            var to = o["to"]?.ToString() ?? "";
+            o["addressed"] = to.Length == 0 ? "room"
+                : to.Equals(me, StringComparison.OrdinalIgnoreCase) ? "you"
+                : to;
+            if ((o["from"]?.ToString() ?? "").Equals(me, StringComparison.OrdinalIgnoreCase))
+                o["mine"] = true;   // your own line coming back in history
+
+            arr.Add(o);
         }
         return arr;
     }
@@ -567,6 +594,11 @@ internal static partial class Program
     /// room. No member file, no notice — which is why the owner can run an
     /// unrelated chat beside a room full of traffic and see none of it.
     /// </summary>
+    /// <summary>How many unread room lines a notice will open to work out who
+    /// they are addressed to. A session that has been away for a day has a
+    /// backlog; the notice is a tap on the shoulder, not the backlog.</summary>
+    private const int CoworkNoticeScan = 20;
+
     private static JObject? TryBuildCoworkNotice(string? tool)
     {
         if (tool is "cowork_read" or "cowork_join" or "cowork_say" or "cowork_leave") return null;
@@ -582,30 +614,75 @@ internal static partial class Program
                 .ToList();
             if (pending.Count == 0) return null;
 
-            // The speaker is in the file name (<ticks>-<from>-<rand>), so the
-            // notice never opens a file — the same trick the mail notice uses.
-            var speakers = pending
-                .Select(f =>
-                {
-                    var n = Path.GetFileNameWithoutExtension(f);
-                    int first = n.IndexOf('-'), last = n.LastIndexOf('-');
-                    return (first >= 0 && last > first + 1) ? n.Substring(first + 1, last - first - 1) : "unknown";
-                })
-                .Distinct()
-                .OrderBy(s => s, StringComparer.Ordinal)
-                .ToArray();
+            // The notice has to answer the one question the reader cannot
+            // answer for itself: IS THIS FOR ME. The previous version read the
+            // speaker out of the file name (<ticks>-<from>-<rand>) and never
+            // opened anything, which is cheap and is exactly why a line
+            // addressed to codex by name reached codex as "someone said
+            // something to the room".
+            //
+            // Opening them costs a few small reads, capped so that a session
+            // which has been away all day still pays for a notice rather than
+            // a transcript. The name stays available from the file name when a
+            // payload is half-written.
+            static string SpeakerFromName(string path)
+            {
+                var n = Path.GetFileNameWithoutExtension(path);
+                int first = n.IndexOf('-'), last = n.LastIndexOf('-');
+                return (first >= 0 && last > first + 1) ? n.Substring(first + 1, last - first - 1) : "unknown";
+            }
 
-            var fromOwner = speakers.Contains("owner", StringComparer.OrdinalIgnoreCase);
+            var speakers = new List<string>();
+            var toOthers = new List<string>();
+            var forMe = 0;
+            var ownerWantsMe = false;
+
+            foreach (var f in pending.TakeLast(CoworkNoticeScan))
+            {
+                var o = ReadJsonOrNull(f);
+                var from = o?["from"]?.ToString() is { Length: > 0 } s1 ? s1 : SpeakerFromName(f);
+                var to = o?["to"]?.ToString() ?? "";
+
+                if (!speakers.Contains(from, StringComparer.OrdinalIgnoreCase)) speakers.Add(from);
+
+                var mine = to.Length > 0 && to.Equals(me, StringComparison.OrdinalIgnoreCase);
+                if (mine) forMe++;
+                else if (to.Length > 0 && !toOthers.Contains(to, StringComparer.OrdinalIgnoreCase)) toOthers.Add(to);
+
+                // An owner line with somebody else's name on it is the owner
+                // talking to THEM. Dragging the whole room in is how one
+                // question turns into two agents doing the same job.
+                if (from.Equals("owner", StringComparison.OrdinalIgnoreCase) && (mine || to.Length == 0))
+                    ownerWantsMe = true;
+            }
+
+            string action;
+            if (ownerWantsMe)
+                action = "THE OWNER SPOKE IN THE COWORK ROOM. That is your user talking, and it outranks peer "
+                       + "chatter. Call cowork_read NOW. " + CoworkFloorRules;
+            else if (forMe > 0)
+                action = $"{string.Join(", ", speakers)} addressed {forMe} line(s) in the cowork room TO YOU BY NAME. "
+                       + "Call cowork_read and ANSWER with cowork_say — not agent_send, the owner keeps the lanes "
+                       + "apart. Answer even if the answer is \"that one is not mine\": a peer who gets nothing back "
+                       + "cannot tell whether you disagreed, are busy, or never heard it, and will sit there waiting.";
+            else if (toOthers.Count > 0)
+                action = $"The room is talking to {string.Join(", ", toOthers)}, not to you. Call cowork_read if it "
+                       + "touches your work. Do not answer on their behalf — but do not sit on something you know "
+                       + "that would change their answer either; say that part in one line.";
+            else
+                action = "Someone spoke to the cowork room without naming anybody. Call cowork_read, and if the work "
+                       + "could be yours SAY SO IN ONE LINE — an unaddressed line that everybody assumes belongs to "
+                       + "somebody else is exactly how a question ends up with no answer at all. Reply with "
+                       + "cowork_say rather than agent_send.";
+
             return new JObject
             {
                 ["room"] = "cowork",
                 ["unread"] = pending.Count,
                 ["from"] = new JArray(speakers),
-                ["action"] = fromOwner
-                    ? "THE OWNER SPOKE IN THE COWORK ROOM. That is your user talking, and it outranks peer "
-                      + "chatter. Call cowork_read NOW. " + CoworkFloorRules
-                    : "Someone in the cowork room said something to the room. Call cowork_read, and answer "
-                      + "with cowork_say rather than agent_send — the owner keeps these lanes apart."
+                ["addressedToYou"] = forMe,
+                ["addressedToOthers"] = new JArray(toOthers),
+                ["action"] = action,
             };
         }
         catch { return null; }
