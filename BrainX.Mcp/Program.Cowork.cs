@@ -338,10 +338,21 @@ internal static partial class Program
         }
         result["hasWrittenAboutThis"] = done;
 
-        var best = counts.Where(k => !k.Key.Equals(me, StringComparison.OrdinalIgnoreCase))
-                         .OrderByDescending(k => k.Value)
-                         .Select(k => k.Key)
-                         .FirstOrDefault();
+        // Somebody who is actually in the room to answer. An identity with
+        // the deepest history and no seat is a dead end — it reads as an
+        // answer and ends in silence, which is the tombstone mistake again in
+        // a different shape. Its notes still show above; only the "go ask
+        // them" line insists on a chair that is occupied.
+        var others = counts.Where(k => !k.Key.Equals(me, StringComparison.OrdinalIgnoreCase))
+                           .OrderByDescending(k => k.Value)
+                           .ToList();
+        var best = others.Where(k => CoworkIsMember(k.Key)).Select(k => k.Key).FirstOrDefault();
+
+        // Deepest history overall, seat or no seat — worth naming so the
+        // reader knows whose notes those are before reading them.
+        var deepest = others.Select(k => k.Key).FirstOrDefault();
+        if (deepest != null && !deepest.Equals(best, StringComparison.OrdinalIgnoreCase))
+            result["mostHistoryButNotInTheRoom"] = deepest;
 
         result["howToReadThis"] =
             "Two different questions, kept apart on purpose. CAN they — `says` and `cannot`, which the agent "
@@ -354,11 +365,12 @@ internal static partial class Program
             ? "Nobody on this brain has written about that yet. No evidence either way — settle it in the room "
             + "with cowork_say rather than assuming it belongs to nobody."
             : best != null
-                ? $"'{best}' has the most written history on this, so ask them before starting — they will know "
-                + "what was already tried. Then check the `cannot` lines above, because those decide who actually "
-                + $"does it: hand the piece over with cowork_say to:<agent> and say what you need back."
-                : "The written history on this is mostly your own — you are probably the one to take it. Say so "
-                + "in the room so nobody doubles up.";
+                ? $"'{best}' is in the room and has the most written history on this — ask them before starting, "
+                + "they will know what was already tried. Then read the `cannot` lines above, because those decide "
+                + $"who actually does it: hand the piece over with cowork_say to:{best} and say what you need back."
+                : "Nobody else with history on this is in the room right now. The notes above are still worth "
+                + "reading before you start; if the piece needs a skill you do not have, say so in the room and "
+                + "let the owner call somebody in.";
 
         return result;
     }
