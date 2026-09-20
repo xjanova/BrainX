@@ -29,10 +29,12 @@ namespace BrainX.Mcp;
 //    else's, so two sessions in the room both hear the boss.
 //  - There is one transcript, not a box per recipient. That is what makes it
 //    a room rather than a group mailing.
-//  - Only MEMBERS are told. A session that never joined gets no notice, ever
-//    — that is the whole point of the separate lane. Joining is a deliberate
-//    act ("I am in the room now"), and it is the only thing that opts a
-//    session into being interrupted by it.
+//  - Only MEMBERS are told, and every connected session is a member by
+//    default (CoworkAutoJoin, from the presence handshake). Owner
+//    (2026-09-20): "ทำไม เอเจน ที่ออนไลน์ไม่อยู่ฟังในห้องต้องเรียกทุกครั้งเองเหรอ"
+//    — being at work is being in the room, and opt-in meant every order cost
+//    a spawn to reach a session that was already running. cowork_leave opts
+//    out and STAYS out; what still never happens is mail.
 //
 // Attachments land under the same files/ root the mail lane uses, because the
 // client already serves that folder to the room over bus.local — a picture
@@ -108,14 +110,75 @@ internal static partial class Program
     {
         var me = BusIdentity();
         var f = CoworkMemberFile(me);
-        var wasIn = File.Exists(f);
-        try { if (wasIn) File.Delete(f); } catch { /* the room is not worth failing a tool over */ }
+        var existing = ReadJsonOrNull(f);
+        var wasIn = existing != null && existing["optedOut"]?.ToObject<bool?>() != true;
+
+        // Recorded, not deleted. Sessions are auto-joined when they connect
+        // (see CoworkAutoJoin), so a deleted file would be recreated on the
+        // very next heartbeat and "leave" would mean nothing. The tombstone
+        // is what makes leaving stick until the agent asks to come back.
+        try
+        {
+            Directory.CreateDirectory(CoworkMembersDir);
+            AtomicWriteJson(f, new JObject
+            {
+                ["agent"] = me,
+                ["optedOut"] = true,
+                ["leftUtc"] = DateTime.UtcNow.ToString("o"),
+                ["cursor"] = existing?["cursor"] ?? "",
+            });
+        }
+        catch { /* the room is not worth failing a tool over */ }
+
         return new JObject
         {
             ["left"] = me,
             ["wasInRoom"] = wasIn,
-            ["note"] = "You will not be told about anything said in the room until you cowork_join again.",
+            ["note"] = "You will not be told about anything said in the room until you cowork_join again. "
+                     + "This survives reconnecting — sessions are otherwise in the room by default.",
         };
+    }
+
+    /// <summary>
+    /// Put this session in the room unless it has explicitly left.
+    ///
+    /// Owner (2026-09-20): "ทำไม เอเจน ที่ออนไลน์ไม่อยู่ฟังในห้องต้องเรียกทุกครั้ง
+    /// เองเหรอ". Being connected is being at work; a session that is up should
+    /// hear the owner without anybody paying to start a second one. Opt-in was
+    /// the wrong default — it made every order cost a spawn.
+    ///
+    /// The cursor starts at the END of the wall, so joining is never a replay
+    /// of the day's backlog, and a leave tombstone is honoured rather than
+    /// overwritten. Runs once per process: the heartbeat calls it, and hitting
+    /// the disk on every tool call for a file that cannot change without this
+    /// session's own say-so would be waste.
+    /// </summary>
+    private static bool _coworkAutoJoined;
+
+    internal static void CoworkAutoJoin()
+    {
+        if (_coworkAutoJoined) return;
+        _coworkAutoJoined = true;
+
+        var me = BusIdentity();
+        if (IsReservedIdentity(me)) return;
+
+        var f = CoworkMemberFile(me);
+        var existing = ReadJsonOrNull(f);
+        if (existing != null) return;   // already seated, or deliberately out
+
+        Directory.CreateDirectory(CoworkMessagesDir);
+        Directory.CreateDirectory(CoworkMembersDir);
+        var latest = CoworkMessageFiles().LastOrDefault();
+        AtomicWriteJson(f, new JObject
+        {
+            ["agent"] = me,
+            ["client"] = _clientName ?? "unknown",
+            ["joinedUtc"] = DateTime.UtcNow.ToString("o"),
+            ["lastSeenUtc"] = DateTime.UtcNow.ToString("o"),
+            ["cursor"] = latest is null ? "" : Path.GetFileName(latest),
+            ["auto"] = true,
+        });
     }
 
     // ───────────── cowork_say ─────────────
@@ -430,7 +493,12 @@ internal static partial class Program
     /// </summary>
     internal static bool CoworkIsMember(string agent)
     {
-        try { return File.Exists(CoworkMemberFile(agent)); }
+        try
+        {
+            var o = ReadJsonOrNull(CoworkMemberFile(agent));
+            // A leave tombstone is a file, and it is NOT a seat.
+            return o != null && o["optedOut"]?.ToObject<bool?>() != true;
+        }
         catch { return false; }
     }
 

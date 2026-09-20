@@ -208,6 +208,16 @@ internal static partial class Program
             if (_presenceTimer != null) return;
             try { WritePresence(); SweepStaleTemps(BusPresenceDir); }
             catch { /* vault may not exist yet */ }
+            // Being online IS being in the room.
+            //
+            // Owner (2026-09-20): "ทำไม เอเจน ที่ออนไลน์ไม่อยู่ฟังในห้องต้อง
+            // เรียกทุกครั้งเองเหรอ". Joining used to be an explicit act, which
+            // meant a session could sit there connected and deaf while the
+            // broker paid to start a SECOND one just to hear an order the
+            // first could have taken. Opt-out, not opt-in: a session that
+            // called cowork_leave stays out (CoworkAutoJoin honours that), and
+            // the notice still only fires when something is actually said.
+            try { CoworkAutoJoin(); } catch { /* the room is not worth failing a handshake over */ }
             _presenceTimer = new Timer(_ => { try { WritePresence(); } catch { } },
                 null, TimeSpan.FromSeconds(HeartbeatSeconds), TimeSpan.FromSeconds(HeartbeatSeconds));
         }
