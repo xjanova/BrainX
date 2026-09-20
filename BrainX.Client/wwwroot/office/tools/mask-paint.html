@@ -156,8 +156,12 @@
         <button id="save">ดาวน์โหลด mask + seats</button>
         <button id="load">โหลด mask เดิม</button>
       </div>
+      <div class="row" style="margin-top:6px">
+        <button id="restore" style="flex:1">กู้งานล่าสุด</button>
+      </div>
       <input type="file" id="file" accept="image/png,application/json" multiple hidden>
       <div id="status"></div>
+      <div id="saved" class="hint"></div>
     </div>
 
     <div class="hint">
@@ -202,7 +206,9 @@ img.onload = () => {
     pctx.drawImage(img, 0, 0);
     say('โหลดภาพห้องแล้ว ' + img.naturalWidth + '×' + img.naturalHeight);
 };
-img.onerror = () => say('เปิดภาพห้องไม่ได้ — ต้องเปิดหน้านี้ผ่าน dev server (localhost:8178)');
+img.onerror = () => say(location.protocol === 'file:'
+    ? 'เปิดจากไฟล์ตรง ๆ ไม่ได้ — เบราว์เซอร์บล็อกการอ่านภาพ ให้กดปุ่ม "ผังห้อง" ในห้อง cowork แทน'
+    : 'เปิดภาพห้องไม่ได้ — ต้องเปิดผ่าน dev server (localhost:8178) หรือปุ่ม "ผังห้อง" ในห้อง');
 img.src = PLATE_SRC;
 
 /* Fit the plate to the window on load; the owner can still scroll/zoom the
@@ -253,6 +259,7 @@ paint.addEventListener('pointerdown', (e) => {
         const hit = wandAt(p.x, p.y);
         if (!hit) { say('ตรงนั้นสีกลืนกันทั้งภาพ — ลดความไวลงแล้วลองใหม่'); return; }
         stampBits(hit.bits, LAYERS[layer].colour);
+        markDirty();
         say('ไม้กายสิทธิ์: ได้ ' + (hit.count / (paint.width * paint.height) * 100).toFixed(1) + '% ของภาพ');
         return;
     }
@@ -260,14 +267,16 @@ paint.addEventListener('pointerdown', (e) => {
     paint.setPointerCapture(e.pointerId);
     snapshot();
     dab(pos(e));
+    markDirty();
 });
-paint.addEventListener('pointermove', (e) => { if (painting) dab(pos(e)); });
+paint.addEventListener('pointermove', (e) => { if (painting) { dab(pos(e)); markDirty(); } });
 paint.addEventListener('pointerup', () => { painting = false; });
 paint.addEventListener('pointerleave', () => { painting = false; });
 
 function addSeat(p) {
     seats.push({ x: +(p.x / paint.width).toFixed(4), y: +(p.y / paint.height).toFixed(4) });
     drawSeats();
+    markDirty();
 }
 function drawSeats() {
     sctx.clearRect(0, 0, pins.width, pins.height);
@@ -661,14 +670,15 @@ document.getElementById('auto').addEventListener('click', async () => {
             seats.length = 0; (sj.seats || []).forEach(s => seats.push(s)); drawSeats();
         } catch { /* seats are optional */ }
         checkMap();
+        markDirty();
         say('ระบายอัตโนมัติมาให้แล้ว — แก้ทับได้เลย');
     } catch (e) {
         say('ยังไม่มีผลอัตโนมัติ — รัน tools/roommap/autoseg.py ก่อน');
     }
 });
 
-document.getElementById('snap').addEventListener('click', () => { snapshot(); snapToEdges(); });
-document.getElementById('clean').addEventListener('click', () => { snapshot(); cleanLayer(); });
+document.getElementById('snap').addEventListener('click', () => { snapshot(); snapToEdges(); markDirty(); });
+document.getElementById('clean').addEventListener('click', () => { snapshot(); cleanLayer(); markDirty(); });
 document.getElementById('check').addEventListener('click', checkMap);
 
 // ── save / load ─────────────────────────────────────────────────────
@@ -695,8 +705,93 @@ document.getElementById('save').addEventListener('click', () => {
         note: 'painted with tools/mask-paint.html — x,y are fractions of the plate, at the FEET',
         seats,
     }, null, 2)], { type: 'application/json' }), 'room-seats.json');
+    dirty = false;
+    autosave();
     say('บันทึกแล้ว — วางไว้ที่ wwwroot/office/art/');
 });
+
+/* ── autosave ────────────────────────────────────────────────────────
+ *
+ * The work lives in a canvas, and a canvas lives exactly as long as its page.
+ * Today an hour of painting went when the view navigated away — my doing, but
+ * a reload or a crash would have done the same.
+ *
+ * So every change is written to localStorage a second and a half after it
+ * stops, and read back on load. PNG rather than raw pixels because 1.5M RGBA
+ * pixels is 6MB and localStorage is 5-10MB total; the mask compresses to tens
+ * of kilobytes because it is three flat colours.
+ *
+ * It is a SAFETY NET, not the save: `ดาวน์โหลด` is still what produces the
+ * files the room reads. The beforeunload guard says so when there is work that
+ * has not been downloaded yet.
+ */
+const SAVE_KEY = 'brainx.roommask.v1';
+let saveTimer = null;
+let dirty = false;
+
+function markDirty() {
+    dirty = true;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(autosave, 1500);
+}
+
+function autosave() {
+    try {
+        const png = paint.toDataURL('image/png');
+        localStorage.setItem(SAVE_KEY, JSON.stringify({
+            at: Date.now(), w: paint.width, h: paint.height, png, seats,
+        }));
+        const t = new Date().toLocaleTimeString();
+        document.getElementById('saved').textContent = 'เซฟอัตโนมัติไว้ในเครื่องแล้ว ' + t + ' (กู้ได้ด้วยปุ่มกู้งานล่าสุด)';
+    } catch (e) {
+        document.getElementById('saved').textContent = 'เซฟอัตโนมัติไม่ได้ — ' + (e && e.name === 'QuotaExceededError' ? 'พื้นที่เต็ม' : 'เบราว์เซอร์ไม่อนุญาต');
+    }
+}
+
+function restoreSaved(quiet) {
+    let raw;
+    try { raw = localStorage.getItem(SAVE_KEY); } catch { raw = null; }
+    if (!raw) { if (!quiet) say('ไม่มีงานที่เซฟไว้'); return false; }
+    try {
+        const j = JSON.parse(raw);
+        const im = new Image();
+        im.onload = () => {
+            snapshot();
+            mctx.clearRect(0, 0, paint.width, paint.height);
+            mctx.drawImage(im, 0, 0, paint.width, paint.height);
+            if (Array.isArray(j.seats)) { seats.length = 0; j.seats.forEach(x => seats.push(x)); drawSeats(); }
+            say('กู้งานที่ระบายไว้เมื่อ ' + new Date(j.at).toLocaleTimeString() + ' แล้ว');
+        };
+        im.src = j.png;
+        return true;
+    } catch { return false; }
+}
+
+document.getElementById('restore').addEventListener('click', () => restoreSaved(false));
+
+// A page that is about to lose unsaved work should say so. The browser shows
+// its own wording; what matters is that it asks at all.
+addEventListener('beforeunload', (e) => {
+    if (!dirty) return;
+    e.preventDefault();
+    e.returnValue = '';
+});
+
+// On load: if there is a session in storage, bring it back rather than making
+// somebody remember a button exists.
+addEventListener('load', () => setTimeout(() => {
+    let raw = null;
+    try { raw = localStorage.getItem(SAVE_KEY); } catch {}
+    if (!raw) return;
+    try {
+        const j = JSON.parse(raw);
+        const mins = Math.round((Date.now() - j.at) / 60000);
+        if (restoreSaved(true)) {
+            document.getElementById('saved').textContent =
+                'กู้งานล่าสุดกลับมาให้แล้ว (เซฟไว้เมื่อ ' + (mins < 1 ? 'ไม่ถึงนาที' : mins + ' นาที') + 'ที่แล้ว)';
+        }
+    } catch {}
+}, 600));
 
 function download(blob, name) {
     const a = document.createElement('a');
