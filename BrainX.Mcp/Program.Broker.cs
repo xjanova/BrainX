@@ -426,7 +426,8 @@ internal static partial class Program
             cfg.Runners.Where(r => r.Value.OnCall).Select(r => r.Key));
         var coworkHandled = false;
 
-        foreach (var agent in AgentsWithWaitingWork(coworkCalls.Keys))
+        var waiting = AgentsWithWaitingWork(coworkCalls.Keys);
+        foreach (var agent in waiting)
         {
             // A run is still going: that IS the session. Spawning a second
             // one would have two agents consuming the same consume-on-read
@@ -629,8 +630,9 @@ internal static partial class Program
                             Id: "norunner-" + agent,
                             Agent: agent,
                             Work: "",
-                            Question: $"'{agent}' has {Describe(work)} waiting but no live session and no entry in runners.json, so nothing can pick it up.",
-                            Options: new[] { "add a runner for it", "reassign the work", "clear it" })).ConfigureAwait(false);
+                            Question: $"{agent} มีงานค้างอยู่ {DescribeTh(work)} แต่ไม่มี session เปิดอยู่ "
+                                    + "และไม่มีรายการของมันใน runners.json เลย ตอนนี้จึงไม่มีใครหยิบงานนี้ได้",
+                            Options: new[] { "เพิ่ม runner ให้", "ย้ายงานให้คนอื่น", "ยกเลิกงานนี้" })).ConfigureAwait(false);
                         continue;
                     }
 
@@ -653,8 +655,8 @@ internal static partial class Program
                         // is the same hole RunPid was moved to disk for.)
                         if (!SaidBudgetStopAlready(cfg, state, gate))
                         {
-                            BrokerLog($"{agent}: budget stop — {gate}");
-                            state.LastBudgetLog = gate;
+                            BrokerLog($"{agent}: budget stop — {gate.Log}");
+                            state.LastBudgetLog = gate.Log;
                             state.LastBudgetLogUtc = DateTime.UtcNow;
                             SaveRunnerState(agent, state);
                         }
@@ -662,8 +664,8 @@ internal static partial class Program
                             Id: "budget-" + agent,
                             Agent: agent,
                             Work: "",
-                            Question: $"'{agent}' cannot pick up its work ({Describe(work)}). {gate}",
-                            Options: new[] { "I fixed it — try again", "leave that work for me" })).ConfigureAwait(false);
+                            Question: $"{agent} หยิบงานของตัวเองไม่ได้ ({DescribeTh(work)}) — {gate.Th}",
+                            Options: new[] { "แก้ให้แล้ว ลองใหม่", "งานนี้เดี๋ยวฉันทำเอง" })).ConfigureAwait(false);
                         continue;
                     }
 
@@ -689,10 +691,10 @@ internal static partial class Program
                             Id: "workdir-" + unmapped[0],
                             Agent: agent,
                             Work: unmapped[0],
-                            Question: $"'{agent}' has work labelled '{unmapped[0]}' waiting ({Describe(work)}) and no session to do it in. "
-                                    + $"Which folder should it run in? Right now it would default to {runner.Cwd}, which is probably wrong. "
-                                    + "Add it under \"workDirs\" in runners.json.",
-                            Options: new[] { $"use {runner.Cwd} anyway", "I will add it to runners.json" })).ConfigureAwait(false);
+                            Question: $"{agent} มีงานป้าย '{unmapped[0]}' ค้างอยู่ ({DescribeTh(work)}) และยังไม่มี session ไหนทำ "
+                                    + $"— งานนี้ต้องรันในโฟลเดอร์ไหน? ตอนนี้มันจะไปลงที่ {runner.Cwd} ซึ่งน่าจะผิด "
+                                    + "(เพิ่มได้ใน \"workDirs\" ของ runners.json)",
+                            Options: new[] { $"ใช้ {runner.Cwd} ไปก่อน", "เดี๋ยวฉันเพิ่มใน runners.json เอง" })).ConfigureAwait(false);
                         continue;
                     }
 
@@ -745,6 +747,11 @@ internal static partial class Program
         }
 
         await PumpDecisionsAsync(cfg).ConfigureAwait(false);
+
+        // Last, and only when everything above found nothing to do. Work
+        // always wins: a study that delays an answer to the owner has
+        // inverted its own purpose.
+        BrokerIdleStudy(cfg, live, hadWork: waiting.Count > 0, dryRun);
     }
 
     // ───────────── is anybody home? ─────────────
@@ -1303,7 +1310,16 @@ internal static partial class Program
     /// retried forever; and MaxRunSeconds (enforced in the reaper) catches one
     /// run that hangs.
     /// </summary>
-    private static string? BudgetGate(BrokerConfig cfg, string agent, RunnerState state)
+    /// <summary>
+    /// Why a runner may not start — in two voices, on purpose. `Log` is read
+    /// by whoever is debugging this and stays English with the numbers in it;
+    /// `Th` is what the owner sees on a button they have to press, and the
+    /// owner reads Thai. One string for both jobs is how English ended up in
+    /// the box.
+    /// </summary>
+    private sealed record SpawnGate(string Log, string Th);
+
+    private static SpawnGate? BudgetGate(BrokerConfig cfg, string agent, RunnerState state)
     {
         var hourAgo = DateTime.UtcNow.AddHours(-1);
         state.Spawns.RemoveAll(s => s < hourAgo);
@@ -1335,13 +1351,20 @@ internal static partial class Program
         if (state.ConsecutiveFailures >= cfg.MaxConsecutiveFailures
             || (state.ConsecutiveFailures >= 1 && state.LastFailure is { } lf
                 && FatalRunnerSigns.Any(sign => lf.Contains(sign, StringComparison.OrdinalIgnoreCase))))
-            return $"the {agent} runner is not starting — {state.LastFailure ?? "it exits immediately"} "
-                 + $"({state.ConsecutiveFailures} runs in a row). Retrying will not change that.";
+            return new SpawnGate(
+                $"the {agent} runner is not starting — {state.LastFailure ?? "it exits immediately"} "
+              + $"({state.ConsecutiveFailures} runs in a row). Retrying will not change that.",
+                $"เปิด session ของ {agent} ไม่ขึ้น — {state.LastFailure ?? "เปิดแล้วดับทันที"} "
+              + $"(ล้มติดกัน {state.ConsecutiveFailures} ครั้ง) ลองใหม่เฉย ๆ ไม่ช่วย");
 
         if (state.Spawns.Count >= cfg.MaxSpawnsPerHour)
-            return $"{state.Spawns.Count} spawns in the last hour (max {cfg.MaxSpawnsPerHour})";
+            return new SpawnGate(
+                $"{state.Spawns.Count} spawns in the last hour (max {cfg.MaxSpawnsPerHour})",
+                $"เปิด session ไปแล้ว {state.Spawns.Count} ครั้งในหนึ่งชั่วโมง (เพดาน {cfg.MaxSpawnsPerHour})");
         if (state.Hops >= cfg.MaxHopsPerWork)
-            return $"{state.Hops} hops without the work closing (max {cfg.MaxHopsPerWork})";
+            return new SpawnGate(
+                $"{state.Hops} hops without the work closing (max {cfg.MaxHopsPerWork})",
+                $"งานนี้ส่งต่อกันมา {state.Hops} รอบแล้วยังไม่ปิด (เพดาน {cfg.MaxHopsPerWork})");
         return null;
     }
 
@@ -1356,6 +1379,20 @@ internal static partial class Program
     /// </summary>
     private readonly record struct WaitingWork(
         int Mail, int Tasks, IReadOnlyList<string> Works, double OldestHours, int Room = 0);
+
+    /// <summary>The same thing as <see cref="Describe"/>, for the owner.
+    /// It goes inside a question they have to answer, so it is Thai and it
+    /// leaves out the labels and ages that only mean something to me.</summary>
+    private static string DescribeTh(WaitingWork w)
+    {
+        var parts = new List<string>();
+        if (w.Mail > 0) parts.Add($"{w.Mail} ข้อความ");
+        if (w.Tasks > 0) parts.Add($"{w.Tasks} งาน");
+        if (w.Room > 0) parts.Add($"{w.Room} บรรทัดในห้อง");
+        if (parts.Count == 0) return "ไม่มีอะไร";
+        return string.Join(" และ ", parts)
+             + (w.Works.Count > 0 ? $" (เรื่อง {string.Join(", ", w.Works)})" : "");
+    }
 
     private static string Describe(WaitingWork w)
     {
@@ -1568,8 +1605,8 @@ internal static partial class Program
     /// at the same deadline — so in practice this window is what keeps the
     /// count-based gates (spawns per hour, hops per work) from chattering.
     /// </summary>
-    private static bool SaidBudgetStopAlready(BrokerConfig cfg, RunnerState state, string gate)
-        => state.LastBudgetLog == gate
+    private static bool SaidBudgetStopAlready(BrokerConfig cfg, RunnerState state, SpawnGate gate)
+        => state.LastBudgetLog == gate.Log
            && state.LastBudgetLogUtc is DateTime said
            && DateTime.UtcNow - said < TimeSpan.FromMinutes(cfg.RetryAfterFailureMinutes);
 
@@ -1675,6 +1712,22 @@ internal static partial class Program
         public int MaxSpawnsPerHour { get; init; } = 20;
 
         /// <summary>
+        /// Idle time spent on the brain instead of on nothing: the agents talk
+        /// a measured retrieval gap through and leave a note behind.
+        ///
+        /// Owner (2026-09-20): "ตอน idle พวกเขาแลกเปลี่ยนคุยกันเอง เพื่อร่วมกัน
+        /// พัฒนา rag ซึ่งกันและกัน จะได้ทำงานให้บอสได้อย่างดีที่สุด".
+        ///
+        /// Six hours, because the value is in the note and a note is worth
+        /// writing a few times a day, not a few times an hour. One spawn,
+        /// because starting a pair of sessions to talk is how a good idea
+        /// turns into a bill — the other agent joins when it is next alive.
+        /// </summary>
+        public bool IdleStudy { get; init; } = true;
+        public int IdleStudyHours { get; init; } = 6;
+        public int IdleStudyMaxSpawns { get; init; } = 1;
+
+        /// <summary>
         /// How old waiting work has to be before a BUSY agent is told about it
         /// anyway. Ten minutes: long enough that a message and its reply in the
         /// same conversation never trip it, short enough that nothing spends a
@@ -1769,6 +1822,9 @@ internal static partial class Program
             MaxRunSeconds = Math.Max(60, b["maxRunSeconds"]?.ToObject<int?>() ?? 900),
             MaxHopsPerWork = Math.Max(1, b["maxHopsPerWork"]?.ToObject<int?>() ?? 12),
             MaxSpawnsPerHour = Math.Max(1, b["maxSpawnsPerHour"]?.ToObject<int?>() ?? 20),
+            IdleStudy = o["idleStudy"]?.ToObject<bool?>() ?? true,
+            IdleStudyHours = Math.Max(1, o["idleStudyHours"]?.ToObject<int?>() ?? 6),
+            IdleStudyMaxSpawns = Math.Max(0, o["idleStudyMaxSpawns"]?.ToObject<int?>() ?? 1),
             StaleMailMinutes = Math.Max(1, o["staleMailMinutes"]?.ToObject<int?>() ?? 10),
             MaxConsecutiveFailures = Math.Max(1, b["maxConsecutiveFailures"]?.ToObject<int?>() ?? 2),
             RetryAfterFailureMinutes = Math.Max(1, b["retryAfterFailureMinutes"]?.ToObject<int?>() ?? 25),
@@ -1795,6 +1851,12 @@ internal static partial class Program
   "//idleGraceSeconds": "A live session whose tool-call counter has not moved for this long is parked, not working.",
   "//budget": "Ceilings, because an autonomous loop with no ceiling is a bill.",
   "//staleMailMinutes": "Work older than this is put in front of a BUSY agent too. Busy never meant busy with THIS.",
+  "//idleStudy": "When nothing is waiting, open a measured retrieval gap in the cowork room so the agents fill it. false turns it off entirely.",
+  "//idleStudyHours": "Never more often than this, and it doubles itself (up to 4x) while nobody answers.",
+  "//idleStudyMaxSpawns": "How many sessions may be STARTED for a study. 0 = never start one; the topic waits in the room for whoever is next alive.",
+  "idleStudy": true,
+  "idleStudyHours": 6,
+  "idleStudyMaxSpawns": 1,
   "pollSeconds": 15,
   "idleGraceSeconds": 45,
   "staleMailMinutes": 10,

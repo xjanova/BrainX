@@ -847,8 +847,8 @@ internal static partial class Program
                     ["type"] = "object",
                     ["properties"] = new JObject
                     {
-                        ["question"] = new JObject { ["type"] = "string", ["description"] = "the decision, in the owner's language, with enough context to answer it without opening anything" },
-                        ["options"] = new JObject { ["type"] = "array", ["items"] = new JObject { ["type"] = "string" }, ["description"] = "2-4 short answers. They become one-tap buttons in Telegram, so phrase them as choices, not questions." },
+                        ["question"] = new JObject { ["type"] = "string", ["description"] = "WRITE THIS IN THAI — it is shown to the owner as a box they have to read and answer, and they read Thai. Keep file paths, identifiers and code in English inside it. Give enough context to answer without opening anything." },
+                        ["options"] = new JObject { ["type"] = "array", ["items"] = new JObject { ["type"] = "string" }, ["description"] = "2-4 short answers, IN THAI. They become one-tap buttons, so phrase them as choices, not questions." },
                         ["work"] = new JObject { ["type"] = "string", ["description"] = "the workstream / task id this blocks, so the answer comes back labelled" }
                     },
                     ["required"] = new JArray { "question" }
