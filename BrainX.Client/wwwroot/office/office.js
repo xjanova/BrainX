@@ -683,7 +683,7 @@ function drawRoom() {
     // Back to front, so somebody nearer the viewer covers whoever is behind.
     const order = [...AGENTS].sort((x, y) => DESKS.get(x.id).desk.y - DESKS.get(y.id).desk.y);
     for (const a of order) if (a.state !== 'offline' && !VISITS.has(a.id)) drawSeated(a);
-    for (const a of order) drawWalker(a);
+    for (const a of order) if (!a.bridge) drawWalker(a);
 
     // The boss stands in his own light, always — he is in the room whether or
     // not he has just spoken, and an unlit figure in the middle of the rug
@@ -711,7 +711,61 @@ function drawSeated(a) {
     const d = DESKS.get(a.id);
     if (!d) return;
     castShadow(d.desk.x, d.desk.y + 5, 9);
-    drawPerson(d.desk.x, d.desk.y, agentColor(a.id), a);
+    // Owner (2026-09-20): "unreal unity เป็นโปรแกรม ไม่ใช่เอไอ ต้องถูกวางเป็น
+    // เครื่องมือ ต้องแยกให้ถูก ... ที่ตอบเราได้และกำหนดเป็นตัวละครอวาต้าได้ ก็มี
+    // ไม่กี่เจ้า". A bridge cannot answer, cannot be asked, and cannot pick a
+    // face — drawing it as a colleague made the room claim six people when
+    // four of them could talk. It gets the desk and the status light; the
+    // chair stays empty.
+    if (a.bridge) drawRig(d.desk.x, d.desk.y, a);
+    else drawPerson(d.desk.x, d.desk.y, agentColor(a.id), a);
+}
+
+/* The engines, as equipment.
+ *
+ * A tower with a status lamp and a vent stack. Deliberately the same visual
+ * weight as a seated figure so the room stays balanced, and deliberately
+ * nothing like one: no head, no skin, no idle bob. It is lit when the bridge
+ * has published a fresh heartbeat, dark when it has not, and the drive light
+ * flickers only while a tool call is actually running through it. */
+const RIG_ROWS = [
+    '..8888888..',
+    '.899999998.',
+    '.897777798.',
+    '.89gxxxg98.',
+    '.897777798.',
+    '.89-----98.',
+    '.897777798.',
+    '.89vvvvv98.',
+    '.89vvvvv98.',
+    '.897777798.',
+    '.89-----98.',
+    '.897777798.',
+    '.8999999 8.',
+    '..8888888..',
+];
+
+function drawRig(x, y, a) {
+    const on = a.state !== 'offline';
+    const busy = a.state === 'working';
+    const c = agentColor(a.id);
+    const body = on ? '#2b3242' : '#20242e';
+    const pal = {
+        '7': body,
+        '8': shade(body, -0.45),
+        '9': shade(body, 0.18),
+        '-': shade(body, -0.25),
+        'v': shade(body, -0.32),
+        'x': on ? '#0d1016' : '#0b0d12',
+        // The status lamp is the agent's own colour, so a glance at the room
+        // tells you WHICH engine is up without reading a nameplate.
+        'g': on ? (busy && (T >> 3) % 2 ? shade(c, 0.35) : c) : '#39405a',
+    };
+    drawGrid(RIG_ROWS, Math.round(x) - 5, Math.round(y) - 13, pal);
+
+    // Its light belongs in the room's lighting pass like everybody else's —
+    // an unlit corner with a running machine in it reads as an empty corner.
+    if (on) LIGHTS.push({ x, y: y - 6, r: 16, c: hexToRgb(c), i: busy ? 0.34 : 0.20 });
 }
 
 
@@ -1979,13 +2033,19 @@ function drawOverlay() {
     for (const a of AGENTS) {
         const d = DESKS.get(a.id);
         if (!d) continue;
-        const doing = a.state === 'offline' ? 'ไม่อยู่'
-            : a.state === 'working' ? (a.lastTool || 'ทำงานอยู่')
-                : 'ว่าง';
+        // An engine is EQUIPMENT: it is connected or it is not, and "ว่าง"
+        // (idle, as in waiting for work) says something about a colleague
+        // that is simply not true of a renderer.
+        const doing = a.bridge
+            ? (a.state === 'offline' ? 'ไม่ได้เชื่อมต่อ' : (a.lastTool || 'พร้อมใช้งาน'))
+            : a.state === 'offline' ? 'ไม่อยู่'
+                : a.state === 'working' ? (a.lastTool || 'ทำงานอยู่')
+                    : 'ว่าง';
         html.push(
-            `<div class="plate${a.state === 'offline' ? ' is-off' : ''}" ` +
+            `<div class="plate${a.state === 'offline' ? ' is-off' : ''}${a.bridge ? ' is-rig' : ''}" ` +
             `style="--pc:${agentColor(a.id)};left:${(d.desk.x * sx).toFixed(1)}px;top:${((d.desk.y + 14) * sy).toFixed(1)}px">` +
             `<span class="who">${esc(label(a.label || a.id))}</span>` +
+            (a.bridge ? `<span class="badge rig">เครื่องมือ</span>` : '') +
             (a.spawned ? `<span class="badge">AUTO</span>` : '') +
             (a.pending ? `<span class="badge">${a.pending}</span>` : '') +
             `<span class="doing">${esc(doing)}</span></div>`);
@@ -2231,10 +2291,14 @@ function apply(p) {
         ].join('\n');
     }
 
-    const online = AGENTS.filter(a => a.state !== 'offline').length;
-    const listening = AGENTS.filter(a => a.inRoom).length;
+    const people = AGENTS.filter(a => !a.bridge);
+    const rigs = AGENTS.filter(a => a.bridge);
+    const online = people.filter(a => a.state !== 'offline').length;
+    const listening = people.filter(a => a.inRoom).length;
+    const rigsUp = rigs.filter(a => a.state !== 'offline').length;
     document.getElementById('room-sub').textContent =
-        `${online} อยู่ในห้อง · ฟังอยู่ ${listening} · ${AGENTS.length} ที่นั่ง`;
+        `${online} อยู่ในห้อง · ฟังอยู่ ${listening} · ${people.length} ที่นั่ง`
+        + (rigs.length ? ` · เครื่องมือ ${rigsUp}/${rigs.length}` : '');
     document.getElementById('room-dot').classList.toggle('off', online === 0);
 
     renderLog();

@@ -4,15 +4,22 @@
    with the room on top. */
 
 :root {
-    --ink: #e8ecff;
-    --ink-dim: #a6adcf;
-    --ink-faint: #6f769b;
-    --bg: #0a0b16;
-    --panel: rgba(12, 14, 30, 0.72);
-    --stroke: rgba(120, 180, 255, 0.16);
-    --accent: #6cf0ff;
-    --warn: #ffb86c;
-    --bad: #e86c5a;
+    /* Obsidian & champagne, 2026-09-20 — the same palette the app shell and
+       the universe HUD carry. The room was still on the old violet/cyan set,
+       which made the one window the owner keeps open the one window that did
+       not match. Data colours (agent hues, gauges) are untouched: those mean
+       something. */
+    --ink: #f2f0ea;
+    --ink-dim: #b9b6ae;
+    --ink-faint: #85837d;
+    --bg: #0a0c11;
+    --panel: linear-gradient(180deg, rgba(32,37,48,0.80) 0%, rgba(20,24,32,0.74) 55%, rgba(12,15,21,0.80) 100%);
+    --stroke: rgba(242, 239, 230, 0.10);
+    --accent: #d8b978;
+    --warn: #e0a86a;
+    --bad: #e0736b;
+    /* One bevel, reused: bright along the top, dark underneath. */
+    --bevel: inset 0 1px 0 rgba(255,255,255,0.09), inset 0 -1px 0 rgba(0,0,0,0.45);
 }
 
 * { box-sizing: border-box; }
@@ -43,8 +50,9 @@ body {
     position: relative;
     border-radius: 10px;
     overflow: hidden;
-    background: #05060e;
+    background: #070910;
     border: 1px solid var(--stroke);
+    box-shadow: var(--bevel), 0 12px 30px -18px #000;
     min-height: 0;
     min-width: 0;
 }
@@ -93,8 +101,8 @@ body {
    a pixel-art room looks like it belongs to a different program. */
 #room-broker {
     appearance: none;
-    border: 1px solid #3a4470;
-    background: rgba(12, 16, 34, 0.72);
+    border: 1px solid rgba(242, 239, 230, 0.14);
+    background: linear-gradient(180deg, rgba(34,39,50,0.88), rgba(16,19,26,0.88));
     color: var(--ink-dim);
     font: inherit;
     letter-spacing: 1px;
@@ -104,10 +112,10 @@ body {
     align-self: center;
     transition: border-color .15s, color .15s, background .15s;
 }
-#room-broker:hover { border-color: #5a6bb0; color: var(--ink); }
-#room-broker.on { border-color: #2f7d5a; color: #7ef0b0; background: rgba(12, 40, 28, 0.6); }
-#room-broker.off { border-color: #6a3350; color: #ff9ab0; background: rgba(40, 12, 22, 0.6); }
-#room-broker.warn { border-color: #7a6320; color: #ffd98a; background: rgba(40, 32, 10, 0.6); }
+#room-broker:hover { border-color: rgba(216,185,120,0.55); color: var(--ink); }
+#room-broker.on { border-color: rgba(111,207,151,0.5); color: #8fdcae; }
+#room-broker.off { border-color: rgba(224,115,107,0.5); color: #e0938c; }
+#room-broker.warn { border-color: rgba(224,168,106,0.5); color: #e0b98a; }
 
 /* ── name plates over the canvas ──────────────────────────────────── */
 
@@ -145,6 +153,17 @@ body {
     color: var(--accent);
 }
 
+/* Equipment reads differently from people at a glance: a square, quiet chip
+   instead of the accent pill a colleague's badge uses. Owner (2026-09-20):
+   unity and unreal are programs, and the room must not imply they can answer. */
+.plate.is-rig .who { font-weight: 500; letter-spacing: 0.4px; opacity: 0.92; }
+.plate .badge.rig {
+    background: rgba(242, 239, 230, 0.10);
+    color: rgba(226, 223, 214, 0.82);
+    border-radius: 2px;
+    letter-spacing: 0.8px;
+}
+
 /* ── speech bubbles ───────────────────────────────────────────────── */
 
 .bubble {
@@ -153,7 +172,7 @@ body {
     max-width: 190px;
     padding: 5px 8px;
     border-radius: 9px;
-    background: rgba(18, 22, 44, 0.94);
+    background: linear-gradient(180deg, rgba(34,39,50,0.96), rgba(18,22,30,0.96));
     border: 1px solid var(--bc, var(--stroke));
     color: var(--ink);
     font-size: 10.5px;
@@ -189,6 +208,7 @@ body {
     border-radius: 10px;
     background: var(--panel);
     border: 1px solid var(--stroke);
+    box-shadow: var(--bevel), 0 14px 34px -20px #000;
 }
 
 #side-head {
