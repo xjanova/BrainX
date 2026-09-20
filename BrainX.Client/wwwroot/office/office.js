@@ -1560,42 +1560,106 @@ function drawBossSprite() {
  * further into the room and gets covered. One number per object is enough
  * because everything here stands on the same floor.
  */
-/* The painted occluder layer: the plate with everything that is NOT an
- * occluder erased. Built once, from art/room-mask.png, and rebuilt only if
- * the mask arrives after the plate. */
-let OCC_PLATE = null;
+/* Occluders, sorted the way a game sorts them.
+ *
+ * Owner (2026-09-20): "ตรงที่ต้องบัง นี่คือ ถ้าเราเดินเข้าด้านหลังจะบัง แต่ถ้า
+ * เดินเข้าข้างหน้าจะไม่บัง จะทำไง เทคนี้ในเกมใช้เยอะด้วย".
+ *
+ * Exactly right, and the previous version could not do it. It re-drew every
+ * occluder pixel BELOW the character's feet, which is true for a character
+ * standing behind the sofa and false the moment they walk around to the front
+ * of it: the sofa's own front legs are still below their feet, so the sofa
+ * kept painting over somebody standing in front of it.
+ *
+ * The fix is the standard one — Y-SORT PER OBJECT, not per pixel:
+ *
+ *   every object gets a BASELINE, the screen row where it meets the floor.
+ *   character's feet ABOVE that line  → character is behind → draw the object over them
+ *   character's feet BELOW that line  → character is in front → draw nothing
+ *
+ * with one refinement that matters in an isometric room: the baseline is per
+ * COLUMN, not one number for the whole object. A sofa photographed from a
+ * corner meets the floor at a different height at its left end than at its
+ * right, and a single baseline makes the character pop in front of it half a
+ * step too early at one end and half a step too late at the other.
+ *
+ * So the mask is split into connected pieces once, each piece keeps its own
+ * cut-out of the plate plus a baseline for every column it covers, and each
+ * frame asks one question per piece: at the column where this character is
+ * standing, is that piece's floor line below the character's feet?
+ */
+let OCC_PIECES = null;
 
-function buildOccluderPlate() {
+function buildOccluderPieces() {
     const m = ROOM_MAP.mask;
     if (!m || !PLATE_READY) return null;
-    const c = document.createElement('canvas');
-    c.width = ROOM_PLATE.naturalWidth;
-    c.height = ROOM_PLATE.naturalHeight;
-    const x = c.getContext('2d');
-    x.drawImage(ROOM_PLATE, 0, 0);
 
-    // Keep the plate only where the mask's BLUE channel is painted. Done as a
-    // stencil rather than by clipping polygons, because the mask is the shape
-    // — pixel for pixel, including the leaves of a plant, which no polygon was
-    // ever going to describe.
-    const sten = document.createElement('canvas');
-    sten.width = c.width; sten.height = c.height;
-    const sx = sten.getContext('2d');
-    const im = sx.createImageData(m.w, m.h);
-    for (let i = 0; i < m.data.length; i += 4) {
-        const on = m.data[i + 2] > 127;
-        im.data[i] = im.data[i + 1] = im.data[i + 2] = 255;
-        im.data[i + 3] = on ? 255 : 0;
+    const W = m.w, H = m.h;
+    const on = new Uint8Array(W * H);
+    for (let i = 0, p = 0; i < on.length; i++, p += 4) on[i] = m.data[p + 2] > 127 ? 1 : 0;
+
+    // Connected components, iterative (a 1.5M-pixel region would blow a
+    // recursive fill) and once per mask, not per frame.
+    const lab = new Int32Array(W * H).fill(-1);
+    const pieces = [];
+    const stack = [];
+    for (let seed = 0; seed < on.length; seed++) {
+        if (!on[seed] || lab[seed] >= 0) continue;
+        const id = pieces.length;
+        let x0 = W, y0 = H, x1 = 0, y1 = 0, count = 0;
+        stack.length = 0;
+        stack.push(seed);
+        lab[seed] = id;
+        while (stack.length) {
+            const i = stack.pop();
+            const x = i % W, y = (i / W) | 0;
+            count++;
+            if (x < x0) x0 = x; if (x > x1) x1 = x;
+            if (y < y0) y0 = y; if (y > y1) y1 = y;
+            if (x > 0     && on[i - 1] && lab[i - 1] < 0) { lab[i - 1] = id; stack.push(i - 1); }
+            if (x < W - 1 && on[i + 1] && lab[i + 1] < 0) { lab[i + 1] = id; stack.push(i + 1); }
+            if (y > 0     && on[i - W] && lab[i - W] < 0) { lab[i - W] = id; stack.push(i - W); }
+            if (y < H - 1 && on[i + W] && lab[i + W] < 0) { lab[i + W] = id; stack.push(i + W); }
+        }
+        // A handful of stray pixels is paint noise, not a piece of furniture.
+        pieces.push(count < 120 ? null : { id, x0, y0, x1, y1, count });
     }
-    const tmp = document.createElement('canvas');
-    tmp.width = m.w; tmp.height = m.h;
-    tmp.getContext('2d').putImageData(im, 0, 0);
-    sx.drawImage(tmp, 0, 0, sten.width, sten.height);
 
-    x.globalCompositeOperation = 'destination-in';
-    x.drawImage(sten, 0, 0);
-    x.globalCompositeOperation = 'source-over';
-    return c;
+    const kept = [];
+    for (const p of pieces) {
+        if (!p) continue;
+        const w = p.x1 - p.x0 + 1, h = p.y1 - p.y0 + 1;
+
+        // The cut-out: this piece of the plate, and nothing else.
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        const cx = c.getContext('2d');
+        cx.drawImage(ROOM_PLATE,
+            p.x0 * (ROOM_PLATE.naturalWidth / W), p.y0 * (ROOM_PLATE.naturalHeight / H),
+            w * (ROOM_PLATE.naturalWidth / W), h * (ROOM_PLATE.naturalHeight / H),
+            0, 0, w, h);
+        const img = cx.getImageData(0, 0, w, h);
+        const base = new Int32Array(w).fill(-1);
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                const gi = (p.y0 + y) * W + (p.x0 + x);
+                if (lab[gi] === p.id) {
+                    if (p.y0 + y > base[x]) base[x] = p.y0 + y;   // lowest row = floor line
+                } else {
+                    img.data[(y * w + x) * 4 + 3] = 0;            // not this piece: transparent
+                }
+            }
+        }
+        cx.putImageData(img, 0, 0);
+
+        // Columns the piece does not cover fall back to its lowest point, so a
+        // character standing in a gap still sorts sensibly against it.
+        let lowest = 0;
+        for (let x = 0; x < w; x++) if (base[x] > lowest) lowest = base[x];
+        kept.push({ canvas: c, x0: p.x0, y0: p.y0, w, h, base, lowest, mw: W, mh: H });
+    }
+    console.info('cowork: occluders split into', kept.length, 'pieces');
+    return kept;
 }
 
 function drawOccluders() {
@@ -1611,19 +1675,43 @@ function drawOccluders() {
     // part the hand-placed polygons kept getting wrong: one number per piece,
     // guessed, for objects whose real depth varies along their own width.
     if (ROOM_MAP.mask) {
-        if (!OCC_PLATE) OCC_PLATE = buildOccluderPlate();
-        if (OCC_PLATE) {
+        if (!OCC_PIECES) OCC_PIECES = buildOccluderPieces();
+        if (OCC_PIECES) {
             const f = PLATE_FIT;
-            const H = OCC_PLATE.height;
-            const feet = Math.max(0, Math.min(H - 1, Math.round(n.y * H)));
-            const hSrc = H - feet;
-            if (hSrc > 0) {
+            const s = bossScaleLogical();
+            const mw = OCC_PIECES.length ? OCC_PIECES[0].mw : 1;
+            const mh = OCC_PIECES.length ? OCC_PIECES[0].mh : 1;
+            const feetX = n.x * mw, feetY = n.y * mh;
+            // The character's own width in mask pixels, so a piece is only
+            // considered when it actually overlaps them.
+            const halfW = (34 * s / PLATE_FIT.w) * mw;
+
+            for (const p of OCC_PIECES) {
+                if (feetX + halfW < p.x0 || feetX - halfW > p.x1) continue;
+
+                // The floor line of THIS piece, at the column this character
+                // is standing in — averaged across their width so a one-pixel
+                // notch in the outline cannot flip the decision.
+                let base = -1, hits = 0;
+                const from = Math.max(0, Math.round(feetX - halfW) - p.x0);
+                const to = Math.min(p.w - 1, Math.round(feetX + halfW) - p.x0);
+                for (let x = from; x <= to; x++) {
+                    if (p.base[x] < 0) continue;
+                    base += p.base[x]; hits++;
+                }
+                base = hits ? (base + 1) / hits : p.lowest;
+
+                // Feet BELOW the line means the character is nearer the
+                // viewer than this object, so it must not be drawn over them.
+                if (feetY >= base) continue;
+
                 vctx.imageSmoothingEnabled = true;
                 vctx.imageSmoothingQuality = 'high';
-                vctx.drawImage(OCC_PLATE,
-                    0, feet, OCC_PLATE.width, hSrc,
-                    f.x * SCALE, (f.y + (feet / H) * f.h) * SCALE,
-                    f.w * SCALE, (hSrc / H) * f.h * SCALE);
+                vctx.drawImage(p.canvas,
+                    (f.x + (p.x0 / mw) * f.w) * SCALE,
+                    (f.y + (p.y0 / mh) * f.h) * SCALE,
+                    (p.w / mw) * f.w * SCALE,
+                    (p.h / mh) * f.h * SCALE);
             }
             return;
         }
@@ -2578,7 +2666,7 @@ function drawMapDebug() {
             const [hasMask, hasSeats] = await Promise.all([
                 ROOM_MAP.loadRoomMask(), ROOM_MAP.loadRoomSeats(),
             ]);
-            if (hasMask) { OCC_PLATE = null; console.info('cowork: using painted room mask'); }
+            if (hasMask) { OCC_PIECES = null; console.info('cowork: using painted room mask'); }
             if (hasSeats) console.info('cowork: using painted seats');
         } catch { /* fall back to the polygons */ }
         // Build the walk grid before the first click rather than on it: 56×42
