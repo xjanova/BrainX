@@ -2653,6 +2653,12 @@ public partial class MainWindow : Window
         // thing that ever runs it unattended (idle + stale gated).
         StartGardenerTimer();
 
+        // The boss of the cowork room. It used to be a Scheduled Task running
+        // a console window on the owner's desktop; the app owns it now, with
+        // no window, supervised, and stopped when the app stops — see
+        // MainWindow.BrokerHost.cs.
+        StartBrokerHost();
+
         // The Universe was started at the TOP of this method, before the
         // indexing — it is the loading screen, so it has to exist while the
         // loading happens. It used to be kicked off here, 250ms after
@@ -8478,6 +8484,12 @@ public partial class MainWindow : Window
 
     private async void Window_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
+        // The broker goes with the app, and takes its headless agents with it.
+        // A spawned agent has write access to the owner's repos; leaving one
+        // running with nothing supervising it is the part that matters here,
+        // not the tidiness of the process list.
+        try { StopBrokerHost(); } catch (Exception ex) { Debug.WriteLine($"broker teardown: {ex.Message}"); }
+
         // Save any unsaved editor work
         _mdEditor?.Save();
 

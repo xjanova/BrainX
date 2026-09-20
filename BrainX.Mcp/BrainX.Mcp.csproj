@@ -27,6 +27,18 @@
     <ProjectReference Include="..\BrainX.Core\BrainX.Core.csproj" />
   </ItemGroup>
 
+  <!-- The broker can run as a Windows Service (see Program.BrokerService.cs),
+       so the agents keep being dispatched when the BrainX app is closed.
+       Referenced unconditionally even though the MCP server also publishes for
+       linux/osx: the package is managed code that builds everywhere and only
+       THROWS off Windows, and every call site is behind OperatingSystem
+       .IsWindows(). A conditional PackageReference would make the same source
+       file fail to compile for the other RIDs, which is worse. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="9.0.0" />
+  </ItemGroup>
+
   <!-- The Claude Code hook scripts, carried INSIDE the binary.
        They cannot ship as loose files beside the exe: brainx-mcp is
        published self-contained and installed by Velopack into a versioned

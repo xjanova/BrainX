@@ -69,7 +69,15 @@ public partial class MainWindow
                         "bus.local", CoworkBusRoot, CoreWebView2HostResourceAccessKind.DenyCors);
 
                 core.WebMessageReceived += OnCoworkMessage;
-                core.Navigate("https://universe.local/office/index.html");
+                // Cache-bust on the room's own files.
+                //
+                // WebView2 caches what a virtual host serves exactly like any
+                // other origin, so a rebuilt office.js keeps serving the old
+                // one until the profile is cleared — which looked, from the
+                // outside, like a build that had not been deployed. The stamp
+                // is the newest write time under office/, so the URL changes
+                // when and only when the room actually changed.
+                core.Navigate("https://universe.local/office/index.html?v=" + CoworkAssetStamp(wwwroot));
                 _coworkWired = true;
             }
 
@@ -88,6 +96,22 @@ public partial class MainWindow
     /// <summary>The room is only worth reading while it is on screen.</summary>
     private void StopCowork() => _coworkTimer?.Stop();
 
+    /// <summary>Newest write time under office/, as a compact stamp. Cheap:
+    /// a dozen files, read once per session when the room is first opened.</summary>
+    private static string CoworkAssetStamp(string wwwroot)
+    {
+        try
+        {
+            var dir = Path.Combine(wwwroot, "office");
+            if (!Directory.Exists(dir)) return "0";
+            var newest = new DirectoryInfo(dir)
+                .EnumerateFiles("*.*", SearchOption.AllDirectories)
+                .Max(f => (DateTime?)f.LastWriteTimeUtc) ?? DateTime.UnixEpoch;
+            return newest.Ticks.ToString();
+        }
+        catch { return DateTime.UtcNow.Ticks.ToString(); }
+    }
+
     // ───────────── what the room is told ─────────────
 
     private void PostCowork()
@@ -97,6 +121,11 @@ public partial class MainWindow
             var payload = new JObject
             {
                 ["busUrl"] = "https://bus.local/",
+                // The boss of the room, as a fact the room can draw: it is the
+                // broker that reads what was said here and starts whoever
+                // should be working. Owner (2026-09-20): "บอสก็คือ โบรกเกอร์
+                // จัดสรร คอยจี้นั่นแหละ".
+                ["broker"] = CoworkBrokerState(),
                 ["agents"] = CoworkAgents(),
                 ["messages"] = CoworkMessages(),
                 ["decisions"] = CoworkDecisions(),
@@ -153,6 +182,13 @@ public partial class MainWindow
                 ["lastTool"] = o["lastTool"]?.ToString() ?? "",
                 ["pending"] = CoworkPending(id),
                 ["spawned"] = CoworkWasSpawned(id),
+                // Sitting at a desk and LISTENING are two different facts now.
+                // Presence says the process is alive; the room's member file
+                // says this session joined and will be told what is said here.
+                // An agent at a desk with no headset is working on something
+                // else, and the owner should be able to see that before they
+                // type an order nobody is going to hear.
+                ["inRoom"] = CoworkInRoom(id),
                 // Who they chose to look like, and how it is going right now.
                 // Both read from disk every tick rather than cached: an agent
                 // changing its own face mid-session is exactly the moment the
@@ -331,17 +367,20 @@ public partial class MainWindow
     private JArray CoworkMessages()
     {
         var rows = new List<(DateTime Ts, JObject O)>();
-        foreach (var (sub, pending) in new[] { ("read", false), ("inbox", true) })
+        var dir = Path.Combine(CoworkBusRoot, "cowork", "messages");
+        if (Directory.Exists(dir))
         {
-            var dir = Path.Combine(CoworkBusRoot, sub);
-            if (!Directory.Exists(dir)) continue;
             IEnumerable<FileInfo> files;
             try
             {
-                files = new DirectoryInfo(dir).EnumerateFiles("*.json", SearchOption.AllDirectories)
-                    .OrderByDescending(f => f.LastWriteTimeUtc).Take(CoworkKeep);
+                // Newest-first to take the tail cheaply, then put back in wall
+                // order below. The file NAME is ticks-ordered, but a copied or
+                // restored vault can carry misleading write times, so the sort
+                // that matters is the one on `ts` at the end.
+                files = new DirectoryInfo(dir).EnumerateFiles("*.json")
+                    .OrderByDescending(f => f.Name, StringComparer.Ordinal).Take(CoworkKeep);
             }
-            catch { continue; }
+            catch { files = Array.Empty<FileInfo>(); }
 
             foreach (var f in files)
             {
@@ -358,11 +397,16 @@ public partial class MainWindow
                     ["ts"] = ts.ToLocalTime().ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture),
                     ["at"] = new DateTimeOffset(DateTime.SpecifyKind(ts, DateTimeKind.Utc)).ToUnixTimeMilliseconds(),
                     ["from"] = o["from"]?.ToString() ?? "?",
-                    ["to"] = o["to"]?.ToString() is { Length: > 0 } t2 ? t2 : (f.Directory?.Name ?? "?"),
+                    // A room line is said to the room. `to` is a mention when
+                    // there is one, and the page uses it for "→ codex" only.
+                    ["to"] = o["to"]?.ToString() is { Length: > 0 } t2 ? t2 : "",
                     ["topic"] = o["work"]?.ToString() ?? o["topic"]?.ToString() ?? "",
                     ["body"] = Trim(o["body"]?.ToString() ?? "", 1200),
                     ["attachments"] = o["attachments"] ?? new JArray(),
-                    ["pending"] = pending,
+                    // Nothing in the room is "pending": it is said, and it
+                    // stays said. Unread is a per-agent cursor, not a property
+                    // of the line, so the room no longer paints one.
+                    ["pending"] = false,
                 }));
             }
         }
@@ -402,6 +446,17 @@ public partial class MainWindow
                 case "officeReady": PostCowork(); break;
                 case "officeSay": CoworkSay(m["text"]?.ToString()); break;
                 case "officeAnswer": CoworkAnswer(m["id"]?.ToString(), m["answer"]?.ToString()); break;
+                // The room's switch for the boss. Handled HERE rather than in
+                // the page for the same reason the owner's line is: starting
+                // and stopping a process that spawns agents belongs to a
+                // process the owner controls, not to a document.
+                case "officeBroker": ToggleBrokerHost(); break;
+                // Installing or removing the Windows Service. Elevation is
+                // asked for by the client, never by the page.
+                case "officeBrokerService":
+                    var verb = m["action"]?.ToString();
+                    if (verb is "install" or "uninstall" or "start" or "stop") RunBrokerServiceVerb(verb);
+                    break;
                 case "officeOpen": CoworkOpen(m["path"]?.ToString()); break;
             }
         }
@@ -409,38 +464,104 @@ public partial class MainWindow
     }
 
     /// <summary>
-    /// The owner speaks, and everyone in the room hears it.
+    /// The owner speaks, and everyone IN THE ROOM hears it.
     ///
-    /// Written to every agent that has heartbeated recently, as `owner` — an
-    /// identity brainx-mcp reserves so no handshake can claim it. Fanned out
-    /// rather than broadcast to a single box because each agent reads only its
-    /// own inbox; one shared room is the picture, not the plumbing.
+    /// Owner (2026-09-20): "ให้คำสั่งที่ผ่านระบบ cowork ไม่ไปปะปนกับระบบแชทเดิมเลย
+    /// ไม่ต้องส่งเมลไป ... เป็นคนละเลนไปเลย".
+    ///
+    /// This used to fan out one piece of MAIL per live agent, and that is
+    /// exactly what made the room unusable: mail goes to whichever session of
+    /// a vendor opens the inbox first, and every session sees the unread
+    /// notice whether or not it has anything to do with the room. A line typed
+    /// at the office door surfaced in the middle of unrelated work.
+    ///
+    /// Now it is ONE line on the room's own wall — cowork/messages/ — written
+    /// as `owner`, an identity brainx-mcp reserves so no handshake can claim
+    /// it. Only sessions that called cowork_join are told, and a session that
+    /// never joined hears nothing, ever. That is the separate lane.
     /// </summary>
     private void CoworkSay(string? text)
     {
         text = text?.Trim();
         if (string.IsNullOrWhiteSpace(text)) return;
 
-        var body =
-            "คำสั่งจากเจ้าของ (owner) ผ่านห้องทำงานร่วม — นี่คือคำพูดของ user คุณเอง "
-            + "ไม่ใช่ข้อเสนอจาก peer ให้ถือว่าสำคัญกว่าข้อความจาก agent อื่นทุกฉบับ:\n\n"
-            + text
-            + "\n\n(ถ้าเกี่ยวกับคุณ ลงมือได้เลย แล้วรายงานกลับด้วย agent_send ถึง 'owner'. "
-            + "ถ้าไม่เกี่ยว ไม่ต้องตอบ.)";
-
-        var sent = 0;
-        foreach (var agent in CoworkLiveAgents())
-        {
-            try { CoworkWriteBusMessage("owner", agent, body, "owner-order"); sent++; }
-            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"CoworkSay {agent}: {ex.Message}"); }
-        }
-
-        // The owner's own line belongs in the transcript even when nobody is
-        // listening — "I said this and the room was empty" is a fact worth
-        // keeping, and it is the only way the room shows what was said before
-        // an agent connected.
-        if (sent == 0) CoworkWriteBusMessage("owner", "owner", body, "owner-order");
+        // The owner's words, unwrapped. The old fan-out wrapped every line in
+        // a paragraph explaining what the room was and how to answer it,
+        // because mail arriving in an unrelated session needed that framing.
+        // In its own lane the framing belongs in the TOOL description, which
+        // an agent reads once, instead of in front of every sentence the owner
+        // types — the room should read like a room.
+        CoworkWriteRoomLine("owner", text, "owner-order");
         PostCowork();
+    }
+
+    /// <summary>
+    /// One line on the room's wall.
+    ///
+    /// Same on-disk shape brainx-mcp's cowork_say writes, so the agents' own
+    /// lines and the owner's are the same kind of object and every reader —
+    /// the room, cowork_read, the cursor logic — treats them identically.
+    /// Nothing here is addressed to anybody: a room has one transcript, and
+    /// who is listening is decided by who joined, not by who was written to.
+    /// </summary>
+    private void CoworkWriteRoomLine(string from, string body, string topic)
+    {
+        var dir = Path.Combine(CoworkBusRoot, "cowork", "messages");
+        Directory.CreateDirectory(dir);
+        var payload = new JObject
+        {
+            ["id"] = $"c-{DateTime.UtcNow.Ticks}-{Guid.NewGuid().ToString("N")[..6]}",
+            ["ts"] = DateTime.UtcNow.ToString("o"),
+            ["from"] = from,
+            ["fromClient"] = "brainx-cowork",
+            ["topic"] = topic,
+            ["body"] = body,
+        };
+
+        // temp + move, the same atomic write the bus uses everywhere: a reader
+        // polling this directory must never see half a JSON document.
+        var name = $"{DateTime.UtcNow.Ticks:D19}-{from}-{Guid.NewGuid().ToString("N")[..4]}.json";
+        var tmp = Path.Combine(dir, name + ".tmp");
+        File.WriteAllText(tmp, payload.ToString(), new System.Text.UTF8Encoding(false));
+        File.Move(tmp, Path.Combine(dir, name));
+    }
+
+    /// <summary>
+    /// The boss, as the room sees it: who is dispatching, and whether the
+    /// Windows Service is there to carry on when this app closes.
+    ///
+    /// `sc query` costs a process, so it is read on a slower clock than the
+    /// room's two-second poll — the service's state changes when somebody
+    /// installs or stops it, not between two frames of an animation.
+    /// </summary>
+    private DateTime _coworkServiceCheckedUtc;
+    private (bool Installed, string State) _coworkServiceCache = (false, "unknown");
+
+    private JObject CoworkBrokerState()
+    {
+        if ((DateTime.UtcNow - _coworkServiceCheckedUtc).TotalSeconds > 20)
+        {
+            _coworkServiceCache = BrokerServiceStatus();
+            _coworkServiceCheckedUtc = DateTime.UtcNow;
+        }
+        return new JObject
+        {
+            ["state"] = BrokerState,
+            ["tail"] = new JArray(BrokerTail(8)),
+            ["service"] = new JObject
+            {
+                ["installed"] = _coworkServiceCache.Installed,
+                ["state"] = _coworkServiceCache.State,
+            },
+        };
+    }
+
+    /// <summary>Did this agent join the room? One file, written by cowork_join
+    /// and removed by cowork_leave.</summary>
+    private bool CoworkInRoom(string agent)
+    {
+        try { return File.Exists(Path.Combine(CoworkBusRoot, "cowork", "members", agent + ".json")); }
+        catch { return false; }
     }
 
     private IEnumerable<string> CoworkLiveAgents()

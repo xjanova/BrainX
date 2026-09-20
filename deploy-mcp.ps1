@@ -123,6 +123,49 @@ function Deploy-Set($srcDir, $dstDir, $assets, $ts, $label) {
     return $failed
 }
 
+# The Windows Service host for the broker (Microsoft.Extensions.Hosting +
+# WindowsServices). These arrived with `brainx-mcp broker-service`, and they
+# are listed once and reused by BOTH deploy targets below because the two
+# lists differ only in the native-runtime layout, not in managed dependencies.
+#
+# Why it matters that they ship: `broker` itself never touches these types, so
+# a deploy that misses them looks completely healthy -- right up until the
+# service starts, fails to load Microsoft.Extensions.Hosting, and Windows
+# reports a service that "started and then stopped" with no further detail.
+$hostingAssets = @(
+    "Microsoft.Extensions.Hosting.dll",
+    "Microsoft.Extensions.Hosting.Abstractions.dll",
+    "Microsoft.Extensions.Hosting.WindowsServices.dll",
+    "Microsoft.Extensions.DependencyInjection.dll",
+    "Microsoft.Extensions.DependencyInjection.Abstractions.dll",
+    "Microsoft.Extensions.Configuration.dll",
+    "Microsoft.Extensions.Configuration.Abstractions.dll",
+    "Microsoft.Extensions.Configuration.Binder.dll",
+    "Microsoft.Extensions.Configuration.CommandLine.dll",
+    "Microsoft.Extensions.Configuration.EnvironmentVariables.dll",
+    "Microsoft.Extensions.Configuration.FileExtensions.dll",
+    "Microsoft.Extensions.Configuration.Json.dll",
+    "Microsoft.Extensions.Configuration.UserSecrets.dll",
+    "Microsoft.Extensions.Diagnostics.dll",
+    "Microsoft.Extensions.Diagnostics.Abstractions.dll",
+    "Microsoft.Extensions.FileProviders.Abstractions.dll",
+    "Microsoft.Extensions.FileProviders.Physical.dll",
+    "Microsoft.Extensions.FileSystemGlobbing.dll",
+    "Microsoft.Extensions.Logging.dll",
+    "Microsoft.Extensions.Logging.Abstractions.dll",
+    "Microsoft.Extensions.Logging.Configuration.dll",
+    "Microsoft.Extensions.Logging.Console.dll",
+    "Microsoft.Extensions.Logging.Debug.dll",
+    "Microsoft.Extensions.Logging.EventLog.dll",
+    "Microsoft.Extensions.Logging.EventSource.dll",
+    "Microsoft.Extensions.Options.dll",
+    "Microsoft.Extensions.Options.ConfigurationExtensions.dll",
+    "Microsoft.Extensions.Primitives.dll",
+    "System.Diagnostics.EventLog.dll",
+    "System.Diagnostics.EventLog.Messages.dll",
+    "System.ServiceProcess.ServiceController.dll"
+)
+
 # 4. Deploy to the dev Release dir (framework-dependent code + runtimeconfig).
 $devAssets = @(
     "brainx-mcp.dll", "brainx-mcp.exe", "brainx-mcp.pdb",
@@ -144,7 +187,7 @@ $devAssets = @(
     # first time an ssh_* tool loads. Any package UPGRADE whose dll already
     # shipped must be added here by hand.
     "Renci.SshNet.dll"
-)
+) + $hostingAssets
 $devFailed = Deploy-Set $fwBuild $devRelease $devAssets $ts "dev Release"
 
 # 5. Deploy to the installed app (the folder the shipped client's status bar
@@ -163,7 +206,7 @@ if (Test-Path $installedMcp) {
         "Microsoft.ML.OnnxRuntime.dll", "System.Numerics.Tensors.dll",
         "onnxruntime.dll", "onnxruntime_providers_shared.dll",
         "Renci.SshNet.dll"
-    )
+    ) + $hostingAssets
     $appFailed = Deploy-Set $scBuild $installedMcp $appAssets $ts "installed app"
 } else {
     Write-Output ""
