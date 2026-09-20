@@ -113,6 +113,9 @@
     <div class="grp">
       <label>ให้โปรแกรมช่วยเก็บ</label>
       <div class="row">
+        <button id="auto" style="flex:1">ระบายอัตโนมัติให้เลย</button>
+      </div>
+      <div class="row" style="margin-top:6px">
         <button id="snap" style="flex:1">เก็บขอบให้ (S)</button>
       </div>
       <div class="row" style="margin-top:6px">
@@ -622,6 +625,47 @@ function checkMap() {
     ].join('<br>'));
 }
 function report(html) { document.getElementById('report').innerHTML = html; }
+
+/* One button: load the automatic pass.
+ *
+ * Owner (2026-09-20): "หาวิธีหน่อย ที่กดปุ่มเดียวแล้วระบายไว้ก่อนเลย ฉันปรับแต่ง
+ * รายละเอียดนิดหน่อย". The segmentation itself is tools/roommap/autoseg.py —
+ * flatness picks the floor, region growing bounded by an edge map keeps the
+ * furniture out of it, and depth comes from the projection. It runs outside
+ * the browser because it is a batch job over 1.5M pixels that only needs
+ * re-running when the PLATE changes, not while somebody is painting.
+ *
+ * So the button loads its output and hands it over as editable paint. */
+document.getElementById('auto').addEventListener('click', async () => {
+    try {
+        snapshot();
+        const im = new Image();
+        await new Promise((res, rej) => { im.onload = res; im.onerror = rej; im.src = '../art/room-mask.png?t=' + Date.now(); });
+        const t = document.createElement('canvas');
+        t.width = im.naturalWidth; t.height = im.naturalHeight;
+        t.getContext('2d').drawImage(im, 0, 0);
+        const d = t.getContext('2d').getImageData(0, 0, t.width, t.height);
+        const out = mctx.createImageData(paint.width, paint.height);
+        for (let i = 0; i < d.data.length; i += 4) {
+            const R = d.data[i] > 127, G = d.data[i + 1] > 127, B = d.data[i + 2] > 127;
+            if (!(R || G || B)) continue;
+            let r = 0, g = 0, b = 0, n = 0;
+            if (G) { r += 60; g += 227; b += 138; n++; }
+            if (R) { r += 255; g += 90; b += 110; n++; }
+            if (B) { r += 90; g += 160; b += 255; n++; }
+            out.data[i] = r / n; out.data[i + 1] = g / n; out.data[i + 2] = b / n; out.data[i + 3] = 255;
+        }
+        mctx.putImageData(out, 0, 0);
+        try {
+            const sj = await fetch('../art/room-seats.json?t=' + Date.now()).then(r => r.json());
+            seats.length = 0; (sj.seats || []).forEach(s => seats.push(s)); drawSeats();
+        } catch { /* seats are optional */ }
+        checkMap();
+        say('ระบายอัตโนมัติมาให้แล้ว — แก้ทับได้เลย');
+    } catch (e) {
+        say('ยังไม่มีผลอัตโนมัติ — รัน tools/roommap/autoseg.py ก่อน');
+    }
+});
 
 document.getElementById('snap').addEventListener('click', () => { snapshot(); snapToEdges(); });
 document.getElementById('clean').addEventListener('click', () => { snapshot(); cleanLayer(); });

@@ -1,13 +1,9 @@
 {
-  "note": "exported from the hand-measured polygons — repaint freely",
+  "note": "auto-segmented (flatness + region growing); seats are guesses",
   "seats": [
     {
-      "x": 0.34,
-      "y": 0.745
-    },
-    {
-      "x": 0.52,
-      "y": 0.795
+      "x": 0.4075,
+      "y": 0.2928
     }
   ]
 }
