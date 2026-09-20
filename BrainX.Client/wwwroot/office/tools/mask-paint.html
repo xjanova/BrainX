@@ -717,6 +717,11 @@ document.getElementById('save').addEventListener('click', () => {
 
     download(new Blob([JSON.stringify({
         note: 'painted with tools/mask-paint.html — x,y are fractions of the plate, at the FEET',
+        // A person placed these, so they outrank the hand-measured spots in
+        // roommap.js. The auto-segmenter writes the same file with
+        // verified:false, and the room ignores those — its guesses once put
+        // the boss in a planter and deleted the sofa doing it.
+        verified: true,
         seats,
     }, null, 2)], { type: 'application/json' }), 'room-seats.json');
     dirty = false;

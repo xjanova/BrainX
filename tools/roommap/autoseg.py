@@ -288,7 +288,15 @@ def main():
     rgb[..., 2] = Oc * 255
     Image.fromarray(rgb).save(os.path.join(OUT, "room-mask.png"))
     io.open(os.path.join(OUT, "room-seats.json"), "w", encoding="utf-8").write(json.dumps(
-        {"note": "auto-segmented (flatness + region growing); seats are guesses", "seats": seats},
+        # verified:false is load-bearing. The room prefers painted seats over
+        # its hand-measured ones, and these are not painted — one of them once
+        # landed on the planters and DELETED both sofa spots on its way in, so
+        # the boss walked upstairs and sat in a plant. The flag is what keeps a
+        # guess from outranking a measurement; only mask-paint.html sets it true.
+        {"note": "auto-segmented (flatness + region growing); seats are GUESSES — "
+                 "verified:false, so the room keeps its hand-measured sofa spots. "
+                 "Paint seats in tools/mask-paint.html to replace them.",
+         "verified": False, "seats": seats},
         ensure_ascii=False, indent=2))
 
     view = im.convert("RGBA")

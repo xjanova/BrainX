@@ -1,9 +1,10 @@
 {
-  "note": "auto-segmented (flatness + region growing); seats are guesses",
+  "note": "auto-segmented (flatness + region growing); seats are GUESSES. verified:false means the room keeps its hand-measured sofa spots. Paint seats in tools/mask-paint.html to replace them.",
   "seats": [
     {
       "x": 0.4075,
       "y": 0.2928
     }
-  ]
+  ],
+  "verified": false
 }

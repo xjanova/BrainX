@@ -355,6 +355,18 @@ function loadRoomSeats(url = 'art/room-seats.json') {
     return fetch(url).then(r => r.ok ? r.json() : null).then(j => {
         const seats = j && Array.isArray(j.seats) ? j.seats : null;
         if (!seats || !seats.length) return false;
+
+        // Only seats a PERSON placed may replace the measured ones.
+        //
+        // The auto-segmenter writes this file too, and it says outright that
+        // its seats are guesses — one of them landed on the planters at the
+        // top of the room, and because painted beat measured, the boss walked
+        // up and sat in a plant. A guess that outranks a measurement is worse
+        // than no guess at all: it silently deletes the thing that was right.
+        if (j.verified !== true) {
+            console.info('cowork: room-seats.json is unverified (auto-segmented) — keeping the measured sofa spots');
+            return false;
+        }
         // Painted seats REPLACE the hand-measured sofa spots and keep the rest
         // (the counter, the shelf, the racks) — those are standing positions,
         // not seats, and nothing about them was wrong.

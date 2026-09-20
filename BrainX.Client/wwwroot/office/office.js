@@ -1887,6 +1887,34 @@ function bossTick() {
     if (!BOSS_AV) return;
     const now = performance.now();
 
+    // Lights out: he goes home and sleeps there. `sleep` is in the pack — this
+    // is the one thing it was always for.
+    if (!ROOM_OPEN) {
+        if (BOSS_ASLEEP) return;                 // already out; nothing moves him
+
+        // Walk him back first, so he is not asleep standing in the middle of
+        // the floor. Once he is home (or was already), he lies down.
+        const home = BOSS_PLAN?.spot === BOSS_HOME && !BOSS_AV.target;
+        if (!home && BOSS_PLAN?.phase !== 'walking' && BOSS_PLAN?.phase !== 'rising') {
+            bossGoTo(BOSS_HOME);
+            return;
+        }
+        if (BOSS_AV.target) return;              // still on his way
+
+        BOSS_ASLEEP = true;
+        BOSS_PLAN = { spot: BOSS_HOME, phase: 'resting', until: Infinity };
+        try { BOSS_AV.play('sleep'); } catch { BOSS_AV.play('idle'); }
+        return;
+    }
+
+    // Lights back on, and he is the first one up.
+    if (BOSS_ASLEEP) {
+        BOSS_ASLEEP = false;
+        BOSS_AV.play('stand_up', { loop: false });
+        BOSS_PLAN = { spot: BOSS_HOME, phase: 'rising', until: now + 880 };
+        return;
+    }
+
     // The owner talking outranks whatever he was doing. He comes back to the
     // rug to say it, because an order shouted from the coffee bar reads as
     // somebody muttering into a cup.
@@ -2000,6 +2028,8 @@ function bossSendTo(lx, ly) {
 }
 
 function onRoomClick(e) {
+    // Asleep is asleep. The light is the only thing that wakes him.
+    if (!ROOM_OPEN) return;
     const r = cv.getBoundingClientRect();
     if (!r.width || !r.height) return;
     // Client px → logical canvas px. The canvas is CSS-scaled, so the ratio is
@@ -2089,7 +2119,7 @@ function present() {
     // other, and a soft radial falloff so the pixels underneath stay readable
     // through it instead of being washed out.
     vctx.globalCompositeOperation = 'lighter';
-    for (const L of LIGHTS) {
+    for (const L of (ROOM_OPEN ? LIGHTS : [])) {
         const cx = L.x * SCALE, cy = L.y * SCALE, r = L.r * SCALE;
         const g = vctx.createRadialGradient(cx, cy, 1, cx, cy, r);
         const [R, G, B] = L.c;
@@ -2136,13 +2166,26 @@ function castDarkness() {
     // Never pitch black: a room you cannot see at all is not atmospheric, it
     // is broken. This much still reads as "unlit" while leaving the furniture
     // legible enough to know it is there.
-    shctx.fillStyle = 'rgba(3,4,12,0.80)';
+    //
+    // With the room CLOSED the blanket goes to full weight and no holes are
+    // cut, because that is what the lamps being off looks like. Not quite
+    // opaque: the owner should still see the shape of their office, and the
+    // boss asleep in it.
+    shctx.fillStyle = ROOM_OPEN ? 'rgba(3,4,12,0.80)' : 'rgba(2,3,9,0.93)';
     shctx.fillRect(0, 0, W, H);
 
     // Cut a hole per light. Two stops with a wide soft tail, because a hard
     // edge reads as a spotlight rather than as a lamp in a room.
     shctx.globalCompositeOperation = 'destination-out';
-    for (const L of LIGHTS) {
+
+    // With everything off, one pool over the sleeper. Not a lamp — the point
+    // is that you can still see him asleep; a dark room you cannot find
+    // anybody in is the black rectangle this function was written to avoid.
+    const nightLight = (!ROOM_OPEN && BOSS_AV)
+        ? [{ x: BOSS_AV.x, y: BOSS_AV.y - 24, r: 38, c: [150, 170, 255], i: 0.2 }]
+        : [];
+
+    for (const L of (ROOM_OPEN ? LIGHTS : nightLight)) {
         const cx = L.x * SCALE, cy = L.y * SCALE, r = L.r * SCALE * 1.9;
         const g = shctx.createRadialGradient(cx, cy, r * 0.10, cx, cy, r);
         g.addColorStop(0, 'rgba(0,0,0,1)');
@@ -2156,7 +2199,7 @@ function castDarkness() {
     // nobody in it is still a room and not a black rectangle.
     const cx = W / 2, cy = H * 0.52, r = Math.max(W, H) * 0.42;
     const amb = shctx.createRadialGradient(cx, cy, r * 0.1, cx, cy, r);
-    amb.addColorStop(0, 'rgba(0,0,0,0.34)');
+    amb.addColorStop(0, ROOM_OPEN ? 'rgba(0,0,0,0.34)' : 'rgba(0,0,0,0.10)');
     amb.addColorStop(1, 'rgba(0,0,0,0)');
     shctx.fillStyle = amb;
     shctx.fillRect(0, 0, W, H);
@@ -2362,6 +2405,8 @@ let BUS_URL = '';
 /** Is the room lit? Dark = everybody has gone home and nothing may be said.
  *  Owner (2026-09-20): "ปิดไฟปิดห้อง ทุกคนออกไปหมด". */
 let ROOM_OPEN = true;
+/** Is he asleep at his spot? Only true while the light is off. */
+let BOSS_ASLEEP = false;
 function fileUrl(rel) { return rel && BUS_URL ? BUS_URL + rel : ''; }
 function kb(b) { return b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB'; }
 
@@ -2374,8 +2419,15 @@ function onMessage(evt) {
 
 function apply(p) {
     if (typeof p.busUrl === 'string') BUS_URL = p.busUrl;
+    // Read before anything uses it: the agent list and the boss both branch on
+    // whether the light is on.
+    if (typeof p.roomOpen === 'boolean') ROOM_OPEN = p.roomOpen;
     const hadAgents = AGENTS.length;
-    AGENTS = (p.agents || []).slice().sort((a, b) => a.id.localeCompare(b.id));
+    // Nobody is drawn in a dark room. The seats were cleared when it closed;
+    // presence only says an MCP process is alive somewhere, which is not the
+    // same as being HERE, and drawing them at desks would say the room is
+    // still in session.
+    AGENTS = ROOM_OPEN ? (p.agents || []).slice().sort((a, b) => a.id.localeCompare(b.id)) : [];
     if (AGENTS.length !== hadAgents) layoutDesks();
 
     MESSAGES = p.messages || [];
