@@ -44,6 +44,11 @@
            CLIENT to start or stop it — the page cannot, and must not, run a
            process that spawns agents. -->
       <button id="room-broker" type="button" title="บอสจัดสรรงาน (broker)">—</button>
+      <!-- The map the room runs on. Opened in this same WebView so the plate
+           loads from the same virtual host the room uses; painting it is how
+           the walkable floor, the blocked furniture and the occluders are
+           defined, instead of being measured off the picture by eye. -->
+      <button id="room-map" type="button" title="ระบายผังห้อง — เดินได้ / ห้ามเข้า / ต้องบัง">ผังห้อง</button>
     </div>
   </div>
 

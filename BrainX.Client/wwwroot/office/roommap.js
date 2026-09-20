@@ -126,6 +126,54 @@ const SPOTS = [
     { key: 'window',   x: 0.690, y: 0.455, act: 'think', face: 'ne', stay: [6, 14] },
 ];
 
+// ── the painted mask (preferred over everything above) ──────────────
+//
+// Owner (2026-09-20): "การบังของคุณผิดพลาด คุณทำเครื่องมือ มาร์กมาให้ฉัน ... ให้
+// ฉันระบายส่วนนั้นมาร์คให้คุณจะง่ายกว่า".
+//
+// They are right. Every polygon above was read off a measuring grid by eye,
+// which is accurate enough for a sofa and hopeless for the edge of a planter
+// — and an occluder a few pixels out is a character sliced in half. So when
+// art/room-mask.png exists it WINS: one channel per meaning, painted on the
+// plate itself with tools/mask-paint.html.
+//
+//   R = blocked    G = walkable    B = occluder
+//
+// The polygons stay as the fallback for a vault that has no mask yet, and as
+// the thing that made it obvious a mask was needed.
+
+let MASK = null;   // { w, h, data: Uint8ClampedArray }  — raw RGBA of the mask
+
+/** Load the painted mask, if the room has one. Resolves either way: a missing
+ *  mask is the normal state until somebody paints one. */
+function loadRoomMask(url = 'art/room-mask.png') {
+    return new Promise((resolve) => {
+        const im = new Image();
+        im.onload = () => {
+            try {
+                const c = document.createElement('canvas');
+                c.width = im.naturalWidth; c.height = im.naturalHeight;
+                const x = c.getContext('2d', { willReadFrequently: true });
+                x.drawImage(im, 0, 0);
+                MASK = { w: c.width, h: c.height, data: x.getImageData(0, 0, c.width, c.height).data };
+                GRID = null;          // the old grid was built from polygons
+                resolve(true);
+            } catch { resolve(false); }
+        };
+        im.onerror = () => resolve(false);
+        im.src = url;
+    });
+}
+
+/** Sample the mask at a normalised point. Returns null when there is no mask. */
+function maskAt(nx, ny) {
+    if (!MASK) return null;
+    const x = Math.min(MASK.w - 1, Math.max(0, Math.round(nx * MASK.w)));
+    const y = Math.min(MASK.h - 1, Math.max(0, Math.round(ny * MASK.h)));
+    const i = (y * MASK.w + x) * 4;
+    return { block: MASK.data[i] > 127, walk: MASK.data[i + 1] > 127, occl: MASK.data[i + 2] > 127 };
+}
+
 // ── geometry ────────────────────────────────────────────────────────
 
 function pointInPoly(px, py, poly) {
@@ -137,8 +185,13 @@ function pointInPoly(px, py, poly) {
     return inside;
 }
 
-/** Can somebody stand here? Normalised plate coordinates. */
+/** Can somebody stand here? Normalised plate coordinates.
+ *
+ *  Painted mask first — blocked beats walkable, so a sofa painted over floor
+ *  is solid without anybody having to erase the floor underneath it. */
 function isWalkable(nx, ny) {
+    const m = maskAt(nx, ny);
+    if (m) return m.walk && !m.block;
     if (!pointInPoly(nx, ny, FLOOR)) return false;
     for (const b of BLOCKS) if (pointInPoly(nx, ny, b.poly)) return false;
     return true;
@@ -296,6 +349,27 @@ function spotNear(nx, ny, within = 0.075) {
     return bestD <= within ? best : null;
 }
 
+/** Seats painted in the tool, if the room has any. Each is where the FEET
+ *  land; the sitting frame is drawn from there like every other spot. */
+function loadRoomSeats(url = 'art/room-seats.json') {
+    return fetch(url).then(r => r.ok ? r.json() : null).then(j => {
+        const seats = j && Array.isArray(j.seats) ? j.seats : null;
+        if (!seats || !seats.length) return false;
+        // Painted seats REPLACE the hand-measured sofa spots and keep the rest
+        // (the counter, the shelf, the racks) — those are standing positions,
+        // not seats, and nothing about them was wrong.
+        for (let i = SPOTS.length - 1; i >= 0; i--) if (SPOTS[i].act === 'sit') SPOTS.splice(i, 1);
+        seats.forEach((s, i) => SPOTS.push({
+            key: 'seat-' + (i + 1), x: s.x, y: s.y, act: 'sit',
+            face: s.face || (i % 2 ? 'nw' : 'ne'), stay: [16, 38],
+            seat: s.seat || { x: s.x, y: s.y - 0.035 },
+        }));
+        return true;
+    }).catch(() => false);
+}
+
 const ROOM_MAP = { FLOOR, BLOCKS, OCCLUDERS, SPOTS, GW, GH,
                    isWalkable, nearestWalkable, findPath, spotNear, buildGrid,
-                   pointInPoly, get grid() { return GRID || buildGrid(); } };
+                   pointInPoly, loadRoomMask, loadRoomSeats, maskAt,
+                   get mask() { return MASK; },
+                   get grid() { return GRID || buildGrid(); } };

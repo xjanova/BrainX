@@ -1560,9 +1560,75 @@ function drawBossSprite() {
  * further into the room and gets covered. One number per object is enough
  * because everything here stands on the same floor.
  */
+/* The painted occluder layer: the plate with everything that is NOT an
+ * occluder erased. Built once, from art/room-mask.png, and rebuilt only if
+ * the mask arrives after the plate. */
+let OCC_PLATE = null;
+
+function buildOccluderPlate() {
+    const m = ROOM_MAP.mask;
+    if (!m || !PLATE_READY) return null;
+    const c = document.createElement('canvas');
+    c.width = ROOM_PLATE.naturalWidth;
+    c.height = ROOM_PLATE.naturalHeight;
+    const x = c.getContext('2d');
+    x.drawImage(ROOM_PLATE, 0, 0);
+
+    // Keep the plate only where the mask's BLUE channel is painted. Done as a
+    // stencil rather than by clipping polygons, because the mask is the shape
+    // — pixel for pixel, including the leaves of a plant, which no polygon was
+    // ever going to describe.
+    const sten = document.createElement('canvas');
+    sten.width = c.width; sten.height = c.height;
+    const sx = sten.getContext('2d');
+    const im = sx.createImageData(m.w, m.h);
+    for (let i = 0; i < m.data.length; i += 4) {
+        const on = m.data[i + 2] > 127;
+        im.data[i] = im.data[i + 1] = im.data[i + 2] = 255;
+        im.data[i + 3] = on ? 255 : 0;
+    }
+    const tmp = document.createElement('canvas');
+    tmp.width = m.w; tmp.height = m.h;
+    tmp.getContext('2d').putImageData(im, 0, 0);
+    sx.drawImage(tmp, 0, 0, sten.width, sten.height);
+
+    x.globalCompositeOperation = 'destination-in';
+    x.drawImage(sten, 0, 0);
+    x.globalCompositeOperation = 'source-over';
+    return c;
+}
+
 function drawOccluders() {
     if (!PLATE_READY || !BOSS_AV) return;
     const n = bossNorm();
+
+    // ── painted mask: the preferred path ──
+    //
+    // Everything in the occluder layer BELOW the character's feet is nearer
+    // the viewer, because this is an isometric room drawn from a fixed camera
+    // — so re-drawing exactly that band over the sprite is the whole depth
+    // test, with no per-object base line to measure or get wrong. That is the
+    // part the hand-placed polygons kept getting wrong: one number per piece,
+    // guessed, for objects whose real depth varies along their own width.
+    if (ROOM_MAP.mask) {
+        if (!OCC_PLATE) OCC_PLATE = buildOccluderPlate();
+        if (OCC_PLATE) {
+            const f = PLATE_FIT;
+            const H = OCC_PLATE.height;
+            const feet = Math.max(0, Math.min(H - 1, Math.round(n.y * H)));
+            const hSrc = H - feet;
+            if (hSrc > 0) {
+                vctx.imageSmoothingEnabled = true;
+                vctx.imageSmoothingQuality = 'high';
+                vctx.drawImage(OCC_PLATE,
+                    0, feet, OCC_PLATE.width, hSrc,
+                    f.x * SCALE, (f.y + (feet / H) * f.h) * SCALE,
+                    f.w * SCALE, (hSrc / H) * f.h * SCALE);
+            }
+            return;
+        }
+    }
+
     const f = PLATE_FIT;
     const s = bossScaleLogical();
     // The character's footprint on the plate, so a piece on the far side of
@@ -2343,6 +2409,10 @@ document.getElementById('room-broker')?.addEventListener('click', () => {
 // dispatching after this window is closed. Confirmed here because it is an
 // administrative change to the machine, and elevated by the CLIENT, which is
 // the only thing that may ask for it.
+document.getElementById('room-map')?.addEventListener('click', () => {
+    location.href = 'tools/mask-paint.html';
+});
+
 document.getElementById('room-broker')?.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     const svc = (BROKER && BROKER.service) || null;
@@ -2501,6 +2571,16 @@ function drawMapDebug() {
         const { BrainXAvatar } = await import('./avatar/brainx-avatar.js');
         BOSS_AV = await BrainXAvatar.load('./avatar/', { scale: 1 });
         plateFit();
+        // A painted mask and painted seats win over the hand-measured
+        // polygons when they exist; both resolve either way, so a vault
+        // without them behaves exactly as before.
+        try {
+            const [hasMask, hasSeats] = await Promise.all([
+                ROOM_MAP.loadRoomMask(), ROOM_MAP.loadRoomSeats(),
+            ]);
+            if (hasMask) { OCC_PLATE = null; console.info('cowork: using painted room mask'); }
+            if (hasSeats) console.info('cowork: using painted seats');
+        } catch { /* fall back to the polygons */ }
         // Build the walk grid before the first click rather than on it: 56×42
         // point-in-polygon tests are cheap, but not on the frame somebody is
         // waiting to see him start moving.

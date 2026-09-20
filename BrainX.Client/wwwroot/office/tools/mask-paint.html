@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<!--
+  Room mask painter.
+
+  Owner (2026-09-20): "การบังของคุณผิดพลาด คุณทำเครื่องมือ มาร์กมาให้ฉัน ว่าจะให้
+  ส่วนไหน นั่งได้ ส่วนไหน ห้ามตัวละครเข้าไป ส่วนไหน ต้องบัง ให้ฉันระบายส่วนนั้น
+  มาร์คให้คุณจะง่ายกว่า".
+
+  They are right, and the polygons prove it: every coordinate in roommap.js was
+  read off a measuring grid by eye, which is fine for a sofa and hopeless for
+  the edge of a planter — and an occluder that is a few pixels out is a
+  character sliced in half. Painting is the correct interface for a shape that
+  came from a painting.
+
+  The output is ONE png the size of the plate, with a channel per meaning:
+
+    GREEN  walkable   the floor a character may stand on
+    RED    blocked    furniture and walls it must not enter
+    BLUE   occluder   pixels that are drawn OVER a character standing behind them
+
+  Channels rather than three files because they overlap constantly (a sofa is
+  blocked AND an occluder) and because one file is one thing to save, load and
+  keep beside the plate.
+
+  Seats are points, not areas, so they are saved as JSON next to the mask: each
+  one is where the FEET go, and a sitting frame is drawn from there.
+
+  Open it through the dev server (the plate has to come over http for
+  getImageData to work):  http://localhost:8178/tools/mask-paint.html
+-->
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BrainX — ระบายผังห้อง</title>
+<style>
+  :root {
+      --ink: #f2f0ea;
+      --ink-dim: #b9b6ae;
+      --bg: #0a0c11;
+      --panel: linear-gradient(180deg, rgba(32,37,48,0.88), rgba(14,17,23,0.92));
+      --stroke: rgba(242, 239, 230, 0.12);
+      --accent: #d8b978;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+               font: 13px/1.5 "Segoe UI", "Noto Sans Thai", system-ui, sans-serif; }
+  body { display: grid; grid-template-columns: 1fr 260px; gap: 12px; padding: 12px; }
+
+  #stage { position: relative; overflow: auto; border: 1px solid var(--stroke);
+           border-radius: 10px; background: #06070b; display: grid; place-items: center; }
+  #wrap { position: relative; line-height: 0; }
+  canvas { display: block; }
+  #plate { position: relative; z-index: 0; }
+  #paint { position: absolute; inset: 0; z-index: 1; opacity: .55; cursor: crosshair; }
+  #pins  { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+
+  aside { background: var(--panel); border: 1px solid var(--stroke); border-radius: 10px;
+          padding: 12px; overflow: auto; box-shadow: inset 0 1px 0 rgba(255,255,255,.08); }
+  h1 { font-size: 13px; letter-spacing: .12em; margin: 0 0 10px; text-transform: uppercase; color: var(--ink-dim); }
+  .grp { margin-bottom: 14px; }
+  .grp > label { display: block; font-size: 11px; color: var(--ink-dim); margin-bottom: 5px; letter-spacing: .06em; }
+  button, select { font: inherit; color: var(--ink); background: linear-gradient(180deg, #252a37, #161a24);
+                   border: 1px solid var(--stroke); border-radius: 7px; padding: 6px 10px; cursor: pointer; }
+  button:hover { border-color: rgba(216,185,120,.5); }
+  button.on { background: linear-gradient(180deg, #f7ebcd, #c9a55e); color: #2a2008; border-color: #a8863f; font-weight: 600; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; }
+  .tool { flex: 1 1 auto; text-align: left; }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .hint { font-size: 11px; color: var(--ink-dim); line-height: 1.6; }
+  .hint b { color: var(--ink); font-weight: 600; }
+  #seatlist { font-size: 11px; color: var(--ink-dim); max-height: 130px; overflow: auto; }
+  #seatlist div { display: flex; justify-content: space-between; gap: 6px; padding: 2px 0; }
+  #seatlist button { padding: 0 6px; font-size: 11px; }
+  #status { font-size: 11px; color: var(--accent); min-height: 16px; }
+</style>
+</head>
+<body>
+  <div id="stage"><div id="wrap">
+    <canvas id="plate"></canvas>
+    <canvas id="paint"></canvas>
+    <canvas id="pins"></canvas>
+  </div></div>
+
+  <aside>
+    <h1>ระบายผังห้อง</h1>
+    <div class="grp"><button id="back" style="width:100%">← กลับเข้าห้อง</button></div>
+
+    <div class="grp">
+      <label>ระบายอะไร</label>
+      <div class="row">
+        <button class="tool on" data-layer="walk"><span class="sw" style="background:#3ce38a"></span>เดินได้</button>
+        <button class="tool" data-layer="block"><span class="sw" style="background:#ff5a6e"></span>ห้ามเข้า</button>
+        <button class="tool" data-layer="occl"><span class="sw" style="background:#5aa0ff"></span>ต้องบัง</button>
+        <button class="tool" data-layer="seat"><span class="sw" style="background:#ffd166"></span>จุดนั่ง</button>
+      </div>
+    </div>
+
+    <div class="grp">
+      <label>ขนาดพู่กัน — <span id="sz">28</span>px</label>
+      <input type="range" id="size" min="4" max="140" value="28">
+      <div class="row" style="margin-top:6px">
+        <button id="erase">ยางลบ (E)</button>
+        <button id="undo">ย้อนกลับ (Ctrl+Z)</button>
+      </div>
+    </div>
+
+    <div class="grp">
+      <label>ความเข้มของสีทับ — <span id="op">55</span>%</label>
+      <input type="range" id="opacity" min="10" max="100" value="55">
+      <div class="row" style="margin-top:6px">
+        <button id="only">ดูเฉพาะชั้นนี้</button>
+        <button id="hide">ซ่อนสีทับ (H)</button>
+      </div>
+    </div>
+
+    <div class="grp">
+      <label>จุดนั่ง (<span id="seatn">0</span>)</label>
+      <div id="seatlist"></div>
+      <div class="hint" style="margin-top:6px">คลิกบนภาพตอนเลือก “จุดนั่ง” = วางจุดที่<b>เท้า</b>แตะพื้น</div>
+    </div>
+
+    <div class="grp">
+      <label>บันทึก</label>
+      <div class="row">
+        <button id="save">ดาวน์โหลด mask + seats</button>
+        <button id="load">โหลด mask เดิม</button>
+      </div>
+      <input type="file" id="file" accept="image/png,application/json" multiple hidden>
+      <div id="status"></div>
+    </div>
+
+    <div class="hint">
+      <b>เดินได้</b> — พื้นที่ตัวละครยืน/เดินได้<br>
+      <b>ห้ามเข้า</b> — เฟอร์นิเจอร์ ผนัง กระถาง<br>
+      <b>ต้องบัง</b> — ของที่อยู่<b>หน้า</b>ตัวละคร (โซฟา เคาน์เตอร์ ผนังมุมซ้ายบน ราวระเบียง)<br><br>
+      ระบายทับกันได้ เช่นโซฟาเป็นทั้ง “ห้ามเข้า” และ “ต้องบัง”<br><br>
+      เสร็จแล้วกดดาวน์โหลด จะได้ <b>room-mask.png</b> กับ <b>room-seats.json</b> — วางทั้งสองไฟล์ไว้ที่
+      <code>wwwroot/office/art/</code> แล้วห้องจะใช้ทันที
+    </div>
+  </aside>
+
+<script>
+/* The plate is the size everything is measured in, so the mask is painted at
+   exactly its resolution — no scaling anywhere, and a pixel the owner paints
+   is the pixel the room reads. */
+const PLATE_SRC = '../art/room.webp';
+
+const plate = document.getElementById('plate');
+const paint = document.getElementById('paint');
+const pins  = document.getElementById('pins');
+const pctx  = plate.getContext('2d');
+const mctx  = paint.getContext('2d', { willReadFrequently: true });
+const sctx  = pins.getContext('2d');
+
+const LAYERS = {
+    walk:  { colour: '#3ce38a', channel: 1 },   // G
+    block: { colour: '#ff5a6e', channel: 0 },   // R
+    occl:  { colour: '#5aa0ff', channel: 2 },   // B
+};
+let layer = 'walk';
+let brush = 28;
+let erasing = false;
+let painting = false;
+let seats = [];
+const undo = [];     // ImageData snapshots, capped — a mask is ~4MB a frame
+
+const img = new Image();
+img.onload = () => {
+    for (const c of [plate, paint, pins]) { c.width = img.naturalWidth; c.height = img.naturalHeight; }
+    fit();
+    pctx.drawImage(img, 0, 0);
+    say('โหลดภาพห้องแล้ว ' + img.naturalWidth + '×' + img.naturalHeight);
+};
+img.onerror = () => say('เปิดภาพห้องไม่ได้ — ต้องเปิดหน้านี้ผ่าน dev server (localhost:8178)');
+img.src = PLATE_SRC;
+
+/* Fit the plate to the window on load; the owner can still scroll/zoom the
+   browser itself. Painting math uses the canvas' own pixels via the bounding
+   rect, so any CSS size works. */
+function fit() {
+    const stage = document.getElementById('stage').getBoundingClientRect();
+    const k = Math.min(stage.width / img.naturalWidth, stage.height / img.naturalHeight, 1);
+    for (const c of [plate, paint, pins]) {
+        c.style.width = (img.naturalWidth * k) + 'px';
+        c.style.height = (img.naturalHeight * k) + 'px';
+    }
+}
+addEventListener('resize', fit);
+
+function say(t) { document.getElementById('status').textContent = t; }
+document.getElementById('back').addEventListener('click', () => { location.href = '../index.html'; });
+
+function pos(e) {
+    const r = paint.getBoundingClientRect();
+    return {
+        x: (e.clientX - r.left) / r.width * paint.width,
+        y: (e.clientY - r.top) / r.height * paint.height,
+    };
+}
+
+function snapshot() {
+    try {
+        undo.push(mctx.getImageData(0, 0, paint.width, paint.height));
+        if (undo.length > 12) undo.shift();
+    } catch { /* first stroke before the image loaded */ }
+}
+
+function dab(p) {
+    mctx.globalCompositeOperation = erasing ? 'destination-out' : 'source-over';
+    mctx.fillStyle = LAYERS[layer].colour;
+    mctx.beginPath();
+    mctx.arc(p.x, p.y, brush / 2, 0, Math.PI * 2);
+    mctx.fill();
+    mctx.globalCompositeOperation = 'source-over';
+}
+
+paint.addEventListener('pointerdown', (e) => {
+    if (layer === 'seat') { addSeat(pos(e)); return; }
+    painting = true;
+    paint.setPointerCapture(e.pointerId);
+    snapshot();
+    dab(pos(e));
+});
+paint.addEventListener('pointermove', (e) => { if (painting) dab(pos(e)); });
+paint.addEventListener('pointerup', () => { painting = false; });
+paint.addEventListener('pointerleave', () => { painting = false; });
+
+function addSeat(p) {
+    seats.push({ x: +(p.x / paint.width).toFixed(4), y: +(p.y / paint.height).toFixed(4) });
+    drawSeats();
+}
+function drawSeats() {
+    sctx.clearRect(0, 0, pins.width, pins.height);
+    seats.forEach((s, i) => {
+        const x = s.x * pins.width, y = s.y * pins.height;
+        sctx.fillStyle = '#ffd166';
+        sctx.beginPath(); sctx.arc(x, y, 7, 0, Math.PI * 2); sctx.fill();
+        sctx.fillStyle = '#2a2008';
+        sctx.font = 'bold 11px system-ui';
+        sctx.textAlign = 'center'; sctx.textBaseline = 'middle';
+        sctx.fillText(String(i + 1), x, y);
+    });
+    document.getElementById('seatn').textContent = seats.length;
+    document.getElementById('seatlist').innerHTML = seats.map((s, i) =>
+        `<div><span>${i + 1}. ${s.x.toFixed(3)}, ${s.y.toFixed(3)}</span>` +
+        `<button data-seat="${i}">ลบ</button></div>`).join('');
+}
+document.getElementById('seatlist').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-seat]');
+    if (!b) return;
+    seats.splice(+b.dataset.seat, 1);
+    drawSeats();
+});
+
+// ── controls ────────────────────────────────────────────────────────
+document.querySelectorAll('.tool').forEach(b => b.addEventListener('click', () => {
+    document.querySelectorAll('.tool').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    layer = b.dataset.layer;
+    paint.style.cursor = layer === 'seat' ? 'copy' : 'crosshair';
+}));
+document.getElementById('size').addEventListener('input', (e) => {
+    brush = +e.target.value; document.getElementById('sz').textContent = brush;
+});
+document.getElementById('opacity').addEventListener('input', (e) => {
+    paint.style.opacity = e.target.value / 100;
+    document.getElementById('op').textContent = e.target.value;
+});
+document.getElementById('erase').addEventListener('click', (e) => {
+    erasing = !erasing; e.target.classList.toggle('on', erasing);
+});
+document.getElementById('undo').addEventListener('click', doUndo);
+function doUndo() {
+    const s = undo.pop();
+    if (s) mctx.putImageData(s, 0, 0);
+}
+document.getElementById('hide').addEventListener('click', (e) => {
+    const on = paint.style.visibility === 'hidden';
+    paint.style.visibility = on ? 'visible' : 'hidden';
+    e.target.classList.toggle('on', !on);
+});
+
+/* "Only this layer" hides the other two by rebuilding the overlay from the
+   channel data — painting stays in one canvas, so nothing is lost. */
+let soloing = false;
+let solostash = null;
+document.getElementById('only').addEventListener('click', (e) => {
+    if (!soloing) {
+        solostash = mctx.getImageData(0, 0, paint.width, paint.height);
+        const d = mctx.getImageData(0, 0, paint.width, paint.height);
+        const keep = LAYERS[layer].channel;
+        for (let i = 0; i < d.data.length; i += 4) {
+            for (let c = 0; c < 3; c++) if (c !== keep) d.data[i + c] = 0;
+            if (d.data[i + keep] < 40) d.data[i + 3] = 0;
+        }
+        mctx.putImageData(d, 0, 0);
+    } else if (solostash) {
+        mctx.putImageData(solostash, 0, 0);
+        solostash = null;
+    }
+    soloing = !soloing;
+    e.target.classList.toggle('on', soloing);
+});
+
+addEventListener('keydown', (e) => {
+    if (e.key === 'e' || e.key === 'E') document.getElementById('erase').click();
+    if (e.key === 'h' || e.key === 'H') document.getElementById('hide').click();
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); doUndo(); }
+});
+
+// ── save / load ─────────────────────────────────────────────────────
+//
+// The painted overlay is soft-edged and semi-transparent; the FILE has to be
+// a hard answer, because the room reads it as "may I stand here" one pixel at
+// a time. Each channel is thresholded on the way out.
+document.getElementById('save').addEventListener('click', () => {
+    const src = mctx.getImageData(0, 0, paint.width, paint.height);
+    const out = mctx.createImageData(paint.width, paint.height);
+    for (let i = 0; i < src.data.length; i += 4) {
+        const a = src.data[i + 3];
+        out.data[i]     = (a > 24 && src.data[i]     > 90) ? 255 : 0;   // blocked
+        out.data[i + 1] = (a > 24 && src.data[i + 1] > 90) ? 255 : 0;   // walkable
+        out.data[i + 2] = (a > 24 && src.data[i + 2] > 90) ? 255 : 0;   // occluder
+        out.data[i + 3] = 255;
+    }
+    const c = document.createElement('canvas');
+    c.width = paint.width; c.height = paint.height;
+    c.getContext('2d').putImageData(out, 0, 0);
+    c.toBlob(b => download(b, 'room-mask.png'));
+
+    download(new Blob([JSON.stringify({
+        note: 'painted with tools/mask-paint.html — x,y are fractions of the plate, at the FEET',
+        seats,
+    }, null, 2)], { type: 'application/json' }), 'room-seats.json');
+    say('บันทึกแล้ว — วางไว้ที่ wwwroot/office/art/');
+});
+
+function download(blob, name) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+
+document.getElementById('load').addEventListener('click', () => document.getElementById('file').click());
+document.getElementById('file').addEventListener('change', (e) => {
+    for (const f of e.target.files) {
+        if (f.type === 'application/json') {
+            f.text().then(t => { try { seats = JSON.parse(t).seats || []; drawSeats(); say('โหลดจุดนั่งแล้ว'); } catch {} });
+        } else {
+            const im = new Image();
+            im.onload = () => { snapshot(); mctx.clearRect(0, 0, paint.width, paint.height); mctx.drawImage(im, 0, 0); say('โหลด mask เดิมแล้ว'); };
+            im.src = URL.createObjectURL(f);
+        }
+    }
+});
+</script>
+</body>
+</html>

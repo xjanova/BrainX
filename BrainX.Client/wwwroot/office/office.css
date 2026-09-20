@@ -112,6 +112,19 @@ body {
     align-self: center;
     transition: border-color .15s, color .15s, background .15s;
 }
+#room-map {
+    appearance: none;
+    border: 1px solid rgba(242, 239, 230, 0.12);
+    background: linear-gradient(180deg, rgba(34,39,50,0.88), rgba(16,19,26,0.88));
+    color: var(--ink-dim);
+    font: inherit;
+    letter-spacing: 1px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    cursor: pointer;
+    align-self: center;
+}
+#room-map:hover { border-color: rgba(216,185,120,0.55); color: var(--ink); }
 #room-broker:hover { border-color: rgba(216,185,120,0.55); color: var(--ink); }
 #room-broker.on { border-color: rgba(111,207,151,0.5); color: #8fdcae; }
 #room-broker.off { border-color: rgba(224,115,107,0.5); color: #e0938c; }
