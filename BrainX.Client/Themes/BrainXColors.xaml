@@ -17,28 +17,41 @@
   <!-- ═══════════════════════════════════════════════════════════════════
        Surfaces (layered depth — see prototype CSS bg tokens)
        ═══════════════════════════════════════════════════════════════════ -->
-  <SolidColorBrush x:Key="NeuralBgVoid"     Color="#060410"/>
-  <SolidColorBrush x:Key="NeuralBgBase"     Color="#0b0818"/>
-  <SolidColorBrush x:Key="NeuralBgElevated" Color="#14102a"/>
-  <SolidColorBrush x:Key="NeuralBgCard"     Color="#1a1535"/>
-  <SolidColorBrush x:Key="NeuralBgCard2"    Color="#211b40"/>
-  <SolidColorBrush x:Key="NeuralBgInset"    Color="#0d0a1f"/>
+  <!-- Obsidian, 2026-09-20. The old surfaces were a saturated purple-black
+       (#0b0818 → #211b40); these are graphite with a trace of blue, which is
+       what lets one warm accent read as metal instead of as another glow.
+       The STEPS between them are deliberately small and even — depth on a
+       dark UI comes from consistent spacing between layers, not contrast. -->
+  <SolidColorBrush x:Key="NeuralBgVoid"     Color="#07080c"/>
+  <SolidColorBrush x:Key="NeuralBgBase"     Color="#0b0d13"/>
+  <SolidColorBrush x:Key="NeuralBgElevated" Color="#12151d"/>
+  <SolidColorBrush x:Key="NeuralBgCard"     Color="#171b25"/>
+  <SolidColorBrush x:Key="NeuralBgCard2"    Color="#1e222d"/>
+  <SolidColorBrush x:Key="NeuralBgInset"    Color="#0a0c11"/>
   <!-- WPF lacks backdrop-filter:blur(); approximate "glass" as 72%-opaque card. -->
-  <SolidColorBrush x:Key="NeuralBgGlass"    Color="#1a1535" Opacity="0.72"/>
+  <SolidColorBrush x:Key="NeuralBgGlass"    Color="#171b25" Opacity="0.72"/>
 
   <!-- ═══════════════════════════════════════════════════════════════════
        Borders / dividers
        ═══════════════════════════════════════════════════════════════════ -->
-  <SolidColorBrush x:Key="NeuralLine"        Color="#B4A0FF" Opacity="0.08"/>
-  <SolidColorBrush x:Key="NeuralLineStrong"  Color="#B4A0FF" Opacity="0.14"/>
-  <SolidColorBrush x:Key="NeuralLineAccent"  Color="#A078FF" Opacity="0.32"/>
+  <!-- Hairlines in warm white rather than violet: a tinted divider on a
+       neutral surface reads as a colour choice, and a neutral one reads as an
+       edge. The accent line is the champagne, at the opacity where it looks
+       like a lit bevel rather than a highlighter. -->
+  <SolidColorBrush x:Key="NeuralLine"        Color="#F2EFE6" Opacity="0.07"/>
+  <SolidColorBrush x:Key="NeuralLineStrong"  Color="#F2EFE6" Opacity="0.13"/>
+  <SolidColorBrush x:Key="NeuralLineAccent"  Color="#D8B978" Opacity="0.34"/>
 
   <!-- ═══════════════════════════════════════════════════════════════════
        Brand palette (refined neural — keep in sync with category mapping below)
        ═══════════════════════════════════════════════════════════════════ -->
-  <SolidColorBrush x:Key="NeuralViolet"      Color="#9d7bff"/>
-  <SolidColorBrush x:Key="NeuralViolet2"     Color="#b89dff"/>
-  <SolidColorBrush x:Key="NeuralVioletDeep"  Color="#6a48d6"/>
+  <!-- The interactive accent. Named Violet in a hundred places and now a
+       champagne gold — renaming the key would be a mechanical diff across
+       every view for no behavioural gain, and the comment is cheaper than
+       the churn. Deep is the pressed/!border state, 2 is the hover. -->
+  <SolidColorBrush x:Key="NeuralViolet"      Color="#d8b978"/>
+  <SolidColorBrush x:Key="NeuralViolet2"     Color="#f0dcae"/>
+  <SolidColorBrush x:Key="NeuralVioletDeep"  Color="#a8863f"/>
   <SolidColorBrush x:Key="NeuralCyan"        Color="#5be9e9"/>
   <SolidColorBrush x:Key="NeuralCyanDeep"    Color="#2bb8b8"/>
   <SolidColorBrush x:Key="NeuralMagenta"     Color="#ff4f9e"/>
@@ -60,11 +73,14 @@
   <!-- ═══════════════════════════════════════════════════════════════════
        Text — five tiers from brightest primary to disabled
        ═══════════════════════════════════════════════════════════════════ -->
-  <SolidColorBrush x:Key="NeuralText"    Color="#f1ecff"/>
-  <SolidColorBrush x:Key="NeuralText1"   Color="#d8d2f0"/>
-  <SolidColorBrush x:Key="NeuralText2"   Color="#a9a3c2"/>
-  <SolidColorBrush x:Key="NeuralText3"   Color="#7d7796"/>
-  <SolidColorBrush x:Key="NeuralTextDim" Color="#5a546f"/>
+  <!-- Warm neutrals. The old tiers were violet-tinted (#f1ecff → #5a546f),
+       which on a neutral surface looks like text that has been coloured in;
+       a trace of warmth reads as paper and sits correctly next to gold. -->
+  <SolidColorBrush x:Key="NeuralText"    Color="#f2f0ea"/>
+  <SolidColorBrush x:Key="NeuralText1"   Color="#d5d2c9"/>
+  <SolidColorBrush x:Key="NeuralText2"   Color="#a6a39b"/>
+  <SolidColorBrush x:Key="NeuralText3"   Color="#7c7a75"/>
+  <SolidColorBrush x:Key="NeuralTextDim" Color="#5c5b57"/>
 
   <!-- ═══════════════════════════════════════════════════════════════════
        Category colors (24 expertise categories, used as data colors on
@@ -89,34 +105,42 @@
        LinearGradientBrush as a starter; ambient layer can be refined later.
        ═══════════════════════════════════════════════════════════════════ -->
   <LinearGradientBrush x:Key="NeuralNebula" StartPoint="0,0" EndPoint="1,1">
-    <GradientStop Color="#100b28" Offset="0"/>
-    <GradientStop Color="#0b0818" Offset="0.5"/>
-    <GradientStop Color="#0a0720" Offset="1"/>
+    <GradientStop Color="#10131c" Offset="0"/>
+    <GradientStop Color="#0b0d13" Offset="0.5"/>
+    <GradientStop Color="#090b10" Offset="1"/>
   </LinearGradientBrush>
 
-  <!-- Titlebar gradient (top → bottom, slight brightening at very top) -->
+  <!-- Titlebar. The brightest stop in the app sits on its top pixel row,
+       which is where the light is coming from for every bevel below it. -->
   <LinearGradientBrush x:Key="NeuralTitlebarBg" StartPoint="0,0" EndPoint="0,1">
-    <GradientStop Color="#1b1638" Offset="0"/>
-    <GradientStop Color="#14102a" Offset="1"/>
+    <GradientStop Color="#232834" Offset="0"/>
+    <GradientStop Color="#191d27" Offset="0.45"/>
+    <GradientStop Color="#11141c" Offset="1"/>
   </LinearGradientBrush>
 
-  <!-- Sidebar gradient (top → bottom, slight darkening at bottom) -->
-  <LinearGradientBrush x:Key="NeuralSidebarBg" StartPoint="0,0" EndPoint="0,1">
-    <GradientStop Color="#14102a" Offset="0"/>
-    <GradientStop Color="#0e0a22" Offset="1"/>
+  <!-- Sidebar / status bar. Obsidian, and angled: EndPoint carries a little
+       X so the light falls across the rail as well as down it, which is what
+       stops a 900px-tall column reading as a single painted slab. -->
+  <LinearGradientBrush x:Key="NeuralSidebarBg" StartPoint="0,0" EndPoint="0.35,1">
+    <GradientStop Color="#181c26" Offset="0"/>
+    <GradientStop Color="#12151e" Offset="0.6"/>
+    <GradientStop Color="#0d1016" Offset="1"/>
   </LinearGradientBrush>
 
-  <!-- Primary button gradient (violet, lighter on top) -->
+  <!-- Primary button: polished champagne. Four stops, because metal has a
+       bright lip, a broad body and a fast fall-off - three makes plastic. -->
   <LinearGradientBrush x:Key="NeuralPrimaryBtn" StartPoint="0,0" EndPoint="0,1">
-    <GradientStop Color="#b89dff" Offset="0"/>
-    <GradientStop Color="#7b58f0" Offset="1"/>
+    <GradientStop Color="#f7ebcd" Offset="0"/>
+    <GradientStop Color="#e4c98f" Offset="0.22"/>
+    <GradientStop Color="#c9a55e" Offset="0.62"/>
+    <GradientStop Color="#a8863f" Offset="1"/>
   </LinearGradientBrush>
 
-  <!-- Sidebar nav-item active state (violet tint) -->
+  <!-- Sidebar nav-item active state (champagne tint, lit from the top) -->
   <LinearGradientBrush x:Key="NeuralNavActive" StartPoint="0,0" EndPoint="0,1">
-    <GradientStop Color="#339d7bff" Offset="0"/>
-    <!-- 0x33 = 20% alpha -->
-    <GradientStop Color="#149d7bff" Offset="1"/>
+    <GradientStop Color="#3Dd8b978" Offset="0"/>
+    <!-- 0x3D = 24% alpha -->
+    <GradientStop Color="#16d8b978" Offset="1"/>
     <!-- 0x14 = 8% alpha -->
   </LinearGradientBrush>
 
@@ -224,5 +248,90 @@
   <SolidColorBrush x:Key="DataViolet" Color="#9a7cff"/>
   <SolidColorBrush x:Key="DataOrange" Color="#ff8b4a"/>
   <SolidColorBrush x:Key="DataSky"    Color="#6cc8ff"/>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       Material — faces and bevels (2026-09-20)
+
+       Owner: "อยากได้มิติ มีสีเป็นเนื้อ นูน แบบ gpuxmine".
+
+       A flat fill plus a drop shadow reads as a CARD ON a background. What
+       reads as a THING is two more cues, and GPUxMINE's chrome theme uses
+       both: a vertical gradient across the face, so the surface catches
+       light unevenly the way a physical panel does, and an edge that is
+       bright along the top and dark along the bottom, which is the bevel.
+       Cheap, and it is the whole difference between "dark UI" and "object".
+
+       WPF gives a Border ONE BorderBrush, so the bevel is that brush as a
+       gradient rather than four separate edges — top-lit, bottom-shaded, in
+       one element with no extra visual tree.
+
+       The faces are deliberately shallow (three or four percent of
+       lightness across the whole height). A steeper ramp on a dark surface
+       bands visibly on 8-bit displays and starts to look like a gradient
+       for its own sake instead of like a material.
+       ═══════════════════════════════════════════════════════════════════ -->
+
+  <LinearGradientBrush x:Key="NeuralFaceCard" StartPoint="0,0" EndPoint="0,1">
+    <GradientStop Color="#20242f" Offset="0"/>
+    <GradientStop Color="#1a1e28" Offset="0.55"/>
+    <GradientStop Color="#141822" Offset="1"/>
+  </LinearGradientBrush>
+
+  <LinearGradientBrush x:Key="NeuralFaceCardHover" StartPoint="0,0" EndPoint="0,1">
+    <GradientStop Color="#272c39" Offset="0"/>
+    <GradientStop Color="#1f242f" Offset="0.55"/>
+    <GradientStop Color="#181c26" Offset="1"/>
+  </LinearGradientBrush>
+
+  <!-- Buttons sit one step proud of the card they are on, so their face
+       starts brighter than the card's and ends at the same value. -->
+  <LinearGradientBrush x:Key="NeuralFaceBtn" StartPoint="0,0" EndPoint="0,1">
+    <GradientStop Color="#252a37" Offset="0"/>
+    <GradientStop Color="#1d222d" Offset="0.52"/>
+    <GradientStop Color="#161a24" Offset="1"/>
+  </LinearGradientBrush>
+
+  <!-- Chrome: the window's own furniture (sidebar, title, status bar). The
+       ramp runs slightly across as well as down, which is what keeps a tall
+       sidebar from looking like a single flat slab. -->
+  <LinearGradientBrush x:Key="NeuralFacePanel" StartPoint="0,0" EndPoint="0.35,1">
+    <GradientStop Color="#181c26" Offset="0"/>
+    <GradientStop Color="#12151e" Offset="0.6"/>
+    <GradientStop Color="#0d1016" Offset="1"/>
+  </LinearGradientBrush>
+
+  <!-- The one warm metal. Four stops because polished metal has a bright
+       lip, a broad body and a fast fall-off — three stops makes plastic. -->
+  <LinearGradientBrush x:Key="NeuralFaceGold" StartPoint="0,0" EndPoint="0,1">
+    <GradientStop Color="#f7ebcd" Offset="0"/>
+    <GradientStop Color="#e4c98f" Offset="0.22"/>
+    <GradientStop Color="#c9a55e" Offset="0.62"/>
+    <GradientStop Color="#a8863f" Offset="1"/>
+  </LinearGradientBrush>
+
+  <!-- Bevels. Top edge lit, bottom edge in shadow, and the fade between
+       them placed high so the light reads as coming from above the window
+       rather than from the middle of it. -->
+  <LinearGradientBrush x:Key="NeuralEdge" StartPoint="0,0" EndPoint="0,1">
+    <GradientStop Color="#26FFFFFF" Offset="0"/>
+    <GradientStop Color="#0CFFFFFF" Offset="0.35"/>
+    <GradientStop Color="#59000000" Offset="1"/>
+  </LinearGradientBrush>
+
+  <LinearGradientBrush x:Key="NeuralEdgeSoft" StartPoint="0,0" EndPoint="0,1">
+    <GradientStop Color="#18FFFFFF" Offset="0"/>
+    <GradientStop Color="#08FFFFFF" Offset="0.4"/>
+    <GradientStop Color="#3D000000" Offset="1"/>
+  </LinearGradientBrush>
+
+  <LinearGradientBrush x:Key="NeuralEdgeGold" StartPoint="0,0" EndPoint="0,1">
+    <GradientStop Color="#B3FFF4D9" Offset="0"/>
+    <GradientStop Color="#59C9A55E" Offset="0.45"/>
+    <GradientStop Color="#A6583F14" Offset="1"/>
+  </LinearGradientBrush>
+
+  <!-- Ink for text sitting ON the gold. White on champagne is unreadable at
+       13px; a very dark warm brown keeps the contrast and the metal. -->
+  <SolidColorBrush x:Key="NeuralOnGold" Color="#2a2008"/>
 
 </ResourceDictionary>

@@ -2,26 +2,46 @@
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
     <!-- ═════════════════════════════════════════════════════════ -->
-    <!-- BrainX Theme — Magenta Nebula (palette tuned to logo)  -->
-    <!-- Primary: hot magenta glow · Secondary: electric purple     -->
-    <!-- Background: deep purple-black space                        -->
+    <!-- BrainX Theme — Obsidian & Champagne                        -->
+    <!--                                                            -->
+    <!-- Owner (2026-09-20): "เปลี่ยนสีธีม ui โปรแกรมให้เหมาะสมกว่านี้   -->
+    <!-- หน่อย ทำให้หรูดูแพง แบบ gpuxmine ก็ได้".                      -->
+    <!--                                                            -->
+    <!-- What made the old palette read as a GAME rather than as an -->
+    <!-- instrument was not the darkness, it was the saturation:    -->
+    <!-- a hot magenta (#FF2E94) carried 59 separate accents, over  -->
+    <!-- purple-black surfaces that were themselves 30% saturated.  -->
+    <!-- Everything glowed, so nothing was important.               -->
+    <!--                                                            -->
+    <!-- This palette does what GPUxMINE's does, in the dark:       -->
+    <!-- surfaces are a near-neutral graphite with only a trace of  -->
+    <!-- blue, so they read as MATERIAL; one warm metal (champagne) -->
+    <!-- carries every interactive accent; and the saturated colours -->
+    <!-- are spent on data and status, where hue actually means     -->
+    <!-- something. Expensive things are quiet and have one accent. -->
+    <!--                                                            -->
+    <!-- The logo colours below are untouched — the brand is        -->
+    <!-- magenta, and a crest is allowed to be the loudest thing on -->
+    <!-- screen when nothing competes with it.                      -->
     <!-- ═════════════════════════════════════════════════════════ -->
 
     <!-- Color Palette -->
-    <Color x:Key="DeepSpaceColor">#FF0A0510</Color>
-    <Color x:Key="DarkPanelColor">#FF170A28</Color>
-    <Color x:Key="SurfaceColor">#FF1F1236</Color>
-    <Color x:Key="SurfaceLightColor">#FF2D1A4A</Color>
-    <!-- Historically "NeonCyan" — now the primary magenta glow that matches the logo -->
-    <Color x:Key="NeonCyanColor">#FFFF2E94</Color>
-    <Color x:Key="ElectricPurpleColor">#FFB044FF</Color>
-    <Color x:Key="NeonPinkColor">#FFFF6BB0</Color>
-    <Color x:Key="NeonGreenColor">#FF00FF88</Color>
-    <Color x:Key="TextPrimaryColor">#FFF5E5FA</Color>
-    <Color x:Key="TextSecondaryColor">#FFC3A7D8</Color>
-    <Color x:Key="TextMutedColor">#FF6F5287</Color>
-    <Color x:Key="DangerColor">#FFFF5566</Color>
-    <Color x:Key="SuccessColor">#FF00FF88</Color>
+    <Color x:Key="DeepSpaceColor">#FF07080C</Color>
+    <Color x:Key="DarkPanelColor">#FF0F1117</Color>
+    <Color x:Key="SurfaceColor">#FF151821</Color>
+    <Color x:Key="SurfaceLightColor">#FF1E222D</Color>
+    <!-- Historically "NeonCyan", then the magenta glow — now the champagne
+         accent that every interactive surface shares. The key name is load
+         bearing in 59 places; the colour behind it is what changed. -->
+    <Color x:Key="NeonCyanColor">#FFD8B978</Color>
+    <Color x:Key="ElectricPurpleColor">#FF9A86C8</Color>
+    <Color x:Key="NeonPinkColor">#FFE8C98F</Color>
+    <Color x:Key="NeonGreenColor">#FF6FCF97</Color>
+    <Color x:Key="TextPrimaryColor">#FFF2F0EA</Color>
+    <Color x:Key="TextSecondaryColor">#FFB9B6AE</Color>
+    <Color x:Key="TextMutedColor">#FF7C7A75</Color>
+    <Color x:Key="DangerColor">#FFE0736B</Color>
+    <Color x:Key="SuccessColor">#FF6FCF97</Color>
     <!-- Dedicated logo-accent colors for direct references in XAML/code -->
     <Color x:Key="LogoMagentaColor">#FFFF1E8A</Color>
     <Color x:Key="LogoRoseColor">#FFFF5FA6</Color>

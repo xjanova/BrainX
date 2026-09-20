@@ -23,10 +23,20 @@ body.hud-active {
     /* Faint vignette so corner panels always have something to sit on, even
        when the camera drifts the galaxy into a corner. */
     --hud-gap: clamp(10px, 1.4vw, 22px);
-    --hud-panel-bg: rgba(8, 6, 24, 0.52);
-    --hud-panel-stroke: rgba(108, 240, 255, 0.16);
-    --hud-panel-glow: 0 0 24px -6px rgba(108, 240, 255, 0.28);
-    --hud-label: rgba(180, 176, 220, 0.62);
+    /* Obsidian & champagne, 2026-09-20. Owner: "อยากได้มิติ มีสีเป็นเนื้อ
+       นูน แบบ gpuxmine". The panels used to be violet glass with a cyan neon
+       rim and an outward glow, which reads as a HUD painted on the screen.
+       What reads as a physical instrument is the opposite: a near-neutral
+       face, a hairline that is bright on top and dark underneath, and the
+       shadow going DOWN and OUT instead of a halo going everywhere. */
+    --hud-panel-bg: linear-gradient(180deg, rgba(32,37,48,0.72) 0%, rgba(20,24,32,0.62) 55%, rgba(12,15,21,0.70) 100%);
+    --hud-panel-stroke: rgba(242, 239, 230, 0.10);
+    --hud-panel-glow:
+        0 10px 26px -14px rgba(0, 0, 0, 0.95),
+        inset 0 1px 0 rgba(255, 255, 255, 0.09),
+        inset 0 -1px 0 rgba(0, 0, 0, 0.45);
+    --hud-label: rgba(214, 210, 200, 0.58);
+    --hud-accent: #d8b978;
     --hud-mono: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
     /* ONE width for every corner panel. Sizing each to its own content left
        both columns ragged and the two sides unequal — the eye reads that as
@@ -122,9 +132,11 @@ body.hud-active #info-card {
     /* Unlike the readouts, this one is READ closely and has buttons in it, so
        it keeps a surface — and it has to out-rank the HUD layer (z-index 40)
        or the readouts would print through it. */
-    background: rgba(6, 5, 18, 0.94);
-    border-color: rgba(108, 240, 255, 0.24);
-    box-shadow: 0 18px 48px -12px rgba(0, 0, 0, 0.9);
+    background: linear-gradient(180deg, rgba(30,35,46,0.96) 0%, rgba(19,23,31,0.96) 60%, rgba(12,15,21,0.97) 100%);
+    border-color: rgba(242, 239, 230, 0.12);
+    box-shadow: 0 18px 48px -12px rgba(0, 0, 0, 0.9),
+                inset 0 1px 0 rgba(255, 255, 255, 0.10),
+                inset 0 -1px 0 rgba(0, 0, 0, 0.5);
     z-index: 55;
 }
 
@@ -135,10 +147,12 @@ body.hud-active #info-card {
    from the stars behind. The readouts stay frameless — they are glanced at,
    not aimed at. */
 body.hud-active #settings-panel {
-    background: rgba(6, 5, 18, 0.94);
-    border-color: rgba(108, 240, 255, 0.28);
+    background: linear-gradient(180deg, rgba(30,35,46,0.97) 0%, rgba(19,23,31,0.97) 60%, rgba(12,15,21,0.98) 100%);
+    border-color: rgba(242, 239, 230, 0.13);
     box-shadow: 0 18px 48px -12px rgba(0, 0, 0, 0.9),
-                0 0 0 1px rgba(0, 0, 0, 0.45);
+                0 0 0 1px rgba(0, 0, 0, 0.45),
+                inset 0 1px 0 rgba(255, 255, 255, 0.10),
+                inset 0 -1px 0 rgba(0, 0, 0, 0.5);
     /* ABOVE the readouts. #hud-layer is z-index 40 and this panel was 11, so
        the System and MCP figures painted straight through the settings panel
        and every slider label had a number sitting on it. Opacity alone could
@@ -152,14 +166,14 @@ body.hud-active #settings-panel {
    working legend to toggle. */
 body.hud-active #settings-panel .legend-row { display: none; }
 
-body.hud-active #settings-panel .panel-title { color: rgba(190, 236, 255, 0.9); }
-body.hud-active #settings-panel .setting-row label { color: rgba(214, 210, 240, 0.92); }
-body.hud-active #settings-panel .setting-val { color: #8ef3ff; }
+body.hud-active #settings-panel .panel-title { color: rgba(242, 240, 234, 0.92); }
+body.hud-active #settings-panel .setting-row label { color: rgba(197, 194, 186, 0.92); }
+body.hud-active #settings-panel .setting-val { color: #e4c98f; }
 /* The gear that opens it needs the same treatment for the same reason — it is
    a target, and a translucent target over a bright star is invisible. */
 body.hud-active #settings-toggle {
-    background: rgba(6, 5, 18, 0.88);
-    border-color: rgba(108, 240, 255, 0.34);
+    background: linear-gradient(180deg, rgba(34,39,50,0.94), rgba(16,19,26,0.94));
+    border-color: rgba(216, 185, 120, 0.38);
     z-index: 61;   /* the button that opens the panel must never end up under it */
 }
 
@@ -241,6 +255,21 @@ body.hud-active #settings-toggle {
    which is how film HUDs stay readable over bright imagery. */
 .hud-panel {
     position: relative;
+    /* A surface, 2026-09-20. Owner: "อยากได้มิติ มีสีเป็นเนื้อ นูน แบบ
+       gpuxmine". These readouts were deliberately frameless — text printed on
+       the glass — and that is what made the window read as a poster rather
+       than as an instrument: nothing had a thickness. They get the same
+       material every other panel now has, kept translucent enough that the
+       galaxy still shows through the gaps between cards.
+
+       The blur is what stops a 62%-opaque panel from turning bright stars
+       into speckle across the numbers. */
+    background: var(--hud-panel-bg);
+    border: 1px solid var(--hud-panel-stroke);
+    border-radius: 12px;
+    box-shadow: var(--hud-panel-glow);
+    backdrop-filter: blur(9px) saturate(1.1);
+    -webkit-backdrop-filter: blur(9px) saturate(1.1);
     /* Five pixels of dead space inside every card edge (owner, 2026-08-04 —
        started at 2px, widened after seeing it). These readouts are frameless,
        so a glyph that starts at x=0 has nothing at all between it and the
@@ -316,11 +345,11 @@ body.hud-active #settings-toggle {
     white-space: nowrap;
     padding: 4px 10px 4px 8px;
     border-radius: 999px;
-    background: rgba(10, 8, 28, 0.55);
-    border: 1px solid var(--hud-panel-stroke);
-    backdrop-filter: blur(12px) saturate(1.25);
-    -webkit-backdrop-filter: blur(12px) saturate(1.25);
-    box-shadow: var(--hud-panel-glow);
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid rgba(216, 185, 120, 0.22);
+    border-radius: 0;
+    box-shadow: none;
     /* The chip is the frame; its own text needs no extra halo. */
     text-shadow: none;
 }
@@ -346,9 +375,9 @@ body.hud-active #settings-toggle {
 }
 .hud-headline .n {
     font-family: var(--hud-mono); font-weight: 700;
-    font-size: clamp(15px, 1.3vw, 21px); color: #eae8ff;
+    font-size: clamp(15px, 1.3vw, 21px); color: #f2f0ea;
     font-variant-numeric: tabular-nums;
-    text-shadow: 0 0 14px rgba(108, 240, 255, 0.35), 0 0 3px rgba(0,0,0,.95), 0 1px 10px rgba(0,0,0,.85);
+    text-shadow: 0 0 14px rgba(216, 185, 120, 0.40), 0 0 3px rgba(0,0,0,.95), 0 1px 10px rgba(0,0,0,.85);
 }
 .hud-headline .u { font-size: 9.5px; color: var(--hud-label); letter-spacing: 0.08em; text-transform: uppercase; }
 .hud-headline .d { font-size: 10px; font-family: var(--hud-mono); }
@@ -386,12 +415,12 @@ body.hud-active #settings-toggle {
     font-size: clamp(15px, 1.45vw, 24px);
     font-weight: 700;
     line-height: 1.15;
-    color: #eae8ff;
+    color: #f2f0ea;
     /* Cyan glow for the look, dark halo underneath for legibility — this rule
        is more specific than the blanket .hud-panel * one, so it has to carry
        both or the big numbers vanish against a bright star. */
     text-shadow:
-        0 0 14px rgba(108, 240, 255, 0.35),
+        0 0 14px rgba(216, 185, 120, 0.40),
         0 0 3px rgba(0, 0, 0, 0.95),
         0 1px 10px rgba(0, 0, 0, 0.85);
     font-variant-numeric: tabular-nums;
@@ -412,7 +441,7 @@ body.hud-active #settings-toggle {
 }
 .hud-row-name {
     display: flex; align-items: center; gap: 6px;
-    color: #cfcbe8;
+    color: #b9b6ae;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .hud-row-val {
@@ -430,7 +459,7 @@ body.hud-active #settings-toggle {
 }
 .hud-bar > i {
     display: block; height: 100%;
-    background: linear-gradient(90deg, #6cf0ff, #a68bff);
+    background: linear-gradient(90deg, #f0dcae, #d8b978 55%, #a8863f);
     box-shadow: 0 0 10px rgba(108, 240, 255, 0.6);
     transition: width 600ms cubic-bezier(.2, .8, .3, 1);
 }
@@ -471,7 +500,7 @@ body.hud-active #settings-toggle {
 }
 .hud-gauge-val {
     font-family: var(--hud-mono); font-variant-numeric: tabular-nums;
-    font-size: clamp(11.5px, 0.95vw, 14px); color: #eae8ff; white-space: nowrap;
+    font-size: clamp(11.5px, 0.95vw, 14px); color: #f2f0ea; white-space: nowrap;
     text-shadow: 0 0 12px var(--g, #6cf0ff), 0 0 3px rgba(0,0,0,.95);
 }
 .hud-gauge-val small { font-size: 0.72em; color: var(--hud-label); margin-left: 2px; }
@@ -618,10 +647,10 @@ body.hud-active #settings-toggle {
        get the rest. */
     padding: 12px 8px 4px;
     background: linear-gradient(180deg,
-        rgba(6, 5, 18, 0) 0%,
-        rgba(6, 5, 18, 0.30) 26%,
-        rgba(6, 5, 18, 0.62) 62%,
-        rgba(6, 5, 18, 0.74) 100%);
+        rgba(9, 11, 16, 0) 0%,
+        rgba(9, 11, 16, 0.32) 26%,
+        rgba(9, 11, 16, 0.64) 62%,
+        rgba(9, 11, 16, 0.78) 100%);
     /* The scrim must fade out at its own top edge too, or its leading edge is
        a visible horizontal line drawn across the middle of the orbit. */
     -webkit-mask-image: linear-gradient(180deg, transparent 0%, #000 22%);
@@ -1027,7 +1056,7 @@ body.hud-active.has-notice #hud-layer {
     letter-spacing: 0.02em;
     color: #d3cfef;
     background: rgba(10, 8, 28, 0.55);
-    border: 1px solid rgba(108, 240, 255, 0.16);
+    border: 1px solid rgba(242, 239, 230, 0.10);
     border-radius: 999px;
     padding: 6px 12px;
     cursor: pointer;
@@ -1077,8 +1106,8 @@ body.hud-active.has-notice #hud-layer {
     font-size: clamp(15px, 1.5vw, 21px);
     font-weight: 700;
     letter-spacing: 0.22em;
-    color: #eae8ff;
-    text-shadow: 0 0 22px rgba(108, 240, 255, 0.5);
+    color: #f2f0ea;
+    text-shadow: 0 0 22px rgba(216, 185, 120, 0.55);
     margin-bottom: 3px;
 }
 .hud-boot-tag {
@@ -1094,7 +1123,7 @@ body.hud-active.has-notice #hud-layer {
 }
 .hud-boot-fill {
     height: 100%; width: 0%;
-    background: linear-gradient(90deg, #6cf0ff, #a68bff 60%, #ff8fd0);
+    background: linear-gradient(90deg, #f7ebcd, #d8b978 55%, #a8863f);
     box-shadow: 0 0 16px rgba(108, 240, 255, 0.75);
     transition: width 420ms cubic-bezier(.2, .8, .3, 1);
 }
@@ -1133,9 +1162,9 @@ body.hud-active.has-notice #hud-layer {
 }
 /* Everything not yet landed is IN FLIGHT — all of them, together. The pulse
    is what says "working" without claiming an order the loader does not have. */
-.hud-boot-step.pending { color: #cfcbe8; }
+.hud-boot-step.pending { color: #8e8b85; }
 .hud-boot-step.pending .mark {
-    color: #6cf0ff;
+    color: var(--hud-accent, #d8b978);
     animation: hud-boot-pulse 1.15s ease-in-out infinite;
 }
 @keyframes hud-boot-pulse {
@@ -1373,7 +1402,7 @@ body.hud-active.has-notice #hud-layer {
 #hud-layer > .hud-panel.hud-free:hover,
 #hud-layer > .hud-panel.hud-free.is-holding {
     border-radius: 12px;
-    box-shadow: inset 0 0 0 1px rgba(108, 240, 255, 0.16);
+    box-shadow: inset 0 0 0 1px rgba(242, 239, 230, 0.10);
 }
 #hud-layer > .hud-panel.hud-free.is-holding {
     box-shadow: inset 0 0 0 1px rgba(108, 240, 255, 0.42),
@@ -1407,7 +1436,7 @@ body.hud-active.has-notice #hud-layer {
 }
 #hud-layout-reset:hover {
     color: #fff;
-    border-color: rgba(108, 240, 255, 0.5);
+    border-color: rgba(216, 185, 120, 0.55);
     background: rgba(16, 13, 40, 0.8);
 }
 /* The panel half of the controls hint. Only true under ?hud=1 — the wallpaper
@@ -1444,7 +1473,7 @@ body.hud-active #hud-bottom .hint-hud { display: inline; }
     font-size: 11px;
     letter-spacing: .14em;
     text-transform: uppercase;
-    color: #67e8f9;
+    color: #d8b978;
     opacity: .72;
     text-shadow: 0 0 12px rgba(103, 232, 249, .45);
 }
@@ -1467,7 +1496,7 @@ body.hud-active #hud-bottom .hint-hud { display: inline; }
     display: flex;
     flex-direction: column;
     z-index: 41;
-    border: 1px solid rgba(103, 232, 249, .22);
+    border: 1px solid rgba(216, 185, 120, .24);
     border-radius: 12px;
     background: rgba(5, 10, 18, .93);
     box-shadow: 0 12px 40px rgba(0, 0, 0, .55);
@@ -1477,15 +1506,15 @@ body.hud-active #hud-bottom .hint-hud { display: inline; }
 .mind-chat-head {
     display: flex; align-items: center; gap: 8px;
     padding: 8px 10px 8px 12px;
-    border-bottom: 1px solid rgba(103, 232, 249, .14);
+    border-bottom: 1px solid rgba(216, 185, 120, .16);
 }
-.mind-chat-title { font-size: 10px; letter-spacing: .16em; color: #67e8f9; opacity: .8; }
+.mind-chat-title { font-size: 10px; letter-spacing: .16em; color: #d8b978; opacity: .8; }
 .mind-chat-status { flex: 1; font-size: 10px; color: #7f9bb3; opacity: .85; }
 .mind-chat-close {
     background: none; border: none; color: #7f9bb3; font-size: 16px;
     line-height: 1; cursor: pointer; padding: 0 2px;
 }
-.mind-chat-close:hover { color: #67e8f9; }
+.mind-chat-close:hover { color: #d8b978; }
 .mind-chat-log {
     flex: 1; overflow-y: auto; padding: 10px 12px;
     display: flex; flex-direction: column; gap: 7px;
@@ -1499,7 +1528,7 @@ body.hud-active #hud-bottom .hint-hud { display: inline; }
 @keyframes mind-pulse { 0%,100% { opacity: .35 } 50% { opacity: .8 } }
 .mind-chat-row {
     display: flex; align-items: flex-end; gap: 6px;
-    padding: 8px; border-top: 1px solid rgba(103, 232, 249, .14);
+    padding: 8px; border-top: 1px solid rgba(216, 185, 120, .16);
 }
 .mind-chat-input {
     flex: 1; resize: none; max-height: 88px;
@@ -1511,8 +1540,8 @@ body.hud-active #hud-bottom .hint-hud { display: inline; }
 .mind-chat-input:focus { outline: none; border-color: rgba(103, 232, 249, .5); }
 .mind-mic, .mind-send {
     background: rgba(103, 232, 249, .10);
-    border: 1px solid rgba(103, 232, 249, .22);
-    border-radius: 8px; color: #67e8f9;
+    border: 1px solid rgba(216, 185, 120, .24);
+    border-radius: 8px; color: #d8b978;
     padding: 6px 9px; cursor: pointer; font-size: 13px; line-height: 1;
 }
 .mind-mic:hover, .mind-send:hover { background: rgba(103, 232, 249, .2); }

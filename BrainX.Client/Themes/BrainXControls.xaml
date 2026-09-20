@@ -44,9 +44,12 @@
   <!-- Default button — "btn" in the prototype. Card-tinted background,
        hairline border, soft outer shadow, 1px top highlight. -->
   <Style x:Key="NeuralBtn" TargetType="Button">
-    <Setter Property="Background" Value="{StaticResource NeuralBgCard}"/>
+    <!-- Face + bevel (2026-09-20). A flat fill with a shadow is a card on a
+         background; a gradient face inside a top-lit / bottom-shaded edge is
+         an object sitting on one. See the Material block in BrainXColors. -->
+    <Setter Property="Background" Value="{StaticResource NeuralFaceBtn}"/>
     <Setter Property="Foreground" Value="{StaticResource NeuralText}"/>
-    <Setter Property="BorderBrush" Value="{StaticResource NeuralLineStrong}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource NeuralEdge}"/>
     <Setter Property="BorderThickness" Value="1"/>
     <Setter Property="Height" Value="{StaticResource BtnHeight}"/>
     <Setter Property="Padding" Value="14,0"/>
@@ -87,7 +90,7 @@
           </Grid>
           <ControlTemplate.Triggers>
             <Trigger Property="IsMouseOver" Value="True">
-              <Setter TargetName="Bd" Property="Background" Value="{StaticResource NeuralBgCard2}"/>
+              <Setter TargetName="Bd" Property="Background" Value="{StaticResource NeuralFaceCardHover}"/>
             </Trigger>
             <Trigger Property="IsPressed" Value="True">
               <Setter TargetName="Bd" Property="Margin" Value="0,1,0,-1"/>
@@ -140,9 +143,11 @@
   <!-- Primary — violet gradient, white text, accent glow. Used for the
        single most-important action on a view (New note, Ask Claude, etc). -->
   <Style x:Key="NeuralBtnPrimary" TargetType="Button" BasedOn="{StaticResource NeuralBtn}">
-    <Setter Property="Background" Value="{StaticResource NeuralPrimaryBtn}"/>
-    <Setter Property="Foreground" Value="#FFFFFF"/>
-    <Setter Property="BorderBrush" Value="#2EFFFFFF"/>
+    <Setter Property="Background" Value="{StaticResource NeuralFaceGold}"/>
+    <!-- White on champagne is unreadable at 13px; the ink is a dark warm
+         brown, which keeps both the contrast and the metal. -->
+    <Setter Property="Foreground" Value="{StaticResource NeuralOnGold}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource NeuralEdgeGold}"/>
     <Setter Property="Effect" Value="{StaticResource ShadowAccent}"/>
     <Style.Triggers>
       <Trigger Property="IsMouseOver" Value="True">
@@ -169,8 +174,8 @@
        Variants: NeuralCardFlat (Shadow1), NeuralCardRaised (Shadow3)
        ═══════════════════════════════════════════════════════════════════ -->
   <Style x:Key="NeuralCard" TargetType="Border">
-    <Setter Property="Background" Value="{StaticResource NeuralBgCard}"/>
-    <Setter Property="BorderBrush" Value="{StaticResource NeuralLine}"/>
+    <Setter Property="Background" Value="{StaticResource NeuralFaceCard}"/>
+    <Setter Property="BorderBrush" Value="{StaticResource NeuralEdgeSoft}"/>
     <Setter Property="BorderThickness" Value="1"/>
     <Setter Property="CornerRadius" Value="16"/>
     <Setter Property="Effect" Value="{StaticResource Shadow2}"/>

@@ -480,6 +480,18 @@ internal static partial class Program
             var verdict = ClassifySession(agent, state, cfg);
             SaveRunnerState(agent, state);
 
+            // WHY this agent would be started, carried rather than logged.
+            //
+            // Three branches below decide that a spawn is the right answer,
+            // and every one of them used to say so on the spot — several
+            // gates before anything actually starts. The budget gate alone
+            // cancelled roughly two hundred announced spawns in fifty
+            // minutes while the state file recorded three real ones, so the
+            // log read as a machine trying constantly and the truth was a
+            // machine correctly doing almost nothing. A log that reports
+            // intentions as actions is worse than one that stays quiet.
+            string? spawnReason = null;
+
             switch (verdict)
             {
                 case SessionVerdict.Working:
@@ -496,7 +508,7 @@ internal static partial class Program
                     // somebody who joined it on purpose.
                     if (work.Room > 0 && CoworkUnreadFor(agent) == 0)
                     {
-                        BrokerLog($"{agent}: called into the cowork room but this session never joined it — spawning one that will");
+                        spawnReason = "called into the cowork room but this session never joined it — spawning one that will";
                         goto case SessionVerdict.Absent;
                     }
 
@@ -539,7 +551,7 @@ internal static partial class Program
                     // is a session that joins the room.
                     if (work.Mail == 0 && work.Tasks == 0 && work.Room > 0)
                     {
-                        BrokerLog($"{agent}: parked, and the only thing waiting is the cowork room — spawning rather than mailing");
+                        spawnReason = "parked, and the only thing waiting is the cowork room — spawning rather than mailing";
                         goto case SessionVerdict.Absent;
                     }
 
@@ -570,7 +582,7 @@ internal static partial class Program
                         continue;
                     }
 
-                    BrokerLog($"{agent}: parked and unresponsive with {Describe(work)} — a nudge cannot reach it, spawning");
+                    spawnReason = $"parked and unresponsive with {Describe(work)} — a nudge cannot reach it, spawning";
                     goto case SessionVerdict.Absent;
 
                 case SessionVerdict.Absent:
@@ -592,7 +604,27 @@ internal static partial class Program
                     var gate = BudgetGate(cfg, agent, state);
                     if (gate != null)
                     {
-                        BrokerLog($"{agent}: budget stop — {gate}");
+                        // Say it once, not every fifteen seconds.
+                        //
+                        // The tick rate is right and the refusal is right;
+                        // what was wrong was repeating it. Eight lines a
+                        // minute is 480 an hour, so a runner blocked
+                        // overnight buries every real event under eleven
+                        // thousand copies of the same two sentences — and
+                        // the one line that mattered would be the one
+                        // nobody could find.
+                        //
+                        // Stored rather than remembered in a field: --once
+                        // is a fresh PROCESS per tick, so an in-memory
+                        // guard would suppress nothing at all there. (That
+                        // is the same hole RunPid was moved to disk for.)
+                        if (!SaidBudgetStopAlready(cfg, state, gate))
+                        {
+                            BrokerLog($"{agent}: budget stop — {gate}");
+                            state.LastBudgetLog = gate;
+                            state.LastBudgetLogUtc = DateTime.UtcNow;
+                            SaveRunnerState(agent, state);
+                        }
                         await EscalateAsync(cfg, new BrokerDecision(
                             Id: "budget-" + agent,
                             Agent: agent,
@@ -600,6 +632,17 @@ internal static partial class Program
                             Question: $"'{agent}' cannot pick up its work ({Describe(work)}). {gate}",
                             Options: new[] { "I fixed it — try again", "leave that work for me" })).ConfigureAwait(false);
                         continue;
+                    }
+
+                    // The door opened. Forget the refusal, so that if it
+                    // shuts again the owner hears about it instead of the
+                    // message being swallowed as a repeat of one that is no
+                    // longer true.
+                    if (state.LastBudgetLog != null)
+                    {
+                        state.LastBudgetLog = null;
+                        state.LastBudgetLogUtc = null;
+                        SaveRunnerState(agent, state);
                     }
 
                     // Where the work LIVES is not guessable, and guessing it
@@ -620,6 +663,7 @@ internal static partial class Program
                         continue;
                     }
 
+                    if (spawnReason != null) BrokerLog($"{agent}: {spawnReason}");
                     if (dryRun) { BrokerLog($"{agent}: would spawn {runner.Exe} in {WorkDirFor(cfg, runner, work)} ({Describe(work)})"); continue; }
                     SpawnRunner(cfg, agent, runner, work, live, state);
                     if (work.Room > 0)
@@ -1425,7 +1469,38 @@ internal static partial class Program
         /// itself is asking them to do the machine's waiting.
         /// </summary>
         public DateTime? FailedUtc { get; set; }
+
+        /// <summary>
+        /// The last budget refusal the owner was told about, and when.
+        ///
+        /// A gate is evaluated every tick because it has to be — the answer
+        /// can change at any moment. Saying the answer out loud every tick
+        /// is a different thing, and the wrong one: the refusal is a
+        /// standing condition, not an event, and a standing condition
+        /// reported 480 times an hour stops being a report.
+        ///
+        /// Kept next to LastFailure rather than in a field because --once
+        /// runs a whole new process per tick and would remember nothing.
+        /// </summary>
+        public string? LastBudgetLog { get; set; }
+        public DateTime? LastBudgetLogUtc { get; set; }
     }
+
+    /// <summary>
+    /// Has the owner already been told about exactly this refusal, recently
+    /// enough that repeating it adds nothing?
+    ///
+    /// Two ways to speak up again: the reason CHANGED (a different wall is
+    /// news), or the retry window elapsed (the machine is about to try
+    /// again, so the state of play is worth restating). Failure-driven gates
+    /// usually clear themselves first — ExpireStaleRefusal wipes the counter
+    /// at the same deadline — so in practice this window is what keeps the
+    /// count-based gates (spawns per hour, hops per work) from chattering.
+    /// </summary>
+    private static bool SaidBudgetStopAlready(BrokerConfig cfg, RunnerState state, string gate)
+        => state.LastBudgetLog == gate
+           && state.LastBudgetLogUtc is DateTime said
+           && DateTime.UtcNow - said < TimeSpan.FromMinutes(cfg.RetryAfterFailureMinutes);
 
     private static string RunnerStatePath(string agent) => Path.Combine(BrokerDir, agent + ".state.json");
 
@@ -1473,6 +1548,8 @@ internal static partial class Program
                 ConsecutiveFailures = o["consecutiveFailures"]?.ToObject<int?>() ?? 0,
                 LastFailure = o["lastFailure"]?.ToString(),
                 FailedUtc = Utc(o["failedUtc"]),
+                LastBudgetLog = o["lastBudgetLog"]?.ToString(),
+                LastBudgetLogUtc = Utc(o["lastBudgetLogUtc"]),
             };
         }
         catch { return new RunnerState(); }
@@ -1494,6 +1571,8 @@ internal static partial class Program
                 ["consecutiveFailures"] = s.ConsecutiveFailures,
                 ["lastFailure"] = s.LastFailure,
                 ["failedUtc"] = s.FailedUtc,
+                ["lastBudgetLog"] = s.LastBudgetLog,
+                ["lastBudgetLogUtc"] = s.LastBudgetLogUtc,
             });
         }
         catch { }
