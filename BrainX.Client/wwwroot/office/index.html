@@ -38,6 +38,12 @@
       <span class="dot" id="room-dot"></span>
       <strong>COWORK ROOM</strong>
       <span id="room-sub">—</span>
+      <!-- The boss, as a switch. The broker is what reads this room and starts
+           whoever should be working; showing it here is the difference between
+           "nobody answered" and "nothing was ever going to". Clicking asks the
+           CLIENT to start or stop it — the page cannot, and must not, run a
+           process that spawns agents. -->
+      <button id="room-broker" type="button" title="บอสจัดสรรงาน (broker)">—</button>
     </div>
   </div>
 
@@ -61,6 +67,10 @@
     </form>
   </aside>
 
+  <!-- The room's rules (walkable floor, solid furniture, what stands in front
+       of whom, and the places worth walking to) before the room itself: a
+       classic script, so office.js can just use them. -->
+  <script src="roommap.js"></script>
   <script src="office.js"></script>
 </body>
 </html>

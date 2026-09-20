@@ -129,6 +129,36 @@ function resize() {
     shadowLayer.height = cv.height;
     ctx.imageSmoothingEnabled = false;
     layoutDesks();
+    bossRelayout();
+}
+
+/**
+ * Keep the boss where he was when the window changes size.
+ *
+ * He walks in LOGICAL canvas pixels, and those move under him on every resize:
+ * without this he keeps his old coordinates and ends up outside the room, or
+ * walking to a sofa that is now somewhere else. His position is converted to
+ * plate-normalised space and back, which is the same space the furniture is
+ * pinned in — so "in front of the sofa" survives any window.
+ */
+function bossRelayout() {
+    if (!BOSS_AV) return;
+    plateFit();
+    const prev = BOSS_AV._norm;
+    const p = prev
+        ? { x: PLATE_FIT.x + prev.x * PLATE_FIT.w, y: PLATE_FIT.y + prev.y * PLATE_FIT.h }
+        : spotPt(BOSS_HOME);
+    BOSS_AV.x = p.x; BOSS_AV.y = p.y;
+    // A trip in flight is abandoned rather than recomputed: the target was in
+    // the old coordinate space, and walking to it would cross the new room.
+    BOSS_AV.target = null;
+    BOSS_PATH = null;
+    if (BOSS_PLAN && BOSS_PLAN.phase === 'walking')
+        BOSS_PLAN = { spot: BOSS_PLAN.spot, phase: 'resting', until: performance.now() + 1200 };
+    // Logical scale, so the pack's nominalSpeed keeps his feet in step with
+    // bossSpeed(); the draw call passes the device-resolution scale instead.
+    BOSS_AV.scale = bossScaleLogical();
+    BOSS_AV.speed = bossSpeed();
 }
 
 // ── palette ─────────────────────────────────────────────────────────
@@ -156,13 +186,70 @@ function label(name) {
 let AGENTS = [];        // [{id,label,state,lastTool,pending,spawned}]
 let MESSAGES = [];      // newest last
 let DECISIONS = [];
+let BROKER = null;      // {state,tail} — the boss: running / adopted / stopped / failed
 const DESKS = new Map();  // agent id → {gx,gy,seat:{x,y},screen:{x,y}}
 const SEEN = new Set();   // message ids already shown as bubbles
 const EMOTES_PLAYED = new Set();  // agent|atUtc, so one emote sounds once
 let PRIMED = false;       // first payload is backlog: show it, don't perform it
 const BUBBLES = [];       // {agent,text,color,until}
 const PACKETS = [];       // {from,to,color,t0,ms}
-let BOSS = null;          // {until,text} — the owner, standing in the room
+let BOSS = null;          // {until,text} — the owner's last line, as a bubble
+
+/* ── the boss, as painted animation ──────────────────────────────────
+ *
+ * Owner (2026-09-20): "เขาทำอนิเมชั่นบอสไว้แล้ว เอาเข้าห้องได้เลย".
+ *
+ * The BrainX Avatar Game Pack: 40 animations, 187 frames of 256×256 with a
+ * shared foot anchor, on three atlases. Everybody else in this room is a
+ * dozen rectangles this file draws, and that was the right call for a figure
+ * the size of a thumbnail — but the boss is one character, in the middle of
+ * the room, that the owner is looking straight at, and hand-placed pixels do
+ * not animate a walk cycle.
+ *
+ * Drawn at DEVICE resolution rather than on the sprite grid, for the same
+ * reason the room plate is: the art is 256 pixels tall and the logical canvas
+ * is half the window. Routing it through the small canvas would throw most of
+ * it away before scaling it back up.
+ */
+let BOSS_AV = null;       // BrainXAvatar, once its atlases have loaded
+let BOSS_CLOCK = 0;       // performance.now() of the last avatar update
+
+/**
+ * Places in the room worth walking to, normalised to the plate.
+ *
+ * Owner (2026-09-20): "สามารถเดินไปเดินมาได้เอง ... นั่งบนโซฟาได้ (มีท่านั่ง)
+ * หรือไปเคาน์เตอร์ กินน้ำได้".
+ *
+ * Each spot is a piece of the painted furniture plus what a person does when
+ * they get there — the pack has a sit, a drink and a read, so the sofa, the
+ * coffee bar and the bookshelf are real destinations rather than coordinates
+ * to stand on. `stay` is how long he lingers, in seconds, picked at random in
+ * that range so two visits never feel like a loop.
+ */
+const BOSS_SPOTS = SPOTS;                                  // roommap.js
+const BOSS_HOME = SPOTS.find(s => s.home) || SPOTS[0];     // the rug, middle of the room
+
+/** The route he is walking, as normalised plate points, and how far along it
+ *  he is. A path exists because the room is a ring of furniture: a straight
+ *  line from the coffee bar to the bookshelf goes through the sofa, and the
+ *  grid in roommap.js is what knows that. */
+let BOSS_PATH = null;
+let BOSS_LEG = 0;
+
+/** What he is doing with himself: {spot, phase, until}. `phase` is 'walking'
+ *  (on his way), 'doing' (at the spot, mid-activity) or 'resting' (settled,
+ *  waiting for `until` before choosing somewhere else). Null until the pack
+ *  has loaded, because there is nobody to move. */
+let BOSS_PLAN = null;
+
+/** Set while the owner is speaking: he drops what he is doing, comes back to
+ *  the rug and gives the order. Wandering resumes when the line expires. */
+let BOSS_SUMMONED = false;
+
+/** Height of the boss as a fraction of the room's height, tuned against the
+ *  seated agents so he reads as a person in the same room rather than a
+ *  cut-out pasted over it. 217 is the drawn height inside the 256px frame. */
+const BOSS_FILL = 0.155;
 /** Agents currently out of their chair: id -> {to, t0, dur}.
  *
  *  Started by REAL traffic — when one agent writes to another, the sender
@@ -598,7 +685,23 @@ function drawRoom() {
     for (const a of order) if (a.state !== 'offline' && !VISITS.has(a.id)) drawSeated(a);
     for (const a of order) drawWalker(a);
 
-    if (BOSS && T < BOSS.until) drawBoss();
+    // The boss stands in his own light, always — he is in the room whether or
+    // not he has just spoken, and an unlit figure in the middle of the rug
+    // would read as somebody who left. Brighter while he is talking.
+    {
+        const p = bossSpot();
+        const talking = BOSS && T < BOSS.until;
+        LIGHTS.push({
+            x: p.x, y: p.y - 10,
+            r: 30,
+            c: hexToRgb(FIXED.owner),
+            i: talking ? 0.52 : 0.30,
+        });
+    }
+
+    // Only while the pack is still loading: the painted boss is drawn at
+    // device resolution in present(), not here on the sprite grid.
+    if (!BOSS_AV && BOSS && T < BOSS.until) drawBoss();
     drawPackets();
 }
 
@@ -1333,11 +1436,364 @@ function drawStanding(x, yFloor, a, walking, facingLeft) {
 
 /** The owner, standing in the middle of the room. Not at a desk, on purpose —
  *  the boss walks in, says the thing, and everyone else is still sitting. */
+/** A spot's place on the LOGICAL canvas. Pinned to the plate, like the desks
+ *  are: the old version derived a spot from the retired desk grid, which after
+ *  the painted room arrived put the boss inside the furniture. */
+function spotPt(s) {
+    return {
+        x: PLATE_FIT.x + s.x * PLATE_FIT.w,
+        y: PLATE_FIT.y + s.y * PLATE_FIT.h,
+    };
+}
+
+/** Where he actually IS — his own position once he is walking around, and his
+ *  home spot before the pack has loaded. Speech bubbles follow this. */
 function bossSpot() {
-    const n = AGENTS.length || 1;
-    const cols = deskCols(n), rows = Math.ceil(n / cols);
-    const c = (cols - 1) * SPACING / 2;
-    return iso(c + 1.4, (rows - 1) * SPACING + 2.6);
+    if (BOSS_AV) return { x: BOSS_AV.x, y: BOSS_AV.y };
+    return spotPt(BOSS_HOME);
+}
+
+/** Scale that puts the pack's 217px-tall figure at BOSS_FILL of the room, in
+ *  DEVICE pixels — the space the avatar is actually drawn in. */
+function bossScale() {
+    return (PLATE_FIT.h * SCALE * BOSS_FILL) / 217;
+}
+
+/** The same height in LOGICAL pixels, which is the space he walks in. Both
+ *  exist because the figure is drawn at device resolution but moves on the
+ *  same grid as the desks — one number in two units, not two numbers. */
+function bossScaleLogical() { return bossScale() / SCALE; }
+
+/**
+ * The boss, drawn from the pack, at device resolution.
+ *
+ * Called from present() between the sprite blit and the lighting pass, so he
+ * is lit by the same darkness cut that everybody else is — draw him after the
+ * lights and he would be a bright sticker on a dim room.
+ */
+function drawBossSprite() {
+    if (!BOSS_AV) return;
+    const now = performance.now();
+    const dt = BOSS_CLOCK ? (now - BOSS_CLOCK) / 1000 : 0;
+    BOSS_CLOCK = now;
+    BOSS_AV.update(dt);
+    bossTick();
+    // Remember where he is in the room's own coordinates, so a resize can put
+    // him back in front of the same sofa rather than at the same pixel.
+    if (PLATE_FIT.w > 1 && PLATE_FIT.h > 1) BOSS_AV._norm = {
+        x: (BOSS_AV.x - PLATE_FIT.x) / PLATE_FIT.w,
+        y: (BOSS_AV.y - PLATE_FIT.y) / PLATE_FIT.h,
+    };
+    BOSS_AV.draw(vctx, {
+        x: BOSS_AV.x * SCALE,
+        y: BOSS_AV.y * SCALE,
+        scale: bossScale(),
+    });
+}
+
+/**
+ * Furniture drawn back OVER the character, so he can stand behind things.
+ *
+ * Owner (2026-09-20): "ตรงไหนต้องบังตัวละคร บริเวณมุมบนซ้าย ก็ต้องคำนึง".
+ *
+ * There is no second set of art for this. Each occluder is a polygon on the
+ * plate, and the piece inside it is re-drawn from the plate itself over the
+ * sprite — a clip and one drawImage. That means the cut-outs can never drift
+ * out of sync with the room, which a hand-exported foreground layer would do
+ * the first time the plate is repainted.
+ *
+ * `base` is the piece's depth line: a character whose feet are above it is
+ * further into the room and gets covered. One number per object is enough
+ * because everything here stands on the same floor.
+ */
+function drawOccluders() {
+    if (!PLATE_READY || !BOSS_AV) return;
+    const n = bossNorm();
+    const f = PLATE_FIT;
+    const s = bossScaleLogical();
+    // The character's footprint on the plate, so a piece on the far side of
+    // the room is skipped instead of being re-blitted every frame.
+    const halfW = (34 * s) / f.w, height = (220 * s) / f.h;
+
+    for (const o of ROOM_MAP.OCCLUDERS) {
+        if (n.y >= o.base) continue;
+        const bb = o._bb || (o._bb = polyBounds(o.poly));
+        if (n.x + halfW < bb.x0 || n.x - halfW > bb.x1) continue;
+        if (n.y < bb.y0 - height || n.y > bb.y1) continue;
+
+        vctx.save();
+        vctx.beginPath();
+        for (let i = 0; i < o.poly.length; i++) {
+            const X = (f.x + o.poly[i][0] * f.w) * SCALE;
+            const Y = (f.y + o.poly[i][1] * f.h) * SCALE;
+            if (i) vctx.lineTo(X, Y); else vctx.moveTo(X, Y);
+        }
+        vctx.closePath();
+        vctx.clip();
+        vctx.imageSmoothingEnabled = true;
+        vctx.imageSmoothingQuality = 'high';
+        vctx.drawImage(ROOM_PLATE, f.x * SCALE, f.y * SCALE, f.w * SCALE, f.h * SCALE);
+        vctx.restore();
+    }
+}
+
+function polyBounds(poly) {
+    let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
+    for (const [x, y] of poly) {
+        if (x < x0) x0 = x; if (x > x1) x1 = x;
+        if (y < y0) y0 = y; if (y > y1) y1 = y;
+    }
+    return { x0, y0, x1, y1 };
+}
+
+// ── the boss, walking around a room he lives in ─────────────────────
+
+/** Walking pace, in logical pixels per second, tied to the room rather than
+ *  fixed: the same number crosses a small window in a hurry and a large one at
+ *  a crawl. `nominalSpeed` in the manifest then keeps his feet in step with it. */
+function bossSpeed() { return Math.max(18, PLATE_FIT.w * 0.075); }
+
+/** Put him somewhere without animating the trip — used on load and on resize,
+ *  where the room changed size under him and a walk would be a lie. */
+function bossPlace(s) {
+    if (!BOSS_AV) return;
+    const p = spotPt(s);
+    BOSS_AV.x = p.x; BOSS_AV.y = p.y;
+    BOSS_AV.target = null;
+}
+
+/**
+ * Send him to a spot.
+ *
+ * Two details that are not decoration:
+ *  - Standing up first. `posture` is seated after sit_down, and walking
+ *    straight out of a chair plays a walk cycle of somebody sitting down.
+ *  - The rug as a waypoint. The room is a ring of furniture around an open
+ *    middle, so a straight line from the coffee bar to the bookshelf goes
+ *    through the sofa. Anything crossing the room routes through the middle,
+ *    which is both shorter to compute than real pathfinding and closer to how
+ *    a person actually crosses a room.
+ */
+function bossGoTo(spot) {
+    if (!BOSS_AV) return;
+
+    if (BOSS_AV.posture === 'seated') {
+        BOSS_AV.play('stand_up', { loop: false });
+        // Back onto the floor he sat down from, so the path that follows
+        // starts somewhere the grid says a person can be. Standing up out of
+        // the cushion's coordinates would begin the route inside the sofa.
+        const from = BOSS_PLAN?.spot;
+        if (from?.seat) {
+            BOSS_AV.x = PLATE_FIT.x + from.x * PLATE_FIT.w;
+            BOSS_AV.y = PLATE_FIT.y + from.y * PLATE_FIT.h;
+        }
+        BOSS_PLAN = { spot, phase: 'rising', until: performance.now() + 880 };
+        return;
+    }
+
+    const from = bossNorm();
+    const path = ROOM_MAP.findPath(from, { x: spot.x, y: spot.y });
+    if (!path.length) {
+        // Nowhere to walk — the target is walled off, or he is already there.
+        BOSS_PLAN = { spot, phase: 'resting', until: performance.now() + 3000 };
+        return;
+    }
+    BOSS_PATH = path;
+    BOSS_LEG = 0;
+    bossWalkLeg();
+    BOSS_PLAN = { spot, phase: 'walking', until: 0 };
+}
+
+/** Where he is, in the plate's own coordinates. */
+function bossNorm() {
+    // Computed from where he is right now, not from the cached `_norm`: that
+    // one is a snapshot taken while drawing, and planning a route from a
+    // stale position sends him walking from somewhere he already left.
+    if (BOSS_AV && PLATE_FIT.w > 1 && PLATE_FIT.h > 1) return {
+        x: (BOSS_AV.x - PLATE_FIT.x) / PLATE_FIT.w,
+        y: (BOSS_AV.y - PLATE_FIT.y) / PLATE_FIT.h,
+    };
+    return { x: BOSS_HOME.x, y: BOSS_HOME.y };
+}
+
+/** Start the next straight leg of the route. */
+function bossWalkLeg() {
+    const leg = BOSS_PATH?.[BOSS_LEG];
+    if (!leg) return false;
+    const p = { x: PLATE_FIT.x + leg.x * PLATE_FIT.w, y: PLATE_FIT.y + leg.y * PLATE_FIT.h };
+    BOSS_AV.moveTo(p.x, p.y, { speed: bossSpeed() });
+    return true;
+}
+
+/** What he does once he is there. Every one of these returns to idle on its
+ *  own through the manifest's `next`, except the sit, which is meant to last. */
+function bossArrive(spot) {
+    const secs = spot.stay[0] + Math.random() * (spot.stay[1] - spot.stay[0]);
+    // Face the room rather than the wall he just walked at. The pack picks a
+    // direction from the walk it finished, which for the coffee bar means
+    // standing with his back to everybody.
+    if (spot.face) BOSS_AV.direction = spot.face;
+    switch (spot.act) {
+        case 'sit':
+            BOSS_AV.play('sit_down', { loop: false });
+            // The walk ended on the floor in front of the cushion; the sitting
+            // frames belong ON it. Moved once, here, rather than making the
+            // cushion a walk target the pathfinder can never reach.
+            if (spot.seat) {
+                BOSS_AV.x = PLATE_FIT.x + spot.seat.x * PLATE_FIT.w;
+                BOSS_AV.y = PLATE_FIT.y + spot.seat.y * PLATE_FIT.h;
+            }
+            break;
+        case 'drink': BOSS_AV.play('drink', { loop: false }); break;
+        case 'read':  BOSS_AV.play('read'); break;
+        case 'phone': BOSS_AV.play('phone'); break;
+        case 'point': BOSS_AV.play('point', { loop: false }); break;
+        case 'think': BOSS_AV.play('think'); break;
+        default:      BOSS_AV.stop();
+    }
+    BOSS_PLAN = { spot, phase: 'resting', until: performance.now() + secs * 1000 };
+}
+
+/** Somewhere else to be — never the place he is already standing. */
+function bossPickSpot() {
+    const here = BOSS_PLAN?.spot?.key;
+    const options = BOSS_SPOTS.filter(s => s.key !== here);
+    return options[Math.floor(Math.random() * options.length)] || BOSS_HOME;
+}
+
+/**
+ * One step of the boss's own life, run every frame.
+ *
+ * Deliberately a poll rather than callbacks on the pack's onComplete: a click
+ * from the owner can interrupt any of these at any moment, and a state machine
+ * that reads "where am I, what changed" survives that, while a chain of
+ * completion handlers ends up firing for a trip that was abandoned.
+ */
+function bossTick() {
+    if (!BOSS_AV) return;
+    const now = performance.now();
+
+    // The owner talking outranks whatever he was doing. He comes back to the
+    // rug to say it, because an order shouted from the coffee bar reads as
+    // somebody muttering into a cup.
+    const talking = BOSS && T < BOSS.until;
+    if (talking && !BOSS_SUMMONED) {
+        BOSS_SUMMONED = true;
+        bossGoTo(BOSS_HOME, { viaMiddle: false });
+        return;
+    }
+    if (!talking && BOSS_SUMMONED) {
+        BOSS_SUMMONED = false;
+        BOSS_PLAN = { spot: BOSS_HOME, phase: 'resting', until: now + 4000 };
+    }
+
+    if (!BOSS_PLAN) { BOSS_PLAN = { spot: BOSS_HOME, phase: 'resting', until: now + 3000 }; return; }
+
+    switch (BOSS_PLAN.phase) {
+        case 'rising':
+            // stand_up is 880ms and the pack sends him to idle after it.
+            if (now >= BOSS_PLAN.until) bossGoTo(BOSS_PLAN.spot);
+            break;
+        case 'walking':
+            // moveTo clears `target` the moment a leg is finished. The route
+            // came from the grid, so each leg is a straight line that stays
+            // off the furniture; walking it one leg at a time is what keeps
+            // him out of the sofa without any per-frame collision check.
+            if (!BOSS_AV.target) {
+                BOSS_LEG++;
+                if (!bossWalkLeg()) { BOSS_PATH = null; bossArrive(BOSS_PLAN.spot); }
+            }
+            break;
+        case 'reacting':
+            if (now < BOSS_PLAN.until) break;
+            if (BOSS_PLAN.resume) {
+                BOSS_AV.moveTo(BOSS_PLAN.resume.x, BOSS_PLAN.resume.y, { speed: bossSpeed() });
+                BOSS_PLAN = { spot: BOSS_PLAN.spot, phase: 'walking', until: 0 };
+            } else {
+                BOSS_PLAN = { spot: BOSS_PLAN.spot, phase: 'resting', until: now + 4000 };
+            }
+            break;
+        case 'resting':
+            if (talking || BOSS_SUMMONED) break;
+            if (now >= BOSS_PLAN.until) bossGoTo(bossPickSpot());
+            break;
+    }
+}
+
+// ── the owner can poke him ──────────────────────────────────────────
+
+/** Is this logical-canvas point on the boss? A box around the drawn figure,
+ *  which is 105 wide and 217 tall inside its frame, with a little slack so a
+ *  click near his feet still counts. */
+function bossHit(lx, ly) {
+    if (!BOSS_AV) return false;
+    const s = bossScaleLogical();
+    return Math.abs(lx - BOSS_AV.x) <= 34 * s && ly <= BOSS_AV.y + 8 * s && ly >= BOSS_AV.y - 220 * s;
+}
+
+/** Clicked ON him: he reacts with one of the pack's one-shot gestures and a
+ *  sound. */
+const BOSS_REACTIONS = ['wave', 'laugh', 'joy', 'celebrate', 'agree', 'surprised', 'love'];
+
+function bossPoke() {
+    if (!BOSS_AV) return;
+    if (BOSS_AV.posture === 'seated') {
+        // Poked in his chair: he gets up rather than miming a wave sitting down.
+        BOSS_AV.play('stand_up', { loop: false });
+        BOSS_PLAN = { spot: BOSS_PLAN?.spot || BOSS_HOME, phase: 'rising', until: performance.now() + 880 };
+        playSound('ok');
+        return;
+    }
+    // Poked mid-walk, the trip has to be remembered. play() clears `target`
+    // for anything that is not a walk cycle — which is right, a person does
+    // not keep sliding across the room while they wave — so the destination is
+    // kept here and he carries on once the gesture finishes.
+    const resume = BOSS_AV.target ? { x: BOSS_AV.target.x, y: BOSS_AV.target.y } : null;
+    const pick = BOSS_REACTIONS[Math.floor(Math.random() * BOSS_REACTIONS.length)];
+    BOSS_AV.play(pick, { loop: false });
+    playSound(pick === 'celebrate' || pick === 'joy' ? 'levelup' : 'ok');
+    BOSS_PLAN = {
+        spot: BOSS_PLAN?.spot || BOSS_HOME,
+        phase: 'reacting',
+        until: performance.now() + 920,
+        resume,
+    };
+}
+
+/**
+ * Clicked somewhere else: he goes there.
+ *
+ * A click that lands near a piece of furniture becomes a visit to THAT
+ * furniture — so clicking the sofa sits him down and clicking the coffee bar
+ * gets him a drink, which is what a person means when they click a sofa.
+ * Anywhere else is a plain walk to the spot on the floor.
+ */
+function bossSendTo(lx, ly) {
+    if (!BOSS_AV) return;
+    const nx = (lx - PLATE_FIT.x) / PLATE_FIT.w;
+    const ny = (ly - PLATE_FIT.y) / PLATE_FIT.h;
+
+    // Clicked a piece of furniture that means something: go and use it.
+    const spot = ROOM_MAP.spotNear(nx, ny);
+    if (spot) { bossGoTo(spot); return; }
+
+    // Clicked the floor. A click on the sofa, a wall or off the plate lands on
+    // the nearest place a person could stand instead of being ignored — the
+    // room should never look like it did not hear you.
+    const target = ROOM_MAP.nearestWalkable(nx, ny);
+    if (!target) return;
+    bossGoTo({ key: 'floor', x: target.x, y: target.y, act: 'idle', stay: [5, 12] });
+}
+
+function onRoomClick(e) {
+    const r = cv.getBoundingClientRect();
+    if (!r.width || !r.height) return;
+    // Client px → logical canvas px. The canvas is CSS-scaled, so the ratio is
+    // the only safe conversion; cv.width would be device pixels.
+    const lx = (e.clientX - r.left) / r.width * CW;
+    const ly = (e.clientY - r.top) / r.height * CH;
+    if (bossHit(lx, ly)) bossPoke();
+    else bossSendTo(lx, ly);
 }
 
 function drawBoss() {
@@ -1405,6 +1861,13 @@ function present() {
     // Sprites on top, blown up with smoothing off so they stay crisp.
     vctx.imageSmoothingEnabled = false;
     vctx.drawImage(scene, 0, 0, W, H);
+
+    // The boss, at his own resolution, before the light is cut — so the room's
+    // darkness falls on him the same way it falls on everybody else.
+    drawBossSprite();
+    // …and whatever he is standing behind, painted back over him.
+    drawOccluders();
+    if (MAP_DEBUG) drawMapDebug();
 
     castDarkness();
 
@@ -1694,6 +2157,7 @@ function apply(p) {
 
     MESSAGES = p.messages || [];
     DECISIONS = p.decisions || [];
+    BROKER = p.broker || null;
 
     // Perform only what is NEW. The first payload is the backlog, and replaying
     // a day of it as bubbles would say "all of this just happened".
@@ -1704,6 +2168,10 @@ function apply(p) {
             const c = agentColor(m.from);
             if (m.from === 'owner') {
                 BOSS = { until: T + 260, text: firstLine(m.body) };
+                // He says it with his body too. `instruct` runs once and the
+                // pack sends him back to idle on its own, so nothing here has
+                // to remember to put him back.
+                try { BOSS_AV?.play('instruct', { loop: false }); } catch { /* pack still loading */ }
             } else {
                 BUBBLES.push({ agent: m.from, text: firstLine(m.body), color: c, until: T + 240 });
             }
@@ -1734,9 +2202,39 @@ function apply(p) {
     }
     if (EMOTES_PLAYED.size > 200) EMOTES_PLAYED.clear();
 
+    // Sitting here and LISTENING are different facts, and the owner needs the
+    // second one before they type an order: an agent at a desk that never
+    // joined the room will not hear a word of it. That is the whole point of
+    // the separate lane — a session working on something else stays quiet.
+    // The boss switch: what the broker is doing, and a way to stop it. A room
+    // where nobody answered and a room where nothing was ever going to answer
+    // look identical without this.
+    const bb = document.getElementById('room-broker');
+    if (bb) {
+        const st = (BROKER && BROKER.state) || 'stopped';
+        const svc = (BROKER && BROKER.service) || null;
+        const label = { running: 'บอสจัดสรรงาน ✓', adopted: 'บอสจัดสรรงาน (ตัวอื่นคุม)',
+                        stopped: 'บอสหยุด — กดเพื่อเริ่ม', failed: 'บอสเริ่มไม่ขึ้น' }[st] || st;
+        // The service is the half the owner cannot see: whether anything will
+        // still be dispatching after this window closes.
+        const svcTag = !svc ? ''
+            : !svc.installed ? ' · ไม่มี service'
+            : svc.state === 'running' ? ' · service ✓'
+            : ' · service ' + svc.state;
+        bb.textContent = label + svcTag;
+        bb.className = st === 'running' ? 'on' : st === 'adopted' ? 'warn' : st === 'failed' ? 'warn' : 'off';
+        bb.title = [
+            'คลิก = เริ่ม/หยุดบอสในแอปนี้',
+            'คลิกขวา = ติดตั้ง/ถอน Windows Service (ทำงานต่อแม้ปิดแอป)',
+            svc && svc.installed ? `service: ${svc.state}` : 'service: ยังไม่ได้ติดตั้ง',
+            '', ...((BROKER && BROKER.tail) || []),
+        ].join('\n');
+    }
+
     const online = AGENTS.filter(a => a.state !== 'offline').length;
+    const listening = AGENTS.filter(a => a.inRoom).length;
     document.getElementById('room-sub').textContent =
-        `${online} อยู่ในห้อง · ${AGENTS.length} ที่นั่ง`;
+        `${online} อยู่ในห้อง · ฟังอยู่ ${listening} · ${AGENTS.length} ที่นั่ง`;
     document.getElementById('room-dot').classList.toggle('off', online === 0);
 
     renderLog();
@@ -1769,6 +2267,26 @@ document.getElementById('say').addEventListener('submit', (e) => {
     // round trip is under two seconds, but a send that looks like nothing
     // happened gets sent twice.
     BOSS = { until: T + 260, text: firstLine(text) };
+});
+
+// The boss switch. Asks the client to start or stop the broker; the page has
+// no business starting a process that spawns agents, so all it does is ask.
+document.getElementById('room-broker')?.addEventListener('click', () => {
+    post({ type: 'officeBroker' });
+});
+
+// Right-click installs or removes the Windows Service — the half that keeps
+// dispatching after this window is closed. Confirmed here because it is an
+// administrative change to the machine, and elevated by the CLIENT, which is
+// the only thing that may ask for it.
+document.getElementById('room-broker')?.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    const svc = (BROKER && BROKER.service) || null;
+    const install = !svc || !svc.installed;
+    const ok = confirm(install
+        ? 'ติดตั้ง BrainX Agent Broker เป็น Windows Service?\n\nจะจัดสรรงานต่อแม้ปิดโปรแกรม — ต้องยืนยันสิทธิ์ผู้ดูแล'
+        : 'ถอน Windows Service ออก?\n\nปิดโปรแกรมแล้วจะไม่มีใครเรียก agent เข้ามาทำงาน');
+    if (ok) post({ type: 'officeBrokerService', action: install ? 'install' : 'uninstall' });
 });
 
 document.getElementById('decisions').addEventListener('click', (e) => {
@@ -1859,6 +2377,84 @@ function frame() {
 window.addEventListener('resize', resize);
 window.addEventListener('message', onMessage);
 try { window.chrome?.webview?.addEventListener('message', onMessage); } catch { /* not hosted */ }
+
+// ── looking at the map itself ───────────────────────────────────────
+
+/* `?map=1` paints the room's rules over the room: every walkable cell, the
+ * furniture that blocks, the spots and the route he is on. It exists because
+ * the polygons were measured off the plate by eye, and the only honest way to
+ * check a hand-measured map is to look at it on top of the picture. */
+const MAP_DEBUG = new URLSearchParams(location.search).has('map');
+
+function drawMapDebug() {
+    const f = PLATE_FIT, g = ROOM_MAP.grid;
+    const cw = (f.w / ROOM_MAP.GW) * SCALE, ch = (f.h / ROOM_MAP.GH) * SCALE;
+    vctx.save();
+    for (let gy = 0; gy < ROOM_MAP.GH; gy++) {
+        for (let gx = 0; gx < ROOM_MAP.GW; gx++) {
+            if (!g[gy * ROOM_MAP.GW + gx]) continue;
+            vctx.fillStyle = 'rgba(80,255,170,0.20)';
+            vctx.fillRect((f.x + (gx / ROOM_MAP.GW) * f.w) * SCALE,
+                          (f.y + (gy / ROOM_MAP.GH) * f.h) * SCALE, cw - 1, ch - 1);
+        }
+    }
+    const trace = (poly, colour) => {
+        vctx.strokeStyle = colour; vctx.lineWidth = 2; vctx.beginPath();
+        poly.forEach(([x, y], i) => {
+            const X = (f.x + x * f.w) * SCALE, Y = (f.y + y * f.h) * SCALE;
+            if (i) vctx.lineTo(X, Y); else vctx.moveTo(X, Y);
+        });
+        vctx.closePath(); vctx.stroke();
+    };
+    trace(ROOM_MAP.FLOOR, 'rgba(120,220,255,0.9)');
+    for (const b of ROOM_MAP.BLOCKS) trace(b.poly, 'rgba(255,90,120,0.9)');
+    for (const o of ROOM_MAP.OCCLUDERS) trace(o.poly, 'rgba(255,200,80,0.55)');
+    for (const s of ROOM_MAP.SPOTS) {
+        vctx.fillStyle = '#ffd166';
+        vctx.fillRect((f.x + s.x * f.w) * SCALE - 3, (f.y + s.y * f.h) * SCALE - 3, 6, 6);
+        vctx.fillStyle = '#fff'; vctx.font = '12px monospace';
+        vctx.fillText(s.key, (f.x + s.x * f.w) * SCALE + 6, (f.y + s.y * f.h) * SCALE);
+    }
+    if (BOSS_PATH) {
+        vctx.strokeStyle = '#8ef'; vctx.lineWidth = 2; vctx.beginPath();
+        BOSS_PATH.forEach((p, i) => {
+            const X = (f.x + p.x * f.w) * SCALE, Y = (f.y + p.y * f.h) * SCALE;
+            if (i) vctx.lineTo(X, Y); else vctx.moveTo(X, Y);
+        });
+        vctx.stroke();
+    }
+    vctx.restore();
+}
+
+// ── the boss's animation pack ───────────────────────────────────────
+//
+// Imported dynamically, and allowed to fail. The three atlases are ~6MB and
+// the module is ESM while this file is a classic script; a missing or broken
+// pack should cost the boss his animation, not take the whole office down
+// with it — drawBoss() is still here for exactly that case.
+(async () => {
+    try {
+        const { BrainXAvatar } = await import('./avatar/brainx-avatar.js');
+        BOSS_AV = await BrainXAvatar.load('./avatar/', { scale: 1 });
+        plateFit();
+        // Build the walk grid before the first click rather than on it: 56×42
+        // point-in-polygon tests are cheap, but not on the frame somebody is
+        // waiting to see him start moving.
+        ROOM_MAP.buildGrid();
+        bossPlace(BOSS_HOME);
+        bossRelayout();
+        BOSS_AV.play('idle');
+        // He starts settled rather than mid-stride, and wanders from there.
+        BOSS_PLAN = { spot: BOSS_HOME, phase: 'resting', until: performance.now() + 2500 };
+        // Clicking the room is how the owner plays with him: on him he reacts,
+        // anywhere else he walks there. Registered only once the pack is up,
+        // so a click before that does nothing rather than throwing.
+        cv.addEventListener('click', onRoomClick);
+        cv.style.cursor = 'pointer';
+    } catch (e) {
+        console.warn('cowork: boss avatar pack unavailable —', e?.message || e);
+    }
+})();
 
 resize();
 requestAnimationFrame(frame);
