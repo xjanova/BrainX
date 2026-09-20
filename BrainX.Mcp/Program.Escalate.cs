@@ -158,6 +158,41 @@ internal static partial class Program
     }
 
     /// <summary>
+    /// Withdraw a question the machine has stopped needing an answer to.
+    ///
+    /// A runner-failure decision carries NO work label on purpose — it is
+    /// about the agent, not about one job — which means it blocks everything
+    /// that agent could do. That is right while the runner really is down and
+    /// wrong the moment it is not: a usage limit that resets at 2:12 clears
+    /// itself, the retry cooldown clears the failure counter, and the question
+    /// would sit there blocking the agent until a human noticed and closed it.
+    ///
+    /// Observed exactly that twice in one night. The broker kept reporting
+    /// "waiting on the owner, not spawning" over a queue that had work in it,
+    /// and both times the fix was somebody hand-editing a JSON file.
+    /// </summary>
+    private static void WithdrawDecision(string id, string why)
+    {
+        try
+        {
+            var path = Path.Combine(BrokerDecisionDir, SanitizeAgentSlug(id) + ".json");
+            if (!File.Exists(path)) return;
+            var o = JObject.Parse(File.ReadAllText(path));
+            if (!string.Equals(o["status"]?.ToString(), "open", StringComparison.OrdinalIgnoreCase)) return;
+
+            // "withdrawn", not "answered": nobody answered it. The distinction
+            // matters to whoever reads this folder later trying to work out
+            // what the owner actually decided.
+            o["status"] = "withdrawn";
+            o["withdrawnUtc"] = DateTime.UtcNow.ToString("o");
+            o["withdrawnWhy"] = why;
+            AtomicWriteJson(path, o);
+            BrokerLog($"withdrew [{id}] — {why}");
+        }
+        catch (Exception ex) { BrokerLog("withdraw failed — " + Redact(ex.Message)); }
+    }
+
+    /// <summary>
     /// Which of this agent's workstreams are parked on the owner.
     ///
     /// Per WORKSTREAM, not per agent — the distinction is the difference

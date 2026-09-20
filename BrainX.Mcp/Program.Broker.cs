@@ -89,7 +89,18 @@ internal static partial class Program
             sb.Append("Call agent_inbox now. ");
         }
 
-        sb.Append("Also call task_queue. Read what is waiting and do it. ")
+        // What this session IS, stated up front.
+        //
+        // A broker-spawned run has no browser, no GUI and none of the owner's
+        // logged-in sessions — and nothing told it so. Two separate artwork
+        // jobs were specced as "open the ChatGPT conversation at this link",
+        // and both burned a whole run discovering `apps=[], browsers=[]`
+        // before stopping to ask. One sentence here saves that every time.
+        sb.Append("You are running HEADLESS: no browser, no GUI, no logged-in web session, ")
+          .Append("and no access to the owner's screen. If the work names a web page or a chat ")
+          .Append("conversation to open, you cannot reach it — say so and use a tool you do have, ")
+          .Append("or ask the owner once with agent_ask_user. Do not spend the run finding out. ")
+          .Append("Also call task_queue. Read what is waiting and do it. ")
           .Append("Close the loop with task_update, and reply to whoever wrote to you with agent_send ")
           .Append("KEEPING THE SAME work label, or your answer is invisible to them for the same reason. ")
           .Append("Do not stop while work you can do is still open. ")
@@ -306,6 +317,15 @@ internal static partial class Program
             // twice is worse than not asking: the second spawn cannot see the
             // first question, so it asks its own version of it and the owner
             // gets two notifications for one decision.
+            // BEFORE anything looks at whether this agent is blocked: a
+            // refusal that has served its cooldown is withdrawn here.
+            //
+            // It used to live inside BudgetGate, which is downstream of the
+            // decision check that the refusal itself causes — so the thing
+            // that clears the block sat behind the block. The counter expired
+            // on schedule and the agent stayed frozen anyway.
+            ExpireStaleRefusal(cfg, agent);
+
             // But only the parked WORKSTREAM stops — the agent keeps its
             // other jobs. Anything else and one unanswered question freezes an
             // agent completely, which is the stall this system exists to end.
@@ -955,6 +975,29 @@ internal static partial class Program
     // ───────────── budget ─────────────
 
     /// <summary>
+    /// Let a refusal expire, and take back the question it raised.
+    ///
+    /// Most walls a runner hits have a clock on them — a usage limit that
+    /// resets, a rate limit, a service briefly down. Clearing the counter
+    /// without also withdrawing the decision leaves the agent blocked by a
+    /// query nobody still needs answered, which is how a queue sits idle all
+    /// night while the log insists it is "waiting on the owner".
+    /// </summary>
+    private static void ExpireStaleRefusal(BrokerConfig cfg, string agent)
+    {
+        var st = ReadRunnerState(agent);
+        if (st.FailedUtc is not DateTime fu) return;
+        if (DateTime.UtcNow - fu < TimeSpan.FromMinutes(cfg.RetryAfterFailureMinutes)) return;
+
+        st.ConsecutiveFailures = 0;
+        st.LastFailure = null;
+        st.FailedUtc = null;
+        SaveRunnerState(agent, st);
+        WithdrawDecision("budget-" + agent,
+            "the runner is being retried; the earlier refusal has expired");
+    }
+
+    /// <summary>
     /// Why the loop is allowed to stop. Returns null when a spawn is fine, or
     /// the reason it is not.
     ///
@@ -982,6 +1025,11 @@ internal static partial class Program
             state.LastFailure = null;
             state.FailedUtc = null;
             SaveRunnerState(agent, state);
+            // And take the question back. Clearing the counter without closing
+            // the decision leaves the agent blocked by a query nobody still
+            // needs answered — which is how a queue sits idle overnight while
+            // the log insists it is "waiting on the owner".
+            WithdrawDecision("budget-" + agent, "the runner is being retried; the earlier refusal has expired");
         }
 
         // Checked BEFORE the counting ceilings, because it is the answer the
@@ -1184,6 +1232,31 @@ internal static partial class Program
 
     private static string RunnerStatePath(string agent) => Path.Combine(BrokerDir, agent + ".state.json");
 
+    /// <summary>
+    /// Read a stored timestamp back as real UTC.
+    ///
+    /// Every time in this file is written with DateTime.UtcNow and compared
+    /// against DateTime.UtcNow, which looks airtight and is not: Newtonsoft
+    /// deserialises "…+00:00" into a LOCAL DateTime, so on a UTC+7 machine a
+    /// refusal recorded five minutes ago came back seven hours in the future
+    /// and its cooldown could never expire. The runner stayed blocked with the
+    /// clock apparently running backwards.
+    ///
+    /// DateTimeOffset carries the offset through the round trip; DateTime
+    /// throws it away and keeps the wall-clock digits.
+    /// </summary>
+    private static DateTime? Utc(JToken? t)
+    {
+        if (t == null || t.Type == JTokenType.Null) return null;
+        try
+        {
+            if (t.Type == JTokenType.Date) return t.ToObject<DateTime>().ToUniversalTime();
+            var s2 = t.ToString();
+            return string.IsNullOrWhiteSpace(s2) ? null : DateTimeOffset.Parse(s2).UtcDateTime;
+        }
+        catch { return null; }
+    }
+
     private static RunnerState ReadRunnerState(string agent)
     {
         try
@@ -1194,14 +1267,15 @@ internal static partial class Program
             return new RunnerState
             {
                 LastCalls = o["lastCalls"]?.ToObject<long?>(),
-                CallsStillSince = o["callsStillSince"]?.ToObject<DateTime?>(),
+                CallsStillSince = Utc(o["callsStillSince"]),
                 Hops = o["hops"]?.ToObject<int?>() ?? 0,
-                Spawns = o["spawns"]?.ToObject<List<DateTime>>() ?? new List<DateTime>(),
+                Spawns = (o["spawns"] as JArray ?? new JArray())
+                            .Select(Utc).Where(d => d.HasValue).Select(d => d!.Value).ToList(),
                 RunPid = o["runPid"]?.ToObject<int?>(),
-                RunStartedUtc = o["runStartedUtc"]?.ToObject<DateTime?>(),
+                RunStartedUtc = Utc(o["runStartedUtc"]),
                 ConsecutiveFailures = o["consecutiveFailures"]?.ToObject<int?>() ?? 0,
                 LastFailure = o["lastFailure"]?.ToString(),
-                FailedUtc = o["failedUtc"]?.ToObject<DateTime?>(),
+                FailedUtc = Utc(o["failedUtc"]),
             };
         }
         catch { return new RunnerState(); }
