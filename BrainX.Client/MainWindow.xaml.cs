@@ -6147,6 +6147,22 @@ public partial class MainWindow : Window
                 return false;                                // still crawling — boot; idle path retries
             await download;
 
+            // Last gate before we give the process up: is anyone else running
+            // out of `current`? Velopack applies by renaming that directory,
+            // and a live agent server inside it makes the rename fail — which
+            // costs a restart, not an update. Checked HERE rather than before
+            // the download so a holder that quits meanwhile still gets the
+            // release, and the package stays staged for the idle path either
+            // way.
+            if (HolderOfInstallDir() is string holder)
+            {
+                _vpkMgr = mgr;
+                _vpkPending = info;
+                Services.StartupProgress.Report(
+                    $"Update v{target} ready — waiting for {holder} to close", 0.28, tag: "update");
+                return false;
+            }
+
             Services.StartupProgress.Report($"Update v{target} — restarting", 0.28, tag: "update");
             _vpkMgr = mgr;
             _vpkPending = info;
@@ -6204,6 +6220,19 @@ public partial class MainWindow : Window
         {
             _autoUpdateFiring = false;
             StatusText.Text = $"Update v{target} ready — will apply next time you step away.";
+            RefreshUpdatePanel();
+            return;
+        }
+
+        // Same gate as the boot path: an agent server running out of `current`
+        // makes the rename fail, and a failed apply here costs the owner their
+        // session for nothing. Re-checked at the moment of applying, because
+        // an empty chair is exactly when a connected agent is most likely to
+        // still be sitting there.
+        if (HolderOfInstallDir() is string holder)
+        {
+            _autoUpdateFiring = false;
+            StatusText.Text = $"Update v{target} ready — waiting for {holder} to close.";
             RefreshUpdatePanel();
             return;
         }
@@ -6313,6 +6342,50 @@ public partial class MainWindow : Window
         foreach (var wv in new[] { UniverseWebView, DashUniverseWebView, DashClaudeProbeWebView })
             try { wv?.Dispose(); } catch { }
         try { Application.Current.Shutdown(); } catch { Environment.Exit(0); }
+    }
+
+    /// <summary>
+    /// Who, apart from us, is running out of the install directory — or null
+    /// when the coast is clear.
+    ///
+    /// Velopack applies a release by RENAMING %LOCALAPPDATA%\BrainX\current,
+    /// and Windows will not rename a directory that holds a running image. Our
+    /// own handle is fine (the updater waits for this process to exit); anyone
+    /// else's is not, and the apply fails. Nothing survives that failure to
+    /// report it, so the app relaunches, tries again, fails again — the shape
+    /// the owner sees as "BrainX restarted three times before it opened"
+    /// (2026-08-01, and again on 2026-09-21 via a Codex session pinned to
+    /// current\mcp).
+    ///
+    /// <see cref="Services.UpdateAttemptLog"/> bounds that at three tries.
+    /// This makes it zero: an apply that is KNOWN to fail is not attempted,
+    /// the package stays staged, and the idle path picks it up once the
+    /// holder closes. The registrars in MainWindow.AutoOnboard.cs stop new
+    /// pins from being written; this covers every pin already out there, on a
+    /// machine that has not run the fixed build yet.
+    /// </summary>
+    private static string? HolderOfInstallDir()
+    {
+        try
+        {
+            var holders = BrainX.Core.Services.McpRuntimePaths.HoldersOfManagedCurrent();
+            if (holders.Count == 0) return null;
+            // One name, not a list: this lands in a single line of a loading
+            // screen. Prefer a holder that knows which AGENT it belongs to —
+            // "waiting for codex to close" is something the owner can act on,
+            // "waiting for brainx-mcp to close" is not, and the workers that
+            // answer to the second description are children of the ones that
+            // answer to the first. Closing the named one takes them along.
+            var named = holders.FirstOrDefault(h => !string.IsNullOrWhiteSpace(h.Client));
+            return (named ?? holders[0]).Label;
+        }
+        catch (Exception ex)
+        {
+            // Never let a diagnostic stop an update. Unknown = proceed, which
+            // is exactly the behaviour that existed before this check.
+            Debug.WriteLine($"HolderOfInstallDir: {ex.Message}");
+            return null;
+        }
     }
 
     private void VersionText_Click(object sender, MouseButtonEventArgs e)

@@ -91,6 +91,12 @@ public partial class MainWindow
             // memory dir). Install the rules whenever Codex exists on the box,
             // even if the MCP entry was already registered.
             var codexChanged = await EnsureCodexCliRegisteredAsync(exe);
+            // A registration that already exists is never re-added above, so an
+            // old one keeps pointing wherever it was first written. Codex's was
+            // written at current\mcp — inside the directory the updater renames
+            // — and so were its two wake hooks, which no `codex mcp` command
+            // can reach. Both are repointed here.
+            if (codexPresent) codexChanged |= HealCodexRuntimePaths(exe);
             if (codexPresent)
             {
                 try
@@ -288,6 +294,29 @@ public partial class MainWindow
     }
 
     /// <summary>
+    /// True when a registration must be repointed because of WHERE it points,
+    /// not because of how old it is.
+    ///
+    /// <see cref="IsMcpOutdated"/> asks the version question, and a config
+    /// pinned to <c>current\mcp</c> answers it "fine" — the packaged server and
+    /// the mirror beside it are the same build, byte for byte. So the pin
+    /// survived every self-heal, and an agent launched from there held a file
+    /// inside the directory Velopack renames to apply a release: the update
+    /// failed, the app relaunched, and the owner watched BrainX restart three
+    /// times before it gave up and opened (2026-09-21, Codex — pinned on
+    /// 2026-07-14, months before the mirror existed; Claude Code was repointed
+    /// by a later remove/add and so never showed the symptom).
+    ///
+    /// Only ever true when we have somewhere better to send it. If the mirror
+    /// could not be made (<see cref="ResolveBestMcpExe"/> falls back to the
+    /// packaged path), repointing would rewrite the config to the same bad
+    /// place on every launch — churn that fixes nothing.
+    /// </summary>
+    private static bool PinnedInsideCurrent(string registeredExe, string bestExe) =>
+        BrainX.Core.Services.McpRuntimePaths.IsInsideManagedCurrent(registeredExe)
+        && !BrainX.Core.Services.McpRuntimePaths.IsInsideManagedCurrent(bestExe);
+
+    /// <summary>
     /// True when the registered exe is a strictly OLDER build than the best
     /// available one. This is what lets an updated install actually reach
     /// Claude: without it, a registration pointing at any still-existing old
@@ -369,6 +398,7 @@ public partial class MainWindow
             && !string.IsNullOrEmpty(curCmd) && File.Exists(curCmd!)
             && string.Equals(curVault, _vaultPath, StringComparison.OrdinalIgnoreCase)
             && curEnabled
+            && !PinnedInsideCurrent(curCmd!, exe)
             && !IsMcpOutdated(curCmd!, exe);
         if (entryHealthy) return false;
 
@@ -435,6 +465,7 @@ public partial class MainWindow
         var entryHealthy = existing is not null
             && !string.IsNullOrEmpty(curCmd) && File.Exists(curCmd!)
             && string.Equals(curVault, _vaultPath, StringComparison.OrdinalIgnoreCase)
+            && !PinnedInsideCurrent(curCmd!, exe)
             && !IsMcpOutdated(curCmd!, exe);
         if (entryHealthy)
         {
@@ -546,8 +577,9 @@ public partial class MainWindow
                 // user-scope command path; upgrade in place only when the
                 // registered build is strictly older than the best available.
                 var registered = ReadCliRegisteredCommand();
-                if (registered is null || !IsMcpOutdated(registered, exe))
-                    return false;   // current (or unknown) → leave alone
+                if (registered is null) return false;               // unknown → leave alone
+                if (!PinnedInsideCurrent(registered, exe) && !IsMcpOutdated(registered, exe))
+                    return false;   // right build, right place → leave alone
                 await RunClaudeCliAsync("mcp", "remove", "brainx-brain", "-s", "user");
             }
 
@@ -609,7 +641,10 @@ public partial class MainWindow
             {
                 var registered = project.Value["mcpServers"]?["brainx-brain"]?["command"]?.ToString();
                 if (string.IsNullOrWhiteSpace(registered)) continue;
-                if (!IsMcpOutdated(registered!, exe)) continue;
+                // Outdated, or pinned inside the folder the updater has to
+                // rename. A project scope is removed rather than repointed
+                // either way: the user entry already names the mirror.
+                if (!IsMcpOutdated(registered!, exe) && !PinnedInsideCurrent(registered!, exe)) continue;
 
                 // `-s local` is keyed by the working directory, so the removal
                 // has to run from the folder it belongs to. A folder that no
@@ -680,6 +715,77 @@ public partial class MainWindow
         catch
         {
             return false;   // Codex CLI flaked — fallback is `brainx-mcp register-codex`
+        }
+    }
+
+    /// <summary>
+    /// Every brainx path in ~/.codex/config.toml that names Velopack's
+    /// `current`, moved to the mirror beside it.
+    ///
+    /// Registration alone cannot do this job here. Codex's entry was written on
+    /// 2026-07-14, months before the mirror existed, and
+    /// <see cref="EnsureCodexCliRegisteredAsync"/> only ever ADDS a missing
+    /// server — so the pin was never revisited, and the two wake hooks
+    /// (Stop + SessionStart) are not MCP servers at all: no `codex mcp`
+    /// subcommand can reach them. Both keep a handle inside the directory
+    /// Velopack renames, which is what made opening Codex cost the owner three
+    /// BrainX restarts (2026-09-21).
+    ///
+    /// Why this may hand-edit a file the rest of the class refuses to touch:
+    /// it replaces one ABSOLUTE PATH with another and parses nothing. The rule
+    /// exists because a DIY merge can corrupt a TOML document the user owns —
+    /// a literal substring swap cannot change its structure, its quoting or
+    /// anyone else's servers. A backup goes down first regardless.
+    ///
+    /// UTF-8 without BOM, deliberately: config.toml holds non-ASCII project
+    /// keys (the owner has Thai folder names), and a BOM would make Codex's
+    /// TOML parser reject the first line.
+    /// </summary>
+    private bool HealCodexRuntimePaths(string exe)
+    {
+        // Nowhere better to point at — a mirror that could not be made would
+        // just be the same bad path rewritten on every launch.
+        if (BrainX.Core.Services.McpRuntimePaths.IsInsideManagedCurrent(exe)) return false;
+        if (!File.Exists(exe)) return false;
+        // The paths we are replacing sit inside TOML literal strings, and two
+        // of the three are ALSO inside a double-quoted argument within one.
+        // A quote in the new path would end the string early and leave the
+        // owner with a config Codex cannot parse — and %LOCALAPPDATA% carries
+        // a username, which Windows does allow an apostrophe in. Nothing here
+        // is worth a corrupt config: leave the pin alone and let the update
+        // gate handle it instead.
+        if (exe.IndexOfAny(['\'', '"', '\r', '\n']) >= 0) return false;
+
+        try
+        {
+            var home = BrainX.Core.Services.CodexAgentsRulesInstaller.ResolveCodexHome();
+            if (home is null) return false;
+            var cfg = Path.Combine(home, "config.toml");
+            if (!File.Exists(cfg)) return false;
+
+            var raw = File.ReadAllText(cfg);
+            // Anchored at both ends: a drive letter on the left, the exe name
+            // on the right. Stops at a quote or a newline so it can never run
+            // past the end of the string it is sitting in. MatchEvaluator
+            // rather than a replacement string — a path is not a substitution
+            // pattern and `$` in one must stay a `$`.
+            var healed = System.Text.RegularExpressions.Regex.Replace(
+                raw,
+                @"[A-Za-z]:[^'""\r\n]*?\\BrainX\\current\\mcp\\brainx-mcp\.exe",
+                _ => exe,
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (string.Equals(healed, raw, StringComparison.Ordinal)) return false;
+
+            try { File.Copy(cfg, cfg + ".brainx.bak", overwrite: true); } catch { }
+            File.WriteAllText(cfg, healed, new System.Text.UTF8Encoding(false));
+            SetOnboardStatus("Codex was pointed at the folder BrainX updates into — moved it to the stable copy. "
+                           + "Restart Codex once.");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"HealCodexRuntimePaths: {ex.Message}");
+            return false;
         }
     }
 

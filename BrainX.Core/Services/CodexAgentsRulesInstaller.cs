@@ -76,7 +76,7 @@ public static class CodexAgentsRulesInstaller
     /// explicitly), else ~/.codex. Honour the override or we'd write rules into
     /// a directory Codex never looks at.
     /// </summary>
-    private static string? ResolveCodexHome()
+    public static string? ResolveCodexHome()
     {
         var env = Environment.GetEnvironmentVariable("CODEX_HOME");
         if (!string.IsNullOrWhiteSpace(env)) return env;
