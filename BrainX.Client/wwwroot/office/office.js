@@ -1656,7 +1656,7 @@ function buildOccluderPieces() {
         // character standing in a gap still sorts sensibly against it.
         let lowest = 0;
         for (let x = 0; x < w; x++) if (base[x] > lowest) lowest = base[x];
-        kept.push({ canvas: c, x0: p.x0, y0: p.y0, w, h, base, lowest, mw: W, mh: H });
+        kept.push({ canvas: c, x0: p.x0, y0: p.y0, x1: p.x1, y1: p.y1, w, h, base, lowest, mw: W, mh: H });
     }
     console.info('cowork: occluders split into', kept.length, 'pieces');
     return kept;
@@ -1686,8 +1686,14 @@ function drawOccluders() {
             // considered when it actually overlaps them.
             const halfW = (34 * s / PLATE_FIT.w) * mw;
 
+            // The sprite's own box in mask pixels. A piece that does not
+            // overlap it cannot hide any of it, however the depths compare —
+            // standing in the middle of the room was re-drawing the sofa over
+            // empty air two pieces at a time.
+            const headY = feetY - (220 * s / PLATE_FIT.h) * mh;
             for (const p of OCC_PIECES) {
                 if (feetX + halfW < p.x0 || feetX - halfW > p.x1) continue;
+                if (p.y1 < headY || p.y0 > feetY) continue;
 
                 // The floor line of THIS piece, at the column this character
                 // is standing in — averaged across their width so a one-pixel

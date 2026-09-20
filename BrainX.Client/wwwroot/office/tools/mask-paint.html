@@ -92,9 +92,9 @@
     <div class="grp">
       <label>ระบายอะไร</label>
       <div class="row">
-        <button class="tool on" data-layer="walk"><span class="sw" style="background:#3ce38a"></span>เดินได้</button>
-        <button class="tool" data-layer="block"><span class="sw" style="background:#ff5a6e"></span>ห้ามเข้า</button>
-        <button class="tool" data-layer="occl"><span class="sw" style="background:#5aa0ff"></span>ต้องบัง</button>
+        <button class="tool on" data-layer="walk"><span class="sw" style="background:#00E000"></span>เดินได้</button>
+        <button class="tool" data-layer="block"><span class="sw" style="background:#E00000"></span>ห้ามเข้า</button>
+        <button class="tool" data-layer="occl"><span class="sw" style="background:#0000E0"></span>ต้องบัง</button>
         <button class="tool" data-layer="seat"><span class="sw" style="background:#ffd166"></span>จุดนั่ง</button>
       </div>
     </div>
@@ -187,10 +187,24 @@ const pctx  = plate.getContext('2d');
 const mctx  = paint.getContext('2d', { willReadFrequently: true });
 const sctx  = pins.getContext('2d');
 
+/* One PURE channel per layer, and that is not a style choice.
+ *
+ * The first palette was picked to read well on a dark plate — a mint green, a
+ * coral, a sky blue — and every one of them had blue above the save
+ * threshold. So every painted pixel was written out as an occluder too, and a
+ * finished mask reported "occluder covers 100% of the walkable floor", which
+ * would have drawn the floor over the character on every frame. The painting
+ * was right; the encoding was not.
+ *
+ * Pure channels cannot spill into a meaning they were not painted for.
+ * Overlaps still work, because layers are mixed with max() per channel:
+ * blocked + occluder really is magenta, and decodes back to exactly those
+ * two. The overlay's opacity slider is what makes them comfortable to look
+ * at, rather than muting the colours themselves. */
 const LAYERS = {
-    walk:  { colour: '#3ce38a', channel: 1 },   // G
-    block: { colour: '#ff5a6e', channel: 0 },   // R
-    occl:  { colour: '#5aa0ff', channel: 2 },   // B
+    walk:  { colour: '#00E000', channel: 1 },   // G only
+    block: { colour: '#E00000', channel: 0 },   // R only
+    occl:  { colour: '#0000E0', channel: 2 },   // B only
 };
 let layer = 'walk';
 let brush = 28;
@@ -463,7 +477,7 @@ function layerBits() {
     const im = mctx.getImageData(0, 0, W, H).data;
     const bits = new Uint8Array(W * H);
     for (let i = 0, p = 0; i < bits.length; i++, p += 4)
-        if (im[p + 3] > 24 && im[p + ch] > 90) bits[i] = 1;
+        if (im[p + 3] > 24 && im[p + ch] > 128) bits[i] = 1;
     return bits;
 }
 
@@ -474,7 +488,7 @@ function writeLayer(bits) {
     const c = hexRgb(LAYERS[layer].colour);
     const ch = LAYERS[layer].channel;
     for (let i = 0, p = 0; i < bits.length; i++, p += 4) {
-        const had = im.data[p + 3] > 24 && im.data[p + ch] > 90;
+        const had = im.data[p + 3] > 24 && im.data[p + ch] > 128;
         if (bits[i] === (had ? 1 : 0)) continue;
         if (bits[i]) {
             const other = im.data[p + 3] > 24;
@@ -484,7 +498,7 @@ function writeLayer(bits) {
             im.data[p + 3] = 255;
         } else {
             im.data[p + ch] = 0;
-            if (im.data[p] < 60 && im.data[p + 1] < 60 && im.data[p + 2] < 60) im.data[p + 3] = 0;
+            if (im.data[p] < 100 && im.data[p + 1] < 100 && im.data[p + 2] < 100) im.data[p + 3] = 0;
         }
     }
     mctx.putImageData(im, 0, 0);
@@ -596,7 +610,7 @@ function checkMap() {
     const walk = new Uint8Array(W * H);
     for (let i = 0, p = 0; i < walk.length; i++, p += 4) {
         const on = im[p + 3] > 24;
-        walk[i] = (on && im[p + 1] > 90 && im[p] <= 90) ? 1 : 0;   // green, and not red
+        walk[i] = (on && im[p + 1] > 128 && im[p] <= 128) ? 1 : 0;   // green, and not red
     }
     let total = 0, first = -1;
     for (let i = 0; i < walk.length; i++) if (walk[i]) { total++; if (first < 0) first = i; }
@@ -658,11 +672,11 @@ document.getElementById('auto').addEventListener('click', async () => {
         for (let i = 0; i < d.data.length; i += 4) {
             const R = d.data[i] > 127, G = d.data[i + 1] > 127, B = d.data[i + 2] > 127;
             if (!(R || G || B)) continue;
-            let r = 0, g = 0, b = 0, n = 0;
-            if (G) { r += 60; g += 227; b += 138; n++; }
-            if (R) { r += 255; g += 90; b += 110; n++; }
-            if (B) { r += 90; g += 160; b += 255; n++; }
-            out.data[i] = r / n; out.data[i + 1] = g / n; out.data[i + 2] = b / n; out.data[i + 3] = 255;
+            let r = 0, g = 0, b = 0;
+            if (G) { g = 224; }
+            if (R) { r = 224; }
+            if (B) { b = 224; }
+            out.data[i] = r; out.data[i + 1] = g; out.data[i + 2] = b; out.data[i + 3] = 255;
         }
         mctx.putImageData(out, 0, 0);
         try {
@@ -691,9 +705,9 @@ document.getElementById('save').addEventListener('click', () => {
     const out = mctx.createImageData(paint.width, paint.height);
     for (let i = 0; i < src.data.length; i += 4) {
         const a = src.data[i + 3];
-        out.data[i]     = (a > 24 && src.data[i]     > 90) ? 255 : 0;   // blocked
-        out.data[i + 1] = (a > 24 && src.data[i + 1] > 90) ? 255 : 0;   // walkable
-        out.data[i + 2] = (a > 24 && src.data[i + 2] > 90) ? 255 : 0;   // occluder
+        out.data[i]     = (a > 24 && src.data[i]     > 128) ? 255 : 0;   // blocked
+        out.data[i + 1] = (a > 24 && src.data[i + 1] > 128) ? 255 : 0;   // walkable
+        out.data[i + 2] = (a > 24 && src.data[i + 2] > 128) ? 255 : 0;   // occluder
         out.data[i + 3] = 255;
     }
     const c = document.createElement('canvas');

@@ -185,13 +185,40 @@ def main():
     room &= (v > 0.14)
     objects = room & ~floor
 
-    # ── occluders: floor above, in the same column ───────────────────
+    # ── occluders ────────────────────────────────────────────────────
+    #
+    # A thing can hide a character only if a character can stand behind it AND
+    # it is standing on the ground in front of itself. Floor above gives the
+    # first; floor below its own base gives the second, and that is what
+    # separates a sofa from a back wall, a window or a patch of floor the
+    # floor pass missed — all three of which have floor above them, and none
+    # of which anybody can walk in front of.
     floor_above = np.zeros_like(floor)
     acc = np.zeros(sw, bool)
     for y in range(sh):
         acc |= floor[y]
         floor_above[y] = acc
 
+    floor_below = np.zeros_like(floor)
+    acc = np.zeros(sw, bool)
+    for y in range(sh - 1, -1, -1):
+        acc |= floor[y]
+        floor_below[y] = acc
+
+    # What the floor LOOKS like, so a piece made of floor can be recognised as
+    # floor however the outline came out. Coarse 5-bit histogram, same idea as
+    # the painter's snap-to-edges.
+    fh = np.zeros(32 * 32 * 32, np.int64)
+    fpx = a[floor].astype(np.int32) >> 3
+    np.add.at(fh, (fpx[:, 0] << 10) | (fpx[:, 1] << 5) | fpx[:, 2], 1)
+    fpeak = fh.max() if fh.size else 0
+    idx = (a.astype(np.int32) >> 3)
+    idx = (idx[..., 0] << 10) | (idx[..., 1] << 5) | idx[..., 2]
+    looks_like_floor = fh[idx] >= max(1, fpeak * 0.02)     # loosely floor-ish
+    is_really_floor = fh[idx] >= max(1, fpeak * 0.25)      # unmistakably the floor
+
+    closed = box_mean(objects.astype(np.float32), 2) > 0.35
+    objects = closed & room & ~floor
     lab2, n2 = components(objects)
     occl = np.zeros_like(objects)
     for i in range(1, n2 + 1):
@@ -199,8 +226,38 @@ def main():
         sz = int(m.sum())
         if sz < 60:
             continue
-        if float((m & floor_above).sum()) / sz > 0.5:
-            occl |= m
+
+        above = float((m & floor_above).sum()) / sz
+        if above < 0.45:
+            continue            # nothing behind it: nobody to hide
+
+        # Its base: the lowest few rows of the piece. Floor under THOSE is what
+        # says it stands in the room rather than hangs on a wall.
+        ys_m, xs_m = np.nonzero(m)
+        base_y = ys_m.max()
+        # "Floor below" is asked NEAR the base, not anywhere below it: the
+        # sofa stands on a patterned rug the floor pass only partly catches,
+        # and a strict test threw the sofa away with the walls. A band of
+        # about a tenth of the picture under the piece is what separates
+        # standing-in-the-room from mounted-on-a-wall.
+        near = int(sh * 0.10)
+        band = np.zeros_like(m)
+        lo = min(sh, base_y + 1)
+        hi = min(sh, base_y + 1 + near)
+        if hi > lo:
+            cols = np.zeros(sw, bool)
+            cols[xs_m.min():xs_m.max() + 1] = True
+            band[lo:hi] = cols
+        if band.sum() and float((band & floor).sum()) / band.sum() < 0.12:
+            continue            # a wall, a window, a light fitting
+
+        # Made of floor? Then it is floor the first pass missed, not furniture.
+        if float((m & looks_like_floor).sum()) / sz > 0.75:
+            continue
+
+        # Trim the outline: whatever inside it looks like floor, is floor.
+        occl |= m & ~is_really_floor
+
 
     # ── seats: the floor strip in front of a big object ──────────────
     seats = []
