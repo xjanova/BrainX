@@ -80,9 +80,10 @@ internal static partial class Program
         // exits — the same no-progress loop the labelled-mail bug caused.
         if (work.Room > 0)
         {
-            sb.Append("THE OWNER SPOKE IN THE COWORK ROOM and nobody was in it. That is your user talking. ")
-              .Append("Call cowork_join {work:'...'} FIRST, then cowork_read, do what was asked, and report back ")
-              .Append("with cowork_say — in the room, not by mail. The owner is watching that window. ")
+            sb.Append("THE OWNER SPOKE IN THE COWORK ROOM. That is your user talking. ")
+              .Append("Call cowork_join {work:'...'} FIRST, then cowork_read. ")
+              .Append(CoworkFloorRules)
+              .Append(" Report in the room with cowork_say, not by mail — the owner is watching that window. ")
               .Append("cowork_leave when the work is done. ");
         }
 
@@ -506,7 +507,11 @@ internal static partial class Program
                     // somebody's. A spawn is a NEW session with its own
                     // identity: the running one keeps its work, the room gets
                     // somebody who joined it on purpose.
-                    if (work.Room > 0 && CoworkUnreadFor(agent) == 0)
+                    // CoworkIsMember, not "has nothing unread": a member that
+                    // is up to date and a session that never joined both read
+                    // zero unread, and treating them the same is how an order
+                    // was left with a session that could not receive it.
+                    if (work.Room > 0 && !CoworkIsMember(agent))
                     {
                         spawnReason = "called into the cowork room but this session never joined it — spawning one that will";
                         goto case SessionVerdict.Absent;
@@ -547,11 +552,20 @@ internal static partial class Program
                     // delivers a bus message, and a bus message is the lane the
                     // owner separated the room from — nudging here would put
                     // the office back into everybody's inbox through the side
-                    // door. When the room is the only thing waiting, the answer
-                    // is a session that joins the room.
-                    if (work.Mail == 0 && work.Tasks == 0 && work.Room > 0)
+                    // door. A session called into the room gets a session that
+                    // JOINS it, whatever else happens to be in its inbox.
+                    //
+                    // The first version of this asked for an empty inbox as
+                    // well (Mail == 0 && Tasks == 0), and that is exactly how
+                    // the owner caught it: claude had one piece of unrelated
+                    // mail parked, so the room order fell through to
+                    // NudgeParkedSession and claude never walked in. Codex —
+                    // which happened to have an empty box — did, and answered
+                    // alone. One stale message must not be able to keep an
+                    // agent out of the room.
+                    if (work.Room > 0 && !CoworkIsMember(agent))
                     {
-                        spawnReason = "parked, and the only thing waiting is the cowork room — spawning rather than mailing";
+                        spawnReason = "parked and called into the cowork room — spawning a session that joins it";
                         goto case SessionVerdict.Absent;
                     }
 
@@ -687,10 +701,26 @@ internal static partial class Program
         {
             if (!coworkHandled && !dryRun)
             {
+                // Somebody already sitting in the room does not need calling —
+                // they get the line on their next tool call. Reporting that as
+                // "could not be called" is what put `ยังเรียก codex เข้ามาไม่ได้`
+                // in front of the owner while codex was in the room answering
+                // them, which is worse than saying nothing.
                 var named = coworkCalls.Keys.ToList();
-                CoworkSystemLine(named.Count == 0
-                    ? "ไม่มีใครอยู่ในห้อง และไม่มี runner ที่ตั้ง onCall ไว้ใน runners.json — คำสั่งนี้ยังไม่มีใครรับ"
-                    : $"ยังเรียก {string.Join(", ", named)} เข้ามาไม่ได้ (session กำลังทำงานอยู่ หรือชนเพดานงบ) — ดู broker log");
+                var seated = named.Where(CoworkIsMember).ToList();
+                // An agent with a run in flight is ON ITS WAY, not unreachable.
+                // Reporting it as "could not be called" while its process is
+                // booting is the same lie in a different shape.
+                var coming = named.Where(a => !CoworkIsMember(a) && live.ContainsKey(a)).ToList();
+                var missing = named.Where(a => !CoworkIsMember(a) && !live.ContainsKey(a)).ToList();
+
+                if (coming.Count > 0 && missing.Count == 0)
+                    CoworkSystemLine($"{string.Join(", ", coming)} กำลังเข้ามา (เพิ่งเรียก รอสักครู่)");
+                else if (missing.Count > 0)
+                    CoworkSystemLine($"ยังเรียก {string.Join(", ", missing)} เข้ามาไม่ได้ (session กำลังทำงานอยู่ หรือชนเพดานงบ) — ดู broker log");
+                else if (seated.Count == 0)
+                    CoworkSystemLine("ไม่มีใครอยู่ในห้อง และไม่มี runner ที่ตั้ง onCall ไว้ใน runners.json — คำสั่งนี้ยังไม่มีใครรับ");
+                // else: everyone called is already seated. Silence is correct.
             }
             if (!dryRun) CoworkMarkCalled();
         }
@@ -924,6 +954,28 @@ internal static partial class Program
         // on one path and not another — set it explicitly so a spawned agent
         // always reads the same brain the broker is watching.
         psi.Environment["BRAINX_VAULT"] = _vaultPath;
+
+        // Claude Code refuses to start inside another Claude Code session, and
+        // it decides that from an inherited environment variable:
+        //
+        //   Error: Claude Code cannot be launched inside another Claude Code
+        //   session. Nested sessions share runtime resources and will crash
+        //   all active sessions.
+        //
+        // Nothing here is nested — the broker is a child of the BrainX client
+        // (or of the service), not of a session. But env vars flow down every
+        // process that started anything in the chain, and the moment the app
+        // was launched from a terminal that had CLAUDECODE set, every claude
+        // runner the broker spawned died on that line while codex, which has
+        // no such check, ran fine. From the owner's chair that looked exactly
+        // like "claude ignores the room": the spawn was logged, the process
+        // started, and it exited before it could join.
+        //
+        // Cleared here rather than at the app, because the broker can be
+        // started by the client, the service or a person's shell, and only
+        // this line covers all three.
+        foreach (var marker in new[] { "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT" })
+            psi.Environment.Remove(marker);
 
         try
         {

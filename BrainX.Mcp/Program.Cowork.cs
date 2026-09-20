@@ -309,6 +309,34 @@ internal static partial class Program
         catch { }
     }
 
+    /// <summary>
+    /// How to behave when the owner speaks to the whole room.
+    ///
+    /// Owner (2026-09-20): "ตอน Owner พิมพ์สั่ง ทุกคนฟังได้เอง ตอบแยกแยะได้เลย
+    /// อยู่แล้ว ควรวิเคราะห์คำสั่งของ owner ได้เองว่าใครทำอะไร หรือถ้ามันคลุมเครือ
+    /// ควรถามบอสได้ว่าตกลงให้ใครทำอะไร หรือให้ไปคุยกันเอง".
+    ///
+    /// The routing is deliberately NOT the broker's job. It starts sessions
+    /// and delivers the line; deciding whose job something is takes reading
+    /// the order, and the agents are the only things here that can read. What
+    /// the broker owes them is that every one of them HEARS it — which is the
+    /// bug this text ships alongside.
+    ///
+    /// The one hard rule is the acknowledgement. An agent that silently
+    /// decides an order is not its problem is indistinguishable, from the
+    /// owner's chair, from an agent that never got it — and that is exactly
+    /// what the owner was looking at when they asked where claude was.
+    /// </summary>
+    private const string CoworkFloorRules =
+        "EVERY agent in the room hears this, so sort it out between yourselves: "
+      + "(1) ACKNOWLEDGE FIRST — one short cowork_say saying you heard it and which part you are taking. "
+      + "Silence is indistinguishable from being offline, and the owner is watching the room. "
+      + "(2) Decide whether it is YOURS from what the order actually asks for and what you are already on. "
+      + "If it is, do it and report back in the room. If it plainly is not, say so in one line and leave it. "
+      + "(3) If it is AMBIGUOUS who should do it, do not guess and do not both start: either agree it in the "
+      + "room with the other agents (cowork_say), or ask the owner directly — they are right there. "
+      + "Two agents doing the same job is worse than one asking.";
+
     // ───────────── what the broker sees ─────────────
 
     /* The room has to be able to CALL somebody.
@@ -365,9 +393,20 @@ internal static partial class Program
                 if (!from.Equals("owner", StringComparison.OrdinalIgnoreCase)) continue;
 
                 var addressed = o["to"]?.ToString();
+                // An unaddressed order calls the members AND everyone on call
+                // — not "members, or on-call if the room is empty".
+                //
+                // Owner (2026-09-20): "เรียกเข้าห้องทำไม cluade ไม่เข้าไปขาน
+                // ตอบรับล่ะ มีแต่ codex ตอบ". That was this line: the moment
+                // codex joined, members was non-empty, so every later order
+                // called codex and ONLY codex, forever. The room had one
+                // member and silently stopped inviting anybody else — which
+                // is the opposite of "ฉันเข้าไปพิมพ์ ทุกคนต้องฟัง".
                 var targets = !string.IsNullOrWhiteSpace(addressed)
                     ? new List<string> { CollapseToReadableBox(SanitizeAgentSlug(addressed!)) }
-                    : members.Count > 0 ? members : (onCall?.ToList() ?? new List<string>());
+                    : members.Concat(onCall ?? Enumerable.Empty<string>())
+                             .Distinct(StringComparer.OrdinalIgnoreCase)
+                             .ToList();
 
                 foreach (var t in targets)
                 {
@@ -378,6 +417,21 @@ internal static partial class Program
         }
         catch { }
         return result;
+    }
+
+    /// <summary>
+    /// Has this agent taken a seat in the room?
+    ///
+    /// Distinct from "is it behind on the room", which is what
+    /// <see cref="CoworkUnreadFor"/> answers — a member that has read
+    /// everything and a session that never joined both report zero unread,
+    /// and treating those two as the same thing is how the broker decided a
+    /// non-member would hear an order it could never receive.
+    /// </summary>
+    internal static bool CoworkIsMember(string agent)
+    {
+        try { return File.Exists(CoworkMemberFile(agent)); }
+        catch { return false; }
     }
 
     /// <summary>How many room lines this agent has not read. Only meaningful
@@ -481,8 +535,7 @@ internal static partial class Program
                 ["from"] = new JArray(speakers),
                 ["action"] = fromOwner
                     ? "THE OWNER SPOKE IN THE COWORK ROOM. That is your user talking, and it outranks peer "
-                      + "chatter. Call cowork_read NOW, do what was asked, and report back with cowork_say — "
-                      + "in the room, not by mail."
+                      + "chatter. Call cowork_read NOW. " + CoworkFloorRules
                     : "Someone in the cowork room said something to the room. Call cowork_read, and answer "
                       + "with cowork_say rather than agent_send — the owner keeps these lanes apart."
             };

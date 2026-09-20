@@ -208,6 +208,23 @@ if (Test-Path $installedMcp) {
         "Renci.SshNet.dll"
     ) + $hostingAssets
     $appFailed = Deploy-Set $scBuild $installedMcp $appAssets $ts "installed app"
+
+    # 5a. The THIRD target, and the one that actually serves the running app.
+    #
+    # ResolveBestMcpExe() in the client prefers %LOCALAPPDATA%\BrainX\mcp over
+    # the Velopack current\mcp folder, so that is the binary the client spawns
+    # for the broker and for every agent session it starts. This script only
+    # ever wrote the other two, and the version stamp made the miss invisible:
+    # both copies report 2.9.<git commit count>, which does not move between
+    # two builds of the same commit. A fix deployed twice, a broker still
+    # running the code from before it, and nothing anywhere saying so -- the
+    # same blindness recorded in "Stale-MCP detection was blind to the case it
+    # existed for - version drift, not file timestamps".
+    $sideMcp = Join-Path $env:LOCALAPPDATA "BrainX\mcp"
+    if (Test-Path $sideMcp) {
+        $sideFailed = Deploy-Set $scBuild $sideMcp $appAssets $ts "client-side mcp"
+        $appFailed = @($appFailed) + @($sideFailed)
+    }
 } else {
     Write-Output ""
     Write-Output "[skip] no installed app at $installedMcp (dev-only machine)"

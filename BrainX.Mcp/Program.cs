@@ -913,7 +913,12 @@ internal static partial class Program
                     }
                 }),
             Tool("cowork_read",
-                "Read what has been said in the cowork room since you last looked. Nothing is consumed — " +
+                "Read what has been said in the cowork room since you last looked. WHEN THE OWNER SPEAKS TO " +
+                "THE ROOM, every agent in it hears the same line, so sort it out between yourselves: " +
+                "acknowledge in one short cowork_say first (silence looks exactly like being offline), decide " +
+                "from the order itself whether the work is yours, say so in a line if it plainly is not, and " +
+                "if it is ambiguous who should take it, agree it in the room or ask the owner — never guess, " +
+                "and never both start. " +
                 "a room is a wall everyone reads, not mail, so two sessions in the room both hear the " +
                 "owner. Pass wait_seconds to hold the door open (max 10), or history:true to re-read the " +
                 "recent transcript from the start. You rarely need to poll: while you are in the room, " +
