@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -427,6 +427,15 @@ public partial class MainWindow
             {
                 var o = JObject.Parse(File.ReadAllText(f));
                 if (!string.Equals(o["status"]?.ToString(), "open", StringComparison.OrdinalIgnoreCase)) continue;
+
+                // Answered, but not yet closed. CoworkAnswer writes `answer`
+                // and leaves `status` alone on purpose — the broker owns the
+                // transition and the delivery back to the agent — so between
+                // the click and the broker's next tick this is still "open",
+                // and the card came straight back. With the broker stopped it
+                // came back forever. One press is the whole contract.
+                if (!string.IsNullOrWhiteSpace(o["answer"]?.ToString())) continue;
+
                 arr.Add(o);
             }
             catch { }

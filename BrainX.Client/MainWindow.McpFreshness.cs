@@ -1,4 +1,4 @@
-// MainWindow.McpFreshness.cs — "Claude is still running the OLD brainx-mcp".
+﻿// MainWindow.McpFreshness.cs — "Claude is still running the OLD brainx-mcp".
 //
 // The MCP server ships INSIDE the client package (CI publishes it to `mcp\`),
 // so every BrainX update replaces the MCP binary too. But Claude spawns
@@ -122,6 +122,17 @@ public partial class MainWindow
     /// somehow still stale, the answer is to tell the user — not to close
     /// their editor again, and again.</summary>
     private bool _autoRestartSpent;
+
+    /// <summary>
+    /// The situation the banner last described, and the one the owner said no
+    /// to. Same string = same news, and news is only news once.
+    ///
+    /// Owner (2026-09-20): "กดทีนึงก็น่าจะพอ ไม่ใช่เด้งให้กดซ้ำ ๆ". The check
+    /// runs on a timer, so without these the box was re-posted every pass and
+    /// Cancel dismissed one copy of a message already queued to come back.
+    /// </summary>
+    private string? _staleNoticeShown;
+    private string? _staleNoticeDismissed;
 
     // ═════════════════════════════════════════════════════════════════
     // Detection
@@ -530,9 +541,20 @@ public partial class MainWindow
         var rewritten = _staleMcp.Any(s => s.Reason == StaleReason.BinaryRewritten && !IsPinnedStale(s));
 
         if (!_autoRestartSpent && _autoRestartTimer == null && any && rewritten)
+        {
             StartAutoRestartCountdown();
-        else
-            PostStaleNotice(onDisk, who, null);
+            return;
+        }
+
+        // Once per situation. A new build, or a different set of clients, is
+        // new information and gets one banner; the same state re-observed
+        // fifteen seconds later is not, and the amber chip is already saying
+        // it without interrupting anybody.
+        var situation = onDisk + " | " + who;
+        if (situation == _staleNoticeDismissed || situation == _staleNoticeShown) return;
+
+        _staleNoticeShown = situation;
+        PostStaleNotice(onDisk, who, null);
     }
 
     /// <summary>
@@ -609,12 +631,12 @@ public partial class MainWindow
         {
             PostHud("hudNotice", new
             {
-                text = $"MCP updated to {onDisk} — restarting {who} in {s}s",
-                detail = "A stdio MCP server is spawned once per session, so the new tools arrive on restart.",
+                text = $"MCP อัปเดตเป็น {onDisk} แล้ว — จะรีสตาร์ต {who} ในอีก {s} วินาที",
+                detail = "MCP แบบ stdio เปิดครั้งเดียวตอนเริ่ม session เครื่องมือใหม่จึงมาถึงตอนรีสตาร์ตเท่านั้น",
                 action = "restartClaude",
-                actionLabel = "Restart now",
+                actionLabel = "รีสตาร์ตเลย",
                 alt = "cancelRestart",
-                altLabel = "Cancel",
+                altLabel = "ไว้ก่อน",
             });
             return;
         }
@@ -632,11 +654,10 @@ public partial class MainWindow
             var by = string.IsNullOrEmpty(first.Scope) ? "" : $", registered by {first.Scope}";
             PostHud("hudNotice", new
             {
-                text = $"{who} is pinned to MCP v{first.Respawn} — restarting will not help",
-                detail = $"It respawns from {first.Exe}{also}{by}, and that copy is still "
-                       + $"v{first.Respawn} while the current build is {onDisk}. Rebuild it — "
-                       + "deploy-mcp.ps1 writes both the dev Release dir and the installed app — "
-                       + "or repoint that registration.",
+                text = $"{who} ถูกตรึงไว้ที่ MCP v{first.Respawn} — รีสตาร์ตไปก็ไม่ช่วย",
+                detail = $"มันเปิดจาก {first.Exe}{also}{by} ซึ่งตัวไฟล์เองยังเป็น v{first.Respawn} "
+                       + $"ขณะที่บิลด์ปัจจุบันคือ {onDisk} — ต้องบิลด์ไฟล์นั้นใหม่ "
+                       + "(deploy-mcp.ps1 เขียนให้ทั้ง dev Release และตัวที่ติดตั้งแล้ว) หรือย้ายการลงทะเบียนไปชี้ที่ใหม่",
             });
             return;
         }
@@ -647,11 +668,11 @@ public partial class MainWindow
         // that has to agree in number, because `who` is one name or five.
         PostHud("hudNotice", new
         {
-            text = $"Restart {who} — still on an older MCP than {onDisk}",
-            detail = "A stdio MCP server is spawned once per session and never reloaded, and the client "
-                   + "caches the tool list from its handshake — so new tools only arrive on restart.",
+            text = $"รีสตาร์ต {who} — ยังใช้ MCP เก่ากว่า {onDisk} อยู่",
+            detail = "MCP แบบ stdio เปิดครั้งเดียวตอนเริ่ม session และไม่โหลดซ้ำ ทั้งตัวไคลเอนต์ยังจำรายการเครื่องมือ "
+                   + "จากตอน handshake ไว้ — เครื่องมือใหม่จึงมาถึงตอนรีสตาร์ตเท่านั้น",
             action = "restartClaude",
-            actionLabel = "Restart now",
+            actionLabel = "รีสตาร์ตเลย",
         });
     }
 
@@ -701,7 +722,10 @@ public partial class MainWindow
     {
         StopAutoRestartCountdown();
         _autoRestartSpent = true;
-        if (StatusText != null) StatusText.Text = "Automatic restart cancelled — restart Claude when convenient";
+        // Not just this copy of the message: this whole state of affairs. It
+        // comes back when there is genuinely something new to say.
+        _staleNoticeDismissed = _staleNoticeShown ?? _staleNoticeDismissed;
+        if (StatusText != null) StatusText.Text = "ยกเลิกการรีสตาร์ตอัตโนมัติแล้ว — รีสตาร์ต Claude เมื่อสะดวก";
         ApplyMcpFreshnessToUi();
     }
 
@@ -828,8 +852,8 @@ public partial class MainWindow
         if (_staleMcp.Count == 0)
         {
             if (!auto)
-                MessageBox.Show(this, "Every running MCP server is already the current build.",
-                    "Nothing to restart", MessageBoxButton.OK, MessageBoxImage.Information);
+                MessageBox.Show(this, "MCP ที่รันอยู่ทุกตัวเป็นบิลด์ปัจจุบันแล้ว",
+                    "ไม่มีอะไรต้องรีสตาร์ต", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
 
@@ -839,21 +863,21 @@ public partial class MainWindow
 
         // The rebuild advice, phrased once and reused by both message paths.
         var pinnedBlock = pinned.Count == 0 ? "" :
-            "A restart cannot fix these — they respawn from a binary that is itself behind:\n"
+            "รีสตาร์ตแก้พวกนี้ไม่ได้ — มันเปิดจากไฟล์ที่ตัวเองก็เก่าอยู่แล้ว:\n"
             + string.Join("\n", pinned.Select(m => "  • " + m))
-            + "\n\nRebuild that copy (deploy-mcp.ps1 writes both targets) or repoint the registration.";
+            + "\n\nต้องบิลด์ไฟล์นั้นใหม่ (deploy-mcp.ps1 เขียนให้ทั้งสองที่) หรือย้ายการลงทะเบียนไปชี้ที่ใหม่";
 
         if (restartable.Count == 0)
         {
             var parts = new List<string>();
             if (pinnedBlock.Length > 0) parts.Add(pinnedBlock);
             if (manual.Count > 0)
-                parts.Add("Restart these yourself:\n" + string.Join("\n", manual.Select(m => "  • " + m)));
-            if (parts.Count == 0) parts.Add("No client here can be restarted automatically.");
+                parts.Add("พวกนี้ต้องรีสตาร์ตเอง:\n" + string.Join("\n", manual.Select(m => "  • " + m)));
+            if (parts.Count == 0) parts.Add("ไม่มีไคลเอนต์ตัวไหนที่รีสตาร์ตให้อัตโนมัติได้");
             var none = string.Join("\n\n", parts);
 
             if (auto) { if (StatusText != null) StatusText.Text = none.Replace("\n", " "); }
-            else MessageBox.Show(this, none, "Restart for the new MCP",
+            else MessageBox.Show(this, none, "รีสตาร์ตเพื่อรับ MCP ตัวใหม่",
                      MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
@@ -863,13 +887,13 @@ public partial class MainWindow
         // restart that never happens.
         if (!auto)
         {
-            var msg = "Close and reopen:\n" + string.Join("\n",
+            var msg = "จะปิดแล้วเปิดใหม่:\n" + string.Join("\n",
                           restartable.Select(p => $"  • {PrettyClient(p.ProcessName)} (pid {p.Id})")) +
-                      "\n\nAnything open in them will be closed.";
+                      "\n\nอะไรที่ค้างอยู่ในนั้นจะถูกปิดไปด้วย";
             if (manual.Count > 0)
-                msg += "\n\nRestart these yourself:\n" + string.Join("\n", manual.Select(m => "  • " + m));
+                msg += "\n\nพวกนี้ต้องรีสตาร์ตเอง:\n" + string.Join("\n", manual.Select(m => "  • " + m));
             if (pinnedBlock.Length > 0) msg += "\n\n" + pinnedBlock;
-            if (MessageBox.Show(this, msg, "Restart for the new MCP",
+            if (MessageBox.Show(this, msg, "รีสตาร์ตเพื่อรับ MCP ตัวใหม่",
                     MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
         }
 
