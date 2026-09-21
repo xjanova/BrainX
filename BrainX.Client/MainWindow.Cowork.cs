@@ -614,23 +614,53 @@ public partial class MainWindow
     /// installs or stops it, not between two frames of an animation.
     /// </summary>
     private DateTime _coworkServiceCheckedUtc;
-    private (bool Installed, string State) _coworkServiceCache = (false, "unknown");
+    /// <summary>Until when the service is read on every poll instead of every
+    /// twenty seconds — set by an install/start/stop so its result shows up.</summary>
+    private DateTime _coworkServiceFastUntilUtc;
+    private BrokerServiceInfo _coworkServiceCache = BrokerServiceInfo.Unknown;
+    private int _coworkServiceReading;
 
     private JObject CoworkBrokerState()
     {
-        if ((DateTime.UtcNow - _coworkServiceCheckedUtc).TotalSeconds > 20)
+        // Read off the dispatcher: this runs on the room's UI timer, and the
+        // read is two sc.exe processes plus a handle open — a stall the window
+        // would feel on every poll while a UAC prompt is being answered. The
+        // room draws the last answer and gets the new one on the next tick.
+        var every = DateTime.UtcNow < _coworkServiceFastUntilUtc ? 2 : 20;
+        if ((DateTime.UtcNow - _coworkServiceCheckedUtc).TotalSeconds > every
+            && Interlocked.CompareExchange(ref _coworkServiceReading, 1, 0) == 0)
         {
-            _coworkServiceCache = BrokerServiceStatus();
             _coworkServiceCheckedUtc = DateTime.UtcNow;
+            _ = Task.Run(() =>
+            {
+                // One read at a time: sc.exe can take seconds on a busy
+                // machine, and the fast two-second clock must not stack them.
+                try { _coworkServiceCache = BrokerServiceStatus(); }
+                finally { Interlocked.Exchange(ref _coworkServiceReading, 0); }
+            });
         }
+        var s = _coworkServiceCache;
         return new JObject
         {
             ["state"] = BrokerState,
             ["tail"] = new JArray(BrokerTail(8)),
             ["service"] = new JObject
             {
-                ["installed"] = _coworkServiceCache.Installed,
-                ["state"] = _coworkServiceCache.State,
+                ["installed"] = s.Installed,
+                ["state"] = s.State,
+                ["account"] = s.Account,
+                ["privileged"] = s.Privileged,
+                ["canControl"] = s.CanControl,
+                ["neverStarted"] = s.NeverStarted,
+                ["userWritableBinary"] = s.UserWritableBinary,
+                ["last"] = _brokerServiceLast is { } last
+                    ? new JObject
+                    {
+                        ["action"] = last.Action,
+                        ["result"] = last.Result,
+                        ["atUtc"] = last.AtUtc.ToString("o"),
+                    }
+                    : null,
             },
         };
     }

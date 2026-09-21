@@ -232,35 +232,126 @@ public partial class MainWindow
 
     internal const string BrokerServiceName = "BrainXBroker";
 
-    /// <summary>installed? and what it is doing — "running", "stopped", …</summary>
-    internal (bool Installed, string State) BrokerServiceStatus()
+    /// <summary>
+    /// Everything the owner asked to see about the service, read from Windows
+    /// rather than remembered from the last button press.
+    ///
+    /// Owner (2026-09-21): "การติดตั้ง service boss ต้องแสดงสถานะว่าติดตั้งแล้วหรือยัง
+    /// ติดตั้งแล้วได้สิทธิ์ แอดมินหรือยัง และเราดำเนินการได้". Three questions, and
+    /// "installed / running" — all this used to report — answers one of them.
+    /// </summary>
+    /// <param name="Account">What it runs as: "LocalSystem", ".\name", …</param>
+    /// <param name="Privileged">Runs as SYSTEM — every right an administrator has, and more.</param>
+    /// <param name="CanControl">This app, unelevated, may start and stop it. When false
+    /// every start and stop is a UAC prompt, which is Windows' default for a service.</param>
+    /// <param name="NeverStarted">Installed but not once started since boot (exit 1077) —
+    /// the state a fresh install is left in, and invisible as plain "stopped".</param>
+    /// <param name="UserWritableBinary">The exe it runs sits in a folder this user can
+    /// write. With a SYSTEM service that is a way for anything running as the user
+    /// to run code as SYSTEM — worth saying, not just knowing.</param>
+    internal sealed record BrokerServiceInfo(
+        bool Installed, string State, string Account, bool Privileged,
+        bool CanControl, bool NeverStarted, bool UserWritableBinary, string BinaryPath)
+    {
+        internal static readonly BrokerServiceInfo Unknown =
+            new(false, "unknown", "", false, false, false, false, "");
+    }
+
+    internal BrokerServiceInfo BrokerServiceStatus()
     {
         try
         {
-            var psi = new ProcessStartInfo("sc.exe")
-            {
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            };
-            psi.ArgumentList.Add("query");
-            psi.ArgumentList.Add(BrokerServiceName);
-            using var p = Process.Start(psi);
-            if (p == null) return (false, "unknown");
-            var output = p.StandardOutput.ReadToEnd();
-            p.WaitForExit(5000);
-            if (p.ExitCode != 0) return (false, "not installed");
-            foreach (var line in output.Split('\n'))
-            {
-                var t = line.Trim();
-                if (!t.StartsWith("STATE", StringComparison.OrdinalIgnoreCase)) continue;
-                var idx = t.LastIndexOf(' ');
-                if (idx > 0) return (true, t[(idx + 1)..].Trim().ToLowerInvariant());
-            }
-            return (true, "unknown");
+            var (qrc, query) = RunSc("query", BrokerServiceName);
+            if (qrc != 0) return BrokerServiceInfo.Unknown with { State = "not installed" };
+
+            var state = ScField(query, "STATE")?.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                            .LastOrDefault()?.ToLowerInvariant() ?? "unknown";
+            var exit = ScField(query, "WIN32_EXIT_CODE") ?? "";
+            var neverStarted = state == "stopped" && exit.StartsWith("1077", StringComparison.Ordinal);
+
+            var (_, config) = RunSc("qc", BrokerServiceName);
+            var account = ScField(config, "SERVICE_START_NAME") ?? "";
+            var bin = ScField(config, "BINARY_PATH_NAME") ?? "";
+            var privileged = account.Equals("LocalSystem", StringComparison.OrdinalIgnoreCase)
+                          || account.Equals(@"NT AUTHORITY\SYSTEM", StringComparison.OrdinalIgnoreCase);
+
+            return new BrokerServiceInfo(true, state, account, privileged,
+                CanControlService(BrokerServiceName), neverStarted,
+                BinaryUnderUserProfile(bin), bin);
         }
-        catch { return (false, "unknown"); }
+        catch { return BrokerServiceInfo.Unknown; }
+    }
+
+    private static (int Code, string Output) RunSc(params string[] args)
+    {
+        var psi = new ProcessStartInfo("sc.exe")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        foreach (var a in args) psi.ArgumentList.Add(a);
+        using var p = Process.Start(psi);
+        if (p == null) return (-1, "");
+        var output = p.StandardOutput.ReadToEnd();
+        p.WaitForExit(5000);
+        return (p.ExitCode, output);
+    }
+
+    /// <summary>`KEY : value` from sc.exe's report. The keys are not localised —
+    /// a Thai Windows prints STATE and SERVICE_START_NAME like any other.</summary>
+    private static string? ScField(string output, string key)
+    {
+        foreach (var line in output.Split('\n'))
+        {
+            var t = line.Trim();
+            if (!t.StartsWith(key, StringComparison.OrdinalIgnoreCase)) continue;
+            var colon = t.IndexOf(':');
+            if (colon < 0) continue;
+            // Exact key, not a prefix of a longer one (STATE vs STATE_x).
+            if (!t[..colon].Trim().Equals(key, StringComparison.OrdinalIgnoreCase)) continue;
+            return t[(colon + 1)..].Trim();
+        }
+        return null;
+    }
+
+    /// <summary>The exe named in a binPath lives under this user's profile.</summary>
+    private static bool BinaryUnderUserProfile(string binPath)
+    {
+        var exe = binPath.Trim();
+        exe = exe.StartsWith('"') ? exe[1..].Split('"')[0] : exe.Split(' ')[0];
+        var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        return profile.Length > 0 && exe.StartsWith(profile.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // Asking Windows the question directly — "may I start and stop this?" — is
+    // the only answer that is never wrong. Reading the service's SDDL and
+    // matching it against this token's groups would be a reimplementation of
+    // the access check, and the one thing a reimplementation guarantees is a
+    // case it gets wrong.
+    private const uint ScManagerConnect = 0x0001;
+    private const uint ServiceStart = 0x0010, ServiceStop = 0x0020;
+
+    [System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern IntPtr OpenSCManager(string? machine, string? database, uint access);
+    [System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern IntPtr OpenService(IntPtr scm, string name, uint access);
+    [System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool CloseServiceHandle(IntPtr handle);
+
+    private static bool CanControlService(string name)
+    {
+        var scm = OpenSCManager(null, null, ScManagerConnect);
+        if (scm == IntPtr.Zero) return false;
+        try
+        {
+            var svc = OpenService(scm, name, ServiceStart | ServiceStop);
+            if (svc == IntPtr.Zero) return false;   // ERROR_ACCESS_DENIED, most of the time
+            CloseServiceHandle(svc);
+            return true;
+        }
+        finally { CloseServiceHandle(scm); }
     }
 
     /// <summary>
@@ -273,38 +364,83 @@ public partial class MainWindow
     /// </summary>
     private void RunBrokerServiceVerb(string verb)
     {
+        // Whatever happens next, the room should see it land within seconds,
+        // not on the next twenty-second read — a UAC prompt takes a moment to
+        // answer, so keep reading for a minute.
+        _coworkServiceFastUntilUtc = DateTime.UtcNow.AddSeconds(60);
+        _coworkServiceCheckedUtc = DateTime.MinValue;
+
+        // Start and stop need no prompt when Windows already lets this user do
+        // them — asking for elevation anyway would be the app inventing a
+        // hurdle the machine does not have.
+        if (verb is "start" or "stop" && CanControlService(BrokerServiceName))
+        {
+            _ = Task.Run(() =>
+            {
+                var (rc, _) = RunSc(verb, BrokerServiceName);
+                _brokerServiceLast = new ServiceAction(verb, rc == 0 ? "ok" : "failed", DateTime.UtcNow);
+                _coworkServiceCheckedUtc = DateTime.MinValue;
+                Dispatcher.BeginInvoke(() => StatusText.Text = rc == 0
+                    ? (verb == "start" ? "🧭 เริ่ม service บอสแล้ว" : "🧭 หยุด service บอสแล้ว")
+                    : $"🧭 sc {verb} ล้มเหลว (รหัส {rc})");
+            });
+            return;
+        }
+
         var exe = ResolveBestMcpExe();
         if (exe == null || !File.Exists(exe))
         {
             StatusText.Text = "🧭 หา brainx-mcp.exe ไม่เจอ — ติดตั้ง service ไม่ได้";
             return;
         }
-        try
+        StatusText.Text = verb == "install"
+            ? "🧭 กำลังติดตั้ง BrainX Agent Broker service… (รอยืนยันสิทธิ์แอดมิน)"
+            : $"🧭 broker-service {verb}… (รอยืนยันสิทธิ์แอดมิน)";
+
+        // Off the dispatcher: a runas launch does not return until the UAC
+        // prompt is answered, and the window must not freeze while it waits.
+        var vault = _vaultPath;
+        _ = Task.Run(async () =>
         {
-            var psi = new ProcessStartInfo
+            string result;
+            try
             {
-                FileName = exe,
-                UseShellExecute = true,
-                Verb = "runas",
-                Arguments = $"broker-service {verb} --vault \"{_vaultPath}\"",
-                WindowStyle = ProcessWindowStyle.Hidden,
-            };
-            Process.Start(psi);
-            StatusText.Text = verb == "install"
-                ? "🧭 กำลังติดตั้ง BrainX Agent Broker service…"
-                : $"🧭 broker-service {verb}…";
-        }
-        catch (System.ComponentModel.Win32Exception)
-        {
+                using var p = Process.Start(new ProcessStartInfo
+                {
+                    FileName = exe,
+                    UseShellExecute = true,
+                    Verb = "runas",
+                    Arguments = $"broker-service {verb} --vault \"{vault}\"",
+                    WindowStyle = ProcessWindowStyle.Hidden,
+                });
+                if (p == null) result = "failed";
+                else
+                {
+                    await p.WaitForExitAsync().ConfigureAwait(false);
+                    result = p.ExitCode == 0 ? "ok" : "failed";
+                }
+            }
             // The owner declined the elevation prompt. Not an error, and not
             // something to retry behind their back.
-            StatusText.Text = "🧭 ยกเลิกการติดตั้ง service (ต้องใช้สิทธิ์ผู้ดูแล)";
-        }
-        catch (Exception ex)
-        {
-            StatusText.Text = "🧭 broker-service ล้มเหลว: " + ex.Message;
-        }
+            catch (System.ComponentModel.Win32Exception) { result = "declined"; }
+            catch { result = "failed"; }
+
+            _brokerServiceLast = new ServiceAction(verb, result, DateTime.UtcNow);
+            _coworkServiceCheckedUtc = DateTime.MinValue;
+            _ = Dispatcher.BeginInvoke(() => StatusText.Text = result switch
+            {
+                "ok" => $"🧭 broker-service {verb} เรียบร้อย",
+                "declined" => "🧭 ยกเลิก — ไม่ได้ให้สิทธิ์ผู้ดูแล",
+                _ => $"🧭 broker-service {verb} ไม่สำเร็จ",
+            });
+        });
     }
+
+    /// <summary>The last thing the owner asked the service to do, and how it
+    /// ended — "ok", "failed" or "declined". The room shows it, because a UAC
+    /// prompt answered in another window otherwise leaves the page guessing.</summary>
+    internal sealed record ServiceAction(string Action, string Result, DateTime AtUtc);
+    private volatile ServiceAction? _brokerServiceLast;
 
     // ───────────── what it has been saying ─────────────
 

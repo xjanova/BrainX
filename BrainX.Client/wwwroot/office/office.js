@@ -250,6 +250,27 @@ let BOSS_SUMMONED = false;
  *  seated agents so he reads as a person in the same room rather than a
  *  cut-out pasted over it. 217 is the drawn height inside the 256px frame. */
 const BOSS_FILL = 0.155;
+
+/** The seated frames, measured off the pack (frame pixels, pivot at the soles):
+ *  the seat of the pants is 37px above the pivot, and the body sits 28px to
+ *  the LEFT of it in the pack's own right-facing pose. A seat painted on a
+ *  cushion is where the body goes, so these turn it into where the feet go. */
+const SIT_BUTT_DY = 37;
+const SIT_BODY_DX = 28;
+
+/** Clips drawn from the seated art. Only these are mirrored for a seat that
+ *  faces left — walking off the sofa uses the pack's own walk directions. */
+const SEATED_CLIPS = new Set(['sit_down', 'seated_idle', 'sleep', 'stand_up', 'typing']);
+
+/** The seat he is in, from sitting down until he has stepped back onto the
+ *  floor. Held separately from BOSS_PLAN because the plan moves on to the next
+ *  destination the moment he starts to get up, and the getting-up still has to
+ *  face the way the seat faces and still has to be drawn on top of the sofa. */
+let BOSS_SEAT = null;
+/** True while the first leg of a walk is the step off BOSS_SEAT. */
+let BOSS_STEPPING = false;
+/** Where he is going to sleep, chosen once when the light goes off. */
+let BOSS_BED = null;
 /** Agents currently out of their chair: id -> {to, t0, dur}.
  *
  *  Started by REAL traffic — when one agent writes to another, the sender
@@ -1538,11 +1559,60 @@ function drawBossSprite() {
         x: (BOSS_AV.x - PLATE_FIT.x) / PLATE_FIT.w,
         y: (BOSS_AV.y - PLATE_FIT.y) / PLATE_FIT.h,
     };
+    // Owner (2026-09-21): "การนั่งต้องดูว่านั่งตรงไหน ฝั่งซ้ายขวา เราต้องมาร์ก ให้
+    // อนิเมชั่นจะได้หันหน้าถูก". The pack draws a seated figure one way only,
+    // turned to the viewer's right; a seat marked as facing left gets the same
+    // frames mirrored about the feet. The pivot is the frame's centre column,
+    // so the mirror stands on exactly the same spot.
+    if (BOSS_SEAT && seatFacesLeft(BOSS_SEAT) && SEATED_CLIPS.has(BOSS_AV.name)) {
+        vctx.save();
+        vctx.translate(BOSS_AV.x * SCALE, 0);
+        vctx.scale(-1, 1);
+        BOSS_AV.draw(vctx, { x: 0, y: BOSS_AV.y * SCALE, scale: bossScale() });
+        vctx.restore();
+        return;
+    }
     BOSS_AV.draw(vctx, {
         x: BOSS_AV.x * SCALE,
         y: BOSS_AV.y * SCALE,
         scale: bossScale(),
     });
+}
+
+/** 'sw' and 'nw' both turn the seated art round; there is no back view of it. */
+function seatFacesLeft(spot) { return /w$/.test(spot?.face || ''); }
+
+/**
+ * Where the seated frame's feet go for this seat, in logical pixels.
+ *
+ * A hand-measured spot carries that point outright (`seat`). A painted one
+ * carries the CUSHION — where the body should be — and the figure decides how
+ * far below and beside that its own soles are. That is the figure's geometry,
+ * which is why it is worked out here and not stored in the room.
+ */
+function seatAnchor(spot) {
+    if (spot.cushion) {
+        const k = BOSS_FILL / 217;                           // frame px → plate height
+        const dx = SIT_BODY_DX * k * (PLATE_FIT.h / Math.max(1, PLATE_FIT.w));
+        const nx = spot.cushion.x + (seatFacesLeft(spot) ? -dx : dx);
+        const ny = spot.cushion.y + SIT_BUTT_DY * k;
+        return { x: PLATE_FIT.x + nx * PLATE_FIT.w, y: PLATE_FIT.y + ny * PLATE_FIT.h };
+    }
+    const s = spot.seat || spot;
+    return { x: PLATE_FIT.x + s.x * PLATE_FIT.w, y: PLATE_FIT.y + s.y * PLATE_FIT.h };
+}
+
+/**
+ * The point the depth test should use for him.
+ *
+ * Normally his feet. On a seat his feet dangle in front of the cushion, which
+ * is still ABOVE the sofa's own floor line — so the test decided he was behind
+ * the sofa and redrew all of it over him, leaving a head poking over the
+ * backrest. Seated, he is as near the camera as the floor he walked up from.
+ */
+function bossDepthNorm() {
+    const n = bossNorm();
+    return BOSS_SEAT ? { x: n.x, y: Math.max(n.y, BOSS_SEAT.y) } : n;
 }
 
 /**
@@ -1664,7 +1734,7 @@ function buildOccluderPieces() {
 
 function drawOccluders() {
     if (!PLATE_READY || !BOSS_AV) return;
-    const n = bossNorm();
+    const n = bossDepthNorm();
 
     // ── painted mask: the preferred path ──
     //
@@ -1690,10 +1760,13 @@ function drawOccluders() {
             // overlap it cannot hide any of it, however the depths compare —
             // standing in the middle of the room was re-drawing the sofa over
             // empty air two pieces at a time.
-            const headY = feetY - (220 * s / PLATE_FIT.h) * mh;
+            // The box is where he is DRAWN; `feetY` above is where he is for
+            // depth, and on a seat the two differ by the height of the cushion.
+            const drawnFeetY = bossNorm().y * mh;
+            const headY = drawnFeetY - (220 * s / PLATE_FIT.h) * mh;
             for (const p of OCC_PIECES) {
                 if (feetX + halfW < p.x0 || feetX - halfW > p.x1) continue;
-                if (p.y1 < headY || p.y0 > feetY) continue;
+                if (p.y1 < headY || p.y0 > drawnFeetY) continue;
 
                 // The floor line of THIS piece, at the column this character
                 // is standing in — averaged across their width so a one-pixel
@@ -1788,25 +1861,31 @@ function bossPlace(s) {
  *    which is both shorter to compute than real pathfinding and closer to how
  *    a person actually crosses a room.
  */
+/** Get up out of the seat, then head for `next`. Where he stands up is where he
+ *  sat — the step onto the floor is the first leg of the walk that follows. */
+function bossRise(next) {
+    BOSS_AV.play('stand_up', { loop: false });
+    BOSS_PLAN = { spot: next, phase: 'rising', until: performance.now() + 880 };
+}
+
 function bossGoTo(spot) {
     if (!BOSS_AV) return;
 
-    if (BOSS_AV.posture === 'seated') {
-        BOSS_AV.play('stand_up', { loop: false });
-        // Back onto the floor he sat down from, so the path that follows
-        // starts somewhere the grid says a person can be. Standing up out of
-        // the cushion's coordinates would begin the route inside the sofa.
-        const from = BOSS_PLAN?.spot;
-        if (from?.seat) {
-            BOSS_AV.x = PLATE_FIT.x + from.x * PLATE_FIT.w;
-            BOSS_AV.y = PLATE_FIT.y + from.y * PLATE_FIT.h;
-        }
-        BOSS_PLAN = { spot, phase: 'rising', until: performance.now() + 880 };
-        return;
-    }
+    if (BOSS_AV.posture === 'seated') { bossRise(spot); return; }
 
-    const from = bossNorm();
+    // Just got up: the first leg is the step off the seat, from where he was
+    // drawn sitting down to the floor he walked up from. Planning from the
+    // cushion instead would start the route inside the sofa, and teleporting
+    // to the floor first (what this used to do) made him jump a body-length
+    // the moment he stood.
+    const off = BOSS_SEAT ? { x: BOSS_SEAT.x, y: BOSS_SEAT.y } : null;
+    const from = off || bossNorm();
     const path = ROOM_MAP.findPath(from, { x: spot.x, y: spot.y });
+    // Standing up toward somewhere he cannot reach still ends on his feet in
+    // front of the seat — never "arriving" at a place he never got to.
+    if (off && !path.length) spot = { key: 'floor', x: off.x, y: off.y, act: 'idle', stay: [3, 6] };
+    if (off) path.unshift(off);
+    BOSS_STEPPING = !!off;
     if (!path.length) {
         // Nowhere to walk — the target is walled off, or he is already there.
         BOSS_PLAN = { spot, phase: 'resting', until: performance.now() + 3000 };
@@ -1848,16 +1927,22 @@ function bossArrive(spot) {
     // standing with his back to everybody.
     if (spot.face) BOSS_AV.direction = spot.face;
     switch (spot.act) {
-        case 'sit':
+        case 'sit': {
             BOSS_AV.play('sit_down', { loop: false });
             // The walk ended on the floor in front of the cushion; the sitting
             // frames belong ON it. Moved once, here, rather than making the
             // cushion a walk target the pathfinder can never reach.
-            if (spot.seat) {
-                BOSS_AV.x = PLATE_FIT.x + spot.seat.x * PLATE_FIT.w;
-                BOSS_AV.y = PLATE_FIT.y + spot.seat.y * PLATE_FIT.h;
+            if (spot.seat || spot.cushion) {
+                const a = seatAnchor(spot);
+                BOSS_AV.x = a.x; BOSS_AV.y = a.y;
             }
-            break;
+            BOSS_SEAT = spot;
+            BOSS_PLAN = { spot, phase: 'resting', until: performance.now() + secs * 1000,
+                          // sit_down is 880ms: nothing that follows (sleep, above
+                          // all) may cut it off halfway into the cushion.
+                          settled: performance.now() + 900 };
+            return;
+        }
         case 'drink': BOSS_AV.play('drink', { loop: false }); break;
         case 'read':  BOSS_AV.play('read'); break;
         case 'phone': BOSS_AV.play('phone'); break;
@@ -1887,38 +1972,55 @@ function bossTick() {
     if (!BOSS_AV) return;
     const now = performance.now();
 
-    // Lights out: he goes home and sleeps there. `sleep` is in the pack — this
-    // is the one thing it was always for.
+    // Lights out: he goes to a seat and sleeps in it.
+    //
+    // `sleep` is a SEATED clip in the pack. It used to be played on the rug,
+    // which drew him sitting on nothing in the middle of the floor — the
+    // owner's "บอสนั่งหลับ" (2026-09-21). Now he walks to the nearest seat,
+    // sits, and only then nods off; the walking and sitting are the ordinary
+    // machinery below, this only picks the destination and says when to sleep.
     if (!ROOM_OPEN) {
         if (BOSS_ASLEEP) return;                 // already out; nothing moves him
 
-        // Walk him back first, so he is not asleep standing in the middle of
-        // the floor. Once he is home (or was already), he lies down.
-        const home = BOSS_PLAN?.spot === BOSS_HOME && !BOSS_AV.target;
-        if (!home && BOSS_PLAN?.phase !== 'walking' && BOSS_PLAN?.phase !== 'rising') {
-            bossGoTo(BOSS_HOME);
+        if (!BOSS_BED) {
+            BOSS_BED = bossBed();
+            // Sitting in it already, or on his way to it: leave him be. Anything
+            // else — including halfway through getting UP from it, when the plan
+            // already names wherever he was off to next — is a trip to bed.
+            const seatedThere = BOSS_SEAT === BOSS_BED && BOSS_AV.posture === 'seated'
+                && BOSS_PLAN?.spot === BOSS_BED;
+            const heading = BOSS_PLAN?.spot === BOSS_BED
+                && (BOSS_PLAN.phase === 'walking' || BOSS_PLAN.phase === 'rising');
+            if (!seatedThere && !heading) { bossGoTo(BOSS_BED); return; }
+        }
+
+        // There, and done sitting down: out like a light. A room with no seat
+        // he can reach still gets a sleeping boss — standing, with the pack's
+        // `tired` loop, which is a doze and not a sit on thin air.
+        if (BOSS_PLAN?.spot === BOSS_BED && BOSS_PLAN.phase === 'resting' && now >= (BOSS_PLAN.settled || 0)) {
+            BOSS_ASLEEP = true;
+            BOSS_PLAN = { spot: BOSS_BED, phase: 'asleep', until: Infinity };
+            const seated = BOSS_AV.posture === 'seated';
+            try { BOSS_AV.play(seated ? 'sleep' : 'tired'); } catch { BOSS_AV.play('idle'); }
             return;
         }
-        if (BOSS_AV.target) return;              // still on his way
-
-        BOSS_ASLEEP = true;
-        BOSS_PLAN = { spot: BOSS_HOME, phase: 'resting', until: Infinity };
-        try { BOSS_AV.play('sleep'); } catch { BOSS_AV.play('idle'); }
-        return;
-    }
-
-    // Lights back on, and he is the first one up.
-    if (BOSS_ASLEEP) {
+        // Otherwise he is still on his way: fall through to the walking below.
+    } else if (BOSS_ASLEEP) {
+        // Lights back on, and he is the first one up.
         BOSS_ASLEEP = false;
-        BOSS_AV.play('stand_up', { loop: false });
-        BOSS_PLAN = { spot: BOSS_HOME, phase: 'rising', until: now + 880 };
+        BOSS_BED = null;
+        bossGoTo(BOSS_HOME);
         return;
+    } else {
+        BOSS_BED = null;                         // the light came back before he got there
     }
 
     // The owner talking outranks whatever he was doing. He comes back to the
     // rug to say it, because an order shouted from the coffee bar reads as
     // somebody muttering into a cup.
-    const talking = BOSS && T < BOSS.until;
+    // Nothing is said in the dark — a line from just before the switch must not
+    // pull him off the sofa and back to the rug to deliver it to nobody.
+    const talking = ROOM_OPEN && BOSS && T < BOSS.until;
     if (talking && !BOSS_SUMMONED) {
         BOSS_SUMMONED = true;
         bossGoTo(BOSS_HOME, { viaMiddle: false });
@@ -1942,6 +2044,9 @@ function bossTick() {
             // off the furniture; walking it one leg at a time is what keeps
             // him out of the sofa without any per-frame collision check.
             if (!BOSS_AV.target) {
+                // Off the seat and on the floor: from here he is an ordinary
+                // person standing in the room, depth test and all.
+                if (BOSS_STEPPING) { BOSS_STEPPING = false; BOSS_SEAT = null; }
                 BOSS_LEG++;
                 if (!bossWalkLeg()) { BOSS_PATH = null; bossArrive(BOSS_PLAN.spot); }
             }
@@ -1956,10 +2061,24 @@ function bossTick() {
             }
             break;
         case 'resting':
-            if (talking || BOSS_SUMMONED) break;
+            if (talking || BOSS_SUMMONED || !ROOM_OPEN) break;
             if (now >= BOSS_PLAN.until) bossGoTo(bossPickSpot());
             break;
     }
+}
+
+/** The seat he sleeps in: the one he is already in, else the nearest one,
+ *  else the rug — a room nobody painted a seat into still has somewhere. */
+function bossBed() {
+    if (BOSS_SEAT) return BOSS_SEAT;
+    const n = bossNorm();
+    let best = null, bestD = Infinity;
+    for (const s of BOSS_SPOTS) {
+        if (s.act !== 'sit') continue;
+        const d = Math.hypot(s.x - n.x, s.y - n.y);
+        if (d < bestD) { bestD = d; best = s; }
+    }
+    return best || BOSS_HOME;
 }
 
 // ── the owner can poke him ──────────────────────────────────────────
@@ -1980,9 +2099,10 @@ const BOSS_REACTIONS = ['wave', 'laugh', 'joy', 'celebrate', 'agree', 'surprised
 function bossPoke() {
     if (!BOSS_AV) return;
     if (BOSS_AV.posture === 'seated') {
-        // Poked in his chair: he gets up rather than miming a wave sitting down.
-        BOSS_AV.play('stand_up', { loop: false });
-        BOSS_PLAN = { spot: BOSS_PLAN?.spot || BOSS_HOME, phase: 'rising', until: performance.now() + 880 };
+        // Poked in his chair: he gets up rather than miming a wave sitting down,
+        // and ends on his feet in front of the seat — not straight back into it.
+        const s = BOSS_SEAT;
+        bossRise(s ? { key: 'floor', x: s.x, y: s.y, act: 'idle', stay: [5, 10] } : BOSS_HOME);
         playSound('ok');
         return;
     }
@@ -2501,20 +2621,14 @@ function apply(p) {
         const svc = (BROKER && BROKER.service) || null;
         const label = { running: 'บอสจัดสรรงาน ✓', adopted: 'บอสจัดสรรงาน (ตัวอื่นคุม)',
                         stopped: 'บอสหยุด — กดเพื่อเริ่ม', failed: 'บอสเริ่มไม่ขึ้น' }[st] || st;
-        // The service is the half the owner cannot see: whether anything will
-        // still be dispatching after this window closes.
-        const svcTag = !svc ? ''
-            : !svc.installed ? ' · ไม่มี service'
-            : svc.state === 'running' ? ' · service ✓'
-            : ' · service ' + svc.state;
-        bb.textContent = label + svcTag;
+        bb.textContent = label;
         bb.className = st === 'running' ? 'on' : st === 'adopted' ? 'warn' : st === 'failed' ? 'warn' : 'off';
         bb.title = [
             'คลิก = เริ่ม/หยุดบอสในแอปนี้',
-            'คลิกขวา = ติดตั้ง/ถอน Windows Service (ทำงานต่อแม้ปิดแอป)',
-            svc && svc.installed ? `service: ${svc.state}` : 'service: ยังไม่ได้ติดตั้ง',
+            'Windows Service (ทำงานต่อแม้ปิดแอป) อยู่ที่ปุ่ม service ข้าง ๆ',
             '', ...((BROKER && BROKER.tail) || []),
         ].join('\n');
+        renderService(svc);
     }
 
     const people = AGENTS.filter(a => !a.bridge);
@@ -2557,6 +2671,140 @@ document.getElementById('say').addEventListener('submit', (e) => {
     // round trip is under two seconds, but a send that looks like nothing
     // happened gets sent twice.
     BOSS = { until: T + 260, text: firstLine(text) };
+});
+
+// ── the Windows Service half of the boss ────────────────────────────
+//
+// Owner (2026-09-21): "การติดตั้ง service boss ต้องแสดงสถานะว่าติดตั้งแล้วหรือยัง
+// ติดตั้งแล้วได้สิทธิ์ แอดมินหรือยัง และเราดำเนินการได้". Three questions; the
+// chip used to answer the first. Every fact below is read from Windows by the
+// client — the page draws them and asks for actions, and never guesses.
+
+const SVC_STATE = {
+    running: 'กำลังทำงาน', stopped: 'หยุดอยู่', start_pending: 'กำลังเริ่ม…',
+    stop_pending: 'กำลังหยุด…', paused: 'พักอยู่', 'not installed': '—', unknown: 'อ่านไม่ได้',
+};
+/** An action is in flight — most of them are waiting on a UAC prompt, which
+ *  the owner has to answer in another window. Cleared when the client reports
+ *  how it ended (`service.last`), which is the only thing that knows. */
+let SVC_PENDING = null;
+/** How the last one ended, in words, until the next one starts. */
+let SVC_RESULT = '';
+const SVC_DONE = {
+    ok: { install: '✓ ติดตั้งเรียบร้อย', uninstall: '✓ ถอนออกแล้ว', start: '✓ สั่งเริ่มแล้ว', stop: '✓ สั่งหยุดแล้ว' },
+    declined: 'ยกเลิก — ไม่ได้ให้สิทธิ์แอดมิน จึงไม่มีอะไรเปลี่ยน',
+    failed: '✗ ไม่สำเร็จ — ดูข้อความที่แถบสถานะของแอป',
+};
+
+function renderService(svc) {
+    const chip = document.getElementById('room-service');
+    if (!chip) return;
+    const s = svc || { installed: false, state: 'unknown' };
+    const last = s.last;
+    // A report belongs to this request only if it is not the one that was
+    // already on screen when the button was pressed — the previous answer is
+    // still in every payload until a new one replaces it.
+    if (SVC_PENDING && last && last.atUtc !== SVC_PENDING.seen && Date.parse(last.atUtc) >= SVC_PENDING.at) {
+        SVC_RESULT = last.result === 'ok' ? (SVC_DONE.ok[last.action] || '✓ เรียบร้อย')
+                   : SVC_DONE[last.result] || SVC_DONE.failed;
+        SVC_PENDING = null;
+    }
+
+    chip.textContent = !svc ? 'service ?'
+        : !s.installed ? 'service —'
+        : s.state === 'running' ? 'service ✓'
+        : 'service ' + (SVC_STATE[s.state] || s.state);
+    chip.className = !svc ? '' : !s.installed ? 'off' : s.state === 'running' ? 'on' : 'warn';
+
+    const facts = document.getElementById('service-facts');
+    if (!facts) return;
+    const row = (k, v, cls) => `<dt>${k}</dt><dd class="${cls || ''}">${v}</dd>`;
+    const account = !s.account ? '—'
+        : s.privileged ? 'SYSTEM — สูงกว่าแอดมิน'
+        : esc(s.account);
+    facts.innerHTML = !svc
+        ? row('สถานะ', 'ยังไม่ได้รับข้อมูลจากแอป', 'meh')
+        : [
+            row('ติดตั้ง', s.installed ? '✓ ติดตั้งแล้ว — เปิดเองตอนเปิดเครื่อง' : '✗ ยังไม่ได้ติดตั้ง',
+                s.installed ? 'yes' : 'no'),
+            row('สิทธิ์', s.installed ? account : '—', s.privileged ? 'yes' : ''),
+            row('สถานะ', !s.installed ? '—'
+                : s.neverStarted ? 'หยุดอยู่ — ยังไม่เคยถูกสั่งรันตั้งแต่เปิดเครื่อง'
+                : (SVC_STATE[s.state] || s.state),
+                s.state === 'running' ? 'yes' : s.installed ? 'meh' : ''),
+            row('สั่งจากแอป', !s.installed ? 'ติดตั้งต้องยืนยันสิทธิ์แอดมิน'
+                : s.canControl ? '✓ เริ่ม/หยุดได้ทันที'
+                : 'เริ่ม/หยุดได้ — ต้องยืนยันสิทธิ์แอดมินทุกครั้ง',
+                s.installed && s.canControl ? 'yes' : 'meh'),
+        ].join('');
+
+    // What the facts mean, when it is not good news. Both are about the same
+    // choice — running as SYSTEM — and both are things the owner cannot see
+    // from "installed ✓ running ✓".
+    const warn = [];
+    if (s.installed && s.privileged)
+        warn.push('รันเป็น SYSTEM จึงไม่เห็นโปรไฟล์ของคุณ — codex / claude ที่ติดตั้งและล็อกอินไว้ในบัญชีคุณ service อาจเรียกไม่เจอ');
+    if (s.installed && s.privileged && s.userWritableBinary)
+        warn.push('ไฟล์โปรแกรมของ service อยู่ในโฟลเดอร์ผู้ใช้ แต่รันด้วยสิทธิ์ SYSTEM — โปรแกรมใดก็ตามที่แก้ไฟล์นั้นได้ จะได้สิทธิ์ SYSTEM ตามไปด้วย');
+    document.getElementById('service-warn').innerHTML = warn.map(w => `<li>⚠ ${w}</li>`).join('');
+
+    const shield = (needs) => needs ? ' 🛡' : '';
+    const acts = [];
+    if (svc && !s.installed) acts.push(['install', 'ติดตั้ง' + shield(true)]);
+    if (s.installed) {
+        if (s.state === 'running') acts.push(['stop', 'หยุด' + shield(!s.canControl)]);
+        else if (s.state === 'stopped') acts.push(['start', 'เริ่ม' + shield(!s.canControl)]);
+        acts.push(['install', 'ติดตั้งใหม่' + shield(true)]);
+        acts.push(['uninstall', 'ถอนออก' + shield(true), 'danger']);
+    }
+    document.getElementById('service-actions').innerHTML = acts.map(([a, t, c]) =>
+        `<button type="button" data-svc="${a}"${c ? ` class="${c}"` : ''}${SVC_PENDING ? ' disabled' : ''}>${t}</button>`).join('');
+    document.getElementById('service-note').textContent = SVC_PENDING ? SVC_PENDING.note
+        : SVC_RESULT ? SVC_RESULT
+        : acts.some(([, t]) => t.includes('🛡')) ? '🛡 = Windows จะถามยืนยันสิทธิ์แอดมิน' : '';
+}
+
+document.getElementById('room-service')?.addEventListener('click', (e) => {
+    const panel = document.getElementById('service-panel');
+    const open = panel.hidden;
+    panel.hidden = !open;
+    e.currentTarget.setAttribute('aria-expanded', String(open));
+    if (open) renderService(BROKER && BROKER.service);
+});
+document.addEventListener('click', (e) => {
+    const panel = document.getElementById('service-panel');
+    if (!panel || panel.hidden) return;
+    if (e.target.closest('#service-panel, #room-service')) return;
+    panel.hidden = true;
+    document.getElementById('room-service')?.setAttribute('aria-expanded', 'false');
+});
+document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const panel = document.getElementById('service-panel');
+    if (panel && !panel.hidden) {
+        panel.hidden = true;
+        document.getElementById('room-service')?.setAttribute('aria-expanded', 'false');
+    }
+});
+document.getElementById('service-actions')?.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-svc]');
+    if (!b || SVC_PENDING) return;
+    const action = b.dataset.svc;
+    if (action === 'uninstall' && !confirm('ถอน Windows Service ของบอสออก?\n\nปิดแอปแล้วจะไม่มีใครเรียก agent เข้ามาทำงาน'))
+        return;
+    const svc = (BROKER && BROKER.service) || {};
+    const uac = action === 'install' || action === 'uninstall' || !svc.canControl;
+    const mine = SVC_PENDING = {
+        at: Date.now(),
+        seen: svc.last ? svc.last.atUtc : null,
+        note: uac ? 'รอยืนยันสิทธิ์แอดมินในหน้าต่างของ Windows…' : 'กำลังดำเนินการ…',
+    };
+    SVC_RESULT = '';
+    post({ type: 'officeBrokerService', action });
+    renderService(BROKER && BROKER.service);
+    // Belt and braces for a client too old to report `last`: never leave the
+    // buttons locked for good.
+    setTimeout(() => { if (SVC_PENDING === mine) { SVC_PENDING = null; renderService(BROKER && BROKER.service); } }, 120000);
 });
 
 // The boss switch. Asks the client to start or stop the broker; the page has
@@ -2743,9 +2991,10 @@ function drawMapDebug() {
         // polygons when they exist; both resolve either way, so a vault
         // without them behaves exactly as before.
         try {
-            const [hasMask, hasSeats] = await Promise.all([
-                ROOM_MAP.loadRoomMask(), ROOM_MAP.loadRoomSeats(),
-            ]);
+            // In order, not together: a painted seat means something different
+            // on the floor than on a cushion, and only the mask can say which.
+            const hasMask = await ROOM_MAP.loadRoomMask();
+            const hasSeats = await ROOM_MAP.loadRoomSeats();
             if (hasMask) { OCC_PIECES = null; console.info('cowork: using painted room mask'); }
             if (hasSeats) console.info('cowork: using painted seats');
         } catch { /* fall back to the polygons */ }

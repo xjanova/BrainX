@@ -147,7 +147,7 @@
     <div class="grp">
       <label>จุดนั่ง (<span id="seatn">0</span>)</label>
       <div id="seatlist"></div>
-      <div class="hint" style="margin-top:6px">คลิกบนภาพตอนเลือก “จุดนั่ง” = วางจุดที่<b>เท้า</b>แตะพื้น</div>
+      <div class="hint" style="margin-top:6px">เลือก “จุดนั่ง” แล้วคลิก<b>บนเบาะ</b>ตรงที่จะให้นั่ง จากนั้นกดปุ่ม <b>หันขวา/หันซ้าย</b> ในรายการให้ตรงกับทิศที่เบาะหันออก (ลูกศรบนภาพชี้ทางที่ตัวละครจะหัน)</div>
     </div>
 
     <div class="grp">
@@ -169,8 +169,8 @@
       <b>ห้ามเข้า</b> — เฟอร์นิเจอร์ ผนัง กระถาง<br>
       <b>ต้องบัง</b> — ของที่อยู่<b>หน้า</b>ตัวละคร (โซฟา เคาน์เตอร์ ผนังมุมซ้ายบน ราวระเบียง)<br><br>
       ระบายทับกันได้ เช่นโซฟาเป็นทั้ง “ห้ามเข้า” และ “ต้องบัง”<br><br>
-      เสร็จแล้วกดดาวน์โหลด จะได้ <b>room-mask.png</b> กับ <b>room-seats.json</b> — วางทั้งสองไฟล์ไว้ที่
-      <code>wwwroot/office/art/</code> แล้วห้องจะใช้ทันที
+      เสร็จแล้วกดดาวน์โหลด จะได้ <b>room-mask.png</b> กับ <b>room-seats.json</b> — วางไว้ที่
+      <code>wwwroot/office/art/</code> แล้วห้องจะใช้ทันที (ถ้าชั้นระบายว่าง จะได้เฉพาะ room-seats.json เพื่อไม่ให้ mask เดิมถูกทับด้วยภาพว่าง)
     </div>
   </aside>
 
@@ -287,8 +287,21 @@ paint.addEventListener('pointermove', (e) => { if (painting) { dab(pos(e)); mark
 paint.addEventListener('pointerup', () => { painting = false; });
 paint.addEventListener('pointerleave', () => { painting = false; });
 
+/* Which way a seat faces.
+ *
+ * Owner (2026-09-21): "การนั่งต้องดูว่านั่งตรงไหน ฝั่งซ้ายขวา เราต้องมาร์ก ให้
+ * อนิเมชั่นจะได้หันหน้าถูก". The pack draws a seated figure turned to the
+ * viewer's right; the room mirrors it for a seat marked the other way. So a
+ * seat is a point AND a direction — the two ends of a curved sofa face
+ * opposite ways, and only a person looking at the picture knows which is which.
+ *
+ *   se = หันขวา (the pack's own pose)     sw = หันซ้าย (mirrored)
+ */
+const FACE_LABEL = { se: 'หันขวา ↘', sw: '↙ หันซ้าย' };
+function faceOf(s) { return s.face === 'sw' ? 'sw' : 'se'; }
+
 function addSeat(p) {
-    seats.push({ x: +(p.x / paint.width).toFixed(4), y: +(p.y / paint.height).toFixed(4) });
+    seats.push({ x: +(p.x / paint.width).toFixed(4), y: +(p.y / paint.height).toFixed(4), face: 'se' });
     drawSeats();
     markDirty();
 }
@@ -296,7 +309,18 @@ function drawSeats() {
     sctx.clearRect(0, 0, pins.width, pins.height);
     seats.forEach((s, i) => {
         const x = s.x * pins.width, y = s.y * pins.height;
-        sctx.fillStyle = '#ffd166';
+        // The arrow first, so the numbered pin sits on top of its tail: it
+        // points the way the seated figure will look.
+        const dir = faceOf(s) === 'sw' ? -1 : 1;
+        sctx.strokeStyle = '#ffd166'; sctx.fillStyle = '#ffd166'; sctx.lineWidth = 3;
+        const tx = x + dir * 26, ty = y + 16;
+        sctx.beginPath(); sctx.moveTo(x, y); sctx.lineTo(tx, ty); sctx.stroke();
+        sctx.beginPath();
+        sctx.moveTo(tx + dir * 4, ty + 3);
+        sctx.lineTo(tx - dir * 9, ty + 1);
+        sctx.lineTo(tx - dir * 2, ty - 8);
+        sctx.closePath(); sctx.fill();
+
         sctx.beginPath(); sctx.arc(x, y, 7, 0, Math.PI * 2); sctx.fill();
         sctx.fillStyle = '#2a2008';
         sctx.font = 'bold 11px system-ui';
@@ -306,13 +330,23 @@ function drawSeats() {
     document.getElementById('seatn').textContent = seats.length;
     document.getElementById('seatlist').innerHTML = seats.map((s, i) =>
         `<div><span>${i + 1}. ${s.x.toFixed(3)}, ${s.y.toFixed(3)}</span>` +
+        `<button data-face="${i}" title="กดเพื่อสลับซ้าย/ขวา">${FACE_LABEL[faceOf(s)]}</button>` +
         `<button data-seat="${i}">ลบ</button></div>`).join('');
 }
 document.getElementById('seatlist').addEventListener('click', (e) => {
+    const f = e.target.closest('button[data-face]');
+    if (f) {
+        const s = seats[+f.dataset.face];
+        s.face = faceOf(s) === 'sw' ? 'se' : 'sw';
+        drawSeats();
+        markDirty();
+        return;
+    }
     const b = e.target.closest('button[data-seat]');
     if (!b) return;
     seats.splice(+b.dataset.seat, 1);
     drawSeats();
+    markDirty();
 });
 
 // ── controls ────────────────────────────────────────────────────────
@@ -635,7 +669,18 @@ function checkMap() {
         }
     }
     const stranded = total - reach;
-    const badSeats = seats.filter(s => !seen[(Math.round(s.y * H) * W) + Math.round(s.x * W)]).length;
+    // A seat on a cushion is not itself walkable — it is reached from the floor
+    // in front of it, which is straight DOWN the picture (the room faces the
+    // camera). Same reading the room uses, so the check and the room agree.
+    const reachable = (s) => {
+        const x = Math.min(W - 1, Math.round(s.x * W));
+        for (let y = Math.round(s.y * H); y < Math.min(H, Math.round((s.y + 0.15) * H)); y++) {
+            const i = y * W + x;
+            if (walk[i]) return !!seen[i];
+        }
+        return false;
+    };
+    const badSeats = seats.filter(s => !reachable(s)).length;
 
     report([
         'เดินได้ <b>' + (total / (W * H) * 100).toFixed(1) + '%</b> ของภาพ',
@@ -660,8 +705,18 @@ function report(html) { document.getElementById('report').innerHTML = html; }
  *
  * So the button loads its output and hands it over as editable paint. */
 document.getElementById('auto').addEventListener('click', async () => {
+    snapshot();
+    if (!(await loadRoomMask())) { say('ยังไม่มีผลอัตโนมัติ — รัน tools/roommap/autoseg.py ก่อน'); return; }
+    await loadRoomSeats();
+    checkMap();
+    markDirty();
+    say('ระบายอัตโนมัติมาให้แล้ว — แก้ทับได้เลย');
+});
+
+/** The mask the room is using right now, as editable paint. False when there
+ *  is none, or the image could not be read. */
+async function loadRoomMask() {
     try {
-        snapshot();
         const im = new Image();
         await new Promise((res, rej) => { im.onload = res; im.onerror = rej; im.src = '../art/room-mask.png?t=' + Date.now(); });
         const t = document.createElement('canvas');
@@ -672,24 +727,38 @@ document.getElementById('auto').addEventListener('click', async () => {
         for (let i = 0; i < d.data.length; i += 4) {
             const R = d.data[i] > 127, G = d.data[i + 1] > 127, B = d.data[i + 2] > 127;
             if (!(R || G || B)) continue;
-            let r = 0, g = 0, b = 0;
-            if (G) { g = 224; }
-            if (R) { r = 224; }
-            if (B) { b = 224; }
-            out.data[i] = r; out.data[i + 1] = g; out.data[i + 2] = b; out.data[i + 3] = 255;
+            out.data[i] = R ? 224 : 0; out.data[i + 1] = G ? 224 : 0; out.data[i + 2] = B ? 224 : 0; out.data[i + 3] = 255;
         }
         mctx.putImageData(out, 0, 0);
-        try {
-            const sj = await fetch('../art/room-seats.json?t=' + Date.now()).then(r => r.json());
-            seats.length = 0; (sj.seats || []).forEach(s => seats.push(s)); drawSeats();
-        } catch { /* seats are optional */ }
-        checkMap();
-        markDirty();
-        say('ระบายอัตโนมัติมาให้แล้ว — แก้ทับได้เลย');
-    } catch (e) {
-        say('ยังไม่มีผลอัตโนมัติ — รัน tools/roommap/autoseg.py ก่อน');
-    }
-});
+        return true;
+    } catch { return false; }
+}
+
+/** The seats the room is using right now, and when that file was written
+ *  (null when the server does not say). Seats are optional; a room without
+ *  the file just has none. */
+async function loadRoomSeats() {
+    try {
+        const r = await fetch('../art/room-seats.json?t=' + Date.now(), { cache: 'no-store' });
+        if (!r.ok) return null;
+        const sj = await r.json();
+        seats.length = 0;
+        // An unverified file is the segmenter's guesses, which the room itself
+        // ignores — showing them here as seats would invite saving them as real.
+        if (sj.verified === true) (sj.seats || []).forEach(s => seats.push(s));
+        drawSeats();
+        const lm = r.headers.get('Last-Modified');
+        return { modified: lm ? Date.parse(lm) : null };
+    } catch { return null; }
+}
+
+/** Nothing painted anywhere? Sampled, not exhaustive: a mask is either a room's
+ *  worth of paint or none at all, and 1.5M pixels is a lot to walk for a yes. */
+function maskIsBlank() {
+    const d = mctx.getImageData(0, 0, paint.width, paint.height).data;
+    for (let i = 3; i < d.length; i += 4 * 97) if (d[i] > 24) return false;
+    return true;
+}
 
 document.getElementById('snap').addEventListener('click', () => { snapshot(); snapToEdges(); markDirty(); });
 document.getElementById('clean').addEventListener('click', () => { snapshot(); cleanLayer(); markDirty(); });
@@ -701,6 +770,30 @@ document.getElementById('check').addEventListener('click', checkMap);
 // a hard answer, because the room reads it as "may I stand here" one pixel at
 // a time. Each channel is thresholded on the way out.
 document.getElementById('save').addEventListener('click', () => {
+    // A blank paint layer is not a mask — it is "nothing may be walked on,
+    // nothing hides anybody", and dropped into art/ it would freeze the room.
+    // It happened (2026-09-21): seats placed on a painter that had not loaded
+    // the room's mask came down with a room-mask.png that was black edge to
+    // edge. Seats alone are a perfectly good save.
+    const blank = maskIsBlank();
+    if (!blank) saveMask();
+    download(new Blob([JSON.stringify({
+        note: 'painted with tools/mask-paint.html — x,y are fractions of the plate. On furniture a point is the seat itself (where the body goes); on open floor it is where the feet land. face: se = facing right, sw = facing left.',
+        // A person placed these, so they outrank the hand-measured spots in
+        // roommap.js. The auto-segmenter writes the same file with
+        // verified:false, and the room ignores those — its guesses once put
+        // the boss in a planter and deleted the sofa doing it.
+        verified: true,
+        seats,
+    }, null, 2)], { type: 'application/json' }), 'room-seats.json');
+    dirty = false;
+    autosave();
+    say(blank
+        ? 'บันทึกเฉพาะจุดนั่ง (room-seats.json) — ชั้นระบายว่างอยู่ จึงไม่ส่ง mask ให้ ห้องจะใช้ mask เดิม'
+        : 'บันทึกแล้ว — วางไว้ที่ wwwroot/office/art/');
+});
+
+function saveMask() {
     const src = mctx.getImageData(0, 0, paint.width, paint.height);
     const out = mctx.createImageData(paint.width, paint.height);
     for (let i = 0; i < src.data.length; i += 4) {
@@ -714,20 +807,7 @@ document.getElementById('save').addEventListener('click', () => {
     c.width = paint.width; c.height = paint.height;
     c.getContext('2d').putImageData(out, 0, 0);
     c.toBlob(b => download(b, 'room-mask.png'));
-
-    download(new Blob([JSON.stringify({
-        note: 'painted with tools/mask-paint.html — x,y are fractions of the plate, at the FEET',
-        // A person placed these, so they outrank the hand-measured spots in
-        // roommap.js. The auto-segmenter writes the same file with
-        // verified:false, and the room ignores those — its guesses once put
-        // the boss in a planter and deleted the sofa doing it.
-        verified: true,
-        seats,
-    }, null, 2)], { type: 'application/json' }), 'room-seats.json');
-    dirty = false;
-    autosave();
-    say('บันทึกแล้ว — วางไว้ที่ wwwroot/office/art/');
-});
+}
 
 /* ── autosave ────────────────────────────────────────────────────────
  *
@@ -778,6 +858,9 @@ function restoreSaved(quiet) {
             snapshot();
             mctx.clearRect(0, 0, paint.width, paint.height);
             mctx.drawImage(im, 0, 0, paint.width, paint.height);
+            // A session that only ever placed seats stored an empty layer.
+            // Keep its seats; take the mask from the room instead of nothing.
+            if (maskIsBlank()) loadRoomMask();
             if (Array.isArray(j.seats)) { seats.length = 0; j.seats.forEach(x => seats.push(x)); drawSeats(); }
             say('กู้งานที่ระบายไว้เมื่อ ' + new Date(j.at).toLocaleTimeString() + ' แล้ว');
         };
@@ -796,20 +879,38 @@ addEventListener('beforeunload', (e) => {
     e.returnValue = '';
 });
 
-// On load: if there is a session in storage, bring it back rather than making
-// somebody remember a button exists.
-addEventListener('load', () => setTimeout(() => {
-    let raw = null;
-    try { raw = localStorage.getItem(SAVE_KEY); } catch {}
-    if (!raw) return;
-    try {
-        const j = JSON.parse(raw);
-        const mins = Math.round((Date.now() - j.at) / 60000);
-        if (restoreSaved(true)) {
-            document.getElementById('saved').textContent =
-                'กู้งานล่าสุดกลับมาให้แล้ว (เซฟไว้เมื่อ ' + (mins < 1 ? 'ไม่ถึงนาที' : mins + ' นาที') + 'ที่แล้ว)';
-        }
-    } catch {}
+// On load: start from what the ROOM is using, and bring back a stored session
+// only when it is newer than that.
+//
+// This used to open blank and restore storage if there was any. Blank meant
+// that placing two seats and pressing download produced a black room-mask.png
+// beside them (2026-09-21) — the painter showed nothing because it had been
+// given nothing. And storage that predates the room's file is not unsaved
+// work, it is an older copy: restoring it over the seats the room actually has
+// would hand the owner yesterday's seats to save again.
+const plateReady = () => new Promise(res => {
+    if (img.complete && img.naturalWidth) res();
+    else img.addEventListener('load', () => res(), { once: true });
+});
+addEventListener('load', () => setTimeout(async () => {
+    await plateReady();
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null'); } catch {}
+
+    const hasMask = await loadRoomMask();
+    const room = await loadRoomSeats();
+    const mins = saved ? Math.round((Date.now() - saved.at) / 60000) : 0;
+    const ago = mins < 1 ? 'ไม่ถึงนาที' : mins + ' นาที';
+
+    if (saved && room?.modified && saved.at > room.modified && restoreSaved(true)) {
+        document.getElementById('saved').textContent =
+            'กู้งานล่าสุดกลับมาให้แล้ว (เซฟไว้เมื่อ ' + ago + 'ที่แล้ว ใหม่กว่าไฟล์ที่ห้องใช้)';
+    } else {
+        say(hasMask ? 'เปิดผังที่ห้องใช้อยู่ตอนนี้แล้ว' : 'ห้องยังไม่มีผัง — เริ่มระบายได้เลย');
+        if (saved) document.getElementById('saved').textContent =
+            'มีงานเซฟอัตโนมัติเมื่อ ' + ago + 'ที่แล้ว — กด “กู้งานล่าสุด” ถ้าต้องการใช้อันนั้นแทน';
+    }
+    if (hasMask) checkMap();
 }, 600));
 
 function download(blob, name) {

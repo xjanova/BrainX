@@ -125,6 +125,80 @@ body {
     align-self: center;
 }
 #room-map:hover { border-color: rgba(216,185,120,0.55); color: var(--ink); }
+
+/* The service chip — same chip as the boss, coloured by the one fact that
+   matters at a glance: is anything going to carry on when the app closes. */
+#room-service {
+    appearance: none;
+    border: 1px solid rgba(242, 239, 230, 0.12);
+    background: linear-gradient(180deg, rgba(34,39,50,0.88), rgba(16,19,26,0.88));
+    color: var(--ink-dim);
+    font: inherit;
+    letter-spacing: 1px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    cursor: pointer;
+    align-self: center;
+}
+#room-service:hover, #room-service[aria-expanded="true"] { border-color: rgba(216,185,120,0.55); color: var(--ink); }
+#room-service.on { border-color: rgba(111,207,151,0.5); color: #8fdcae; }
+#room-service.warn { border-color: rgba(224,168,106,0.5); color: #e0b98a; }
+#room-service.off { border-color: rgba(224,115,107,0.35); color: var(--ink-faint); }
+
+#service-panel {
+    position: absolute;
+    top: 34px;
+    left: 10px;
+    z-index: 30;
+    width: min(340px, calc(100% - 20px));
+    padding: 10px 12px 10px;
+    border: 1px solid var(--stroke);
+    border-radius: 10px;
+    background: var(--panel);
+    backdrop-filter: blur(8px);
+    box-shadow: var(--bevel), 0 12px 30px rgba(0,0,0,0.5);
+    color: var(--ink-dim);
+    font-size: 11px;
+    line-height: 1.45;
+}
+#service-panel[hidden] { display: none; }
+#service-panel header { color: var(--ink); font-weight: 600; margin-bottom: 8px; }
+#service-panel header span { color: var(--ink-faint); font-weight: 400; }
+#service-facts {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px 10px;
+    margin: 0 0 8px;
+}
+#service-facts dt { color: var(--ink-faint); }
+#service-facts dd { margin: 0; color: var(--ink); }
+#service-facts .yes { color: #8fdcae; }
+#service-facts .no { color: #e0938c; }
+#service-facts .meh { color: #e0b98a; }
+#service-warn { list-style: none; margin: 0 0 8px; padding: 0; }
+#service-warn li {
+    color: #e0b98a;
+    padding: 5px 8px;
+    margin-top: 4px;
+    border-radius: 6px;
+    background: rgba(224,168,106,0.08);
+    border: 1px solid rgba(224,168,106,0.22);
+}
+#service-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+#service-actions button {
+    appearance: none;
+    border: 1px solid rgba(242, 239, 230, 0.16);
+    background: linear-gradient(180deg, rgba(44,50,64,0.95), rgba(22,26,34,0.95));
+    color: var(--ink);
+    font: inherit;
+    padding: 4px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+}
+#service-actions button:hover { border-color: rgba(216,185,120,0.6); }
+#service-actions button.danger { color: #e0938c; }
+#service-note { margin: 8px 0 0; color: var(--ink-faint); min-height: 1em; }
+#service-note:empty { display: none; }
 #room-broker:hover { border-color: rgba(216,185,120,0.55); color: var(--ink); }
 #room-broker.on { border-color: rgba(111,207,151,0.5); color: #8fdcae; }
 #room-broker.off { border-color: rgba(224,115,107,0.5); color: #e0938c; }

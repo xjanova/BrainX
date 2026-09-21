@@ -349,8 +349,60 @@ function spotNear(nx, ny, within = 0.075) {
     return bestD <= within ? best : null;
 }
 
-/** Seats painted in the tool, if the room has any. Each is where the FEET
- *  land; the sitting frame is drawn from there like every other spot. */
+/**
+ * The floor directly in front of a point on the furniture — where somebody
+ * sitting there would have walked up to. "In front" is DOWN the plate: the
+ * camera is fixed and everything faces it, so the sofa's open side is always
+ * the side nearer the bottom of the picture.
+ *
+ * Nudged a little past the first standable pixel, because the path planner
+ * works in cells a person is wide, and a point on the very edge of the floor
+ * sits in a cell the grid still calls sofa.
+ */
+function floorInFront(nx, ny) {
+    for (let y = ny; y <= Math.min(1, ny + 0.15); y += 0.002) {
+        if (!isWalkable(nx, y)) continue;
+        const p = nearestWalkable(nx, Math.min(1, y + 0.012));
+        if (p) return p;
+    }
+    return nearestWalkable(nx, ny) || { x: nx, y: ny };
+}
+
+/** 'se' (facing right) or 'sw' (facing left) — the only two ways a seated
+ *  figure can face the camera. Anything else is the painter not having said. */
+function seatFace(f) { return f === 'se' || f === 'sw' ? f : null; }
+
+/**
+ * One painted seat, as a spot the room can use.
+ *
+ * Owner (2026-09-21): "บอสนั่งหลับ หรือนั่งให้ถูก" — and the seats they painted
+ * were ON THE CUSHIONS, not on the floor. The painter's hint said "where the
+ * feet touch the floor", which is the one place nobody clicks when asked where
+ * somebody should sit. Reading those points as feet walked him into the sofa
+ * and drew him hovering over the backrest.
+ *
+ * So the point is read the way it was meant: on furniture it IS the seat —
+ * `cushion` — and the floor in front of it becomes where he walks. The drawing
+ * offset from cushion to feet belongs to the figure, not the room, so office.js
+ * works it out from the figure's own size. A point painted on open floor keeps
+ * the old reading, so a file made the old way still means what it meant.
+ */
+function paintedSeat(s, i) {
+    const key = 'seat-' + (i + 1), stay = [16, 38];
+    const face = seatFace(s.face);
+    if (isWalkable(s.x, s.y)) {
+        return { key, x: s.x, y: s.y, act: 'sit', face: face || (i % 2 ? 'nw' : 'ne'), stay,
+                 seat: s.seat || { x: s.x, y: s.y - 0.035 } };
+    }
+    const floor = floorInFront(s.x, s.y);
+    // Facing the camera from the right-hand pose unless told otherwise: it is
+    // the way the pack draws a seated figure, so it needs no mirroring.
+    return { key, x: floor.x, y: floor.y, act: 'sit', face: face || 'se', stay,
+             cushion: { x: s.x, y: s.y } };
+}
+
+/** Seats painted in the tool, if the room has any. Load the mask FIRST: which
+ *  reading a seat gets depends on whether it was painted on the floor. */
 function loadRoomSeats(url = 'art/room-seats.json') {
     return fetch(url).then(r => r.ok ? r.json() : null).then(j => {
         const seats = j && Array.isArray(j.seats) ? j.seats : null;
@@ -371,11 +423,8 @@ function loadRoomSeats(url = 'art/room-seats.json') {
         // (the counter, the shelf, the racks) — those are standing positions,
         // not seats, and nothing about them was wrong.
         for (let i = SPOTS.length - 1; i >= 0; i--) if (SPOTS[i].act === 'sit') SPOTS.splice(i, 1);
-        seats.forEach((s, i) => SPOTS.push({
-            key: 'seat-' + (i + 1), x: s.x, y: s.y, act: 'sit',
-            face: s.face || (i % 2 ? 'nw' : 'ne'), stay: [16, 38],
-            seat: s.seat || { x: s.x, y: s.y - 0.035 },
-        }));
+        GRID = null;     // floorInFront plans on the grid; build it from the mask we have now
+        seats.forEach((s, i) => SPOTS.push(paintedSeat(s, i)));
         return true;
     }).catch(() => false);
 }
