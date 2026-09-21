@@ -147,7 +147,7 @@
     <div class="grp">
       <label>จุดนั่ง (<span id="seatn">0</span>)</label>
       <div id="seatlist"></div>
-      <div class="hint" style="margin-top:6px">เลือก “จุดนั่ง” แล้วคลิก<b>บนเบาะ</b>ตรงที่จะให้นั่ง จากนั้นกดปุ่ม <b>หันขวา/หันซ้าย</b> ในรายการให้ตรงกับทิศที่เบาะหันออก (ลูกศรบนภาพชี้ทางที่ตัวละครจะหัน)</div>
+      <div class="hint" style="margin-top:6px">เลือก “จุดนั่ง” แล้วคลิก 2 ครั้ง: <b>① บนเบาะ</b> ตรงที่ก้นวาง <b>② บนพื้น</b> ตรงที่เท้ายืนก่อนนั่งลง — ทิศหันตั้งให้เองตามจุดยืน (สลับได้ในรายการ) · ลูกศรเหลือง = ทิศที่หัน · วงฟ้า = จุดยืน (เส้นประ = ห้องเดาให้)</div>
     </div>
 
     <div class="grp">
@@ -266,7 +266,11 @@ function dab(p) {
 }
 
 paint.addEventListener('pointerdown', (e) => {
-    if (layer === 'seat') { addSeat(pos(e)); return; }
+    if (layer === 'seat') {
+        const p = pos(e);
+        if (standFor >= 0) setStand(standFor, p); else addSeat(p);
+        return;
+    }
     if (mode === 'wand') {
         const p = pos(e);
         snapshot();
@@ -300,15 +304,70 @@ paint.addEventListener('pointerleave', () => { painting = false; });
 const FACE_LABEL = { se: 'หันขวา ↘', sw: '↙ หันซ้าย' };
 function faceOf(s) { return s.face === 'sw' ? 'sw' : 'se'; }
 
+/* A seat is TWO clicks: where the body goes, then where the feet stand.
+ *
+ * Owner (2026-09-21): "คุณวัดจาก ก้นตัวละคร หรือเท้า ที่ยืน ถ้าวัดที่เท้า เวลาเรา
+ * มาร์คจุดนั่ง ต้องกำหนดจุดที่ยืน แล้วจึงจะแม่นกว่า". The figure is drawn from
+ * its feet; the SITTING frame is placed from the cushion click plus offsets
+ * measured off the art, which are exact. What was a guess was the other end —
+ * where he walks up to and stands before sitting, found by scanning straight
+ * down for floor. So that point is now marked too, and the facing follows from
+ * it: a person faces the side they sat down from.
+ */
+let standFor = -1;     // seat index waiting for its standing point, or -1
+
 function addSeat(p) {
     seats.push({ x: +(p.x / paint.width).toFixed(4), y: +(p.y / paint.height).toFixed(4), face: 'se' });
+    standFor = seats.length - 1;
     drawSeats();
     markDirty();
+    say('จุดนั่งที่ ' + seats.length + ' แล้ว — ต่อไปคลิก “จุดยืน” (ตำแหน่งเท้าบนพื้น ก่อนนั่งลง) · Esc = ข้าม ให้ห้องหาเอง');
+}
+
+function setStand(i, p) {
+    const s = seats[i];
+    if (!s) { standFor = -1; return; }
+    s.stand = { x: +(p.x / paint.width).toFixed(4), y: +(p.y / paint.height).toFixed(4) };
+    // Facing follows the side he sat down from. Settable afterwards — this is
+    // a default, not a rule.
+    s.face = s.stand.x >= s.x ? 'se' : 'sw';
+    standFor = -1;
+    drawSeats();
+    markDirty();
+    say('ตั้งจุดยืนของที่นั่ง ' + (i + 1) + ' แล้ว — ' + (s.face === 'sw' ? 'หันซ้าย' : 'หันขวา') + ' ตามจุดยืน (กดสลับในรายการได้)');
+}
+
+/** Where the room will stand him when a seat has no marked standing point:
+ *  straight down the picture to the first walkable pixel. The same reading
+ *  roommap.js makes, so the dashed pin shows what will actually happen. */
+function autoStand(s) {
+    const W = paint.width, H = paint.height, x = Math.round(s.x * W);
+    const y0 = Math.round(s.y * H), y1 = Math.min(H - 1, Math.round((s.y + 0.15) * H));
+    let col;
+    try { col = mctx.getImageData(x, y0, 1, Math.max(1, y1 - y0)).data; } catch { return null; }
+    for (let k = 0; k < col.length; k += 4) {
+        if (col[k + 3] > 24 && col[k + 1] > 128 && col[k] <= 128)
+            return { x: s.x, y: Math.min(1, (y0 + k / 4) / H + 0.012) };
+    }
+    return null;
 }
 function drawSeats() {
     sctx.clearRect(0, 0, pins.width, pins.height);
     seats.forEach((s, i) => {
         const x = s.x * pins.width, y = s.y * pins.height;
+        // The standing point first, under everything: a cyan foot-ring joined
+        // to its seat. Solid when marked, dashed when it is the room's guess.
+        const st = s.stand || autoStand(s);
+        if (st) {
+            const sx = st.x * pins.width, sy = st.y * pins.height;
+            sctx.save();
+            sctx.strokeStyle = '#5fe3ff'; sctx.lineWidth = 2;
+            sctx.setLineDash(s.stand ? [] : [5, 4]);
+            sctx.beginPath(); sctx.moveTo(x, y); sctx.lineTo(sx, sy); sctx.stroke();
+            sctx.beginPath(); sctx.ellipse(sx, sy, 9, 4.5, 0, 0, Math.PI * 2); sctx.stroke();
+            if (s.stand) { sctx.fillStyle = 'rgba(95,227,255,0.35)'; sctx.fill(); }
+            sctx.restore();
+        }
         // The arrow first, so the numbered pin sits on top of its tail: it
         // points the way the seated figure will look.
         const dir = faceOf(s) === 'sw' ? -1 : 1;
@@ -329,11 +388,23 @@ function drawSeats() {
     });
     document.getElementById('seatn').textContent = seats.length;
     document.getElementById('seatlist').innerHTML = seats.map((s, i) =>
-        `<div><span>${i + 1}. ${s.x.toFixed(3)}, ${s.y.toFixed(3)}</span>` +
+        `<div><span>${i + 1}. ${s.x.toFixed(3)}, ${s.y.toFixed(3)}` +
+        ` · ยืน ${s.stand ? '✓' : '<i>อัตโนมัติ</i>'}${standFor === i ? ' ← รอคลิก' : ''}</span>` +
         `<button data-face="${i}" title="กดเพื่อสลับซ้าย/ขวา">${FACE_LABEL[faceOf(s)]}</button>` +
+        `<button data-stand="${i}" title="คลิกบนภาพตรงที่เท้าแตะพื้นก่อนนั่ง">จุดยืน</button>` +
         `<button data-seat="${i}">ลบ</button></div>`).join('');
 }
 document.getElementById('seatlist').addEventListener('click', (e) => {
+    const st = e.target.closest('button[data-stand]');
+    if (st) {
+        standFor = +st.dataset.stand;
+        // The next click on the picture is the standing point, so the seat
+        // tool has to be the one listening.
+        document.querySelector('.tool[data-layer="seat"]')?.click();
+        drawSeats();
+        say('คลิกบนภาพตรงที่เท้าแตะพื้น (จุดยืนของที่นั่ง ' + (standFor + 1) + ') · Esc = ยกเลิก');
+        return;
+    }
     const f = e.target.closest('button[data-face]');
     if (f) {
         const s = seats[+f.dataset.face];
@@ -345,6 +416,7 @@ document.getElementById('seatlist').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-seat]');
     if (!b) return;
     seats.splice(+b.dataset.seat, 1);
+    standFor = -1;      // indexes shifted; a pending standing point has no seat to land on
     drawSeats();
     markDirty();
 });
@@ -354,6 +426,9 @@ document.querySelectorAll('.tool').forEach(b => b.addEventListener('click', () =
     document.querySelectorAll('.tool').forEach(x => x.classList.remove('on'));
     b.classList.add('on');
     layer = b.dataset.layer;
+    // Leaving the seat tool abandons a standing point nobody clicked yet;
+    // otherwise the next seat click would silently become one.
+    if (layer !== 'seat' && standFor >= 0) { standFor = -1; drawSeats(); }
     setMode(mode);
 }));
 document.getElementById('size').addEventListener('input', (e) => {
@@ -400,6 +475,11 @@ document.getElementById('only').addEventListener('click', (e) => {
 });
 
 addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && standFor >= 0) {
+        standFor = -1; drawSeats();
+        say('ข้ามจุดยืน — ห้องจะหาพื้นหน้าที่นั่งให้เอง (เส้นประ)');
+        return;
+    }
     if (e.key === 'b' || e.key === 'B') setMode('brush');
     if (e.key === 'w' || e.key === 'W') setMode('wand');
     if (e.key === 's' || e.key === 'S') document.getElementById('snap').click();
@@ -673,6 +753,15 @@ function checkMap() {
     // in front of it, which is straight DOWN the picture (the room faces the
     // camera). Same reading the room uses, so the check and the room agree.
     const reachable = (s) => {
+        // A marked standing point is the whole answer: it has to be floor the
+        // rest of the room connects to. (A point painted a pixel off the floor
+        // counts if floor is right under it — the room nudges it the same way.)
+        if (s.stand) {
+            const sx = Math.min(W - 1, Math.round(s.stand.x * W));
+            for (let y = Math.round(s.stand.y * H); y < Math.min(H, Math.round((s.stand.y + 0.02) * H)); y++)
+                if (walk[y * W + sx]) return !!seen[y * W + sx];
+            return false;
+        }
         const x = Math.min(W - 1, Math.round(s.x * W));
         for (let y = Math.round(s.y * H); y < Math.min(H, Math.round((s.y + 0.15) * H)); y++) {
             const i = y * W + x;

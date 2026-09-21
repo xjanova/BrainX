@@ -390,6 +390,17 @@ function seatFace(f) { return f === 'se' || f === 'sw' ? f : null; }
 function paintedSeat(s, i) {
     const key = 'seat-' + (i + 1), stay = [16, 38];
     const face = seatFace(s.face);
+    // A marked standing point (2026-09-21): the owner said where the feet go,
+    // so nothing is guessed. The seat point is then the cushion by definition,
+    // and the facing defaults to the side he sat down from.
+    if (s.stand && Number.isFinite(s.stand.x) && Number.isFinite(s.stand.y)) {
+        const st = isWalkable(s.stand.x, s.stand.y)
+            ? { x: s.stand.x, y: s.stand.y }
+            : (nearestWalkable(s.stand.x, s.stand.y) || { x: s.stand.x, y: s.stand.y });
+        return { key, x: st.x, y: st.y, act: 'sit', stay,
+                 face: face || (s.stand.x >= s.x ? 'se' : 'sw'),
+                 cushion: { x: s.x, y: s.y } };
+    }
     if (isWalkable(s.x, s.y)) {
         return { key, x: s.x, y: s.y, act: 'sit', face: face || (i % 2 ? 'nw' : 'ne'), stay,
                  seat: s.seat || { x: s.x, y: s.y - 0.035 } };
