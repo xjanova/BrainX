@@ -2710,11 +2710,14 @@ function renderService(svc) {
         SVC_PENDING = null;
     }
 
+    // Not installed is the GOOD state now: the service was retired on
+    // 2026-09-21 (it ran as SYSTEM — see the warnings below), and the app's
+    // own broker does the work as the owner. So an install left over from
+    // before is what gets the colour, not the absence of one.
     chip.textContent = !svc ? 'service ?'
-        : !s.installed ? 'service —'
-        : s.state === 'running' ? 'service ✓'
-        : 'service ' + (SVC_STATE[s.state] || s.state);
-    chip.className = !svc ? '' : !s.installed ? 'off' : s.state === 'running' ? 'on' : 'warn';
+        : !s.installed ? 'ไม่มี service'
+        : 'service ⚠ ควรถอน';
+    chip.className = !svc || !s.installed ? '' : 'warn';
 
     const facts = document.getElementById('service-facts');
     if (!facts) return;
@@ -2725,16 +2728,16 @@ function renderService(svc) {
     facts.innerHTML = !svc
         ? row('สถานะ', 'ยังไม่ได้รับข้อมูลจากแอป', 'meh')
         : [
-            row('ติดตั้ง', s.installed ? '✓ ติดตั้งแล้ว — เปิดเองตอนเปิดเครื่อง' : '✗ ยังไม่ได้ติดตั้ง',
-                s.installed ? 'yes' : 'no'),
+            row('ติดตั้ง', s.installed ? 'ยังติดตั้งอยู่ — เปิดเองตอนเปิดเครื่อง' : '✓ ไม่ได้ติดตั้ง — ไม่จำเป็นแล้ว',
+                s.installed ? 'meh' : 'yes'),
             row('สิทธิ์', s.installed ? account : '—', s.privileged ? 'yes' : ''),
             row('สถานะ', !s.installed ? '—'
                 : s.neverStarted ? 'หยุดอยู่ — ยังไม่เคยถูกสั่งรันตั้งแต่เปิดเครื่อง'
                 : (SVC_STATE[s.state] || s.state),
                 s.state === 'running' ? 'yes' : s.installed ? 'meh' : ''),
-            row('สั่งจากแอป', !s.installed ? 'ติดตั้งต้องยืนยันสิทธิ์แอดมิน'
-                : s.canControl ? '✓ เริ่ม/หยุดได้ทันที'
-                : 'เริ่ม/หยุดได้ — ต้องยืนยันสิทธิ์แอดมินทุกครั้ง',
+            row('สั่งจากแอป', !s.installed ? '—'
+                : s.canControl ? '✓ ถอนออกได้ทันที'
+                : 'ถอนออกได้ — ต้องยืนยันสิทธิ์แอดมิน',
                 s.installed && s.canControl ? 'yes' : 'meh'),
         ].join('');
 
@@ -2743,24 +2746,21 @@ function renderService(svc) {
     // from "installed ✓ running ✓".
     const warn = [];
     if (s.installed && s.privileged)
-        warn.push('รันเป็น SYSTEM จึงไม่เห็นโปรไฟล์ของคุณ — codex / claude ที่ติดตั้งและล็อกอินไว้ในบัญชีคุณ service อาจเรียกไม่เจอ');
+        warn.push('เลิกใช้แล้ว — รันเป็น SYSTEM จึงเรียก codex / claude ที่ล็อกอินไว้ในบัญชีคุณไม่ได้ (เวอร์ชันนี้จะถอยให้บอสในแอปเอง แต่ควรถอนออก)');
     if (s.installed && s.privileged && s.userWritableBinary)
         warn.push('ไฟล์โปรแกรมของ service อยู่ในโฟลเดอร์ผู้ใช้ แต่รันด้วยสิทธิ์ SYSTEM — โปรแกรมใดก็ตามที่แก้ไฟล์นั้นได้ จะได้สิทธิ์ SYSTEM ตามไปด้วย');
     document.getElementById('service-warn').innerHTML = warn.map(w => `<li>⚠ ${w}</li>`).join('');
 
     const shield = (needs) => needs ? ' 🛡' : '';
+    // One way out, no way in. Uninstall stops it first, so there is no
+    // separate stop to reach for.
     const acts = [];
-    if (svc && !s.installed) acts.push(['install', 'ติดตั้ง' + shield(true)]);
-    if (s.installed) {
-        if (s.state === 'running') acts.push(['stop', 'หยุด' + shield(!s.canControl)]);
-        else if (s.state === 'stopped') acts.push(['start', 'เริ่ม' + shield(!s.canControl)]);
-        acts.push(['install', 'ติดตั้งใหม่' + shield(true)]);
-        acts.push(['uninstall', 'ถอนออก' + shield(true), 'danger']);
-    }
+    if (s.installed) acts.push(['uninstall', 'ถอนออก' + shield(!s.canControl), 'danger']);
     document.getElementById('service-actions').innerHTML = acts.map(([a, t, c]) =>
         `<button type="button" data-svc="${a}"${c ? ` class="${c}"` : ''}${SVC_PENDING ? ' disabled' : ''}>${t}</button>`).join('');
     document.getElementById('service-note').textContent = SVC_PENDING ? SVC_PENDING.note
         : SVC_RESULT ? SVC_RESULT
+        : !s.installed && svc ? 'บอสในแอปทำงานในนามบัญชีคุณอยู่แล้ว จึงเห็น codex / claude ที่ล็อกอินไว้ครบ'
         : acts.some(([, t]) => t.includes('🛡')) ? '🛡 = Windows จะถามยืนยันสิทธิ์แอดมิน' : '';
 }
 
@@ -2821,22 +2821,19 @@ document.getElementById('room-light')?.addEventListener('click', () => {
     post({ type: 'officeRoomLight', on });
 });
 
-// Right-click installs or removes the Windows Service — the half that keeps
-// dispatching after this window is closed. Confirmed here because it is an
-// administrative change to the machine, and elevated by the CLIENT, which is
-// the only thing that may ask for it.
 document.getElementById('room-map')?.addEventListener('click', () => {
     location.href = 'tools/mask-paint.html';
 });
 
+// Right-click used to install the Windows Service too. That service is
+// retired (it ran as SYSTEM), so the only thing left to do here is remove
+// one that is still installed.
 document.getElementById('room-broker')?.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     const svc = (BROKER && BROKER.service) || null;
-    const install = !svc || !svc.installed;
-    const ok = confirm(install
-        ? 'ติดตั้ง BrainX Agent Broker เป็น Windows Service?\n\nจะจัดสรรงานต่อแม้ปิดโปรแกรม — ต้องยืนยันสิทธิ์ผู้ดูแล'
-        : 'ถอน Windows Service ออก?\n\nปิดโปรแกรมแล้วจะไม่มีใครเรียก agent เข้ามาทำงาน');
-    if (ok) post({ type: 'officeBrokerService', action: install ? 'install' : 'uninstall' });
+    if (!svc || !svc.installed) return;
+    if (confirm('ถอน Windows Service ของบอส (แบบเก่า) ออก?\n\nบอสในแอปทำงานแทนอยู่แล้ว — ต้องยืนยันสิทธิ์ผู้ดูแล'))
+        post({ type: 'officeBrokerService', action: 'uninstall' });
 });
 
 document.getElementById('decisions').addEventListener('click', (e) => {

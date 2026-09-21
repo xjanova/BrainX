@@ -25,16 +25,19 @@ namespace BrainX.Mcp;
 // that Windows restarts in a loop, and a service that ignores the lock is two
 // brokers spawning the same agent twice onto one consume-on-read inbox.
 //
-// `install` writes the service with `sc.exe` rather than shipping an installer:
-// the binary is deployed by Velopack into a versioned folder and hot-swapped by
-// deploy-mcp.ps1, so the service definition has to be (re)written against
-// whatever path is current, by the same exe that is running.
+// RETIRED 2026-09-21. `sc create` made it a LocalSystem service, and SYSTEM is
+// the one account that cannot do this job: the owner's codex/claude and their
+// logins live in the owner's profile, and the exe it ran sits in a folder the
+// owner can write — code anyone at user level could swap, run as SYSTEM. It
+// had never actually run (installed after the last boot); at the next boot it
+// would have taken the Global\ mutex first and left the room to a boss that
+// could call nobody. `install` now refuses, an installed copy stands down, and
+// `uninstall` stays so old installs can be removed. The app hosts the broker.
 // ─────────────────────────────────────────────────────────────────────────
 
 internal static partial class Program
 {
     internal const string BrokerServiceName = "BrainXBroker";
-    private const string BrokerServiceDisplay = "BrainX Agent Broker";
 
     /// <summary>
     /// `brainx-mcp broker --service --vault PATH`, started by the SCM.
@@ -68,6 +71,28 @@ internal static partial class Program
     {
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
+            // A broker running as SYSTEM stands down instead of taking the room.
+            //
+            // It cannot do the job: SYSTEM has its own profile, so the owner's
+            // PATH, %LOCALAPPDATA% and logins are not there — codex does not
+            // resolve at all and claude starts logged out (2026-09-21, checked
+            // on the owner's machine). And it would not merely fail quietly:
+            // the mutex is Global\, the service is AUTO_START, so after a
+            // reboot it wins the race, the app's own broker exits 3 and shows
+            // "another one is in charge", and the room goes silent behind a
+            // boss that can call nobody. Standing down keeps the app's broker —
+            // which runs AS the owner — in charge. Not exiting: the failure
+            // actions would restart a service that exits, every minute.
+            if (OperatingSystem.IsWindows()
+                && System.Security.Principal.WindowsIdentity.GetCurrent().IsSystem)
+            {
+                BrokerLog("service: running as SYSTEM, which cannot reach the owner's agents or logins — "
+                        + "standing down so the app keeps the room. Remove it: brainx-mcp broker-service uninstall");
+                try { await Task.Delay(Timeout.Infinite, stoppingToken).ConfigureAwait(false); }
+                catch (OperationCanceledException) { }
+                return;
+            }
+
             var vault = _vaultPath;
             var key = BrokerMutexName(vault);
             var announcedWait = false;
@@ -135,7 +160,7 @@ internal static partial class Program
     /// <summary>
     /// <c>brainx-mcp broker-service install|uninstall|start|stop|status [--vault PATH]</c>
     ///
-    /// install and uninstall need an elevated shell; the others do not.
+    /// uninstall needs an elevated shell; install is retired (see the header).
     /// </summary>
     public static Task<int> RunBrokerServiceCommand(string[] args)
     {
@@ -148,64 +173,41 @@ internal static partial class Program
         var verb = args.Length > 1 ? args[1].ToLowerInvariant() : "status";
         return Task.FromResult(verb switch
         {
-            "install" => InstallBrokerService(args),
-            "uninstall" or "remove" => Sc("delete", BrokerServiceName),
+            // Retired 2026-09-21. `sc create` without obj= makes a LocalSystem
+            // service, and a LocalSystem broker is the wrong thing twice over:
+            // it cannot see the owner's agents or logins, and it runs as SYSTEM
+            // an exe that lives in a folder the user can write. The app hosts
+            // the broker as the owner; `uninstall` stays so old installs can go.
+            "install" => RefuseInstall(),
+            // Stop, then delete: `sc delete` on a running service only marks it,
+            // and it lingers until the next reboot — the one moment it must not.
+            "uninstall" or "remove" => Uninstall(),
             "start" => Sc("start", BrokerServiceName),
             "stop" => Sc("stop", BrokerServiceName),
             "status" => BrokerServiceStatusCommand(),
             _ => Usage(),
         });
 
+        static int Uninstall()
+        {
+            ScRun("stop", BrokerServiceName, quiet: true);
+            return Sc("delete", BrokerServiceName);
+        }
+
+        static int RefuseInstall()
+        {
+            Console.Error.WriteLine("broker-service install is retired: a Windows service runs as SYSTEM, which cannot reach");
+            Console.Error.WriteLine("your codex/claude logins and would run a user-writable exe with SYSTEM rights.");
+            Console.Error.WriteLine("The BrainX app hosts the broker as you. For a foreground one: brainx-mcp broker");
+            Console.Error.WriteLine("To remove an old install:                                   brainx-mcp broker-service uninstall");
+            return 2;
+        }
+
         static int Usage()
         {
-            Console.Error.WriteLine("usage: brainx-mcp broker-service install|uninstall|start|stop|status [--vault PATH]");
+            Console.Error.WriteLine("usage: brainx-mcp broker-service uninstall|start|stop|status [--vault PATH]  (install is retired)");
             return 1;
         }
-    }
-
-    [SupportedOSPlatform("windows")]
-    private static int InstallBrokerService(string[] args)
-    {
-        if (!TryEnterVault(args))
-        {
-            Console.Error.WriteLine("broker-service install: no vault. Pass --vault PATH or set BRAINX_VAULT.");
-            return 1;
-        }
-
-        var exe = Environment.ProcessPath;
-        if (string.IsNullOrWhiteSpace(exe))
-        {
-            Console.Error.WriteLine("broker-service install: cannot determine this executable's path.");
-            return 1;
-        }
-
-        // sc.exe's binPath is ONE string that Windows later splits like a
-        // command line, so the exe and the vault each need their own quotes,
-        // and the whole thing needs to survive this process's own quoting.
-        // Both of those have bitten this repo before, in the Codex runner.
-        var bin = $"\"{exe}\" broker --service --vault \"{_vaultPath}\"";
-
-        // Delete first so `install` is idempotent and always points at the
-        // CURRENT exe: Velopack moves the binary into a new versioned folder
-        // on every update, and a service still pointing at the old one fails
-        // to start with a completely unhelpful error.
-        ScQuiet("stop", BrokerServiceName);
-        ScQuiet("delete", BrokerServiceName);
-
-        var rc = Sc("create", BrokerServiceName,
-                    $"binPath= {Quote(bin)}", "start= auto",
-                    $"DisplayName= \"{BrokerServiceDisplay}\"");
-        if (rc != 0) return rc;
-
-        ScQuiet("description", BrokerServiceName,
-           "\"Dispatches BrainX agent work from the cowork room and the task queue when the BrainX app is not running.\"");
-        // Restart on failure: 5s, 15s, then every minute. A broker that dies
-        // at 3am and stays dead is the failure mode a service exists to avoid.
-        ScQuiet("failure", BrokerServiceName, "reset= 86400", "actions= restart/5000/restart/15000/restart/60000");
-
-        Console.WriteLine($"installed {BrokerServiceName} → {bin}");
-        Console.WriteLine("start it with:  sc start " + BrokerServiceName);
-        return 0;
     }
 
     [SupportedOSPlatform("windows")]
@@ -253,14 +255,7 @@ internal static partial class Program
         catch { return (false, "unknown"); }
     }
 
-    private static string Quote(string s) => "\"" + s.Replace("\"", "\\\"") + "\"";
-
     private static int Sc(string verb, string name, params string[] rest) => ScRun(verb, name, false, rest);
-
-    /// <summary>Same call, but nothing is printed — for the best-effort steps
-    /// of an install (a `delete` that fails because it was not there yet is
-    /// not something to show somebody).</summary>
-    private static int ScQuiet(string verb, string name, params string[] rest) => ScRun(verb, name, true, rest);
 
     private static int ScRun(string verb, string name, bool quiet, params string[] rest)
     {

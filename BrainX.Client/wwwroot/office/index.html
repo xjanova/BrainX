@@ -44,9 +44,9 @@
            CLIENT to start or stop it — the page cannot, and must not, run a
            process that spawns agents. -->
       <button id="room-broker" type="button" title="บอสจัดสรรงาน (broker)">—</button>
-      <!-- The other half of the boss: the Windows Service that keeps dispatching
-           after this app closes. Owner (2026-09-21): show whether it is
-           installed, whether it has admin rights, and whether we can run it. -->
+      <!-- The Windows Service the boss used to have. Retired 2026-09-21: it ran
+           as SYSTEM, which cannot reach the owner's agents. The chip stays so an
+           install left over from before is visible, and removable. -->
       <button id="room-service" type="button" aria-expanded="false" aria-controls="service-panel"
               title="Windows Service ของบอส — ติดตั้ง / สิทธิ์ / สั่งงาน">service</button>
       <!-- The map the room runs on. Opened in this same WebView so the plate
@@ -61,7 +61,7 @@
     </div>
 
     <section id="service-panel" hidden aria-label="Windows Service ของบอส">
-      <header>Windows Service <span>— บอสทำงานต่อแม้ปิดแอป</span></header>
+      <header>Windows Service <span>— แบบเก่า เลิกใช้แล้ว</span></header>
       <dl id="service-facts"></dl>
       <ul id="service-warn"></ul>
       <div id="service-actions"></div>

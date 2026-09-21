@@ -473,7 +473,10 @@ public partial class MainWindow
                 // asked for by the client, never by the page.
                 case "officeBrokerService":
                     var verb = m["action"]?.ToString();
-                    if (verb is "install" or "uninstall" or "start" or "stop") RunBrokerServiceVerb(verb);
+                    // No "install": the service ran as SYSTEM, which cannot reach
+                    // the owner's agents and ran a user-writable exe with SYSTEM
+                    // rights. Retired 2026-09-21; removing an old one stays.
+                    if (verb is "uninstall" or "stop") RunBrokerServiceVerb(verb);
                     break;
                 case "officeOpen": CoworkOpen(m["path"]?.ToString()); break;
             }
