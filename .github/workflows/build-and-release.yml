@@ -129,6 +129,7 @@ jobs:
             --packDir publish/win-x64 `
             --mainExe BrainX.Client.exe `
             --packTitle "BrainX" `
+            --icon BrainX.Client/Assets/Logo.ico `
             --outputDir Releases
 
       - name: Publish + zip node (server self-update)

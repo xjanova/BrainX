@@ -23,7 +23,9 @@
         <SolidColorBrush x:Key="BgPanel" Color="#FF12102B"/>
         <SolidColorBrush x:Key="BorderNeon" Color="#886CF0FF"/>
         <SolidColorBrush x:Key="NeonCyan" Color="#FF6CF0FF"/>
-        <SolidColorBrush x:Key="NeonMagenta" Color="#FFFF2E94"/>
+        <!-- The logo's own cyan (2026-09-21 blue BrainX mark). Only the logo
+             block uses it: the glow around the banner and the version under it. -->
+        <SolidColorBrush x:Key="BrandCyan" Color="#FF40D8FF"/>
         <SolidColorBrush x:Key="NeonGreen" Color="#FF6CFFA8"/>
         <SolidColorBrush x:Key="TextBright" Color="#FFE8E6FF"/>
         <SolidColorBrush x:Key="TextMuted" Color="#88A0A8C8"/>
@@ -57,10 +59,10 @@
 
             <!-- ═══════════ TITLE BLOCK ═══════════ -->
             <StackPanel Grid.Row="0" HorizontalAlignment="Center">
-                <!-- Banner-format brand logo (brain + BRAINX wordmark). The
-                     PNG already carries the "GLOBAL AI BRAIN PROGRAM"
-                     subtitle, so we drop the old "Neural Knowledge Network"
-                     line and keep just the version chip beneath. -->
+                <!-- Banner-format brand logo: the cyan circuit brain and the
+                     "BrainX" wordmark over its cosmos, edges feathered to
+                     transparent so it sits in the splash rather than on it.
+                     Just the version chip beneath. -->
                 <Image x:Name="LogoImage"
                        Source="pack://application:,,,/Assets/LogoBanner.png"
                        Height="120"
@@ -70,7 +72,7 @@
                        RenderOptions.BitmapScalingMode="HighQuality"
                        RenderTransformOrigin="0.5,0.5">
                     <Image.Effect>
-                        <DropShadowEffect Color="#FFFF2E94" BlurRadius="28" ShadowDepth="0" Opacity="0.55"/>
+                        <DropShadowEffect Color="#FF40D8FF" BlurRadius="28" ShadowDepth="0" Opacity="0.45"/>
                     </Image.Effect>
                     <Image.RenderTransform>
                         <ScaleTransform x:Name="LogoScale" ScaleX="1" ScaleY="1"/>
@@ -100,7 +102,7 @@
                            Text="v2.6.0"
                            FontSize="10"
                            FontFamily="{StaticResource MonoFont}"
-                           Foreground="{StaticResource NeonMagenta}"
+                           Foreground="{StaticResource BrandCyan}"
                            HorizontalAlignment="Center"/>
             </StackPanel>
 

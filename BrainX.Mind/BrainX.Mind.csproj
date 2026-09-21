@@ -12,7 +12,9 @@
     <Version>1.0.0</Version>
     <!-- Its own app, launched on its own. The dashboard is not required to be
          running, and closing the dashboard must not close her. -->
-    <!-- no .ico in the repo; the exe keeps the default until one is added -->
+    <!-- The BrainX mark, shared with the dashboard rather than copied: one
+         file, so a rebrand is one file. -->
+    <ApplicationIcon>..\BrainX.Client\Assets\Logo.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
