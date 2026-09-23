@@ -21,7 +21,7 @@
 // facing +z with +y up has their right hand toward -x, so the left
 // hemisphere sits at +x and the right one at -x.
 
-import { hashStr, rng, gauss, paletteFor, expertiseByCategory, linkEdges } from './layout.js';
+import { hashStr, rng, gauss, paletteFor, expertiseByCategory, linkEdges, drawnLinks } from './layout.js';
 
 // ── small math ──────────────────────────────────────────────────────────
 
@@ -632,7 +632,7 @@ export function buildBrainGraph(brain) {
                 tags: n.Tags ?? n.tags ?? [],
                 preview: (n.Preview ?? n.preview ?? '').slice(0, 480),
                 modifiedAt: n.ModifiedAt ?? n.modifiedAt ?? null,
-                linkedIds: n.LinkedNodeIds ?? n.linkedNodeIds ?? [],
+                linkedIds: drawnLinks(n),
             };
             idIndex.set(id, nodes.length);
             nodes.push(node);

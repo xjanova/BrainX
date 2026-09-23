@@ -159,6 +159,19 @@ public class PhysicsEngine
     public List<PhysicsNode> Nodes { get; } = [];
     public List<PhysicsEdge> Edges { get; } = [];
 
+    /// <summary>
+    /// Every link the universe draws: the written ones and the auto-linker's.
+    /// The indexer keeps the two apart since 2026-09-23 so brain_get_backlinks,
+    /// brain_walk and the orphan audit stop counting guesses as links — but the
+    /// layout's springs were shaped by both all along, and dropping the ~80%
+    /// that are guesses would change the brain's shape for a reason that has
+    /// nothing to do with how it looks.
+    /// </summary>
+    private static List<string> DrawnLinks(KnowledgeNode n)
+        => n.AutoLinkedNodeIds.Count == 0
+            ? n.LinkedNodeIds
+            : n.LinkedNodeIds.Concat(n.AutoLinkedNodeIds).Distinct(StringComparer.Ordinal).ToList();
+
     /// <summary>Optional semantic-similarity springs computed by
     /// <c>SemanticSpringComputer</c>. Apply ON TOP OF structural Edges,
     /// at a small fraction of the structural spring strength so they
@@ -285,14 +298,14 @@ public class PhysicsEngine
                     || existing.Category != gn.PrimaryCategory
                     || existing.CustomCategoryId != gn.CustomCategoryId
                     || Math.Abs(existing.Importance - gn.Importance) > 0.001
-                    || existing.LinkedIds.Count != gn.LinkedNodeIds.Count;
+                    || existing.LinkedIds.Count != DrawnLinks(gn).Count;
 
                 // Preserve position + velocity; refresh metadata
                 existing.Title = gn.Title;
                 existing.Category = gn.PrimaryCategory;
                 existing.WordCount = gn.WordCount;
                 existing.Importance = gn.Importance;
-                existing.LinkedIds = gn.LinkedNodeIds;
+                existing.LinkedIds = DrawnLinks(gn);
                 existing.CustomCategoryId = gn.CustomCategoryId;
                 existing.DyingAt = null;   // cancel pending death if it re-appeared
                 if (edited) existing.EditedAt = now;
@@ -323,7 +336,7 @@ public class PhysicsEngine
                     Mass = Math.Max(0.5, Math.Log(1 + gn.WordCount) * 0.3),
                     Radius = Math.Max(0.08, Math.Min(0.35, Math.Log(1 + gn.WordCount) * 0.035)),
                     PulsePhase = _rng.NextDouble() * Math.PI * 2,
-                    LinkedIds = gn.LinkedNodeIds,
+                    LinkedIds = DrawnLinks(gn),
                     CustomCategoryId = gn.CustomCategoryId,
                     BirthAt = now
                 });
@@ -411,7 +424,7 @@ public class PhysicsEngine
                 Mass = Math.Max(0.5, Math.Log(1 + node.WordCount) * 0.3),
                 Radius = Math.Max(0.08, Math.Min(0.35, Math.Log(1 + node.WordCount) * 0.035)),
                 PulsePhase = _rng.NextDouble() * Math.PI * 2,
-                LinkedIds = node.LinkedNodeIds,
+                LinkedIds = DrawnLinks(node),
                 CustomCategoryId = node.CustomCategoryId
             });
             i++;

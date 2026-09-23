@@ -362,6 +362,10 @@ static KnowledgeGraph ExportToGraph(BrainExport e)
         });
         foreach (var lid in n.LinkedNodeIds ?? [])
             g.Edges.Add(new KnowledgeEdge { SourceId = n.Id, TargetId = lid });
+        // The auto-linker's guesses travel apart from written links since
+        // 2026-09-23. They were edges here before; they stay edges, marked.
+        foreach (var lid in n.AutoLinkedNodeIds ?? [])
+            g.Edges.Add(new KnowledgeEdge { SourceId = n.Id, TargetId = lid, RelationType = "auto" });
     }
     return g;
 }
@@ -519,7 +523,7 @@ app.MapGet("/api/brain/note/{id}", (string id) =>
     {
         node.Id, node.Title, node.RelativePath, node.PrimaryCategory,
         node.SecondaryCategories, node.Tags, node.WordCount,
-        node.ModifiedAt, node.LinkedNodeIds, Content = content
+        node.ModifiedAt, node.LinkedNodeIds, node.AutoLinkedNodeIds, Content = content
     });
 });
 

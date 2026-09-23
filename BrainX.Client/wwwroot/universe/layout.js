@@ -219,7 +219,7 @@ export function buildUniverse(brain) {
                 tags: n.Tags ?? n.tags ?? [],
                 preview: (n.Preview ?? n.preview ?? '').slice(0, 480),
                 modifiedAt: n.ModifiedAt ?? n.modifiedAt ?? null,
-                linkedIds: n.LinkedNodeIds ?? n.linkedNodeIds ?? []
+                linkedIds: drawnLinks(n)
             };
 
             idIndex.set(id, nodes.length);
@@ -258,6 +258,19 @@ export function expertiseByCategory(brain) {
  *  palette has never heard of. */
 export function paletteFor(category) {
     return GALAXY_PALETTE[category] ?? { hex: hueFromCategory(category), label: prettifyCategory(category) };
+}
+
+/**
+ * Every link a note draws: the written ones and the auto-linker's guesses.
+ * Since 2026-09-23 the export keeps them apart (AutoLinkedNodeIds) so the
+ * brain's tools stop counting guesses as links — but the universe was always
+ * shaped by both, and dropping the ~80% that are guesses would change how the
+ * brain looks for a reason that has nothing to do with how it looks.
+ */
+export function drawnLinks(n) {
+    const written = n.LinkedNodeIds ?? n.linkedNodeIds ?? [];
+    const guessed = n.AutoLinkedNodeIds ?? n.autoLinkedNodeIds ?? [];
+    return guessed.length === 0 ? written : [...new Set([...written, ...guessed])];
 }
 
 /**
