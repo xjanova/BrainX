@@ -52,6 +52,8 @@ internal static partial class Program
         WriteNote(vault, "Imported/a/Shared deployment checklist.md", "# one\n");
         WriteNote(vault, "Imported/b/Shared deployment checklist.md", "# two\n");
         WriteNote(vault, "V3_CODING_GUIDELINES.md", "# guidelines\n");
+        // …and a report BrainX rewrites itself on every eval run.
+        WriteNote(vault, "Notes/Retrieval benchmark — gold-mini.md", "---\nsource: brainx-eval\n---\n# Retrieval benchmark — gold-mini\n\n| arm | MRR |\n");
         File.WriteAllText(Path.Combine(vault, ".obsidianx", "brain-export.json"), Newtonsoft.Json.JsonConvert.SerializeObject(Snapshot(vault)));
         var resultPath = Path.Combine(vault, ".obsidianx", "findability.json");
         JObject Result() => JObject.Parse(File.ReadAllText(resultPath));
@@ -62,7 +64,7 @@ internal static partial class Program
         {
             var (code, output) = RunCliWith(exe, $"canary --vault \"{vault}\"", new Dictionary<string, string> { ["BRAINX_OLLAMA_URL"] = ollama.Url });
             var ok = Result();
-            Check("canary: asks only for notes whose title can stand as a query — not README, a shared name, or a rules file",
+            Check("canary: asks only for notes whose title can stand as a query — not README, a shared name, a rules file or a BrainX report",
                   ok["checked"]?.Value<int>() == 3, ok.ToString());
             Check("…finds each by its own title through brain_recall's ranking, with the queries embedded",
                   code == 0 && ok["found"]?.Value<int>() == 3 && ok["queriesEmbedded"]?.Value<int>() == 3 && ok["problem"]?.Type == JTokenType.Null, output);

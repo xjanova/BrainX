@@ -73,7 +73,12 @@ internal static partial class Program
                         && n.RelativePath.EndsWith(".md", StringComparison.OrdinalIgnoreCase)
                         && n.Kind != "instructions"
                         && n.Title.Length >= 12
-                        && titleCount[n.Title] == 1)
+                        && titleCount[n.Title] == 1
+                        // Reports BrainX rewrites itself (source: brainx-eval,
+                        // brainx-garden): a table of numbers is looked up by its
+                        // name — the exact-title guard's job — not found by what
+                        // it says, and every eval run makes one "newest".
+                        && !FrontmatterRefs(n, "source").Any(s => s.StartsWith("brainx-", StringComparison.OrdinalIgnoreCase)))
             .OrderByDescending(n => n.ModifiedAt)
             .Take(CanaryNotes)
             .ToList();

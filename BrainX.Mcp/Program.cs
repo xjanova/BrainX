@@ -2032,7 +2032,7 @@ internal static partial class Program
                     escalated = matches.Count == 0
                         ? "keyword matched nothing, so these come from meaning (keyword + embeddings, as brain_recall ranks)"
                         : string.Create(System.Globalization.CultureInfo.InvariantCulture,
-                            $"the best keyword match held only {cover:P0} of the query's words, so these come from meaning (keyword + embeddings, as brain_recall ranks)");
+                            $"the best keyword match held only {cover * 100:0}% of the query's words, so these come from meaning (keyword + embeddings, as brain_recall ranks)");
                     matches = fused.Select(r => new { Node = r.Node, Score = r.Score }).ToList();
                 }
             }
