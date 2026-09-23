@@ -360,7 +360,7 @@ internal static partial class Program
             };
         }
 
-        var updates = new List<(string Key, string Value)>();
+        var updates = new List<(string Key, string? Value)>();
         if (!string.IsNullOrEmpty(statusRaw))
         {
             updates.Add(("status", statusRaw!));
