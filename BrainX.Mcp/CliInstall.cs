@@ -59,6 +59,8 @@ internal static class CliInstall
         Console.WriteLine("                                          (file->lesson, error->fix, per-repo warm start; also a garden step)");
         Console.WriteLine("  brainx-mcp garden [--vault]          Re-bake stale bundles, fill embeddings, audit, write Brain health");
         Console.WriteLine("  brainx-mcp eval [options]            Score retrieval on a labelled query set (writes Retrieval benchmark)");
+        Console.WriteLine("  brainx-mcp export [--vault] [--out DIR] Re-index and rewrite brain-export.json; --out writes a shadow");
+        Console.WriteLine("                                       export to DIR only (measure an indexer change without touching the vault)");
         Console.WriteLine("  brainx-mcp embed-probe [options]     Compare the in-process ONNX embedder against Ollama and against");
         Console.WriteLine("                                          the sidecars on disk — the check that says whether the");
         Console.WriteLine("                                          existing vectors survive a backend switch");
@@ -69,6 +71,16 @@ internal static class CliInstall
         Console.WriteLine("                                          (echo {} | brainx-mcp hook-stop --vault G:\\Obsidian).");
         Console.WriteLine("  brainx-mcp hook-session-start        Claude Code SessionStart hook: print queued tasks as context.");
         Console.WriteLine("             --vault PATH                 Always exits 0 — it informs a session, it never blocks one.");
+        Console.WriteLine("  brainx-mcp ssh-approve <confirm_id>  Review and approve (or deny) a gated ssh_run command — needs a");
+        Console.WriteLine("                                       real terminal; --list shows what is waiting, --deny refuses");
+        Console.WriteLine("  brainx-mcp ssh-lint [--vault]        What each SSH profile lets through + safer deny/allow lists to adopt");
+        Console.WriteLine("  brainx-mcp ssh-audit-migrate [--apply] Move pre-2026-09-23 SSH rows out of access-log.ndjson into the");
+        Console.WriteLine("                                       redacted ssh-audit file (dry run unless --apply; backs up first)");
+        Console.WriteLine("  brainx-mcp remember-backfill [--apply] Copy brain_remember facts stranded in .obsidianx/sessions into");
+        Console.WriteLine("                                       the searchable Notes/Remembered notes (dry run unless --apply)");
+        Console.WriteLine("  brainx-mcp canary [--vault]          Can the newest notes be found by their own titles? (brain_recall's");
+        Console.WriteLine("                                       ranking; sessions also run it every 12 h → findability.json)");
+        Console.WriteLine("  brainx-mcp dream [--vault] [--limit] What brain_dream proposes, supersede candidates included (read-only)");
         Console.WriteLine("  brainx-mcp --version | -v | version  Print version + binary path + build time");
         Console.WriteLine("  brainx-mcp help                      Show this help");
         Console.WriteLine();

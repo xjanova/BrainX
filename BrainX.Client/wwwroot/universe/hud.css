@@ -1362,6 +1362,15 @@ body.hud-active.has-notice #hud-layer {
     user-select: none;
 }
 
+/* The chat card's own caps (46vw × 34vh, under .hud-panel-chat) carry one
+   class more than the rule above, so they won on specificity: a placed chat
+   card could be dragged bigger — or planned bigger by hudplace.js — and its
+   box simply did not follow. */
+#hud-layer > .hud-panel.hud-bc.hud-panel-chat.hud-free {
+    max-width: none;
+    max-height: none;
+}
+
 /* Stretching a card is a request to SEE MORE, and several readouts were capped
    by the window instead of by the card they live in — so dragging one taller
    grew the card and nothing inside it. Under a placed card the card is the
@@ -1438,6 +1447,12 @@ body.hud-active.has-notice #hud-layer {
     color: #fff;
     border-color: rgba(216, 185, 120, 0.55);
     background: rgba(16, 13, 40, 0.8);
+}
+/* Armed: the next click throws every arrangement away, and it should look it. */
+#hud-layout-reset.is-armed {
+    color: #ffe2a8;
+    border-color: rgba(255, 176, 92, 0.75);
+    background: rgba(48, 22, 8, 0.82);
 }
 /* The panel half of the controls hint. Only true under ?hud=1 — the wallpaper
    and dashboard-embed modes render this same strip and have no HUD to place. */

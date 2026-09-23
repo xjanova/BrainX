@@ -35,21 +35,43 @@ internal static partial class Program
     // sweeps every candidate, and re-reading a few hundred section files
     // per query would put disk I/O back on the hot path v2.8.0 removed it
     // from. Keyed by mtime so a re-embedded note reloads.
-    private static readonly Dictionary<string, (long Mtime, List<float[]> Vecs)> _sectCache = new();
+    // Keyed by the sidecar's mtime AND the note's, so an edit to either
+    // re-decides; Vecs is null for a sidecar judged not to fit its note.
+    private static readonly Dictionary<string, (long Mtime, long NoteTicks, List<float[]>? Vecs)> _sectCache = new();
 
     /// <summary>Sidecar's section vectors, or null when the note has none —
-    /// which is the common case and must stay free: one File.Exists.</summary>
-    private static List<float[]>? LoadSectionEmbeddings(string nodeId)
+    /// which is the common case and must stay free: one File.Exists.
+    ///
+    /// Also null when the sidecar predates the note AND the note has lost
+    /// sections since. The winning section's INDEX is what the caller shows,
+    /// read against the note's current text: once sections are removed,
+    /// section 4 of the old split is another passage of the new one. But the
+    /// edits this vault actually gets are appends (brain_append_note) and
+    /// stamps: of 32 stale sidecars on 2026-09-23, 19 belonged to notes that
+    /// had GROWN at the end, 7 were unchanged in shape, 1 had shrunk — and
+    /// dropping them all cost paraphrase-46 two points of hit@1. A note that
+    /// still splits into at least as many sections keeps its vectors: its first
+    /// sections are the ones they were made from.</summary>
+    private static List<float[]>? LoadSectionEmbeddings(NodeSummary note)
     {
+        var nodeId = note.Id;
         try
         {
             var path = SectionEmbeddings.SidecarPath(_vaultPath, nodeId);
             if (!File.Exists(path)) return null;
-            var mtime = File.GetLastWriteTimeUtc(path).Ticks;
-            if (_sectCache.TryGetValue(nodeId, out var hit) && hit.Mtime == mtime) return hit.Vecs;
+            var at = File.GetLastWriteTimeUtc(path);
+            var mtime = at.Ticks;
+            var noteTicks = note.ModifiedAt.ToUniversalTime().Ticks;
+            if (_sectCache.TryGetValue(nodeId, out var hit) && hit.Mtime == mtime && hit.NoteTicks == noteTicks)
+                return hit.Vecs;
             var vecs = SectionEmbeddings.Read(path);
-            if (vecs == null) return null;
-            _sectCache[nodeId] = (mtime, vecs);
+            if (vecs != null && mtime < noteTicks)
+            {
+                var file = Path.Combine(_vaultPath, note.RelativePath);
+                var now = File.Exists(file) ? SectionEmbeddings.Split(note.Title, File.ReadAllText(file)).Count : 0;
+                if (now < vecs.Count) vecs = null;
+            }
+            _sectCache[nodeId] = (mtime, noteTicks, vecs);
             return vecs;
         }
         catch { return null; }
@@ -96,7 +118,11 @@ internal static partial class Program
         var budget = EmbeddingService.ReadManifestMaxChars(_vaultPath)
                      ?? EmbeddingService.ResolveMaxChars(model);
         var svc = new EmbeddingService { Model = model, MaxChars = budget };
-        var ollama = await svc.OllamaReachableAsync().ConfigureAwait(false);
+        // Not just "reachable": Ollama answering /api/tags while every embed
+        // 404s on a missing model is the failure that stalled the vault for a
+        // week (2026-09-16 → 23). Either way the in-process backend takes over.
+        var ollamaProblem = await svc.OllamaProblemAsync(model).ConfigureAwait(false);
+        var ollama = ollamaProblem == null;
 
         // Fallback backend, resolved once. Sections are capped at 4,000 chars
         // (~1,500 tokens of Thai), so 2048 tokens reads every section in full
@@ -108,16 +134,22 @@ internal static partial class Program
             onnx = OnnxEmbedder.TryCreate(null, out var why);
             if (onnx == null)
             {
-                Console.Error.WriteLine($"Ollama unreachable and ONNX unavailable ({why}) — nothing can embed.");
+                Console.Error.WriteLine($"{ollamaProblem} — and ONNX is unavailable ({why}); nothing can embed.");
                 return 2;
             }
         }
 
-        var targets = export.Nodes.Where(n => kinds.Contains(n.Kind)).ToList();
+        // The kinds this pass CREATES sidecars for, plus every note that
+        // already HAS one: 865 sidecars of other kinds existed (made by a
+        // one-off --kinds run) and nothing ever refreshed them, so 28 went
+        // stale and kept winning max() with the text of an older revision.
+        var targets = export.Nodes
+            .Where(n => kinds.Contains(n.Kind) || File.Exists(SectionEmbeddings.SidecarPath(_vaultPath, n.Id)))
+            .ToList();
         Console.WriteLine($"brainx-mcp embed-sections · v{ServerVersion}");
         Console.WriteLine($"  vault:   {_vaultPath}");
-        Console.WriteLine($"  backend: {(ollama ? $"ollama/{model}" : "onnx in-process")}");
-        Console.WriteLine($"  targets: {targets.Count} note(s) of kind [{string.Join(", ", kinds)}]");
+        Console.WriteLine($"  backend: {(ollama ? $"ollama/{model}" : $"onnx in-process ({ollamaProblem})")}");
+        Console.WriteLine($"  targets: {targets.Count} note(s) — kind [{string.Join(", ", kinds)}] plus existing sidecars");
 
         var sw = Stopwatch.StartNew();
         int written = 0, fresh = 0, tooFew = 0, failed = 0, sectionsTotal = 0;

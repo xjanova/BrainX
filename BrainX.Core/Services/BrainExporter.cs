@@ -131,36 +131,7 @@ public class BrainExporter
         }
 
         foreach (var node in graph.Nodes.OrderByDescending(n => n.Importance))
-        {
-            export.Nodes.Add(new NodeSummary
-            {
-                Id = node.Id,
-                Title = node.Title,
-                RelativePath = Path.GetRelativePath(vaultPath, node.FilePath).Replace("\\", "/"),
-                PrimaryCategory = node.PrimaryCategory.ToString(),
-                SecondaryCategories = node.SecondaryCategories.Select(c => c.ToString()).ToList(),
-                Tags = node.Tags,
-                // Routing dimensions travel with the export — the MCP reads
-                // this file, not the graph, so anything absent here is absent
-                // from every agent-facing answer.
-                Kind = node.Kind.ToString().ToLowerInvariant(),
-                Scope = node.Scope,
-                Audience = node.Audience,
-                WordCount = node.WordCount,
-                ModifiedAt = node.ModifiedAt,
-                Importance = Math.Round(node.Importance, 3),
-                LinkedNodeIds = node.LinkedNodeIds,
-                BacklinkIds = node.BacklinkIds,
-                Headings = node.Headings.Select(h => new HeadingSummary
-                {
-                    Level = h.Level, Text = h.Text, Anchor = h.Anchor
-                }).ToList(),
-                BlockIds = node.BlockIds,
-                Properties = node.Properties,
-                Embeds = node.Embeds,
-                Preview = ReadPreview(node.FilePath, 280)
-            });
-        }
+            export.Nodes.Add(Summarize(node, vaultPath));
 
         // Top tags across the vault (useful for quick "ask Claude about X" prompts)
         var tagCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -173,6 +144,41 @@ public class BrainExporter
 
         return export;
     }
+
+    /// <summary>
+    /// One node as the export carries it. Shared with <see cref="ExportOverlay"/>,
+    /// which summarises notes written since the last export — the two must
+    /// never disagree about what a note looks like to the MCP server.
+    /// </summary>
+    public static NodeSummary Summarize(KnowledgeNode node, string vaultPath) => new()
+    {
+        Id = node.Id,
+        Title = node.Title,
+        RelativePath = Path.GetRelativePath(vaultPath, node.FilePath).Replace("\\", "/"),
+        PrimaryCategory = node.PrimaryCategory.ToString(),
+        SecondaryCategories = node.SecondaryCategories.Select(c => c.ToString()).ToList(),
+        Tags = node.Tags,
+        // Routing dimensions travel with the export — the MCP reads
+        // this file, not the graph, so anything absent here is absent
+        // from every agent-facing answer.
+        Kind = node.Kind.ToString().ToLowerInvariant(),
+        Scope = node.Scope,
+        Audience = node.Audience,
+        WordCount = node.WordCount,
+        ModifiedAt = node.ModifiedAt,
+        Importance = Math.Round(node.Importance, 3),
+        LinkedNodeIds = node.LinkedNodeIds,
+        AutoLinkedNodeIds = node.AutoLinkedNodeIds,
+        BacklinkIds = node.BacklinkIds,
+        Headings = node.Headings.Select(h => new HeadingSummary
+        {
+            Level = h.Level, Text = h.Text, Anchor = h.Anchor
+        }).ToList(),
+        BlockIds = node.BlockIds,
+        Properties = node.Properties,
+        Embeds = node.Embeds,
+        Preview = ReadPreview(node.FilePath, 280)
+    };
 
     private static string ReadPreview(string path, int limit)
     {
@@ -388,6 +394,25 @@ public class BrainExport
     public List<ExpertiseEntry> Expertise { get; set; } = [];
     public List<TagCount> TopTags { get; set; } = [];
     public List<NodeSummary> Nodes { get; set; } = [];
+
+    /// <summary>
+    /// Set only on a live view built by <see cref="ExportOverlay"/>: what the
+    /// vault holds that this snapshot does not. Never serialized — the file on
+    /// disk IS the snapshot, and marking it otherwise would be a lie.
+    /// </summary>
+    [JsonIgnore] public OverlayInfo? Overlay { get; set; }
+}
+
+/// <summary>How far a live view is ahead of the brain-export.json it started from.</summary>
+public sealed class OverlayInfo
+{
+    /// <summary>Notes on disk that the snapshot does not have.</summary>
+    public int Added { get; init; }
+    /// <summary>Notes edited since the snapshot, re-read from disk.</summary>
+    public int Changed { get; init; }
+    /// <summary>Snapshot notes whose file is gone.</summary>
+    public int Removed { get; init; }
+    public DateTime ScannedAt { get; init; }
 }
 
 public class ExpertiseEntry
@@ -418,7 +443,10 @@ public class NodeSummary
     public int WordCount { get; set; }
     public DateTime ModifiedAt { get; set; }
     public double Importance { get; set; }
+    /// <summary>Links written by hand (wiki-links, embeds, canvas).</summary>
     public List<string> LinkedNodeIds { get; set; } = [];
+    /// <summary>The auto-linker's guesses, kept apart — see KnowledgeNode.AutoLinkedNodeIds.</summary>
+    public List<string> AutoLinkedNodeIds { get; set; } = [];
     /// <summary>
     /// Reverse links — every other note that links INTO this one.
     /// Computed in <see cref="KnowledgeIndexer.IndexVault"/> after edges
@@ -435,6 +463,9 @@ public class NodeSummary
     public Dictionary<string, object?> Properties { get; set; } = new();
     /// <summary>External assets referenced by transclusion <c>![[image.png]]</c>.</summary>
     public List<string> Embeds { get; set; } = [];
+
+    /// <summary>A shallow copy — replace a list on it before changing that list.</summary>
+    public NodeSummary Copy() => (NodeSummary)MemberwiseClone();
 }
 
 public class HeadingSummary

@@ -401,22 +401,36 @@ public class VaultImporter
         Directory.CreateDirectory(importedDir);
 
         var manifest = LoadManifest(options.VaultPath);
+        // Targets claimed by a source earlier in THIS run — the disk alone
+        // cannot say, because nothing has been written for them yet when the
+        // second source with the same folder and file name comes along.
+        var claimed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var hit in hits)
         {
             try
             {
-                var target = Path.Combine(options.VaultPath, hit.SuggestedVaultPath);
+                var target = TargetFor(hit, options.VaultPath, claimed);
+                // Unchanged since last time AND its note is really there. The
+                // manifest alone is not proof: a source whose note was
+                // overwritten by a namesake before this fix is "imported" by
+                // the manifest and present nowhere — this is how it comes back.
+                if (manifest.TryGetValue(hit.SourcePath, out var prev) && prev == hit.ContentHash && File.Exists(target))
+                {
+                    claimed[target] = hit.SourcePath;
+                    result.Skipped.Add(hit.SourcePath);
+                    continue;
+                }
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-
-                if (manifest.TryGetValue(hit.SourcePath, out var prev) && prev == hit.ContentHash)
-                { result.Skipped.Add(hit.SourcePath); continue; }
+                if (!target.Equals(Path.Combine(options.VaultPath, hit.SuggestedVaultPath), StringComparison.OrdinalIgnoreCase))
+                    result.Renamed.Add($"{hit.SourcePath} → {Path.GetRelativePath(options.VaultPath, target).Replace('\\', '/')}");
 
                 if (options.Mode == ImportMode.Copy)
                     WriteCopyNote(target, hit);
                 else
                     WriteReferenceNote(target, hit);
 
+                claimed[target] = hit.SourcePath;
                 manifest[hit.SourcePath] = hit.ContentHash;
                 result.Imported.Add(target);
             }
@@ -428,6 +442,60 @@ public class VaultImporter
 
         SaveManifest(options.VaultPath, manifest);
         return result;
+    }
+
+    /// <summary>
+    /// Where a hit is written. Its suggested path is Imported/&lt;parent
+    /// folder&gt;/&lt;file&gt;, so repoA\docs\guide.md and repoB\docs\guide.md
+    /// both land on Imported/docs/guide.md — and the second used to overwrite
+    /// the first, while the manifest recorded BOTH as imported, so the first
+    /// was never written again. A target belongs to one source: its own note
+    /// (frontmatter `source:`), or nobody's yet. Anything else — another
+    /// source's note, or a note the owner wrote there by hand — gets a name
+    /// derived from this source's full path, stable across runs so a re-import
+    /// updates the same file instead of spawning another.
+    /// </summary>
+    private static string TargetFor(ScanHit hit, string vaultPath, Dictionary<string, string> claimed)
+    {
+        var preferred = Path.Combine(vaultPath, hit.SuggestedVaultPath);
+        if (Owns(preferred, hit.SourcePath, claimed)) return preferred;
+
+        var tag = (FnvHash64(Path.GetFullPath(hit.SourcePath).ToLowerInvariant()) & 0xFFFFFF).ToString("x6");
+        var alt = Path.Combine(Path.GetDirectoryName(preferred)!,
+            $"{Path.GetFileNameWithoutExtension(preferred)} ({tag}){Path.GetExtension(preferred)}");
+        return Owns(alt, hit.SourcePath, claimed) ? alt
+            // Two full paths sharing 24 bits of hash: vanishingly rare, and
+            // still never an overwrite.
+            : Path.Combine(Path.GetDirectoryName(preferred)!, $"{Path.GetFileNameWithoutExtension(preferred)} ({Guid.NewGuid():N}){Path.GetExtension(preferred)}");
+    }
+
+    private static bool Owns(string target, string source, Dictionary<string, string> claimed)
+    {
+        if (claimed.TryGetValue(target, out var by)) return by.Equals(source, StringComparison.OrdinalIgnoreCase);
+        if (!File.Exists(target)) return true;
+        var recorded = ReadImportSource(target);
+        return recorded != null
+            && Path.GetFullPath(recorded).Equals(Path.GetFullPath(source), StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>The `source:` an import note was written from, or null for a
+    /// file this importer did not write.</summary>
+    private static string? ReadImportSource(string path)
+    {
+        try
+        {
+            using var reader = new StreamReader(path);
+            if (reader.ReadLine()?.TrimEnd() != "---") return null;
+            for (int i = 0; i < 40 && reader.ReadLine() is { } line; i++)
+            {
+                if (line.TrimEnd() == "---") return null;
+                if (line.StartsWith("source: ", StringComparison.Ordinal)) return line[8..].Trim();
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        catch (ArgumentException) { }
+        return null;
     }
 
     private static void WriteReferenceNote(string target, ScanHit hit)
@@ -654,4 +722,6 @@ public class ImportResult
     public List<string> Imported { get; set; } = [];
     public List<string> Skipped { get; set; } = [];
     public List<string> Errors { get; set; } = [];
+    /// <summary>"source → vault path" for hits whose usual name was taken by another source.</summary>
+    public List<string> Renamed { get; set; } = [];
 }

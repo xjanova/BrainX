@@ -121,6 +121,50 @@ if ($vaultRoot) {
     catch { }
 }
 
+# === Embedding pipeline health ===
+# The one failure no session can see from inside: from 2026-09-16 to 09-23
+# bge-m3 was missing from Ollama, every embed 404'd, every report said
+# "0 written", and a week of new notes had no vector - so brain_recall and
+# semantic search could not find them while answering confidently from older
+# ones. The last pass records its problem in embeddings/status.json; if there
+# is one, the session hears it before it trusts a semantic result.
+$embedSection = $null
+if ($vaultRoot) {
+    try {
+        $sj = "$vaultRoot\.obsidianx\embeddings\status.json"
+        if (Test-Path $sj) {
+            $st = [System.IO.File]::ReadAllText($sj) | ConvertFrom-Json
+            if ($st.problem) {
+                $age = ''
+                try { $age = " (checked $([math]::Round(((Get-Date).ToUniversalTime() - (Get-Date $st.checkedAt).ToUniversalTime()).TotalHours, 0))h ago)" } catch { }
+                $embedSection = "EMBEDDINGS STALLED$($age): $($st.problem). Notes written since then have no vector, so brain_semantic_search and brain_recall cannot see them - prefer brain_search (keyword) for anything recent, and tell the owner: the fix is on their machine. brain_stats -> embeddings shows how many notes are waiting."
+            }
+        }
+    }
+    catch { }
+}
+
+# === Findability canary ===
+# The end-to-end version of the check above: can the notes written in the last
+# three days be found by their own titles through brain_recall's ranking? MCP
+# sessions run it every 12 hours into findability.json; a failure is said here,
+# and only while the result is recent enough to still describe the vault.
+$findSection = $null
+if ($vaultRoot) {
+    try {
+        $fj = "$vaultRoot\.obsidianx\findability.json"
+        if (Test-Path $fj) {
+            $fc = [System.IO.File]::ReadAllText($fj) | ConvertFrom-Json
+            $recent = $false
+            try { $recent = ((Get-Date).ToUniversalTime() - (Get-Date $fc.checkedAt).ToUniversalTime()).TotalDays -lt 3 } catch { }
+            if ($fc.problem -and $recent) {
+                $findSection = "FINDABILITY: $($fc.problem). For anything recent, confirm a brain_recall answer with brain_search (keyword) before trusting it, and tell the owner - brain_stats -> findability lists the notes."
+            }
+        }
+    }
+    catch { }
+}
+
 # === Who she is ===
 # Injected FIRST, because it frames everything after it. Without this the
 # owner typing "มายด์ ช่วยดูให้หน่อย" reads as a third party the agent should
@@ -156,6 +200,8 @@ catch { }
 # === Compose final context ===
 $parts = @()
 if ($identitySection) { $parts += $identitySection }
+if ($embedSection) { $parts += $embedSection }
+if ($findSection) { $parts += $findSection }
 if ($handoffSection) { $parts += $handoffSection }
 if ($repoPackSection) { $parts += $repoPackSection }
 if ($playbookSection) { $parts += $playbookSection }

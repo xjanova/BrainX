@@ -132,6 +132,27 @@ public static class McpRemotePolicy
 
     public static bool IsHardBlocked(string tool) => HardBlocked.Contains(tool);
 
+    /// <summary>
+    /// Why a call's ARGUMENTS are refused remotely even though the tool itself
+    /// is allowed, or null. The allowlist above decides by name only, and one
+    /// argument turned an allowed tool into the thing brain_import_path is
+    /// hard-blocked for: agent_send's `attachments` names LOCAL paths, which the
+    /// MCP copied into the shared bus — arbitrary file disclosure from a remote
+    /// token. A remote caller has no files on this machine, so any path it
+    /// names is a probe.
+    /// </summary>
+    public static string? ArgumentRefusal(string tool, JToken? arguments)
+    {
+        if (arguments is not JObject args) return null;
+        if (tool.Equals("agent_send", StringComparison.OrdinalIgnoreCase)
+            && args["attachments"] is JToken a && a.Type != JTokenType.Null
+            && !(a is JArray arr && arr.Count == 0)
+            && !(a.Type == JTokenType.String && string.IsNullOrWhiteSpace(a.ToString())))
+            return "attachments are not accepted over the remote endpoint — a remote caller has no files on this machine; "
+                 + "put the content in the message, or in a brain note and send its id";
+        return null;
+    }
+
     /// <summary>Is <paramref name="tool"/> callable at <paramref name="scope"/>?</summary>
     public static bool IsAllowed(string tool, McpScope scope)
     {

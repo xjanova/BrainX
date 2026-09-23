@@ -254,6 +254,11 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        // The owner's seal key exists from the first launch of a client that
+        // seals, so the MCP starts refusing unsealed "owner" lines right away
+        // instead of after the owner's first message (see BusSeal).
+        try { BrainX.Core.Services.BusSeal.EnsureKey(); }
+        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"BusSeal key: {ex.Message}"); }
         _vaultPath = @"G:\Obsidian";
         if (Environment.GetCommandLineArgs().Length > 1)
             _vaultPath = Environment.GetCommandLineArgs()[1];

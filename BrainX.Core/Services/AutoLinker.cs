@@ -109,7 +109,8 @@ public partial class AutoLinker
                     Strength = w * Options.AutoEdgePhysicsScale,
                     RelationType = $"auto:{why}"
                 });
-                a.LinkedNodeIds.Add(graph.Nodes[j].Id);
+                // A guess, filed as one — never beside the links a person wrote.
+                a.AutoLinkedNodeIds.Add(graph.Nodes[j].Id);
                 existingEdges.Add(key);
                 added++;
                 take++;
@@ -248,7 +249,11 @@ public partial class AutoLinker
     private static (string, string) Norm(string a, string b)
         => string.CompareOrdinal(a, b) < 0 ? (a, b) : (b, a);
 
-    [GeneratedRegex(@"[\p{L}\p{N}]+")]
+    // \p{M} included: Thai vowel signs and tone marks are combining MARKS, not
+    // letters, so [\p{L}\p{N}]+ cut every Thai word at each one — "การ์ด"
+    // became "การ" + "ด" — and those fragments matched across unrelated
+    // titles as if they were shared words.
+    [GeneratedRegex(@"[\p{L}\p{M}\p{N}]+")]
     private static partial Regex TokenPattern();
 
     [GeneratedRegex(@"^source:\s*(.+)$", RegexOptions.Multiline)]

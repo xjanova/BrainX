@@ -210,7 +210,12 @@ public partial class MainWindow
 
     private void SshOpenAuditLog_Click(object sender, RoutedEventArgs e)
     {
-        var path = Path.Combine(_vaultPath, ".obsidianx", "access-log.ndjson");
+        // Since 2026-09-23 the SSH record lives in its own redacted, rotating
+        // file; access-log.ndjson only carries a short pulse per call. Older
+        // vaults (or a server that has not made a call since) still have only
+        // the access log, so fall back to it.
+        var path = Path.Combine(_vaultPath, ".obsidianx", "ssh-audit.ndjson");
+        if (!File.Exists(path)) path = Path.Combine(_vaultPath, ".obsidianx", "access-log.ndjson");
         if (!File.Exists(path))
         {
             MessageBox.Show(

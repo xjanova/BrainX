@@ -90,8 +90,11 @@ foreach ($c in $continuations) {
 }
 
 # === Build protocol message ===
+# Same wording as the server's own instructions (Program.Instructions), so the
+# two never disagree. It used to end "OR read .obsidianx/brain-export.json
+# directly" - a ~12 MB file, and never cheaper than one more search.
 $protocolParts = @(
-    'Brain-first protocol: before responding to non-trivial prompts, run ONE brain_search with 2-4 keywords. If 0 hits, retry with brain_semantic_search OR read .obsidianx/brain-export.json directly. brain_get_note ONLY when preview is insufficient (notes can be 5k-20k tokens). Skip search entirely for: trivial Q, generic coding/framework knowledge, prompts with explicit file paths or code blocks. Cite note titles you actually read.'
+    'Brain-first protocol: before responding to non-trivial prompts, ask the brain ONCE - brain_recall (STRONG = cite it and move on) or brain_search with 2-4 keywords, passing scope when you can name the project. 0 hits: brain_semantic_search without scope. brain_get_note ONLY when the preview is insufficient (notes can be 5k-20k tokens). Skip for: trivial Q, generic coding/framework knowledge, prompts with explicit file paths or code blocks. Cite note titles you actually read.'
 )
 
 # Inject recent searches (last 60 min) to prevent duplicate queries
@@ -164,14 +167,16 @@ if (Test-Path $toolLog) {
             # (obsidianx-brain -> brainx-brain, 2026-05-25); the tool name does not.
             # Anchored to the old prefix this matched NOTHING for ~3 months, so the
             # stronger nudge fired on every editing turn regardless of what was read.
-            $_.tool -match '__(brain_search|brain_semantic_search|brain_get_note|brain_synthesize|brain_get_backlinks)$'
+            # brain_recall is the recommended FIRST move; leaving it (and walk /
+            # bundle) out scolded exactly the agents that followed the protocol.
+            $_.tool -match '__(brain_recall|brain_search|brain_semantic_search|brain_get_note|brain_synthesize|brain_get_backlinks|brain_walk|brain_bundle)$'
         }).Count -gt 0
 
         if ($hadEdit -and -not $hadBrainRead) {
             $protocolParts = ,(
                 "STRONGER NUDGE - the previous turn made code changes WITHOUT consulting the brain first. " +
-                "This vault has 600+ notes documenting past decisions and bugs. " +
-                "BEFORE answering this prompt, run brain_search (or brain_semantic_search if 0 hits) " +
+                "This vault documents past decisions and bugs for exactly this kind of work. " +
+                "BEFORE answering this prompt, run brain_recall or brain_search (brain_semantic_search if 0 hits) " +
                 "and CITE the note titles you read in your reply. " +
                 "Memory rule: feedback_consult_brain_proactively.md"
             ) + $protocolParts

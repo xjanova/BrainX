@@ -24,19 +24,24 @@ internal static partial class Program
 {
     internal static int ExportCli(string[] args)
     {
-        string? vaultArg = null;
+        string? vaultArg = null, outArg = null;
         var quiet = false;
         for (int i = 0; i < args.Length; i++)
         {
             if (args[i] == "--vault" && i + 1 < args.Length) vaultArg = args[++i];
+            else if (args[i] == "--out" && i + 1 < args.Length) outArg = args[++i];
             else if (args[i] == "--quiet") quiet = true;
             else if (args[i] is "-h" or "--help" or "help")
             {
-                Console.WriteLine("Usage: brainx-mcp export [--vault PATH] [--quiet]");
+                Console.WriteLine("Usage: brainx-mcp export [--vault PATH] [--out DIR] [--quiet]");
                 Console.WriteLine();
                 Console.WriteLine("Re-indexes the vault and rewrites .obsidianx/brain-export.json,");
                 Console.WriteLine("which every search path reads. Run this after importing or");
                 Console.WriteLine("hand-adding notes on a machine with no BrainX client.");
+                Console.WriteLine();
+                Console.WriteLine("--out DIR writes ONLY DIR/.obsidianx/brain-export.json and touches");
+                Console.WriteLine("nothing in the vault: a shadow export, for measuring an indexer");
+                Console.WriteLine("change with `brainx-mcp eval --vault DIR` before it ships.");
                 return 0;
             }
         }
@@ -44,6 +49,31 @@ internal static partial class Program
             _vaultPath = Path.GetFullPath(vaultArg);
 
         void Say(string s) { if (!quiet) Console.WriteLine(s); }
+
+        if (!string.IsNullOrWhiteSpace(outArg))
+        {
+            // The live export is what every agent reads, and the full Export()
+            // also rewrites the managed section of CLAUDE.md — neither may
+            // change because someone wanted to MEASURE an indexer. The shadow
+            // keeps VaultPath pointing at the real vault, so every note body a
+            // ranker reads is the real one; only the index differs.
+            var outDir = Path.Combine(Path.GetFullPath(outArg), ".obsidianx");
+            if (Path.GetFullPath(outArg).TrimEnd('\\', '/').Equals(_vaultPath.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase))
+            {
+                Console.Error.WriteLine("--out is the vault itself — use plain `export` for that.");
+                return 2;
+            }
+            Directory.CreateDirectory(outDir);
+            var shadowWatch = Stopwatch.StartNew();
+            var shadowGraph = new KnowledgeIndexer().IndexVault(_vaultPath);
+            var shadow = BrainExporter.BuildExport(LoadOrAnonymousIdentity(_vaultPath), shadowGraph, _vaultPath);
+            var shadowPath = Path.Combine(outDir, "brain-export.json");
+            File.WriteAllText(shadowPath, JsonConvert.SerializeObject(shadow, Formatting.Indented), new System.Text.UTF8Encoding(false));
+            Say($"brainx-mcp export (shadow) · v{ServerVersion}");
+            Say($"  vault: {_vaultPath} (read only)");
+            Say($"  wrote  {shadowPath} — {shadow.Nodes.Count} note(s), {shadow.TotalEdges} edge(s), {shadowWatch.Elapsed.TotalSeconds:F1}s");
+            return 0;
+        }
 
         Say($"brainx-mcp export · v{ServerVersion}");
         Say($"  vault: {_vaultPath}");

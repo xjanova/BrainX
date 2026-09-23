@@ -626,9 +626,12 @@ public static class McpBridgeHub
     private static void ReapDeadSessions(string dir)
     {
         var mine = Environment.ProcessId + ".json";
-        foreach (var f in Directory.EnumerateFiles(dir, "*.json"))
+        // A session that died between its write and its move leaves the
+        // scratch copy too — reaped on the same clock as its status file.
+        foreach (var f in Directory.EnumerateFiles(dir, "*.json").Concat(Directory.EnumerateFiles(dir, "*.json.tmp")))
         {
-            if (string.Equals(Path.GetFileName(f), mine, StringComparison.OrdinalIgnoreCase)) continue;
+            if (string.Equals(Path.GetFileName(f), mine, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(Path.GetFileName(f), mine + ".tmp", StringComparison.OrdinalIgnoreCase)) continue;
             try
             {
                 if (DateTime.UtcNow - File.GetLastWriteTimeUtc(f) > TimeSpan.FromMinutes(StatusReapMinutes))
@@ -704,8 +707,39 @@ public static class McpBridgeHub
             // and a half-written cache would be parsed as a corrupt one.
             var tmp = path + "." + Environment.ProcessId + ".tmp";
             File.WriteAllText(tmp, body, new UTF8Encoding(false));
-            File.Move(tmp, path, overwrite: true);
+            try { File.Move(tmp, path, overwrite: true); }
+            catch
+            {
+                // Another session was reading the cache at that moment. Its own
+                // write will land; this copy must not stay behind — six of them,
+                // 266 KB each, had piled up in .obsidianx since August.
+                try { File.Delete(tmp); } catch { }
+                throw;
+            }
+            SweepStaleCacheTemps(path);
         }
         catch (Exception ex) { _log($"bridge cache write failed (non-fatal): {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Scratch copies earlier sessions left when their move failed — only this
+    /// file's own "&lt;name&gt;.&lt;pid&gt;.tmp" pattern, and only once old enough that
+    /// no live writer can still be between its write and its move.
+    /// </summary>
+    private static void SweepStaleCacheTemps(string path)
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(path)!;
+            var prefix = Path.GetFileName(path) + ".";
+            foreach (var f in Directory.EnumerateFiles(dir, Path.GetFileName(path) + ".*.tmp"))
+            {
+                var pid = Path.GetFileName(f)[prefix.Length..^".tmp".Length];
+                if (pid.Length == 0 || !pid.All(char.IsAsciiDigit)) continue;
+                if (DateTime.UtcNow - File.GetLastWriteTimeUtc(f) < TimeSpan.FromMinutes(10)) continue;
+                try { File.Delete(f); } catch { }
+            }
+        }
+        catch { /* housekeeping — never worth failing a cache write over */ }
     }
 }

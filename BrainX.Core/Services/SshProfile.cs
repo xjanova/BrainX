@@ -38,7 +38,12 @@ public class SshProfile
     /// <summary>Cap each exec at this many seconds. Defaults to 30 — diagnostic reads should be quick.</summary>
     public int MaxRuntimeSec { get; set; } = 30;
 
-    /// <summary>If true, every call requires the owner to click confirm in the UI before exec. Reserved for destructive profiles — Phase 4 dispatcher hook will read this; the bare executor ignores it.</summary>
+    /// <summary>
+    /// If true, EVERY command on this profile needs the owner's approval
+    /// (brainx-mcp ssh-approve) before it runs. Enforced by the MCP's ssh_run
+    /// gate, not by the executor. Commands SshCommandRisk classifies as
+    /// destructive need approval on every profile regardless of this flag.
+    /// </summary>
     public bool RequireConfirmation { get; set; } = false;
 
     /// <summary>If true, append every call to .obsidianx/access-log.ndjson. Default true.</summary>

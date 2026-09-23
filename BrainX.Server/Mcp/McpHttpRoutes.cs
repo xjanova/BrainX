@@ -135,6 +135,12 @@ public static class McpHttpRoutes
                                       + (McpRemotePolicy.IsHardBlocked(tool) ? " · HARD-BLOCKED" : ""));
                     return RpcError(id, -32004, McpRemotePolicy.DenyReason(tool, effScope), StatusCodes.Status403Forbidden);
                 }
+                var argRefusal = McpRemotePolicy.ArgumentRefusal(tool, req["params"]?["arguments"]);
+                if (argRefusal != null)
+                {
+                    Console.WriteLine($"[mcp] DENIED {tool} arguments · session={sessionId[..8]} · {argRefusal}");
+                    return RpcError(id, -32004, argRefusal, StatusCodes.Status403Forbidden);
+                }
             }
 
             try

@@ -447,6 +447,89 @@ internal static partial class Program
     private const long MaxAttachmentBytes = 25L * 1024 * 1024;
 
     /// <summary>
+    /// Where an agent puts a file it means to send from outside the vault — a
+    /// screenshot, a build log. Copying it here is the deliberate step that
+    /// separates "hand this over" from "read whatever path a message names".
+    /// </summary>
+    private static string AttachmentOutbox => Path.Combine(BusRoot, "outbox");
+
+    /// <summary>Copies in files/ and staged files in outbox/ older than this are swept.</summary>
+    private static readonly TimeSpan AttachmentRetention = TimeSpan.FromDays(30);
+    private static DateTime _attachmentsSweptUtc = DateTime.MinValue;
+
+    private static readonly System.Text.RegularExpressions.Regex KeyMaterialName = new(
+        @"^(?:id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?|.*\.(?:pem|key|pfx|p12|ppk|kdbx|keystore|jks|asc|gpg|ovpn)" +
+        @"|\.env(?:\..*)?|known_hosts|authorized_keys|credentials(?:\..*)?|.*(?:secret|token|password|passwd).*" +
+        @"|ai-keys\.json|ssh-profiles\.json|identity\.json)$",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// Why <paramref name="src"/> may not be attached, or null when it may.
+    ///
+    /// Decided on the PATH, before the file is touched. The copier used to take
+    /// any path an argument named — `~/.ssh/id_rsa`, `.obsidianx/ai-keys.json` —
+    /// copy it into the shared bus, and answer "file not found" or its size for
+    /// anything else, which made it an existence probe for the whole disk. A
+    /// refusal now says nothing about whether the file is there.
+    /// </summary>
+    private static string? AttachmentRefusal(string src)
+    {
+        string full;
+        try { full = Path.GetFullPath(src.Trim()); }
+        catch { return "not a usable path"; }
+
+        var sep = Path.DirectorySeparatorChar;
+        var outbox = Path.GetFullPath(AttachmentOutbox).TrimEnd(sep) + sep;
+        var vault = Path.GetFullPath(_vaultPath).TrimEnd(sep) + sep;
+
+        string root;
+        if (full.StartsWith(outbox, StringComparison.OrdinalIgnoreCase)) root = outbox;
+        else if (full.StartsWith(vault, StringComparison.OrdinalIgnoreCase))
+        {
+            root = vault;
+            // Dot-folders hold the brain's own machinery: keys, profiles, the bus.
+            if (full[vault.Length..].Split(sep, '/').Any(s => s.StartsWith('.')))
+                return "files under dot-folders (.obsidianx, .git, …) cannot be attached";
+        }
+        else return $"attachments come from the vault or from the outbox ({outbox.TrimEnd(sep)}) — copy the file there first";
+
+        if (KeyMaterialName.IsMatch(Path.GetFileName(full)))
+            return "that looks like a key or credential file — it cannot be attached";
+
+        // A link inside an allowed root that points out of it is a way round
+        // the rule — for the file itself and for every folder on the way down.
+        try
+        {
+            if (new FileInfo(full).LinkTarget != null) return "links cannot be attached — attach the file itself";
+            for (var d = Path.GetDirectoryName(full); d != null && d.Length + 1 > root.Length; d = Path.GetDirectoryName(d))
+                if (new DirectoryInfo(d).LinkTarget != null) return "files reached through a linked folder cannot be attached";
+        }
+        catch { return "not a usable path"; }
+        return null;
+    }
+
+    private static void SweepOldAttachments()
+    {
+        if (DateTime.UtcNow - _attachmentsSweptUtc < TimeSpan.FromHours(1)) return;
+        _attachmentsSweptUtc = DateTime.UtcNow;
+        foreach (var root in new[] { Path.Combine(BusRoot, "files"), AttachmentOutbox })
+        {
+            if (!Directory.Exists(root)) continue;
+            foreach (var entry in Directory.EnumerateFileSystemEntries(root))
+            {
+                try
+                {
+                    var isDir = Directory.Exists(entry);
+                    var written = isDir ? Directory.GetLastWriteTimeUtc(entry) : File.GetLastWriteTimeUtc(entry);
+                    if (DateTime.UtcNow - written < AttachmentRetention) continue;
+                    if (isDir) Directory.Delete(entry, recursive: true); else File.Delete(entry);
+                }
+                catch { /* locked or already gone — next sweep */ }
+            }
+        }
+    }
+
+    /// <summary>
     /// Copy each attachment into <c>agent-bus/files/&lt;msgId&gt;/</c> and
     /// describe it for the card.
     ///
@@ -466,10 +549,13 @@ internal static partial class Program
             ? new List<string> { raw.ToString() }
             : raw.Select(t => t.ToString()).ToList();
 
+        SweepOldAttachments();
         var dir = Path.Combine(BusRoot, "files", msgId);
         foreach (var src in paths.Where(p => !string.IsNullOrWhiteSpace(p)).Take(MaxAttachments))
         {
             var entry = new JObject { ["name"] = Path.GetFileName(src) };
+            var refusal = AttachmentRefusal(src);
+            if (refusal != null) { entry["error"] = refusal; result.Add(entry); continue; }
             try
             {
                 var info = new FileInfo(src);

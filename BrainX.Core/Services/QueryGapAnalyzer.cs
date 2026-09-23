@@ -72,10 +72,32 @@ public class QueryGapAnalyzer
 
         events.Sort((a, b) => a.Ts.CompareTo(b.Ts));
 
-        // Pass 2 — collapse search log lines into search CALLS.
-        // One brain_search call emits N log lines (one per result, same context, same ms-ish).
-        // Group by (context lower, time bucket of SearchCallWindow).
+        // Pass 2a — search calls as the MCP now records them: one "query" row
+        // per call, with the exact number of notes it returned — zero
+        // included. A search that found nothing used to write no row at all,
+        // so the clearest gap there is ("asked, and the brain had nothing")
+        // was the one this analyzer could never see.
         var searchCalls = new List<SearchCall>();
+        var recorded = new List<SearchCall>();
+        foreach (var ev in events.Where(e => e.Op == "query"))
+        {
+            var call = new SearchCall
+            {
+                QueryKey = ev.Context.Trim().ToLowerInvariant(),
+                QueryDisplay = ev.Context.Trim(),
+                StartTs = ev.Ts,
+                LastTs = ev.Ts,
+                ResultCount = Math.Max(0, ev.Hits ?? 0)
+            };
+            recorded.Add(call);
+            searchCalls.Add(call);
+        }
+
+        // Pass 2b — history from before "query" rows existed: rebuild calls
+        // from the per-result rows (one brain_search call emits N lines, one
+        // per result, same context, same ms-ish), skipping any call a query
+        // row already describes. These can only ever count calls that FOUND
+        // something, which is why 2a exists.
         SearchCall? cur = null;
         foreach (var ev in events.Where(e => e.Op == "search" || e.Op == "semantic_search"))
         {
@@ -97,7 +119,9 @@ public class QueryGapAnalyzer
                     LastTs = ev.Ts,
                     ResultCount = 1
                 };
-                searchCalls.Add(cur);
+                var start = cur.StartTs;
+                if (!recorded.Any(r => r.QueryKey == key && (r.StartTs - start).Duration() <= SearchCallWindow))
+                    searchCalls.Add(cur);
             }
         }
 
@@ -155,11 +179,14 @@ public class QueryGapAnalyzer
 
     private static string BuildReason(int count, double avg, double followThrough)
     {
-        var bits = new List<string>();
-        bits.Add($"{count} searches");
-        bits.Add($"avg {avg:F1} hits");
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        var bits = new List<string> { $"{count} searches" };
+        // Nothing found: follow-through is meaningless when there was nothing
+        // to follow through to, so it is not reported as a second failure.
+        if (avg <= 0.0) return string.Join(", ", bits) + ", found nothing every time — the brain does not have this";
+        bits.Add(string.Format(inv, "avg {0:F1} hits", avg));
         if (followThrough <= 0.0) bits.Add("never followed up");
-        else if (followThrough < 0.3) bits.Add($"only {followThrough * 100:F0}% led to a read");
+        else if (followThrough < 0.3) bits.Add(string.Format(inv, "only {0:F0}% led to a read", followThrough * 100));
         return string.Join(", ", bits) + " — looks like a brain gap";
     }
 
@@ -169,6 +196,8 @@ public class QueryGapAnalyzer
         public string Op { get; init; } = "";
         public string Context { get; init; } = "";
         public string NodeId { get; init; } = "";
+        /// <summary>Notes a "query" row's search returned; null on every other row.</summary>
+        public int? Hits { get; init; }
     }
 
     private class SearchCall
@@ -194,7 +223,8 @@ public class QueryGapAnalyzer
                 Ts = DateTime.Parse(raw, null, System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime(),
                 Op = obj["op"]?.ToString() ?? "",
                 Context = obj["context"]?.ToString() ?? "",
-                NodeId = obj["node_id"]?.ToString() ?? ""
+                NodeId = obj["node_id"]?.ToString() ?? "",
+                Hits = obj["hits"]?.Type == JTokenType.Integer ? obj["hits"]!.Value<int>() : null
             };
             return true;
         }

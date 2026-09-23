@@ -19,7 +19,10 @@ public partial class KnowledgeIndexer
     private static readonly Dictionary<KnowledgeCategory, string[]> CategoryKeywords = new()
     {
         [KnowledgeCategory.Programming] = ["code", "function", "class", "algorithm", "variable", "loop", "array", "api", "debug", "compiler", "syntax", "git", "repository", "refactor", "IDE"],
-        [KnowledgeCategory.AI_MachineLearning] = ["neural", "network", "model", "training", "deep learning", "GPT", "transformer", "tensor", "classification", "regression", "NLP", "computer vision", "embedding", "LLM", "prompt"],
+        // "ai" and "rag" could not be keywords while matching was by
+        // substring — "ai" is inside main, detail, email and chain. As words
+        // they are the most direct evidence this category has.
+        [KnowledgeCategory.AI_MachineLearning] = ["neural", "network", "model", "training", "deep learning", "GPT", "transformer", "tensor", "classification", "regression", "NLP", "computer vision", "embedding", "LLM", "prompt", "AI", "RAG"],
         [KnowledgeCategory.Blockchain_Web3] = ["blockchain", "smart contract", "token", "wallet", "defi", "NFT", "ethereum", "solidity", "web3", "decentralized", "consensus", "mining", "hash", "crypto"],
         [KnowledgeCategory.Science] = ["experiment", "hypothesis", "theory", "research", "physics", "chemistry", "biology", "quantum", "molecular", "atom", "energy", "force", "gravity"],
         [KnowledgeCategory.Mathematics] = ["equation", "theorem", "proof", "calculus", "algebra", "geometry", "statistics", "probability", "matrix", "integral", "derivative", "topology"],
@@ -29,9 +32,16 @@ public partial class KnowledgeIndexer
         [KnowledgeCategory.Security_Crypto] = ["security", "encryption", "vulnerability", "exploit", "firewall", "authentication", "authorization", "pentest", "malware", "CVE", "zero-day"],
         [KnowledgeCategory.DevOps_Cloud] = ["docker", "kubernetes", "CI/CD", "pipeline", "AWS", "Azure", "GCP", "terraform", "deployment", "container", "microservice", "serverless"],
         [KnowledgeCategory.Web_Development] = ["HTML", "CSS", "JavaScript", "React", "Vue", "Angular", "frontend", "backend", "REST", "GraphQL", "responsive", "SPA", "webpack"],
-        [KnowledgeCategory.DataScience] = ["data", "analysis", "visualization", "pandas", "dataset", "ETL", "pipeline", "dashboard", "metric", "insight", "SQL", "warehouse"],
-        [KnowledgeCategory.Health_Medicine] = ["health", "medical", "diagnosis", "treatment", "symptom", "disease", "therapy", "clinical", "patient", "pharmaceutical"],
-        [KnowledgeCategory.Philosophy] = ["philosophy", "ethics", "consciousness", "existence", "logic", "metaphysics", "epistemology", "moral", "ontology"],
+        // Not bare "data": as a word start it is in database, datatable and
+        // every CRUD note, which is most of a developer's vault.
+        [KnowledgeCategory.DataScience] = ["data science", "data analysis", "analysis", "visualization", "pandas", "dataset", "ETL", "pipeline", "dashboard", "metric", "insight", "SQL", "warehouse"],
+        // Not "health", "diagnosis", "treatment" or "symptom": in a developer's
+        // vault those head bug reports ("Symptom:", "DIAGNOSIS", "health
+        // check", "Brain health"), and once substring noise stopped inflating
+        // other categories they began filing payment bugs under medicine.
+        [KnowledgeCategory.Health_Medicine] = ["medical", "disease", "therapy", "clinical", "patient", "pharmaceutical", "medicine", "hospital"],
+        // Not "logic": business logic, logic app, logic bug.
+        [KnowledgeCategory.Philosophy] = ["philosophy", "ethics", "consciousness", "existence", "metaphysics", "epistemology", "moral", "ontology"],
         [KnowledgeCategory.GameDev] = ["game", "unity", "unreal", "sprite", "shader", "physics engine", "gameplay", "level design", "multiplayer", "rendering"],
     };
 
@@ -55,8 +65,7 @@ public partial class KnowledgeIndexer
         // — `Imported/.claude` holds 24 real notes.
         var ignore = VaultIgnore.Load(vaultPath);
         var mdFiles = Directory.GetFiles(vaultPath, "*.md", SearchOption.AllDirectories)
-            .Where(f => !f.Contains(".obsidian") && !f.Contains(".trash"))
-            .Where(f => !ignore.ShouldSkip(Path.GetRelativePath(vaultPath, f)));
+            .Where(f => IsIndexedNote(f, vaultPath, ignore));
 
         var nodeMap = new Dictionary<string, KnowledgeNode>();
         // Track notes by relative path too so canvas file-references
@@ -137,20 +146,8 @@ public partial class KnowledgeIndexer
                 // So: if the split form does not resolve, put the pieces back
                 // and try the whole string as a title. Only reached on failure,
                 // so a genuine `Note#Heading` link is unaffected.
-                var lookupKey = NormalizeLinkTarget(rawTarget);
-                if (!nodeMap.TryGetValue(lookupKey, out var targetNode)
-                    && (heading != null || block != null))
-                {
-                    var whole = rawTarget
-                              + (heading != null ? "#" + heading : "")
-                              + (block != null ? "^" + block : "");
-                    if (nodeMap.TryGetValue(NormalizeLinkTarget(whole), out targetNode))
-                    {
-                        // The `#` was part of the name, not an anchor into it.
-                        heading = null;
-                        block = null;
-                    }
-                }
+                var targetNode = ResolveLink(rawTarget, ref heading, ref block,
+                    key => nodeMap.TryGetValue(key, out var hit) ? hit : null);
                 // Embed assets that don't resolve to a markdown note —
                 // record on the source's Embeds list and skip edge
                 // creation. Examples: ![[diagram.png]], ![[clip.mp4]].
@@ -265,12 +262,16 @@ public partial class KnowledgeIndexer
         // Walk the final edge list once and stamp each node with its
         // incoming-link list. Done here rather than at query time so
         // MCP's brain_get_backlinks runs O(1) per call instead of O(E).
-        // We dedupe by source so two edges from the same parent (e.g.
-        // a wiki-link AND an auto-link) only count as one backlink.
+        // We dedupe by source so two edges from the same parent only count
+        // as one backlink. Auto-linker edges are not backlinks at all:
+        // "notes that link here" is a statement about what someone WROTE,
+        // and counting the linker's guesses made brain_get_backlinks answer
+        // with notes that never mention this one.
         var byTarget = new Dictionary<string, HashSet<string>>();
         foreach (var edge in graph.Edges)
         {
             if (string.IsNullOrEmpty(edge.SourceId) || string.IsNullOrEmpty(edge.TargetId)) continue;
+            if (edge.RelationType.StartsWith("auto", StringComparison.Ordinal)) continue;
             if (!byTarget.TryGetValue(edge.TargetId, out var set))
                 byTarget[edge.TargetId] = set = new HashSet<string>();
             set.Add(edge.SourceId);
@@ -381,7 +382,7 @@ public partial class KnowledgeIndexer
                 // hashtag scan still pick up any inline #tags.
             }
         }
-        tags.AddRange(HashtagPattern().Matches(content).Select(m => m.Groups[1].Value));
+        tags.AddRange(InlineTags(content));
 
         // Headings and block IDs unlock fine-grained linking
         // ([[Note#section]] / [[Note^id]]) and let downstream tools
@@ -432,7 +433,11 @@ public partial class KnowledgeIndexer
             WordCount = wordCount,
             CreatedAt = fileInfo.CreationTimeUtc,
             ModifiedAt = fileInfo.LastWriteTimeUtc,
-            Importance = Math.Log(1 + wordCount) * (1 + tags.Count * 0.1),
+            // DISTINCT tags, capped. The raw count made a CHANGELOG — a
+            // thousand "#123" pull-request numbers — the most important note
+            // in the vault; ten tags is already a thoroughly described note.
+            Importance = Math.Log(1 + wordCount)
+                         * (1 + Math.Min(tags.Distinct(StringComparer.OrdinalIgnoreCase).Count(), 10) * 0.1),
             KeywordScores = sorted.Take(5).ToDictionary(kv => kv.Key.ToString(), kv => kv.Value),
             CustomCategoryId = customWins ? customId : null,
             Headings = headings,
@@ -445,6 +450,110 @@ public partial class KnowledgeIndexer
 
         return node;
     }
+
+    /// <summary>
+    /// What a <c>[[link]]</c> points at, by the index's rules — including the
+    /// retry for a <c>#</c> that is part of a note's NAME rather than a heading
+    /// anchor (see its use in <see cref="IndexVault"/>). Shared with
+    /// <see cref="IndexOne"/>, so a note indexed on its own links exactly as it
+    /// would in a full pass.
+    /// </summary>
+    private static T? ResolveLink<T>(string rawTarget, ref string? heading, ref string? block,
+        Func<string, T?> lookup) where T : class
+    {
+        var target = lookup(NormalizeLinkTarget(rawTarget));
+        if (target == null && (heading != null || block != null))
+        {
+            var whole = rawTarget
+                      + (heading != null ? "#" + heading : "")
+                      + (block != null ? "^" + block : "");
+            target = lookup(NormalizeLinkTarget(whole));
+            if (target != null)
+            {
+                // The `#` was part of the name, not an anchor into it.
+                heading = null;
+                block = null;
+            }
+        }
+        return target;
+    }
+
+    /// <summary>
+    /// One note, indexed the way <see cref="IndexVault"/> indexes it — same id,
+    /// title, tags, category, headings, links, kind and scope — for a reader
+    /// that cannot wait for the next full pass: the MCP server's view of the
+    /// notes written since brain-export.json was built. What only the whole
+    /// vault can say is left out: auto-links, backlinks, expertise.
+    /// </summary>
+    /// <param name="resolveLink">A link key — lower-cased title, alias or id,
+    /// as <see cref="NormalizeLinkTarget"/> makes it — to the id of the note it
+    /// names, or null.</param>
+    /// <param name="projects">Project names, as <see cref="NoteRouting.DiscoverProjects"/> finds them.</param>
+    public KnowledgeNode IndexOne(string filePath, string vaultPath,
+        Func<string, string?> resolveLink, IReadOnlySet<string> projects)
+    {
+        var node = ReadOne(filePath, vaultPath);
+        LinkOne(node, vaultPath, resolveLink, projects);
+        return node;
+    }
+
+    /// <summary>
+    /// The half of <see cref="IndexOne"/> that needs nothing but the note:
+    /// title, tags, frontmatter, headings, category. Its aliases are known
+    /// after this, which is what another note's links may need to resolve.
+    /// </summary>
+    public KnowledgeNode ReadOne(string filePath, string vaultPath) => IndexFile(filePath, vaultPath);
+
+    /// <summary>
+    /// The half of <see cref="IndexOne"/> that needs the rest of the vault: its
+    /// links, by name, and its kind and scope, by the vault's projects. Replaces
+    /// the node's link lists rather than editing them, so a summary built from
+    /// an earlier call keeps what it had.
+    /// </summary>
+    public void LinkOne(KnowledgeNode node, string vaultPath,
+        Func<string, string?> resolveLink, IReadOnlySet<string> projects)
+    {
+        node.LinkedNodeIds = [];
+        node.Embeds = [];
+        var content = File.ReadAllText(node.FilePath);
+        foreach (Match link in WikiLinkPattern().Matches(content))
+        {
+            var isEmbed = link.Groups["embed"].Value == "!";
+            var rawTarget = link.Groups["target"].Value.Trim();
+            if (string.IsNullOrEmpty(rawTarget)) continue;
+            string? heading = link.Groups["heading"].Success ? link.Groups["heading"].Value.Trim() : null;
+            string? block = link.Groups["block"].Success ? link.Groups["block"].Value.Trim() : null;
+            var targetId = ResolveLink(rawTarget, ref heading, ref block, resolveLink);
+            if (targetId == null)
+            {
+                if (isEmbed) node.Embeds.Add(rawTarget);
+                continue;
+            }
+            if (targetId == node.Id) continue;
+            if (!node.LinkedNodeIds.Contains(targetId)) node.LinkedNodeIds.Add(targetId);
+        }
+
+        var rel = Path.GetRelativePath(vaultPath, node.FilePath);
+        node.Kind = NoteRouting.KindOf(rel, node.Tags);
+        node.Scope = NoteRouting.ScopeOf(rel, node.Tags, node.Kind, projects);
+        node.Audience = node.Kind == NoteKind.Instructions
+            ? NoteRouting.AudienceOf(Path.GetFileName(rel))
+            : null;
+    }
+
+    /// <summary><c>aliases:</c> from frontmatter, parsed from YAML or from the
+    /// export's JSON — both give a list or a scalar. See <see cref="ReadAliases"/>.</summary>
+    public static IEnumerable<string> AliasesOf(Dictionary<string, object?>? properties)
+        => properties == null ? [] : ReadAliases(new KnowledgeNode { Properties = properties });
+
+    /// <summary>
+    /// The markdown files a full pass reads — the one definition of "is this
+    /// file a note", shared by <see cref="IndexVault"/> and anything that has to
+    /// agree with it about which files the index covers.
+    /// </summary>
+    public static bool IsIndexedNote(string fullPath, string vaultPath, VaultIgnore ignore)
+        => !fullPath.Contains(".obsidian") && !fullPath.Contains(".trash")
+           && !ignore.ShouldSkip(Path.GetRelativePath(vaultPath, fullPath));
 
     /// <summary>
     /// Parse all ATX-style headings (<c># Heading</c>) into structured
@@ -580,10 +689,10 @@ public partial class KnowledgeIndexer
 
         foreach (var tag in tags)
         {
-            if (cc.KeywordsEn.Any(k => tag.Contains(k, StringComparison.OrdinalIgnoreCase))) score += 2.0;
-            if (cc.KeywordsTh.Any(k => tag.Contains(k, StringComparison.Ordinal))) score += 2.0;
+            if (cc.KeywordsEn.Any(k => TagMentions(tag, k))) score += 2.0;
+            if (cc.KeywordsTh.Any(k => TagMentions(tag, k))) score += 2.0;
             // Match tag against display name directly
-            if (tag.Contains(cc.DisplayName, StringComparison.OrdinalIgnoreCase)) score += 2.5;
+            if (TagMentions(tag, cc.DisplayName)) score += 2.5;
         }
 
         return Math.Min(1.0, score / 10.0);
@@ -616,10 +725,9 @@ public partial class KnowledgeIndexer
             // Boost if tags match (English or Thai)
             foreach (var tag in tags)
             {
-                if (keywords.Any(k => tag.Contains(k, StringComparison.OrdinalIgnoreCase)))
+                if (keywords.Any(k => TagMentions(tag, k)))
                     score += 2.0;
-                if (thaiKeywords != null &&
-                    thaiKeywords.Any(k => tag.Contains(k, StringComparison.Ordinal)))
+                if (thaiKeywords != null && thaiKeywords.Any(k => TagMentions(tag, k)))
                     score += 2.0;
             }
 
@@ -632,12 +740,67 @@ public partial class KnowledgeIndexer
         return scores;
     }
 
+    /// <summary>
+    /// Occurrences of a category keyword that are that WORD, not a piece of
+    /// another one. Plain substring counting misfiled an estimated 28-35% of
+    /// notes: "ui" is in build, guide and quick, "ux" in linux, "rest" in
+    /// interest, "unity" in community, "spa" in space, "roi" in android, "ide"
+    /// in guide — and Thai "สี" (colour) in "เสียง" (sound).
+    ///
+    /// Latin: the match must start a word (prose runs straight from Thai into
+    /// English, so a script change counts as a break), and a keyword of three
+    /// letters or fewer must also end one. Thai has no spaces to test, so it
+    /// rejects only what is certain: a match right after a leading vowel
+    /// (เ แ โ ใ ไ belong to the consonant after them) or right before a
+    /// vowel or mark that belongs to the keyword's last consonant.
+    /// </summary>
     private static int CountOccurrences(string text, string pattern)
     {
+        if (string.IsNullOrEmpty(pattern)) return 0;
+        var thai = pattern.Any(IsThai);
         int count = 0, i = 0;
-        while ((i = text.IndexOf(pattern, i, StringComparison.Ordinal)) != -1) { count++; i += pattern.Length; }
+        while ((i = text.IndexOf(pattern, i, StringComparison.Ordinal)) != -1)
+        {
+            if (thai ? ThaiWholeAt(text, i, pattern.Length) : LatinWordAt(text, i, pattern.Length))
+            {
+                count++;
+                i += pattern.Length;
+            }
+            else i++;
+        }
         return count;
     }
+
+    private static bool IsThai(char c) => c >= '฀' && c <= '๿';
+
+    private static bool LatinWordAt(string text, int i, int length)
+    {
+        if (i > 0 && char.IsLetterOrDigit(text[i - 1]) && !IsThai(text[i - 1])) return false;
+        if (length > 3) return true;
+        // A short keyword must end its word too — but a version number or a
+        // plural still ends it: gpt4, gpt-4o, gpt35, apis, llms. What stays
+        // out is the case this exists for: "ui" in uid, build, guide.
+        var end = i + length;
+        while (end < text.Length && char.IsDigit(text[end])) end++;
+        if (end < text.Length && text[end] == 's'
+            && (end + 1 >= text.Length || !char.IsLetterOrDigit(text[end + 1]) || IsThai(text[end + 1])))
+            end++;
+        return end >= text.Length || !char.IsLetterOrDigit(text[end]) || IsThai(text[end]);
+    }
+
+    private static bool ThaiWholeAt(string text, int i, int length)
+    {
+        if (i > 0 && text[i - 1] >= 'เ' && text[i - 1] <= 'ไ') return false;
+        var end = i + length;
+        if (end >= text.Length) return true;
+        var c = text[end];
+        return !(c is >= 'ะ' and <= 'ฺ' || c == 'ๅ' || c is >= '็' and <= '๎');
+    }
+
+    /// <summary>A tag mentions a keyword by the same rule, case-insensitively.</summary>
+    private static bool TagMentions(string tag, string keyword) =>
+        !string.IsNullOrEmpty(keyword)
+        && CountOccurrences(tag.ToLowerInvariant(), keyword.ToLowerInvariant()) > 0;
 
     private static double CalculateLinkStrength(KnowledgeNode a, KnowledgeNode b)
     {
@@ -672,6 +835,37 @@ public partial class KnowledgeIndexer
 
     [GeneratedRegex(@"(?:^|\s)#(\w[\w/\-]+)", RegexOptions.Multiline)]
     private static partial Regex HashtagPattern();
+
+    /// <summary>Fenced blocks and inline code: a `#` in there is a C#
+    /// preprocessor line, a CSS colour or a shell comment — never a tag.</summary>
+    [GeneratedRegex(@"```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`")]
+    private static partial Regex CodePattern();
+
+    /// <summary>
+    /// Inline #tags from the note's prose. Measured 2026-09-23: 1,494 of the
+    /// vault's distinct tags — 34% — were bare numbers, mostly "Merge pull
+    /// request #123" lines in imported changelogs, plus hex colours lifted out
+    /// of CSS. Each one was a "topic" the tag clouds, bundles and the
+    /// auto-linker took seriously.
+    /// </summary>
+    private static IEnumerable<string> InlineTags(string content)
+    {
+        foreach (Match m in HashtagPattern().Matches(CodePattern().Replace(content, " ")))
+        {
+            var t = m.Groups[1].Value;
+            if (t.All(char.IsDigit)) continue;      // "#123": an issue or PR number
+            if (IsHexColour(t)) continue;           // "#1e1e1e", "#fff"
+            yield return t;
+        }
+    }
+
+    // A colour, not a word: hex digits at a colour's length, with a digit in
+    // it or one letter repeated. "facade" and "cafe" stay tags; "fff" and
+    // "0af" do not.
+    private static bool IsHexColour(string t) =>
+        t.Length is 3 or 4 or 6 or 8
+        && t.All(Uri.IsHexDigit)
+        && (t.Any(char.IsDigit) || t.Distinct().Count() == 1);
 
     /// <summary>ATX heading lines: 1-6 hashes followed by a space and the heading text.</summary>
     [GeneratedRegex(@"^(#{1,6})\s+(.+?)\s*$", RegexOptions.Multiline)]

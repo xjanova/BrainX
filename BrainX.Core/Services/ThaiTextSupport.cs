@@ -51,7 +51,9 @@ public static class ThaiTextSupport
             "โครงสร้าง", "ซีเอดี", "จำลอง", "ต้นแบบ", "การผลิต", "วิศวกรรม",
         ],
         [KnowledgeCategory.Design_Art] = [
-            "ดีไซน์", "สี", "ตัวอักษร", "เลย์เอาต์", "ยูไอ", "ยูเอ็กซ์", "ภาพประกอบ",
+            // Not bare "สี": two letters that also spell the start of เสียง,
+            // สีหน้า and a hundred other words — no rule can tell them apart.
+            "ดีไซน์", "โทนสี", "จานสี", "ชุดสี", "ตัวอักษร", "เลย์เอาต์", "ยูไอ", "ยูเอ็กซ์", "ภาพประกอบ",
             "กราฟิก", "สุนทรียะ", "องค์ประกอบ", "พาเลตต์", "ฟิกมา", "ศิลปะ", "ออกแบบ",
         ],
         [KnowledgeCategory.Business_Finance] = [
@@ -76,11 +78,15 @@ public static class ThaiTextSupport
             "ไปป์ไลน์", "แดชบอร์ด", "เมตริก", "เอสคิวแอล", "แวร์เฮาส์", "บิ๊กดาต้า",
         ],
         [KnowledgeCategory.Health_Medicine] = [
-            "สุขภาพ", "การแพทย์", "วินิจฉัย", "รักษา", "อาการ", "โรค", "บำบัด",
-            "คลินิก", "ผู้ป่วย", "ยา", "เภสัช", "แพทย์",
+            // Not bare "ยา": it is inside ยาว, ยาก and พยายาม, which a
+            // developer writes far more often than anything medical. Nor
+            // อาการ / รักษา / วินิจฉัย / สุขภาพ: in bug reports they mean
+            // symptom, maintain, diagnose and system health.
+            "การแพทย์", "โรค", "บำบัด", "คลินิก", "ผู้ป่วย", "เภสัช", "แพทย์", "โรงพยาบาล",
         ],
         [KnowledgeCategory.Philosophy] = [
-            "ปรัชญา", "จริยศาสตร์", "จิตสำนึก", "การมีอยู่", "ตรรกะ", "อภิปรัชญา",
+            // Not ตรรกะ (logic): in code notes it means business logic.
+            "ปรัชญา", "จริยศาสตร์", "จิตสำนึก", "การมีอยู่", "อภิปรัชญา",
             "ญาณวิทยา", "ศีลธรรม", "จิตวิญญาณ",
         ],
         [KnowledgeCategory.GameDev] = [

@@ -392,12 +392,19 @@ public partial class MainWindow
                         System.Globalization.DateTimeStyles.AdjustToUniversal, out var ts))
                     ts = f.LastWriteTimeUtc;
 
+                // The boss's chair is only for lines this window sealed; one that
+                // borrowed the name without the seal is drawn as a stranger.
+                var from = o["from"]?.ToString() ?? "?";
+                if (from.Equals("owner", StringComparison.OrdinalIgnoreCase)
+                    && BrainX.Core.Services.BusSeal.IsActive() && !BrainX.Core.Services.BusSeal.Verify(o))
+                    from = "owner?";
+
                 rows.Add((ts, new JObject
                 {
                     ["id"] = o["id"]?.ToString() ?? f.Name,
                     ["ts"] = ts.ToLocalTime().ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture),
                     ["at"] = new DateTimeOffset(DateTime.SpecifyKind(ts, DateTimeKind.Utc)).ToUnixTimeMilliseconds(),
-                    ["from"] = o["from"]?.ToString() ?? "?",
+                    ["from"] = from,
                     // A room line is said to the room. `to` is a mention when
                     // there is one, and the page uses it for "→ codex" only.
                     ["to"] = o["to"]?.ToString() is { Length: > 0 } t2 ? t2 : "",
@@ -599,6 +606,14 @@ public partial class MainWindow
             ["topic"] = topic,
             ["body"] = body,
         };
+
+        // The owner's words carry the owner's seal — without it the MCP treats
+        // a line as a peer's, whatever its `from` says (see BusSeal).
+        if (from == "owner")
+        {
+            try { BrainX.Core.Services.BusSeal.Seal(payload); }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"BusSeal: {ex.Message}"); }
+        }
 
         // temp + move, the same atomic write the bus uses everywhere: a reader
         // polling this directory must never see half a JSON document.

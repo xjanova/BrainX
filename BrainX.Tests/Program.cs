@@ -24,7 +24,7 @@ namespace BrainX.Tests;
 ///
 /// Exit code 0 = all checks passed.
 /// </summary>
-internal static class Program
+internal static partial class Program
 {
     private static int _failed;
 
@@ -36,6 +36,7 @@ internal static class Program
             return await StubMcpServer.RunAsync();
 
         try { Console.OutputEncoding = new System.Text.UTF8Encoding(false); } catch { /* legacy console */ }
+        if (args.Length >= 2 && args[0] == "--only") _only = args[1];
 
         Console.WriteLine("BrainX remote /mcp verification");
         Console.WriteLine("───────────────────────────────");
@@ -53,6 +54,20 @@ internal static class Program
         await Run("a session abandoned mid-call is dropped (HTTP end-to-end)", AbandonedSessionIsDroppedOverHttp);
         await Run("a healthy session still works (HTTP end-to-end)", HealthySessionStillWorksOverHttp);
         await Run("the task-handoff tools are classified for the remote endpoint", TaskToolsAreClassified);
+
+        // Offline too: pure classification, a temp approvals folder, temp logs,
+        // and a fake Ollama on loopback.
+        var sshChecks = new List<(string Name, Func<Task> Check)>();
+        RegisterSshGateChecks(sshChecks);
+        RegisterSshEndToEnd(sshChecks);
+        RegisterAgentBusChecks(sshChecks);
+        RegisterEmbeddingChecks(sshChecks);
+        RegisterNoteWriteChecks(sshChecks);
+        RegisterLearningLoopChecks(sshChecks);
+        RegisterShieldChecks(sshChecks);
+        RegisterIndexerChecks(sshChecks);
+        RegisterLiveIndexChecks(sshChecks);
+        foreach (var (name, check) in sshChecks) await Run(name, check);
 
         Console.WriteLine();
         Console.WriteLine(_failed == 0 ? "ALL CHECKS PASSED" : $"{_failed} CHECK(S) FAILED");
@@ -382,8 +397,13 @@ internal static class Program
 
     private static string Describe(Exception? ex) => ex == null ? "(did not throw)" : $"{ex.GetType().Name}: {ex.Message}";
 
+    /// <summary>`--only TEXT` runs just the checks whose name contains TEXT — for
+    /// iterating on one area. CI runs everything.</summary>
+    private static string? _only;
+
     private static async Task Run(string name, Func<Task> check)
     {
+        if (_only != null && !name.Contains(_only, StringComparison.OrdinalIgnoreCase)) return;
         Console.WriteLine();
         Console.WriteLine($"▸ {name}");
         try { await check(); }

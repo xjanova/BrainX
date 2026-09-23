@@ -81,3 +81,10 @@ jobs:
             fi
           done
           exit $fail
+
+      # Where placed HUD cards go when the window changes shape. hudplace.js is
+      # pure geometry, so its rules run here without a browser: no overlaps,
+      # nothing out of the gutters, columns kept straight, the owner's own
+      # arrangement exact at the size it was made.
+      - name: HUD placement rules
+        run: node BrainX.Tests/hud/hudplace.check.mjs

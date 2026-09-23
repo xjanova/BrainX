@@ -50,6 +50,15 @@ public class DreamPass
     /// load-bearing.</summary>
     public int LoadBearingDays { get; set; } = 3;
 
+    /// <summary>
+    /// Questions one agent asked in one day beyond which that day's questions
+    /// are a machine's, not anybody's curiosity. Real use is a handful a day;
+    /// the benchmarks that leaked into the log asked 2,299 (2026-08-11) and
+    /// 174 (2026-08-13) — and those rows are decisions, kept for months, so
+    /// without this every benchmark question could become "a recurring gap".
+    /// </summary>
+    public int MachineQuestionsPerDay { get; set; } = 60;
+
     public class Proposal
     {
         public string Kind { get; set; } = "";
@@ -71,6 +80,8 @@ public class DreamPass
         public double SpanDays { get; set; }
         public int DeliberateRows { get; set; }
         public int QuestionRows { get; set; }
+        /// <summary>Question rows set aside as machine traffic (see MachineQuestionsPerDay).</summary>
+        public int MachineQuestionRows { get; set; }
         public List<Proposal> Proposals { get; set; } = [];
         /// <summary>Checks that could not honestly run, each with the reason.</summary>
         public List<string> Withheld { get; set; } = [];
@@ -101,6 +112,10 @@ public class DreamPass
         var askDisplay = new Dictionary<string, string>(StringComparer.Ordinal);
         var askVerdicts = new Dictionary<string, List<string>>(StringComparer.Ordinal);
         var allDays = new HashSet<int>();
+        // Questions are held back until the whole log has been read: whether a
+        // row is somebody asking or a benchmark asking depends on how many
+        // others that agent asked the same day.
+        var questions = new List<(string Agent, int Day, string Context)>();
 
         foreach (var line in ReadLinesSafe(logPath))
         {
@@ -133,23 +148,30 @@ public class DreamPass
             }
             else if (op.Equals("recall", StringComparison.OrdinalIgnoreCase))
             {
-                // Written by BrainRecall as "<VERDICT> conf=<n> · <query>". The
-                // verdict is the part worth keeping: the same question asked
-                // three times and answered STRONG every time is a different
-                // finding from one answered MISS every time.
                 report.QuestionRows++;
-                var sep = ctx.IndexOf(" · ", StringComparison.Ordinal);
-                var verdict = sep > 0 ? ctx[..sep].Split(' ')[0] : "";
-                var q = sep > 0 ? ctx[(sep + 3)..] : ctx;
-                var key = Normalise(q);
-                if (key.Length < 4) continue;
-                Add(askDays, key, day);
-                askDisplay[key] = q.Trim();
-                if (verdict.Length > 0)
-                {
-                    if (!askVerdicts.TryGetValue(key, out var vs)) askVerdicts[key] = vs = [];
-                    vs.Add(verdict);
-                }
+                questions.Add((e["agent"]?.ToString() ?? "", day, ctx));
+            }
+        }
+
+        var perAgentDay = questions.GroupBy(q => (q.Agent, q.Day)).ToDictionary(g => g.Key, g => g.Count());
+        foreach (var (agent, day, ctx) in questions)
+        {
+            if (perAgentDay[(agent, day)] > MachineQuestionsPerDay) { report.MachineQuestionRows++; continue; }
+            // Written by BrainRecall as "<VERDICT> conf=<n> · <query>". The
+            // verdict is the part worth keeping: the same question asked
+            // three times and answered STRONG every time is a different
+            // finding from one answered MISS every time.
+            var sep = ctx.IndexOf(" · ", StringComparison.Ordinal);
+            var verdict = sep > 0 ? ctx[..sep].Split(' ')[0] : "";
+            var q = sep > 0 ? ctx[(sep + 3)..] : ctx;
+            var key = Normalise(q);
+            if (key.Length < 4) continue;
+            Add(askDays, key, day);
+            askDisplay[key] = q.Trim();
+            if (verdict.Length > 0)
+            {
+                if (!askVerdicts.TryGetValue(key, out var vs)) askVerdicts[key] = vs = [];
+                vs.Add(verdict);
             }
         }
 

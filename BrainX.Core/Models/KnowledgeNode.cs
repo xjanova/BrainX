@@ -28,11 +28,24 @@ public class KnowledgeNode
     public KnowledgeCategory PrimaryCategory { get; set; }
     public List<KnowledgeCategory> SecondaryCategories { get; set; } = [];
     public List<string> Tags { get; set; } = [];
+
+    /// <summary>Notes this one links to BY HAND — wiki-links, embeds, canvas
+    /// lines. Never the auto-linker's guesses: see <see cref="AutoLinkedNodeIds"/>.</summary>
     public List<string> LinkedNodeIds { get; set; } = [];
 
     /// <summary>
+    /// Notes the auto-linker judged related (shared tags, title words, source
+    /// folder). Kept apart from <see cref="LinkedNodeIds"/> since 2026-09-23:
+    /// mixed in, 13,449 "links" stood for 3,185 real ones, so the degree
+    /// boost rewarded the linker's guesses, brain_walk followed them as if
+    /// someone had written them, and the audit counted 2 orphans where 544
+    /// notes had no link of their own at all.
+    /// </summary>
+    public List<string> AutoLinkedNodeIds { get; set; } = [];
+
+    /// <summary>
     /// Inverse of <see cref="LinkedNodeIds"/>: every other node that
-    /// links INTO this one. Populated after edges are built so the
+    /// links INTO this one by hand. Populated after edges are built so the
     /// brain has a runtime backlinks panel without re-walking the
     /// whole edge list per query. Backed by
     /// <c>brain_get_backlinks</c>.

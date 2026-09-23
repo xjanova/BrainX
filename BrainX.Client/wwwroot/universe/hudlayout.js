@@ -14,6 +14,16 @@
  * means the first pixel moves exactly one thing, and nothing else ever moves
  * unless it is dragged.
  *
+ * A window that changes shape never rewrites what the owner placed. Each
+ * arrangement is filed under the window size it was made at, and every other
+ * size is DERIVED from the nearest one by hudplace.js — anchors kept, cards
+ * that were apart kept apart, nothing pushed out of the gutters. Deriving
+ * afresh each time is what makes maximise → restore → maximise land exactly
+ * where it started; the first version re-anchored the current rects and saved
+ * them, so every resize quietly clamped the layout a little more. And because
+ * arrangements are per size, the owner can arrange a half-screen window
+ * differently from a maximised one without losing either.
+ *
  * Geometry is plain viewport pixels: #hud-layer is `position:fixed; inset:0`,
  * so an absolutely positioned child of it shares the viewport's coordinate
  * space and getBoundingClientRect() reads back exactly what we wrote.
@@ -23,16 +33,28 @@
  * their overlays stay exactly as they were.
  */
 
+import { MIN_W, MIN_H, planLayout, mapRect, findRoom, reachable, overlaps } from './hudplace.js';
+
 /* Same shape as the other two on this page (obsidianx.wallpaper.prefs.v2,
    obsidianx.universe.settings.v3). The WebView2 user-data folder is stable
-   across updates, so a layout placed today survives tomorrow's installer. */
+   across updates, so a layout placed today survives tomorrow's installer.
+   Still ".v1" although the value grew a `layouts` list: the old fields are
+   kept alongside it, so a downgrade reads the latest arrangement instead of
+   finding its key empty. */
 const KEY = 'obsidianx.hud.layout.v1';
 
-const MIN_W = 148;   // narrower than this and the title chip itself wraps
-const MIN_H = 46;    // one title chip and nothing else — a deliberate "collapsed"
 const EDGE = 9;      // px inside a border that counts as a resize grip
 const SNAP = 8;      // magnetism to a viewport gutter or a neighbour's edge
 const SLOP = 3;      // px of travel before a press counts as a drag, so clicks live
+
+/* Two windows within 5% of each other on both axes are the same size — the
+   taskbar auto-hiding, a scrollbar, a DPI rounding. Arranging at one of them
+   edits the arrangement already filed for that size instead of starting a new
+   one. Past that it is a genuinely different window (half-screen, a second
+   monitor) and gets its own, up to MAX_LAYOUTS, least recently seen dropped
+   first. */
+const SAME_SIZE = 0.05;
+const MAX_LAYOUTS = 6;
 
 /** The nine grid areas, which double as the identity a saved rect is filed
  *  under. Reading the key off the class means the markup stays the single
@@ -52,9 +74,23 @@ const CONTROLS = 'button, a, input, select, textarea, canvas, [role="button"]';
 let panels = [];
 let placed = false;          // has the layout been taken over by the owner?
 let topZ = 10;
-let view = { w: 0, h: 0 };   // viewport the current rects were authored against
 let gesture = null;
 let resetBtn = null;
+
+/** What the owner placed: [{ w, h, g, used, seen, panels: { key: rect } }],
+ *  one per window size they have arranged at. `g` is that window's gutters —
+ *  the gap is a clamp() of the width, so it is part of what "flush" meant
+ *  there. `seen` is which cards were on screen when it was filed (see
+ *  relayout). */
+let layouts = [];
+/** Keys on screen at the last relayout, so a card that has just appeared can
+ *  be told from one that was there all along. null until the first one. */
+let shown = null;
+/** Orders `used` stamps. Wall-clock time alone ties when a resize and a drop
+ *  land in the same millisecond, and can run backwards when the clock is
+ *  corrected — either would make "the arrangement in use" ambiguous. */
+let clock = 0;
+const tick = () => (clock = Math.max(clock + 1, Date.now()));
 
 // ── Public ───────────────────────────────────────────────────────
 
@@ -76,8 +112,15 @@ export function initHudLayout() {
 
     /* A window that changed shape has to be answered, or a layout authored on
        a maximised window leaves half its panels off a restored one — and there
-       is no window list to get them back from. See reanchorAxis for the rule. */
-    addEventListener('resize', onViewportResize);
+       is no window list to get them back from. hudplace.js has the rules. */
+    addEventListener('resize', () => relayout());
+
+    /* A card switched on or off from the settings panel. Off gives its
+       neighbours their room back; on takes it again — and if something was
+       arranged over its spot while it was away, it looks for free room rather
+       than landing on top. */
+    const switches = new MutationObserver(() => relayout());
+    for (const p of panels) switches.observe(p, { attributes: true, attributeFilter: ['hidden'] });
 
     /* Safety net for a pointer that never comes back to the panel it started
        on. Capture normally guarantees it does, but capture is the one part of
@@ -92,7 +135,6 @@ export function initHudLayout() {
     addEventListener('pointerup', onUp);
     addEventListener('pointercancel', onUp);
 
-    view = { w: innerWidth, h: innerHeight };
     restore();
 }
 
@@ -109,6 +151,9 @@ export function resetHudLayout() {
     }
     placed = false;
     topZ = 10;
+    layouts = [];
+    shown = null;
+    clock = 0;
     try { localStorage.removeItem(KEY); } catch { /* private mode */ }
     syncResetBtn();
 }
@@ -128,13 +173,16 @@ export function resetHudLayout() {
  *
  * Hidden panels are skipped: hud.css drops several at small window sizes, and
  * a display:none element measures 0×0 — pinning one would file a zero-size
- * rect and resurrect it later as an invisible sliver. They stay grid items and
- * are pinned by the next gesture after the window brings them back.
+ * rect and resurrect it later as an invisible sliver. They stay grid items
+ * until the window brings them back, and then relayout() finds each one free
+ * room among the placed cards rather than pinning it wherever the grid had
+ * put it — which, with the grid no longer holding anything else, is usually
+ * on top of a card the owner placed.
  */
 function freezeAll() {
+    if (placed) return void relayout();
     markPlaced();
     for (const p of panels) freezeOne(p);
-    view = { w: innerWidth, h: innerHeight };
 }
 
 function markPlaced() {
@@ -247,8 +295,8 @@ function onMove(e) {
         // A resize is intentional from the first pixel — nothing else lives on
         // a border. A move has to clear the slop so clicks survive.
         if (!g.dir && Math.abs(dx) < SLOP && Math.abs(dy) < SLOP) return;
+        freezeAll();       // before `live`: relayout() stands aside for a live gesture
         g.live = true;
-        freezeAll();
         // freezeAll may have shifted nothing, but it CAN have re-measured this
         // panel; re-read so the delta is applied to the rect actually on screen.
         g.start = readRect(g.p);
@@ -298,7 +346,18 @@ function onUp() {
     g.p.style.removeProperty('cursor');
     if (!g.live) return;             // it was a click after all — nothing to save
     keepReachable(g.p);
-    save();
+    /* The window changed shape, or a card was switched, while this one was in
+       the hand — and relayout() stood aside, so the others are still where
+       the OLD window put them. Filing that would record a layout nobody made.
+       Place them for this window, keep the held card where it was dropped,
+       then file. */
+    if (g.stale) {
+        const dropped = readRect(g.p);
+        relayout();
+        writeRect(g.p, dropped);
+        keepReachable(g.p);
+    }
+    commit();
 }
 
 /** Double-click sizes a panel to its content — the one size the owner cannot
@@ -314,7 +373,7 @@ function onFit(e) {
     const want = Math.min(p.offsetHeight, innerHeight - g.t - g.b);
     writeRect(p, { ...r, h: Math.max(MIN_H, want) });
     keepReachable(p);
-    save();
+    commit();
 }
 
 /** Raise on touch. Free panels can overlap by design, so the last one the
@@ -386,89 +445,218 @@ function snapSpan(start, size, lines) {
 
 // ── Staying on screen ────────────────────────────────────────────
 
-/**
- * A panel dragged off the edge is not "hidden", it is LOST: there is no window
- * list to get it back from, and the only recovery would be Reset layout, which
- * throws away every other placement too. So a panel always keeps a graspable
- * amount of itself inside the viewport.
- */
+/** A card let go of past an edge keeps a graspable amount of itself on
+ *  screen — see reachable() in hudplace.js for why that is not optional. */
 function keepReachable(p) {
     const r = readRect(p);
-    const keepX = Math.min(r.w, 90), keepY = Math.min(r.h, 34);
-    const x = Math.min(Math.max(r.x, keepX - r.w), innerWidth - keepX);
-    const y = Math.min(Math.max(r.y, 0), innerHeight - keepY);   // never above the top
-    if (x !== r.x || y !== r.y) writeRect(p, { ...r, x, y });
+    const k = reachable(r, { w: innerWidth, h: innerHeight });
+    if (k.x !== r.x || k.y !== r.y) writeRect(p, k);
 }
 
-function onViewportResize() {
-    const from = view;
-    view = { w: innerWidth, h: innerHeight };
-    if (!placed || !from.w || !from.h) return;
+// ── Arrangements ─────────────────────────────────────────────────
 
-    let moved = false;
-    for (const p of panels) {
-        // Panels still on the grid stay the grid's business — it already
-        // handles a resize, and better than re-anchoring would.
-        if (!p.classList.contains('hud-free')) continue;
-        const r = readRect(p);
-        if (!r.w) continue;
-        writeRect(p, reanchor(r, from, view));
-        keepReachable(p);
-        moved = true;
+/** How far apart two window sizes are, as ratios: 960 → 1920 is as far as
+ *  1920 → 3840, which is how different they look. */
+const distance = (l, w, h) => Math.abs(Math.log(w / l.w)) + Math.abs(Math.log(h / l.h));
+
+function nearest(w, h, skip = null, key = null) {
+    let best = null, bestD = Infinity;
+    for (const l of layouts) {
+        if (l === skip || (key && !l.panels[key])) continue;
+        const d = distance(l, w, h);
+        if (d < bestD) { bestD = d; best = l; }
     }
-    if (moved) save();
+    return best;
 }
 
-/** Keep each panel where it was RELATIVE to the window, and shrink it only if
- *  the new viewport genuinely cannot hold it. */
-function reanchor(r, from, to) {
-    const w = Math.min(r.w, to.w), h = Math.min(r.h, to.h);
-    return {
-        x: reanchorAxis(r.x, w, from.w, to.w),
-        y: reanchorAxis(r.y, h, from.h, to.h),
-        w, h,
-    };
+const frameOf = (l, fallback) => ({ w: l.w, h: l.h, g: l.g || fallback.g });
+
+/** A card as the owner placed it, in `base`'s window — or, if they only ever
+ *  placed it at another size (it was hidden when they arranged this one),
+ *  carried across from the nearest size that has it. */
+function designOf(key, base, from) {
+    if (base.panels[key]) return base.panels[key];
+    const other = nearest(from.w, from.h, base, key);
+    return other ? mapRect(other.panels[key], frameOf(other, from), from) : null;
 }
 
 /**
- * One axis of the re-anchor, in three cases.
- *
- * A panel parked against an edge keeps its exact distance from THAT edge —
- * that is what makes a corner readout stay in its corner at every window size,
- * and it is the case that matters most because most of them are in corners.
- *
- * A panel floating between the edges keeps its position as a FRACTION of the
- * window instead. Deciding by "which half is its centre in" looked equivalent
- * and was not: the top-centre panel sat one pixel right of centre, counted as
- * right-anchored, and a 1280→900 resize slid it 380 px to the left. Nothing
- * about a panel in the middle should be anchored to an edge 470 px away.
- *
- * The edge zone scales with the window so the same layout behaves the same way
- * on a laptop and on a 4K panel, with a floor for genuinely small windows.
+ * The gutters a card is planned inside: the layer's own padding, except the
+ * top. A notice banner inflates padding-top while it is up, and an
+ * arrangement must not be re-planned around a banner that is about to go — so
+ * the top gutter is the plain gap, which padding-left always is.
  */
-function reanchorAxis(pos, size, from, to) {
-    const head = pos, tail = from - (pos + size);
-    const zone = Math.max(120, from * 0.15);
-    if (head <= zone && head <= tail) return head;             // pinned to the near edge
-    if (tail <= zone && tail < head) return to - tail - size;  // pinned to the far edge
-    return (pos + size / 2) / from * to - size / 2;            // floating: keep the fraction
+function lane() {
+    const cs = getComputedStyle(document.getElementById('hud-layer'));
+    const gap = parseFloat(cs.paddingLeft) || 0;
+    return { l: gap, r: parseFloat(cs.paddingRight) || 0, t: gap, b: parseFloat(cs.paddingBottom) || 0 };
+}
+
+// Hidden by its own switch ([hidden]) or by a breakpoint in hud.css.
+const isShown = p => getComputedStyle(p).display !== 'none';
+
+/**
+ * Put every placed card where the current window says it goes. Runs on every
+ * resize, on a card switched on or off, and once at boot — and always derives
+ * from what the owner placed, never from what is on screen, so it can run any
+ * number of times without drifting.
+ *
+ * It only WRITES the arrangement in two cases, both about a card that was not
+ * on screen when the owner arranged the rest: one coming back onto a spot
+ * that something else was arranged over while it was away, and one the grid
+ * is still holding. Each is given free room among the others, and that room
+ * is filed as its place.
+ *
+ * "Not on screen when the owner arranged the rest" is recorded, not guessed:
+ * each arrangement keeps the keys that were visible when it was filed
+ * (`seen`). Two cards the owner could SEE overlapping were stacked on
+ * purpose, and stay stacked however often a breakpoint hides one of them.
+ */
+function relayout() {
+    if (!placed) return;
+    // A card in the hand is the owner's; onUp catches the others up after.
+    if (gesture?.live) return void (gesture.stale = true);
+    const W = innerWidth, H = innerHeight;
+    /* A minimised or collapsed host reports a window of nothing. Planning
+       against that would crush every card to its floor — and since the next
+       real size is derived from the arrangement anyway, waiting costs nothing.
+       The first version did plan against it, and a HUD booted minimised came
+       up with every card 0×0 and no way to grab one. */
+    if (W < 200 || H < 150) return;
+    const base = nearest(W, H);
+    if (!base) return;
+    base.used = tick();
+    const to = { w: W, h: H, g: lane() };
+    const from = frameOf(base, to);
+    /* The first real pass cannot adopt the grid's cards (see `stragglers`
+       below), so it books a second one for when the page has settled. A
+       timer, not rAF: rAF does not fire in a window that is not compositing.
+       Booked here rather than at boot because a HUD booted minimised has its
+       first real pass whenever the window is finally shown. */
+    if (!shown) setTimeout(() => relayout(), 1500);
+
+    const cards = [];
+    for (const p of panels) {
+        const key = p.dataset.hudKey;
+        if (!key || !p.classList.contains('hud-free')) continue;
+        const rect = designOf(key, base, from);
+        if (rect) cards.push({ key, p, rect, shown: isShown(p) });
+    }
+
+    // Unseen: carried in from another size, or hidden when this arrangement
+    // was filed. An arrangement from before `seen` existed counts every card
+    // it holds as seen — the old behaviour, never a surprise move.
+    for (const c of cards) c.seen = !!base.panels[c.key] && (!base.seen || base.seen.includes(c.key));
+    const arriving = cards.filter(c => c.shown && !shown?.has(c.key) && !c.seen
+        && cards.some(o => o !== c && o.shown && overlaps(o.rect, c.rect)));
+    // A card the grid still holds has to be MEASURED to be adopted, and at
+    // boot that would be measuring fallback fonts — so not on the first pass.
+    const stragglers = shown
+        ? panels.filter(p => p.dataset.hudKey && !p.classList.contains('hud-free') && isShown(p))
+        : [];
+    /* A card given a spot here is filed there but stays UNSEEN until the owner
+       files an arrangement themselves. The spot was free in this window, and
+       mapping it into the arrangement's own window is not guaranteed to keep
+       it free — so if a neighbour ever lands on it, the planner parts them
+       rather than reading the overlap as something the owner chose. With no
+       free room at all the card keeps its own spot, on the same terms. */
+    const file = (key, rect) => (base.panels[key] = mapRect(rect, to, from));
+    if (arriving.length || stragglers.length) {
+        for (const c of arriving) c.shown = false;
+        const first = planLayout(cards, from, to);
+        const taken = cards.filter(c => c.shown).map(c => first.get(c.key));
+        for (const c of arriving) {
+            const want = first.get(c.key), spot = findRoom(want, taken, to) ?? want;
+            taken.push(spot);
+            c.rect = file(c.key, spot);
+            c.shown = true;
+        }
+        for (const p of stragglers) {
+            const r = p.getBoundingClientRect();
+            if (r.width < 1 || r.height < 1) continue;
+            const want = { x: r.left, y: r.top, w: r.width, h: r.height };
+            const spot = findRoom(want, taken, to) ?? want;
+            taken.push(spot);
+            p.classList.add('hud-free');
+            cards.push({ key: p.dataset.hudKey, p, rect: file(p.dataset.hudKey, spot), shown: true, seen: false });
+        }
+    }
+    shown = new Set(cards.filter(c => c.shown).map(c => c.key));
+
+    const plan = planLayout(cards, from, to);
+    for (const c of cards) writeRect(c.p, plan.get(c.key));
+    if (arriving.length || stragglers.length) save();
+}
+
+/**
+ * File what is on screen as the owner's arrangement for this window size —
+ * the one already filed for it if there is one within SAME_SIZE, a new one if
+ * not. The other sizes are untouched: tidying a half-screen window must not
+ * cost the owner their maximised one.
+ */
+function commit() {
+    const W = innerWidth, H = innerHeight;
+    let l = nearest(W, H);
+    if (!l || Math.abs(Math.log(W / l.w)) > SAME_SIZE || Math.abs(Math.log(H / l.h)) > SAME_SIZE) {
+        l = { panels: {} };
+        layouts.push(l);
+    }
+    Object.assign(l, { w: W, h: H, g: lane(), used: tick(), seen: [] });
+    for (const p of panels) {
+        if (!p.dataset.hudKey || !p.classList.contains('hud-free')) continue;
+        const r = readRect(p);
+        if (r.w >= 1 && r.h >= 1) l.panels[p.dataset.hudKey] = r;
+        if (isShown(p)) l.seen.push(p.dataset.hudKey);
+    }
+    while (layouts.length > MAX_LAYOUTS) {
+        const stale = layouts.reduce((a, b) => (b.used < a.used ? b : a));
+        layouts.splice(layouts.indexOf(stale), 1);
+    }
+    save();
 }
 
 // ── Persistence ──────────────────────────────────────────────────
 
 function save() {
-    if (!placed) return;
-    const data = { w: innerWidth, h: innerHeight, panels: {} };
-    for (const p of panels) {
-        if (!p.classList.contains('hud-free') || !p.dataset.hudKey) continue;
-        data.panels[p.dataset.hudKey] = readRect(p);
-    }
+    if (!placed || !layouts.length) return;
+    // The top-level w/h/panels are the arrangement in use, in exactly the shape
+    // the first version of this file wrote — an older build reads those and
+    // never looks at `layouts`.
+    const recent = layouts.reduce((a, b) => (b.used > a.used ? b : a));
+    const data = { v: 2, w: recent.w, h: recent.h, panels: recent.panels, layouts };
     try { localStorage.setItem(KEY, JSON.stringify(data)); } catch { /* private mode */ }
 }
 
+/** Whatever is stored, as a clean list of arrangements. Anything malformed is
+ *  dropped rather than trusted: a NaN in one rect would otherwise propagate
+ *  through the planner into every card it shares a lane with. */
+function readLayouts(data) {
+    const rectOk = r => r && [r.x, r.y, r.w, r.h].every(Number.isFinite) && r.w >= 1 && r.h >= 1;
+    const gutter = g => g && [g.l, g.r, g.t, g.b].every(Number.isFinite) ? { l: g.l, r: g.r, t: g.t, b: g.b } : null;
+    const one = l => {
+        const w = Number(l?.w), h = Number(l?.h);
+        if (!(w > 0 && h > 0 && Number.isFinite(w) && Number.isFinite(h))) return null;
+        if (!l.panels || typeof l.panels !== 'object') return null;
+        const kept = {};
+        for (const [k, r] of Object.entries(l.panels))
+            if (AREAS.includes(k) && rectOk(r)) kept[k] = { x: r.x, y: r.y, w: r.w, h: r.h };
+        if (!Object.keys(kept).length) return null;
+        return {
+            w, h, g: gutter(l.g), used: Number.isFinite(l.used) ? l.used : 0, panels: kept,
+            ...(Array.isArray(l.seen) ? { seen: l.seen.filter(k => AREAS.includes(k)) } : {}),
+        };
+    };
+    // No `layouts`: written by the first version of this file — one
+    // arrangement, filed under the window it was last saved at.
+    const list = Array.isArray(data?.layouts) ? data.layouts
+        : data?.panels ? [{ w: data.w || innerWidth, h: data.h || innerHeight, panels: data.panels }]
+        : [];
+    return list.map(one).filter(Boolean).slice(-MAX_LAYOUTS);
+}
+
 /**
- * Apply a stored layout. Nothing here MEASURES a panel — a saved rect is
- * absolute, so this runs correctly the instant the DOM exists, before web
+ * Apply the stored arrangements. Nothing here MEASURES a panel — a saved rect
+ * is absolute, so this runs correctly the instant the DOM exists, before web
  * fonts land and before the first frame is composited. That matters: the
  * obvious implementation defers to requestAnimationFrame so the grid can
  * settle first, and rAF does not fire in a window that is not compositing —
@@ -478,32 +666,51 @@ function save() {
  * A panel with NO stored rect is deliberately left on the grid rather than
  * pinned at whatever it measures right now: mid-boot that measurement is
  * taken against fallback metrics, and freezing it would make a one-off font
- * swap permanent. It joins the free layout at the next gesture, by which time
- * the page has settled.
+ * swap permanent. relayout() gives it free room once the page has settled.
  */
 function restore() {
     let data = null;
     try { data = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch { /* corrupt */ }
-    const saved = data?.panels;
-    if (!saved || !Object.keys(saved).length) return;
+    layouts = readLayouts(data);
+    if (!layouts.length) return;
+    clock = Math.max(0, ...layouts.map(l => l.used));
 
     markPlaced();
-    const from = { w: data.w || view.w, h: data.h || view.h };
-    for (const p of panels) {
-        const r = saved[p.dataset.hudKey];
-        if (!r?.w || !r?.h) continue;
-        p.classList.add('hud-free');
-        writeRect(p, reanchor(r, from, view));
-        keepReachable(p);
-    }
+    for (const p of panels)
+        if (layouts.some(l => l.panels[p.dataset.hudKey])) p.classList.add('hud-free');
+    relayout();
 }
 
 // ── The way back ─────────────────────────────────────────────────
 
 function wireReset() {
     resetBtn = document.getElementById('hud-layout-reset');
-    resetBtn?.addEventListener('click', resetHudLayout);
+    resetBtn?.addEventListener('click', onReset);
     syncResetBtn();
+}
+
+/* Reset throws away every arrangement — one per window size now, not one — so
+   it asks first: the first click arms it and says what it is about to do, a
+   second click within a few seconds does it. The button answering in place is
+   the confirmation; a modal dialog over a live render would be a heavier way
+   to ask a one-word question. */
+let armed = null;
+function onReset() {
+    if (armed) { disarm(); resetHudLayout(); return; }
+    resetBtn.dataset.label ??= resetBtn.textContent;
+    resetBtn.textContent = layouts.length > 1
+        ? `Click again to reset all ${layouts.length} layouts`
+        : 'Click again to reset';
+    resetBtn.classList.add('is-armed');
+    armed = setTimeout(disarm, 4000);
+}
+
+function disarm() {
+    clearTimeout(armed);
+    armed = null;
+    if (!resetBtn) return;
+    resetBtn.classList.remove('is-armed');
+    if (resetBtn.dataset.label) resetBtn.textContent = resetBtn.dataset.label;
 }
 
 /** The button only exists once there is something to undo. A permanent "Reset

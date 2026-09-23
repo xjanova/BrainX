@@ -64,6 +64,12 @@ internal static partial class Program
         if (!string.IsNullOrWhiteSpace(vaultArg) && Directory.Exists(vaultArg))
             _vaultPath = Path.GetFullPath(vaultArg);
         if (models.Count == 0) models.Add("gemma3:4b");
+        // Same rule as `brainx-mcp eval`: these questions come from a fact set,
+        // not from anybody wanting to know, and BrainRecall logs every one. The
+        // eval learned this on 2026-08-11; this benchmark never did, and its run
+        // on 2026-08-13 left 174 machine "questions" in the log that DreamPass
+        // reads as things the owner keeps asking.
+        SuppressAccessLog = true;
 
         var factsPath = factsArg ?? Path.Combine(_vaultPath, ".obsidianx", "eval", "facts.json");
         if (!File.Exists(factsPath)) { Console.Error.WriteLine($"no fact set at {factsPath}"); return 2; }

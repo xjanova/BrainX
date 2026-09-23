@@ -55,6 +55,31 @@ public static class SectionEmbeddings
     /// </summary>
     public static List<string> Split(string title, string body)
     {
+        var merged = Merge(body);
+        if (merged.Count < 2) return new List<string>();
+
+        return merged
+            .Select(m => m.Length > MaxCharsPerSection ? m[..MaxCharsPerSection] : m)
+            .Select(m => $"{title}\n\n{m}")
+            .ToList();
+    }
+
+    /// <summary>
+    /// Characters of <paramref name="body"/> past the per-section cap — the
+    /// part no section vector read — or -1 when the note does not split into
+    /// sections (the whole-note vector is then all there is). The same split
+    /// and merge as <see cref="Split"/>, so it describes exactly the sidecar
+    /// Split would build.
+    /// </summary>
+    public static int UnreadChars(string body)
+    {
+        var merged = Merge(body);
+        return merged.Count < 2 ? -1 : merged.Sum(m => Math.Max(0, m.Length - MaxCharsPerSection));
+    }
+
+    // Sections on "## ", tiny ones merged into their predecessor — untruncated.
+    private static List<string> Merge(string body)
+    {
         if (string.IsNullOrWhiteSpace(body)) return new List<string>();
 
         var lines = body.Replace("\r\n", "\n").Split('\n');
@@ -67,7 +92,15 @@ public static class SectionEmbeddings
                 if (cur.Length > 0) sections.Add(cur);
                 cur = new System.Text.StringBuilder();
             }
-            cur.AppendLine(line);
+            // "\r\n" spelled out, not AppendLine: every sidecar on disk was
+            // built on Windows, where AppendLine meant "\r\n", and the line
+            // ending counts toward MinCharsPerSection — so it decides which
+            // sections merge, i.e. what section i IS. AppendLine on any other
+            // OS would re-split the same note differently and point every
+            // section vector at the wrong text. Normalising to "\n" here would
+            // do the same to every sidecar already written; display code
+            // (ResolveSection) normalises its own copy instead.
+            cur.Append(line).Append("\r\n");
         }
         if (cur.Length > 0) sections.Add(cur);
 
@@ -83,12 +116,56 @@ public static class SectionEmbeddings
             else
                 merged.Add(text);
         }
-        if (merged.Count < 2) return new List<string>();
+        return merged;
+    }
 
-        return merged
-            .Select(m => m.Length > MaxCharsPerSection ? m[..MaxCharsPerSection] : m)
-            .Select(m => $"{title}\n\n{m}")
-            .ToList();
+    /// <summary>
+    /// One <see cref="Split"/> result as a reader should see it: without the
+    /// "{title}\n\n" prefix that is there for the vector, with "\n" line
+    /// endings, and — for the preamble, <paramref name="index"/> 0 — without
+    /// the YAML frontmatter and the note's own "# Title" line. A snippet that
+    /// opened "---\ncreated: …\ntags:" spent its whole preview on metadata the
+    /// search result already carries. Display only: never embed this.
+    /// </summary>
+    public static string Display(string sectionText, string title, int index)
+    {
+        var body = sectionText;
+        var prefix = title + "\n\n";
+        if (body.StartsWith(prefix, StringComparison.Ordinal)) body = body[prefix.Length..];
+        body = body.Replace("\r\n", "\n").Trim();
+        if (index == 0)
+        {
+            var clean = StripPreamble(body);
+            if (clean.Length > 0) body = clean;
+        }
+        return body;
+    }
+
+    /// <summary>
+    /// A note's opening without its YAML frontmatter and without a leading
+    /// "# heading" line. Expects "\n" line endings. An unterminated
+    /// frontmatter block is left alone — better a snippet that shows a stray
+    /// "---" than one that swallows the whole note.
+    /// </summary>
+    public static string StripPreamble(string body)
+    {
+        var s = body.TrimStart();
+        if (s.StartsWith("---\n", StringComparison.Ordinal))
+        {
+            var end = s.IndexOf("\n---", 3, StringComparison.Ordinal);
+            if (end > 0)
+            {
+                var after = s.IndexOf('\n', end + 4);
+                s = after < 0 ? "" : s[(after + 1)..];
+            }
+        }
+        s = s.TrimStart();
+        if (s.StartsWith("# ", StringComparison.Ordinal))
+        {
+            var nl = s.IndexOf('\n');
+            s = nl < 0 ? "" : s[(nl + 1)..];
+        }
+        return s.Trim();
     }
 
     /// <summary>

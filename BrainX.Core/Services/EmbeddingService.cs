@@ -102,6 +102,140 @@ public class EmbeddingService
     public bool BackendUnreachable { get; private set; }
 
     /// <summary>
+    /// Why the last pass could not embed through Ollama, in words a human can
+    /// act on — or null when the daemon was up and had the model. The first
+    /// thing any report should print when this is set.
+    /// </summary>
+    public string? BackendProblem { get; private set; }
+
+    /// <summary>Vectors the last pass wrote in-process (reduced budget, recorded as partial).</summary>
+    public int InProcessWritten { get; private set; }
+
+    /// <summary>
+    /// Let a pass fall back to the in-process bge-m3 (OnnxEmbedder) when Ollama
+    /// cannot embed — for notes MISSING a vector only, never a rebuild, and at
+    /// <see cref="InProcessMaxTokens"/> rather than the full budget: measured
+    /// 2026-08-11, one 16,000-char embed in-process is 35–72 s and 11.4 GB
+    /// resident. Off by default so a UI process never loads 2.3 GB of weights;
+    /// the gardener and the CLI turn it on.
+    /// </summary>
+    public bool AllowInProcessFallback { get; set; }
+
+    /// <summary>Token budget for in-process fallback embeds (~4–6k chars; ~3.5 GB peak).</summary>
+    public int InProcessMaxTokens { get; set; } = 2048;
+
+    /// <summary>Stop after this many embeds (0 = no cap). Bounds a pass run inside a tool call.</summary>
+    public int MaxNotes { get; set; }
+
+    private const string UnreachablePrefix = "Ollama is not reachable";
+
+    /// <summary>
+    /// Null when Ollama is up AND has <paramref name="model"/>; otherwise what
+    /// is wrong and the command that fixes it.
+    ///
+    /// "Reachable" was the only check for months. On 2026-09-16 bge-m3 went
+    /// missing from the daemon: /api/tags still answered 200, every embed
+    /// answered 404, FailedCount counted them quietly, and the vault went seven
+    /// days without a single new vector while every report said "0 written".
+    /// </summary>
+    public async Task<string?> OllamaProblemAsync(string model, CancellationToken ct = default, string role = "embedding model")
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            using var resp = await http.GetAsync($"{OllamaUrl}/api/tags", ct).ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode)
+                return $"{UnreachablePrefix} properly — {OllamaUrl}/api/tags answered HTTP {(int)resp.StatusCode}";
+            var names = (JObject.Parse(await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false))["models"] as JArray)
+                ?.Select(m => m["name"]?.ToString() ?? "").Where(n => n.Length > 0).ToList() ?? new List<string>();
+            var wantBase = model.Split(':')[0];
+            var has = names.Any(n => n.Equals(model, StringComparison.OrdinalIgnoreCase)
+                                  || n.Equals(model + ":latest", StringComparison.OrdinalIgnoreCase)
+                                  || (!model.Contains(':') && n.Split(':')[0].Equals(wantBase, StringComparison.OrdinalIgnoreCase)));
+            return has ? null
+                : $"Ollama is running but the {role} '{model}' is not installed"
+                  + (names.Count > 0 ? $" (it has: {string.Join(", ", names)})" : "")
+                  + $" — run `ollama pull {model}`";
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or Newtonsoft.Json.JsonException)
+        {
+            return $"{UnreachablePrefix} at {OllamaUrl} — start Ollama (the {role} is '{model}')";
+        }
+    }
+
+    // ───────────── partial vectors + pass status ─────────────
+
+    private static string PartialPath(string dir) => Path.Combine(dir, "partial.json");
+    private static string StatusPath(string dir) => Path.Combine(dir, "status.json");
+
+    /// <summary>Note ids whose sidecar was written in-process at the reduced budget.</summary>
+    public static HashSet<string> ReadPartial(string dir)
+    {
+        try
+        {
+            var p = PartialPath(dir);
+            if (!File.Exists(p)) return new HashSet<string>(StringComparer.Ordinal);
+            var ids = JObject.Parse(File.ReadAllText(p))["ids"] as JArray;
+            return new HashSet<string>(ids?.Select(t => t.ToString()) ?? Enumerable.Empty<string>(), StringComparer.Ordinal);
+        }
+        catch { return new HashSet<string>(StringComparer.Ordinal); }
+    }
+
+    private static void WritePartial(string dir, HashSet<string> ids)
+    {
+        try
+        {
+            var p = PartialPath(dir);
+            if (ids.Count == 0) { if (File.Exists(p)) File.Delete(p); return; }
+            var tmp = p + "." + Environment.ProcessId + ".tmp";
+            File.WriteAllText(tmp, new JObject
+            {
+                ["ids"] = new JArray(ids.OrderBy(i => i, StringComparer.Ordinal)),
+                ["note"] = "embedded in-process at a reduced budget while Ollama could not; the next pass with the daemon re-embeds them in full",
+                ["updatedAt"] = DateTime.UtcNow.ToString("O")
+            }.ToString());
+            File.Move(tmp, p, overwrite: true);
+        }
+        catch { /* best-effort: worst case a partial vector is not upgraded until the note changes */ }
+    }
+
+    /// <summary>
+    /// The last pass's outcome, for readers that cannot afford to run one:
+    /// brain_stats, brain_audit, the SessionStart hook. Null if no pass has
+    /// recorded one yet.
+    /// </summary>
+    public static JObject? ReadStatus(string vaultPath)
+    {
+        try
+        {
+            var p = StatusPath(Path.Combine(vaultPath, ".obsidianx", "embeddings"));
+            return File.Exists(p) ? JObject.Parse(File.ReadAllText(p)) : null;
+        }
+        catch { return null; }
+    }
+
+    private void WriteStatus(string dir, int written)
+    {
+        try
+        {
+            var p = StatusPath(dir);
+            var tmp = p + "." + Environment.ProcessId + ".tmp";
+            File.WriteAllText(tmp, new JObject
+            {
+                ["checkedAt"] = DateTime.UtcNow.ToString("O"),
+                ["model"] = Model,
+                ["problem"] = BackendProblem,
+                ["written"] = written,
+                ["inProcess"] = InProcessWritten,
+                ["failed"] = FailedCount,
+                ["partial"] = ReadPartial(dir).Count,
+            }.ToString());
+            File.Move(tmp, p, overwrite: true);
+        }
+        catch { }
+    }
+
+    /// <summary>
     /// The embedding model actually used for the sidecars on disk is
     /// recorded in <c>.obsidianx/embeddings/model.json</c>. Every writer
     /// and reader resolves through this manifest so the query-time embed
@@ -261,11 +395,8 @@ public class EmbeddingService
         Directory.CreateDirectory(dir);
         FailedCount = 0;
         BackendUnreachable = false;
-        if (!await OllamaReachableAsync(ct).ConfigureAwait(false))
-        {
-            BackendUnreachable = true;
-            return 0;
-        }
+        BackendProblem = null;
+        InProcessWritten = 0;
 
         Model = ResolveModel(vaultPath);
         // Sidecars that predate the manifest were built with the legacy
@@ -296,6 +427,25 @@ public class EmbeddingService
                 : DateTime.UtcNow)
             : DateTime.MinValue;
 
+        // The daemon has to be up AND have the model — see OllamaProblemAsync.
+        var problem = await OllamaProblemAsync(Model, ct).ConfigureAwait(false);
+        if (problem != null)
+        {
+            BackendProblem = problem;
+            BackendUnreachable = problem.StartsWith(UnreachablePrefix, StringComparison.Ordinal);
+            var fallback = AllowInProcessFallback && !ct.IsCancellationRequested
+                ? PrecomputeInProcess(dir, nodes, mustRebuild, progress, ct)
+                : 0;
+            WriteStatus(dir, fallback);
+            return fallback;
+        }
+
+        // Vectors written in-process while the daemon was away cover only the
+        // head of the note. Now that it is back, they are redone in full.
+        var partial = ReadPartial(dir);
+        var partialBefore = partial.Count;
+        int attempted = 0;
+
         int written = 0, done = 0, dims = 0;
         // 30s was sized for 4000-char inputs on an idle machine. At 16,000 the
         // model does ~4x the work per call, and when a second process embeds at
@@ -322,11 +472,14 @@ public class EmbeddingService
             {
                 var sidecarAt = File.GetLastWriteTimeUtc(sidecar);
                 // Skip when sidecar is newer than source — embedding is
-                // already up to date for this revision of the note.
-                if (!mustRebuild && sidecarAt >= node.ModifiedAt) continue;
+                // already up to date for this revision of the note — unless it
+                // is a partial vector waiting for the daemon.
+                if (!mustRebuild && sidecarAt >= node.ModifiedAt && !partial.Contains(node.Id)) continue;
                 // Resuming a rebuild: this one was already redone this pass.
                 if (mustRebuild && sidecarAt >= rebuildStartedAt) continue;
             }
+            if (MaxNotes > 0 && attempted >= MaxNotes) break;
+            attempted++;
             var text = LoadEmbedText(node);
             if (string.IsNullOrWhiteSpace(text)) continue;
             var vec = await EmbedAsync(http, text, ct).ConfigureAwait(false);
@@ -348,6 +501,7 @@ public class EmbeddingService
             catch (IOException) { continue; }
             catch (UnauthorizedAccessException) { continue; }
             written++;
+            partial.Remove(node.Id);
             dims = vec.Length;
             // Claim the new budget only as IN PROGRESS. Marking it complete here
             // is what would strand the other 1200 notes on the old budget.
@@ -356,8 +510,76 @@ public class EmbeddingService
             progress?.Invoke(done, nodes.Count);
         }
 
-        if (written > 0 && !ct.IsCancellationRequested)
+        // A capped pass (MaxNotes) is not a finished rebuild; only a pass that
+        // walked every note may mark the manifest complete.
+        if (written > 0 && !ct.IsCancellationRequested && (MaxNotes == 0 || attempted < MaxNotes))
             WriteManifest(dir, Model, dims, MaxChars, complete: true, rebuildStartedAt);
+        if (partial.Count != partialBefore) WritePartial(dir, partial);
+        if (written == 0 && FailedCount > 0)
+            BackendProblem = $"{FailedCount} embed(s) failed through Ollama ({Model}) with no error to show — check the daemon's log";
+        WriteStatus(dir, written);
+        return written;
+    }
+
+    /// <summary>
+    /// The fallback when Ollama cannot embed: vectors for notes that have NONE
+    /// (or a stale one), in-process, at <see cref="InProcessMaxTokens"/>. Never
+    /// a rebuild. A partial vector beats an invisible note — the 2026-09-23
+    /// review watched brain_recall answer STRONG with a month-old incident
+    /// while the note written two days earlier, near-verbatim to the question,
+    /// had no vector at all — and it is recorded so the daemon redoes it in full.
+    /// </summary>
+    private int PrecomputeInProcess(string dir, IReadOnlyList<KnowledgeNode> nodes, bool mustRebuild,
+        Action<int, int>? progress, CancellationToken ct)
+    {
+        if (!Model.Split(':')[0].Equals("bge-m3", StringComparison.OrdinalIgnoreCase))
+        {
+            BackendProblem += " — the in-process fallback only runs bge-m3";
+            return 0;
+        }
+        if (mustRebuild)
+        {
+            BackendProblem += " — a full re-embed is pending, which needs the daemon (in-process it is hours of CPU and ~11 GB)";
+            return 0;
+        }
+
+        using var onnx = OnnxEmbedder.TryCreate(null, out var why);
+        if (onnx == null)
+        {
+            BackendProblem += $" — and the in-process model is unavailable ({why})";
+            return 0;
+        }
+
+        var partial = ReadPartial(dir);
+        int written = 0, done = 0, attempted = 0;
+        foreach (var node in nodes)
+        {
+            if (ct.IsCancellationRequested) break;
+            done++;
+            var sidecar = Path.Combine(dir, node.Id + ".bin");
+            // Fresh, or already partial: only the daemon can improve on either.
+            if (File.Exists(sidecar) && File.GetLastWriteTimeUtc(sidecar) >= node.ModifiedAt) continue;
+            if (MaxNotes > 0 && attempted >= MaxNotes) break;
+            attempted++;
+
+            var text = LoadEmbedText(node);
+            if (string.IsNullOrWhiteSpace(text)) continue;
+            var vec = onnx.Embed(text, InProcessMaxTokens);
+            if (vec == null) { FailedCount++; continue; }
+            try
+            {
+                var tmp = sidecar + "." + Environment.ProcessId + ".tmp";
+                File.WriteAllBytes(tmp, FloatsToBytes(vec));
+                File.Move(tmp, sidecar, overwrite: true);
+            }
+            catch (IOException) { continue; }
+            catch (UnauthorizedAccessException) { continue; }
+            partial.Add(node.Id);
+            written++;
+            progress?.Invoke(done, nodes.Count);
+        }
+        InProcessWritten = written;
+        if (written > 0) WritePartial(dir, partial);
         return written;
     }
 
@@ -483,6 +705,99 @@ public class EmbeddingService
         // server's own query embed, and the reason ResolveGpuLayersAsync exists.
         _gpuLayers = 0;
         return await EmbedAsync(http, text, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Embed ONE note that was just written, so it can be found by meaning
+    /// before the next pass. The 2026-09-23 review watched brain_recall answer
+    /// STRONG with a month-old incident while the note written two days
+    /// earlier — near-verbatim to the question, first in keyword search — lost,
+    /// because it alone had no vector.
+    ///
+    /// Reads at most <paramref name="headChars"/> of the note: the moment of a
+    /// write is not the time for a 16,000-char CPU embed that holds the shared
+    /// daemon for a minute. A vector that stops short is recorded as partial and
+    /// the next pass with the daemon redoes it in full — the contract the
+    /// in-process fallback already has. So is anything <paramref name="inProcess"/>
+    /// embeds when Ollama cannot, at <see cref="InProcessMaxTokens"/>.
+    ///
+    /// Stays out of a pass's way: nothing is written while the manifest says the
+    /// vault is mid-rebuild or moving to another model or budget, because a
+    /// vector written now would be the wrong kind.
+    /// </summary>
+    /// <returns>What happened, for a log line. Never throws for I/O or the network.</returns>
+    public async Task<string> EmbedNoteNowAsync(string vaultPath, string noteId, string title, string filePath,
+        int headChars, Func<string, int, float[]?>? inProcess = null, CancellationToken ct = default)
+    {
+        var dir = Path.Combine(vaultPath, ".obsidianx", "embeddings");
+        if (!Directory.Exists(dir)) return "skipped: this vault has no embeddings";
+        Model = ResolveModel(vaultPath);
+        MaxChars = ResolveMaxChars(Model);
+        var manifestModel = ReadManifestModel(vaultPath) ?? DefaultModel;
+        if (!manifestModel.Equals(Model, StringComparison.OrdinalIgnoreCase))
+            return $"skipped: the vectors on disk are {manifestModel} and {Model} is configured — a pass re-embeds the vault";
+        if ((ReadManifestMaxChars(vaultPath) ?? DefaultMaxChars) != MaxChars)
+            return "skipped: the embedding budget is changing — a pass re-embeds the vault";
+        if (ReadManifestFlag(vaultPath, "complete") == false)
+            return "skipped: a re-embed of the vault is in progress";
+
+        try
+        {
+            if (!File.Exists(filePath)) return "skipped: the note is gone";
+            var body = await File.ReadAllTextAsync(filePath, ct).ConfigureAwait(false);
+            var budget = Math.Min(MaxChars, Math.Max(500, headChars));
+            var partial = body.Length > budget;
+            if (partial)
+            {
+                var cut = budget;
+                if (char.IsHighSurrogate(body[cut - 1])) cut--;
+                body = body[..cut];
+            }
+            // What a pass embeds (LoadEmbedText) — so a note that fits is a
+            // finished vector, not a provisional one.
+            var text = $"{title}\n\n{body}";
+
+            float[]? vec;
+            string via;
+            var problem = await OllamaProblemAsync(Model, ct).ConfigureAwait(false);
+            if (problem == null)
+            {
+                // The CPU, as for a query: a write happens while the user's own
+                // model may be on the card (see ResolveGpuLayersAsync).
+                _gpuLayers = Environment.GetEnvironmentVariable("BRAINX_EMBED_GPU") == "1" ? 999 : 0;
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(Math.Max(60, text.Length / 100)) };
+                vec = await EmbedAsync(http, text, ct).ConfigureAwait(false);
+                if (vec == null) return $"failed: Ollama ({Model}) returned no vector — the next pass retries";
+                via = "Ollama";
+            }
+            else if (inProcess != null && Model.Split(':')[0].Equals("bge-m3", StringComparison.OrdinalIgnoreCase))
+            {
+                vec = inProcess(text, InProcessMaxTokens);
+                if (vec == null) return $"skipped: {problem}, and the in-process model is unavailable";
+                via = "the in-process model";
+                partial = true;
+            }
+            else return $"skipped: {problem}";
+
+            if (ReadManifestDims(vaultPath) is int dims && dims > 0 && vec.Length != dims)
+                return $"skipped: a {vec.Length}-wide vector does not match the manifest's {dims}";
+
+            var sidecar = Path.Combine(dir, noteId + ".bin");
+            var tmp = sidecar + "." + Environment.ProcessId + ".tmp";
+            await File.WriteAllBytesAsync(tmp, FloatsToBytes(vec), ct).ConfigureAwait(false);
+            File.Move(tmp, sidecar, overwrite: true);
+
+            var marked = ReadPartial(dir);
+            if (partial ? marked.Add(noteId) : marked.Remove(noteId)) WritePartial(dir, marked);
+            if (problem != null) return $"written via {via}, provisionally — the next pass with the daemon redoes it";
+            return partial
+                ? $"written via {via} from the first {text.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)} chars — the next pass embeds all of it"
+                : $"written via {via}";
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or HttpRequestException or TaskCanceledException)
+        {
+            return $"failed: {ex.GetType().Name}: {ex.Message}";
+        }
     }
 
     /// <summary>
