@@ -28,6 +28,139 @@ internal static partial class Program
         checks.Add(("find_contradictions end to end: no chat model is 'unverified', never 'checked, all clear'", ContradictionsHonesty));
         checks.Add(("semantic search end to end: the owner's retrieval mode sets its defaults too", SemanticSearchFollowsMode));
         checks.Add(("section vectors: a sidecar older than its note counts until the note has lost sections", StaleSectionChecks));
+        checks.Add(("brain_search end to end: a question keyword cannot cover is answered by meaning, and says so", SearchEscalationChecks));
+        checks.Add(("fused ranking: a query that IS a note's title finds that note first, unless the name is common", ExactTitleChecks));
+    }
+
+    private static async Task ExactTitleChecks()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the end-to-end check", false); return; }
+        var (root, vault, _) = EmbedVault(0);
+        void Note(string rel, string text)
+        {
+            var p = Path.Combine(vault, rel);
+            Directory.CreateDirectory(Path.GetDirectoryName(p)!);
+            File.WriteAllText(p, text);
+        }
+        // The report is a table of numbers: its vector sits far from its title,
+        // while five notes ABOUT the benchmark sit right on the query.
+        Note("Notes/Latency benchmark — gold-mini.md", "# Latency benchmark — gold-mini\n\n| arm | p50 |\n|---|---|\n| a | 12 |\n");
+        for (int i = 0; i < 5; i++)
+            Note($"Notes/Benchmark discussion {i}.md", $"# Benchmark discussion {i}\n\nThe latency benchmark and the gold mini set, discussed.\n");
+        // A name four notes share is a question, not a lookup.
+        for (int i = 0; i < 4; i++) Note($"Imported/p{i}/Setup guide.md", "# Setup guide\n\nsteps\n");
+        var graph = new KnowledgeIndexer().IndexVault(vault);
+        File.WriteAllText(Path.Combine(vault, ".obsidianx", "brain-export.json"), Newtonsoft.Json.JsonConvert.SerializeObject(
+            BrainExporter.BuildExport(new BrainIdentity { Address = "t", DisplayName = "t" }, graph, vault)));
+        var q = new[] { 1.0, 1, 1, 1, 1, 1, 1, 0 };
+        var dir = Path.Combine(vault, ".obsidianx", "embeddings");
+        foreach (var n in graph.Nodes)
+        {
+            var v = n.Title.StartsWith("Benchmark discussion") ? q.Select(x => (float)x).ToArray() : new float[] { 0, 0, 0, 0, 0, 0, 0, 1 };
+            var bytes = new byte[v.Length * 4];
+            Buffer.BlockCopy(v, 0, bytes, 0, bytes.Length);
+            File.WriteAllBytes(Path.Combine(dir, n.Id + ".bin"), bytes);
+        }
+        var report = graph.Nodes.Single(n => n.Title == "Latency benchmark — gold-mini").Id;
+
+        using var ollama = new FakeOllama("bge-m3:latest") { Fixed = q };
+        Process? on = null, off = null;
+        try
+        {
+            on = await StartServer(exe, vault, new Dictionary<string, string> { ["BRAINX_OLLAMA_URL"] = ollama.Url, ["BRAINX_CANARY"] = "0" });
+            off = await StartServer(exe, vault, new Dictionary<string, string>
+                { ["BRAINX_OLLAMA_URL"] = ollama.Url, ["BRAINX_CANARY"] = "0", ["BRAINX_EXACT_TITLE"] = "0" });
+            async Task<List<string>> Ids(Process server, int id, string query)
+            {
+                var r = ToolJson(await Rpc(server, id, "tools/call", new JObject
+                {
+                    ["name"] = "brain_semantic_search",
+                    ["arguments"] = new JObject { ["query"] = query, ["bypass_cache"] = true, ["limit"] = 5 }
+                }));
+                return (r["results"] as JArray)?.Select(x => x["id"]?.ToString() ?? "").ToList() ?? new();
+            }
+            var without = await Ids(off, 10, "Latency benchmark — gold-mini");
+            Check("fixture: without the guard, fusion loses the note by its own name", without.FirstOrDefault() != report, string.Join(",", without));
+            var with = await Ids(on, 11, "latency benchmark gold mini");
+            Check("with it, the title — typed any old way — finds that note first", with.FirstOrDefault() == report, string.Join(",", with));
+            var common = await Ids(on, 12, "Setup guide");
+            var offCommon = await Ids(off, 13, "Setup guide");
+            Check("a name four notes share is left to fusion", common.SequenceEqual(offCommon), $"{string.Join(",", common)} vs {string.Join(",", offCommon)}");
+        }
+        finally
+        {
+            foreach (var s in new[] { on, off })
+            {
+                try { s?.Kill(entireProcessTree: true); } catch { }
+                s?.Dispose();
+            }
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    private static async Task SearchEscalationChecks()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the end-to-end check", false); return; }
+        var (root, vault, _) = EmbedVault(0);
+        void Note(string title, string body)
+        {
+            var p = Path.Combine(vault, "Notes", title + ".md");
+            File.WriteAllText(p, $"# {title}\n\n{body}\n");
+        }
+        Note("Deploy checklist", "Build it, push it, restart the service. The deploy checklist.");
+        Note("Rollback playbook", "When a release goes wrong: pin the previous artifact and redeploy it.");
+        Note("Quarterly planning", "Themes and owners for the quarter.");
+        var graph = new KnowledgeIndexer().IndexVault(vault);
+        File.WriteAllText(Path.Combine(vault, ".obsidianx", "brain-export.json"), Newtonsoft.Json.JsonConvert.SerializeObject(
+            BrainExporter.BuildExport(new BrainIdentity { Address = "t", DisplayName = "t" }, graph, vault)));
+        // The query vector is q; only the rollback playbook points that way.
+        var q = new[] { 1.0, 1, 1, 1, 1, 1, 1, 0 };
+        var dir = Path.Combine(vault, ".obsidianx", "embeddings");
+        string Id(string title) => graph.Nodes.Single(n => n.Title == title).Id;
+        foreach (var n in graph.Nodes)
+        {
+            var v = n.Title == "Rollback playbook" ? q.Select(x => (float)x).ToArray() : new float[] { 0, 0, 0, 0, 0, 0, 0, 1 };
+            var bytes = new byte[v.Length * 4];
+            Buffer.BlockCopy(v, 0, bytes, 0, bytes.Length);
+            File.WriteAllBytes(Path.Combine(dir, n.Id + ".bin"), bytes);
+        }
+
+        using var ollama = new FakeOllama("bge-m3:latest") { Fixed = q };
+        Process? on = null, off = null;
+        try
+        {
+            on = await StartServer(exe, vault, new Dictionary<string, string> { ["BRAINX_OLLAMA_URL"] = ollama.Url, ["BRAINX_CANARY"] = "0" });
+            off = await StartServer(exe, vault, new Dictionary<string, string>
+                { ["BRAINX_OLLAMA_URL"] = ollama.Url, ["BRAINX_CANARY"] = "0", ["BRAINX_SEARCH_ESCALATE"] = "0" });
+            async Task<JObject> Search(Process server, int id, string query) => ToolJson(await Rpc(server, id, "tools/call", new JObject
+                { ["name"] = "brain_search", ["arguments"] = new JObject { ["query"] = query, ["bypass_cache"] = true } }));
+            static string? First(JObject r) => (r["results"] as JArray)?.FirstOrDefault()?["id"]?.ToString();
+
+            // "release" is in the playbook, so keyword finds it — but holds one
+            // word of four: the question is about something else.
+            var meaning = await Search(on, 10, "how do we undo a broken release");
+            Check("a question the best keyword match barely covers is answered by meaning",
+                  meaning["mode"]?.ToString() == "escalated" && First(meaning) == Id("Rollback playbook"), meaning.ToString());
+            Check("…and the reply says why", meaning["escalated"]?.ToString().Contains("of the query's words") == true, meaning["escalated"]?.ToString());
+
+            var exact = await Search(on, 11, "deploy checklist");
+            Check("a question keyword covers stays keyword — no embed, no mode flag",
+                  exact["mode"] == null && First(exact) == Id("Deploy checklist"), exact.ToString());
+
+            var kept = await Search(off, 12, "how do we undo a broken release");
+            Check("BRAINX_SEARCH_ESCALATE=0 keeps brain_search keyword-only", kept["mode"] == null, kept.ToString());
+        }
+        finally
+        {
+            foreach (var s in new[] { on, off })
+            {
+                try { s?.Kill(entireProcessTree: true); } catch { }
+                s?.Dispose();
+            }
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
     }
 
     private static async Task StaleSectionChecks()

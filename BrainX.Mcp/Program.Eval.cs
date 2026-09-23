@@ -440,6 +440,41 @@ internal static partial class Program
         return (top, second, conc, top10.Select(x => x.id).ToList());
     }
 
+    /// <summary>
+    /// brain_search answering from keyword alone unless keyword has nothing to
+    /// stand on for THIS query — and then from the ranking brain_recall uses.
+    ///
+    /// brain_search is the tool agents actually call (682 times in 30 days
+    /// against 2 for brain_recall), and it is keyword-only: on paraphrase-46 it
+    /// scores MRR 0.04 where the shipped fusion scores 0.39. The rule agents
+    /// are given — "0 hits, then semantic" — fires on 1.2% of real searches,
+    /// because keyword almost always finds SOMETHING. On the journal set the
+    /// other way round holds: keyword alone beats fusion at depth (hit@10 69.6
+    /// vs 65.0). So neither "always" is right, and the question is whether a
+    /// signal from the keyword result alone — no embedding, which is the cost
+    /// being saved — can tell the two kinds of question apart.
+    ///
+    /// Signals, each a cut above which keyword's list is kept: `zero` (today's
+    /// rule), `cov` (share of the query's words the top note contains), `conc`
+    /// (top-10 score mass in rank 1), `mgn` (lead of rank 1 over rank 2).
+    /// </summary>
+    private static readonly (string Name, string Signal, double Cut)[] EscalateArms =
+    {
+        ("esc:zero", "zero", 0),
+        ("esc:cov0.5", "cov", 0.50), ("esc:cov0.75", "cov", 0.75), ("esc:cov1", "cov", 1.00),
+        ("esc:conc.15", "conc", 0.15), ("esc:conc.2", "conc", 0.20), ("esc:conc.3", "conc", 0.30),
+        ("esc:mgn.05", "mgn", 0.05), ("esc:mgn.15", "mgn", 0.15), ("esc:mgn.3", "mgn", 0.30),
+    };
+
+    /// <summary>brain_search's own escalation test (TopCoverage) on the note
+    /// keyword ranks first — the eval measures exactly what ships.</summary>
+    private static double QueryCoverage(BrainExport export, List<NodeSummary> all, string query, List<string> keywordIds)
+    {
+        if (keywordIds.Count == 0) return 0;
+        var top = all.FirstOrDefault(n => n.Id == keywordIds[0]);
+        return top == null ? 0 : TopCoverage(export, query.ToLowerInvariant(), top);
+    }
+
     /// <summary>Fraction of the two top-10 lists that overlap.</summary>
     private static double Overlap(List<string> a, List<string> b)
     {
@@ -1373,7 +1408,10 @@ internal static partial class Program
         // a few thousand extra SIMD cosines — and because the sections idea was
         // once rejected on a whole-vault measurement that never split by kind;
         // this row is where the kind-scoped version answers for itself.
-        var armNames = new[] { "keyword", "semantic", "hybrid", "shipped", "sect", "router" }
+        // `noguard` is shipped without the exact-title guard — the guard's own
+        // effect, one variable apart.
+        var armNames = new[] { "keyword", "semantic", "hybrid", "shipped", "noguard", "sect", "router" }
+            .Concat(EscalateArms.Select(e => e.Name))
             .Concat(WideCeilings.Select(c => $"wide{c:0.#}"))
             // Two CHEATING arms. They read the labels, so they can never ship —
             // they exist to bound the search. `oracle:pick` is the best a
@@ -1419,6 +1457,7 @@ internal static partial class Program
         // And again by the tool the label came from — the bias control.
         var byTool = new Dictionary<string, Dictionary<string, ModeScore>>();
         var recall = new RecallScore();
+        var escalated = new Dictionary<string, int>(StringComparer.Ordinal);
         var kwTops = new List<double>();
         var kwMargins = new List<double>();
         var kwPerWord = new List<double>();
@@ -1487,7 +1526,9 @@ internal static partial class Program
             var kwIds = Arm("keyword", () => RunKeyword(export, all, pair.Query));
             var semIds = Arm("semantic", () => RunSemantic(all, vec));
             var hybridIds = Arm("hybrid", () => RunHybrid(export, all, pair.Query, vec));
-            Arm("shipped", () => RunShipped(export, all, pair.Query, vec));
+            var shippedIds = Arm("shipped", () => RunShipped(export, all, pair.Query, vec));
+            Arm("noguard", () => HybridRank(export, all, pair.Query.ToLowerInvariant(), EvalTopK, vec, exactTitle: false)
+                .Ranked.Select(r => r.Node.Id).ToList());
             Arm("sect", () => HybridRank(export, all, pair.Query.ToLowerInvariant(),
                     EvalTopK, vec, sectionMax: true)
                 .Ranked.Select(r => r.Node.Id).ToList());
@@ -1594,6 +1635,19 @@ internal static partial class Program
             var cosValues = semSorted.Select(x => x.Cos).ToList();
 
             var (kwTop, kwSecond, kwConc, kwTopIds) = KeywordSignal(export, all, pair.Query);
+
+            // brain_search, escalating: keyword's own signals only — nothing
+            // that needs the query vector, which is the cost escalation saves.
+            var kwMargin = kwTop > 0 ? (kwTop - kwSecond) / kwTop : 0;
+            var kwCover = QueryCoverage(export, all, pair.Query, kwIds);
+            foreach (var (name, signal, cut) in EscalateArms)
+            {
+                var value = signal switch { "cov" => kwCover, "conc" => kwConc, "mgn" => kwMargin, _ => kwTop };
+                var keep = signal == "zero" ? kwTop > 0 : value >= cut;
+                if (!keep) escalated[name] = escalated.GetValueOrDefault(name) + 1;
+                Arm(name, () => keep ? kwIds : shippedIds);
+            }
+
             kwConcs.Add(kwConc);
             kwOverlaps.Add(Overlap(kwTopIds, semTopIds));
             kwTops.Add(kwTop);
@@ -1790,6 +1844,10 @@ internal static partial class Program
                  + $"hit@10 {a.P(a.Hit10):P1}  MRR {a.Mrr:F3}"
                  + $"  (rank {a.ElapsedMs / Math.Max(1, a.N)}ms · total "
                  + $"{(a.ElapsedMs + (a.NeedsEmbed ? embedMs : 0)) / Math.Max(1, a.N)}ms/q)");
+        // What each escalation rule would cost live: the share of queries that
+        // pay for an embed. The rows above charge every esc: arm the embed.
+        Result("  escalated: " + string.Join(" · ", EscalateArms.Select(e =>
+            $"{e.Name} {(double)escalated.GetValueOrDefault(e.Name) / Math.Max(1, gold.Count):P0}")));
         Result($"  {"recall",-9} STRONG {recall.Strong} · WEAK {recall.Weak} · MISS {recall.Miss}"
              + $"  strongRate {recall.Rate(recall.Strong):P1}"
              + $"  falseMiss {recall.Rate(recall.Miss):P1}"

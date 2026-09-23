@@ -61,6 +61,12 @@ internal static partial class Program
         // Two halves of one piece of work: alike, but written together.
         Note("Notes/Cache warmup notes part one.md", "2026-09-16T09:00:00Z", "# one\n\nfirst half");
         Note("Notes/Cache warmup notes part two.md", "2026-09-16T15:00:00Z", "# two\n\nsecond half");
+        // Reports BrainX rewrites in place: each is replaced by its own next run.
+        foreach (var (name, day) in new[] { ("Retrieval benchmark", "2026-09-02"), ("Retrieval benchmark — gold-paraphrase", "2026-09-17") })
+        {
+            var p = Path.Combine(vault, "Notes", name + ".md");
+            File.WriteAllText(p, $"---\ncreated: {day}T09:00:00Z\nsource: brainx-eval\ntags:\n  - eval\n---\n# {name}\n\nnumbers\n");
+        }
         var graph = new KnowledgeIndexer().IndexVault(vault);
         File.WriteAllText(Path.Combine(vault, ".obsidianx", "brain-export.json"), Newtonsoft.Json.JsonConvert.SerializeObject(
             BrainExporter.BuildExport(new BrainX.Core.Models.BrainIdentity { Address = "t", DisplayName = "t" }, graph, vault)));
@@ -82,7 +88,7 @@ internal static partial class Program
             var dream = JObject.Parse(RunCli(exe, $"dream --vault \"{vault}\""));
             var candidates = (dream["proposals"] as JArray)!.OfType<JObject>().Where(p => p["kind"]?.ToString() == "supersede-candidate").ToList();
             Check("dream proposes the rewrite as a replacement — and nothing else: not the session log, the import, the "
-                  + "unrelated title, or two halves written the same day",
+                  + "unrelated title, two halves written the same day, or two reports BrainX rewrites in place",
                   candidates.Count == 1 && candidates[0]["noteId"]?.ToString() == newer && candidates[0]["action"]?.ToString().Contains(older2) == true,
                   string.Join(" | ", candidates.Select(c => c["subject"] + " / " + c["evidence"])));
 

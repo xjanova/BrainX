@@ -88,8 +88,10 @@ internal static partial class Program
             // the caches a live request may be writing, so it takes the gate.
             var vec = EmbedQuery(n.Title);
             if (vec != null) semantic++;
+            // Without the exact-title guard: with it, every title lookup wins by
+            // construction and this would stop measuring the ranking at all.
             List<(NodeSummary Node, double Score)> ranked;
-            lock (_requestGate) ranked = HybridRank(export, all, n.Title.ToLowerInvariant(), 10, vec).Ranked;
+            lock (_requestGate) ranked = HybridRank(export, all, n.Title.ToLowerInvariant(), 10, vec, exactTitle: false).Ranked;
             var rank = ranked.FindIndex(r => r.Node.Id == n.Id) + 1;
             var ok = rank is >= 1 and <= CanaryTop;
             if (ok) found++;
@@ -117,6 +119,15 @@ internal static partial class Program
         var missingVectors = rows.Count(r => r["hasVector"]?.Value<bool>() == false);
         if (problem != null && missingVectors > 0)
             problem += $" — {missingVectors} of them have no vector (see brain_stats.embeddings)";
+        // A note an hour old with no vector means nothing is embedding — a
+        // write embeds its own note within seconds, the Garden the rest. On
+        // its own this is the stall of 2026-09-16, even while titles still rank.
+        var stranded = picks.Count(n => DateTime.UtcNow - n.ModifiedAt.ToUniversalTime() > TimeSpan.FromHours(1)
+                                        && Directory.Exists(embeddings)
+                                        && !File.Exists(Path.Combine(embeddings, n.Id + ".bin")));
+        if (problem == null && stranded > 0)
+            problem = $"{stranded} of the {picks.Count} newest notes are over an hour old and still have no vector — "
+                    + "nothing is embedding (see brain_stats.embeddings)";
 
         return new JObject
         {

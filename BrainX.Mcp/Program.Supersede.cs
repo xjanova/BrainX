@@ -67,6 +67,11 @@ internal static partial class Program
             if (!n.RelativePath.EndsWith(".md", StringComparison.OrdinalIgnoreCase)) continue;
             if (n.RelativePath.StartsWith("Imported/", StringComparison.OrdinalIgnoreCase)
                 || n.RelativePath.StartsWith("Notes/Remembered/", StringComparison.OrdinalIgnoreCase)) continue;
+            // A report BrainX rewrites in place (`source: brainx-eval` — "this
+            // note is overwritten on every run") is replaced by its own next
+            // run, never by another note. The first proposals on the real vault
+            // were exactly two of these: the benchmark reports for two gold sets.
+            if (FrontmatterRefs(n, "source").Any(s => s.StartsWith("brainx-", StringComparison.OrdinalIgnoreCase))) continue;
             if (LoadEmbedding(n.Id) is { } vec) pool.Add((n, vec, NoteStart(n)));
         }
 

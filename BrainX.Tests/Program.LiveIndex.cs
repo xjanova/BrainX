@@ -82,6 +82,15 @@ internal static partial class Program
             Check("brain_stats carries the last canary result, problem and notes included",
                   stats["findability"]?["problem"]?.ToString().Contains("keyword-only") == true && stats["findability"]?["notes"] is JArray { Count: 3 },
                   stats["findability"]?.ToString());
+
+            // Everything ranks, queries embed — but a note two hours old has no
+            // vector: nothing is embedding, which is the stall itself.
+            var old = Path.Combine(vault, "Notes", "Ledger reconciliation walkthrough.md");
+            File.SetLastWriteTimeUtc(old, DateTime.UtcNow.AddHours(-2));
+            File.WriteAllText(Path.Combine(vault, ".obsidianx", "brain-export.json"), Newtonsoft.Json.JsonConvert.SerializeObject(Snapshot(vault)));
+            var (strandedCode, strandedOutput) = RunCliWith(exe, $"canary --vault \"{vault}\"", new Dictionary<string, string> { ["BRAINX_OLLAMA_URL"] = ollama.Url });
+            Check("a note over an hour old with no vector is a problem even when every title ranks",
+                  strandedCode == 1 && Result()["problem"]?.ToString().Contains("nothing is embedding") == true, strandedOutput);
         }
         finally
         {

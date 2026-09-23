@@ -2008,10 +2008,40 @@ internal static partial class Program
             matches = Rank(_ => true, (n, s) => new { Node = n, Score = s });
         }
 
+        // Escalation. brain_search is the tool agents call, and keyword alone
+        // cannot find a note by what it MEANS: paraphrase-46 scores MRR 0.04
+        // keyword against 0.39 for the ranking brain_recall uses. The rule
+        // agents were given — "0 hits, then semantic" — fired on 1.2% of real
+        // searches, because keyword nearly always finds SOMETHING. The test
+        // that separates the two kinds of question (EscalateArms, measured on
+        // both gold sets) is whether the note keyword put first contains what
+        // was asked: below SearchEscalateCover of the query's words, the answer
+        // comes from the fused ranking, and the reply says so.
+        string? escalated = null;
+        if (SearchEscalationOn)
+        {
+            var cover = matches.Count == 0 ? 0 : TopCoverage(export, ql, matches[0].Node);
+            if (cover < SearchEscalateCover && EmbedQuery(query) is { } vec)
+            {
+                var pool = scope.Length > 0 && !scopeFallback
+                    ? export.Nodes.Where(n => ScopeMatches(n, scope)).ToList()
+                    : export.Nodes.ToList();
+                var fused = HybridRank(export, pool, ql, limit, vec).Ranked;
+                if (fused.Count > 0)
+                {
+                    escalated = matches.Count == 0
+                        ? "keyword matched nothing, so these come from meaning (keyword + embeddings, as brain_recall ranks)"
+                        : string.Create(System.Globalization.CultureInfo.InvariantCulture,
+                            $"the best keyword match held only {cover:P0} of the query's words, so these come from meaning (keyword + embeddings, as brain_recall ranks)");
+                    matches = fused.Select(r => new { Node = r.Node, Score = r.Score }).ToList();
+                }
+            }
+        }
+
         // Log access for each hit so the 3D graph can pulse the matching nodes,
         // and the question itself once — see LogQuery for why both.
         foreach (var m in matches) LogAccess(m.Node.Id, "search", query);
-        LogQuery("brain_search", query, matches.Count);
+        LogQuery("brain_search", query, matches.Count, escalated != null ? "escalated" : null);
 
         var resultsArr = new JArray(matches.Select(x =>
         {
@@ -2036,6 +2066,11 @@ internal static partial class Program
             ["count"] = matches.Count,
             ["results"] = resultsArr
         };
+        if (escalated != null)
+        {
+            ret["mode"] = "escalated";
+            ret["escalated"] = escalated;
+        }
         if (scopeFallback)
         {
             ret["scopeFallback"] = true;
@@ -2043,6 +2078,41 @@ internal static partial class Program
         }
         AddProvenance(ret, resultsArr);
         return ret;
+    }
+
+    /// <summary>Share of the query's words a note must hold before brain_search
+    /// trusts keyword alone. Set from the escalation arms of `brainx-mcp eval`
+    /// (2026-09-23, after the Garden pass):
+    ///
+    ///                 journal-651 h1/h5/h10 · MRR      paraphrase-46 MRR   escalated
+    ///   keyword        28.3 / 56.1 / 69.4 · .403       .041                0% / 0%
+    ///   cover 0.75     29.5 / 56.5 / 68.2 · .411       .391                33% / 100%
+    ///   cover 1.0      29.8 / 55.9 / 65.9 · .406       .391                72% / 100%
+    ///
+    /// 0.75 is the one that keeps journal inside the eval gate (worst: hit@10
+    /// −1.2) while paraphrase gets everything fusion has, and it pays for an
+    /// embed on a third of keyword-shaped questions rather than most of them.</summary>
+    private const double SearchEscalateCover = 0.75;
+
+    /// <summary>BRAINX_SEARCH_ESCALATE=0 keeps brain_search keyword-only.</summary>
+    private static bool SearchEscalationOn => Environment.GetEnvironmentVariable("BRAINX_SEARCH_ESCALATE") != "0";
+
+    /// <summary>
+    /// Share of the query's words — split and filtered as ScoreNode splits them
+    /// — that <paramref name="note"/> contains in its title, tags, preview or
+    /// body. One note, so it costs one cached body scan.
+    /// </summary>
+    private static double TopCoverage(BrainExport export, string ql, NodeSummary note)
+    {
+        var words = ql.Split(new[] { ' ', '\t', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .Where(w => w.Length >= 2 && !_stopWords.Contains(w))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (words.Length == 0) return 1;
+        var body = GetContentLower(export, note);
+        var hit = words.Count(w => HasTerm(note.Title, w) || note.Tags.Any(t => HasTerm(t, w))
+                                   || HasTerm(note.Preview, w) || HasTerm(body, w, lowered: true));
+        return (double)hit / words.Length;
     }
 
     private static JObject BuildSearchResult(NodeSummary n, double score, int previewChars, bool compact)

@@ -310,7 +310,76 @@ internal static partial class Program
         HybridRank(BrainExport export, List<NodeSummary> filtered, string ql, int limit,
                    float[]? queryVec, Fusion? fusion = null, double? kwCeiling = null,
                    bool? lexRerank = null, bool? autoScope = null, int? lexDepth = null,
-                   bool? sectionMax = null, Dictionary<string, int>? bestSectionOut = null)
+                   bool? sectionMax = null, Dictionary<string, int>? bestSectionOut = null,
+                   bool? exactTitle = null)
+    {
+        var result = HybridRankFused(export, filtered, ql, limit, queryVec, fusion, kwCeiling,
+            lexRerank, autoScope, lexDepth, sectionMax, bestSectionOut);
+        if (exactTitle ?? ExactTitleGuardOn)
+            result.Ranked = PromoteExactTitles(filtered, ql, result.Ranked, limit);
+        return result;
+    }
+
+    /// <summary>BRAINX_EXACT_TITLE=0 turns the exact-title guard off.</summary>
+    private static bool ExactTitleGuardOn => Environment.GetEnvironmentVariable("BRAINX_EXACT_TITLE") != "0";
+
+    /// <summary>
+    /// A query that IS a note's title is a lookup, not a question — and fusion
+    /// can lose it. The first findability canary on the live vault asked for
+    /// "Retrieval benchmark — gold-paraphrase" and the note by exactly that
+    /// name was not in the top ten: it is a table of numbers, its vector sits
+    /// nowhere near its own title, and reciprocal-rank fusion puts a note that
+    /// only keyword ranks first behind every note both lists merely like.
+    /// So a note whose title equals the query (punctuation and case aside) goes
+    /// first — unless more than three notes share the name, when "README" is a
+    /// question after all and fusion keeps its order.
+    /// </summary>
+    private static List<(NodeSummary Node, double Score)> PromoteExactTitles(
+        List<NodeSummary> filtered, string ql, List<(NodeSummary Node, double Score)> ranked, int limit)
+    {
+        var key = TitleKey(ql);
+        if (key.Length < 3) return ranked;
+        var exact = filtered.Where(n => TitleKey(n.Title) == key).ToList();
+        if (exact.Count is 0 or > 3) return ranked;
+        var top = ranked.Count > 0 ? ranked[0].Score : 1.0;
+        var promoted = new List<(NodeSummary Node, double Score)>(ranked.Count + exact.Count);
+        foreach (var n in exact)
+        {
+            var at = ranked.FindIndex(r => r.Node.Id == n.Id);
+            promoted.Add((n, at >= 0 ? Math.Max(ranked[at].Score, top) : top));
+        }
+        var ids = new HashSet<string>(exact.Select(n => n.Id), StringComparer.Ordinal);
+        promoted.AddRange(ranked.Where(r => !ids.Contains(r.Node.Id)));
+        return promoted.Count > limit ? promoted.Take(limit).ToList() : promoted;
+    }
+
+    /// <summary>A title as someone would type it: lower-case, letters and digits
+    /// only, single spaces — so "Retrieval benchmark — gold-paraphrase" and
+    /// "retrieval benchmark gold paraphrase" are the same lookup.</summary>
+    private static string TitleKey(string s)
+    {
+        var sb = new System.Text.StringBuilder(s.Length);
+        var space = false;
+        foreach (var c in s.ToLowerInvariant())
+        {
+            if (char.IsLetterOrDigit(c) || char.GetUnicodeCategory(c) is System.Globalization.UnicodeCategory.NonSpacingMark
+                                                                   or System.Globalization.UnicodeCategory.SpacingCombiningMark)
+            {
+                if (space && sb.Length > 0) sb.Append(' ');
+                sb.Append(c);
+                space = false;
+            }
+            else space = true;
+        }
+        return sb.ToString();
+    }
+
+    private static (List<(NodeSummary Node, double Score)> Ranked, string Mode,
+                    Dictionary<string, double> Cosines, RankerAgreement Agree)
+        HybridRankFused(BrainExport export, List<NodeSummary> filtered, string ql, int limit,
+                   float[]? queryVec, Fusion? fusion, double? kwCeiling,
+                   bool? lexRerank, bool? autoScope, int? lexDepth,
+                   bool? sectionMax, Dictionary<string, int>? bestSectionOut)
     {
         var fuse = fusion ?? CurrentFusion;
         var doLex = lexRerank ?? LexRerankEnabled;
