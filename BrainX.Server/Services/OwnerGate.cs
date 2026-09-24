@@ -13,6 +13,10 @@ namespace BrainX.Server.Services;
 ///     token even when RequireAuth=false; McpCallerResolver owns it.
 ///   • /api/cloud — BrainX Cloud customers are not the owner. Every route there
 ///     authenticates with its own bxc_ token (login with a license key).
+///   • /api/admin — STRICTER than this gate, not looser: AdminGate demands the
+///     same token AND a request from this very machine, and answers every
+///     failure with a plain 404. Letting this gate answer first would turn
+///     "no token" into a 401 that says the route is there.
 /// </summary>
 public static class OwnerGate
 {
@@ -21,6 +25,7 @@ public static class OwnerGate
         if (p.StartsWithSegments("/health") || p.StartsWithSegments("/api/health")) return false;
         if (p.StartsWithSegments("/mcp")) return false;
         if (p.StartsWithSegments("/api/cloud")) return false;
+        if (p.StartsWithSegments("/api/admin")) return false;
         return p.StartsWithSegments("/api") || p.StartsWithSegments("/v1");
     }
 }

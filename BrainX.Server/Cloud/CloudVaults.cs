@@ -58,6 +58,10 @@ public sealed class AccountVault
     /// (a remote MCP write tool) — rescan before trusting the index.</summary>
     internal volatile bool Dirty;
 
+    /// <summary>The owner deleted this account. Set under Gate; a request that
+    /// was already waiting for the lock sees it and writes nothing.</summary>
+    internal volatile bool Deleted;
+
     private long _used;
     private int _count;
     public long UsedBytes => Interlocked.Read(ref _used);
@@ -272,9 +276,89 @@ public sealed class CloudVaults
         if (!await v.Gate.WaitAsync(LockWait, ct).ConfigureAwait(false)) return null;
         try
         {
+            if (v.Deleted) return new ManifestSnapshot([], 0, 0);
             EnsureScannedLocked(v, allowAged: false);
             var files = v.Entries.Values.OrderBy(e => e.Path, StringComparer.Ordinal).ToList();
             return new ManifestSnapshot(files, v.UsedBytes, v.NoteCount);
+        }
+        finally
+        {
+            v.Gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Usage for the owner's admin views, without taking any account lock: the
+    /// index totals when this account has been scanned since start, otherwise a
+    /// size-only walk of its notes (no hashing).
+    /// </summary>
+    public (long UsedBytes, int NoteCount) QuickUsage(string accountId)
+    {
+        var v = For(accountId);
+        if (v.Scanned) return (v.UsedBytes, v.NoteCount);
+        if (!Directory.Exists(v.VaultDir)) return (0, 0);
+        long used = 0;
+        var count = 0;
+        try
+        {
+            var walk = new FileSystemEnumerable<long>(
+                v.VaultDir,
+                (ref FileSystemEntry e) => e.Length,
+                new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.System })
+            {
+                ShouldIncludePredicate = (ref FileSystemEntry e) => !e.IsDirectory && e.FileName.EndsWith(".md", StringComparison.OrdinalIgnoreCase),
+                ShouldRecursePredicate = (ref FileSystemEntry e) => e.FileName.Length > 0 && e.FileName[0] != '.',
+            };
+            foreach (var size in walk) { used += size; count++; }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        return (used, count);
+    }
+
+    /// <summary>Free space on the volume that holds the cloud root, or null if unknown.</summary>
+    public long? DiskFreeBytes()
+    {
+        try
+        {
+            var root = Path.GetPathRoot(_root);
+            return string.IsNullOrEmpty(root) ? null : new DriveInfo(root).AvailableFreeSpace;
+        }
+        catch (Exception) { return null; }
+    }
+
+    /// <summary>
+    /// Remove an account's whole folder (admin delete). Takes the account lock,
+    /// so no upload is mid-write; anything that was waiting for the lock sees
+    /// <see cref="AccountVault.Deleted"/> and writes nothing. Null on success.
+    /// </summary>
+    public async Task<CloudError?> DeleteStorageAsync(string accountId, CancellationToken ct)
+    {
+        var v = For(accountId);
+        if (!await v.Gate.WaitAsync(LockWait, ct).ConfigureAwait(false))
+            return new CloudError(503, "BUSY", "the account is busy — retry the delete in a moment");
+        try
+        {
+            v.Deleted = true;
+            Exception? last = null;
+            for (var attempt = 0; attempt < 10 && Directory.Exists(v.Dir); attempt++)
+            {
+                try { Directory.Delete(v.Dir, recursive: true); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    // A child that was just killed can hold a handle for a moment.
+                    last = ex;
+                    await Task.Delay(200 * (attempt + 1), CancellationToken.None).ConfigureAwait(false);
+                }
+            }
+            if (Directory.Exists(v.Dir))
+            {
+                v.Deleted = false;
+                v.Dirty = true;
+                Console.WriteLine($"[cloud] delete of {CloudIds.ShortId(accountId)} left files behind: {last?.GetType().Name}");
+                return new CloudError(500, "IO_ERROR", "some of the account's files are still in use — retry the delete");
+            }
+            _vaults.TryRemove(new KeyValuePair<string, AccountVault>(accountId, v));
+            return null;
         }
         finally
         {
@@ -292,6 +376,7 @@ public sealed class CloudVaults
         if (!await v.Gate.WaitAsync(wait, ct).ConfigureAwait(false)) return (v.UsedBytes, v.NoteCount);
         try
         {
+            if (v.Deleted) return (0, 0);
             EnsureScannedLocked(v, allowAged: true);
             return (v.UsedBytes, v.NoteCount);
         }
@@ -394,6 +479,7 @@ public sealed class CloudVaults
             return (null, new CloudError(503, "BUSY", "another operation on this account is still running — retry shortly"));
         try
         {
+            if (v.Deleted) return (null, new CloudError(401, "UNAUTHORIZED", "this account no longer exists"));
             EnsureScannedLocked(v, allowAged: true);
 
             // 3. Where each note lands: an existing note keeps its spelling;
@@ -464,7 +550,7 @@ public sealed class CloudVaults
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {
                     failure = new CloudError(500, "IO_ERROR", $"could not write '{Show(p.Requested)}' — earlier notes in this batch were saved; retry the batch");
-                    Console.WriteLine($"[cloud] write failed for {CloudIds.ShortId(accountId)}: {ex.GetType().Name}: {ex.Message}");
+                    Console.WriteLine($"[cloud] write failed for {CloudIds.ShortId(accountId)}: {ex.GetType().Name} (0x{ex.HResult:X8})");
                     break;
                 }
 
@@ -538,6 +624,7 @@ public sealed class CloudVaults
             return (null, new CloudError(503, "BUSY", "another operation on this account is still running — retry shortly"));
         try
         {
+            if (v.Deleted) return (null, new CloudError(401, "UNAUTHORIZED", "this account no longer exists"));
             EnsureScannedLocked(v, allowAged: true);
             var deleted = 0;
             var failed = new List<string>();

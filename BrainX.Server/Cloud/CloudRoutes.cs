@@ -75,7 +75,7 @@ public static class CloudRoutes
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[cloud] {ctx.Request.Method} {ctx.Request.Path} failed: {ex.GetType().Name}: {ex.Message}");
+            Console.WriteLine($"[cloud] {ctx.Request.Method} {ctx.Request.Path} failed: {ex.GetType().Name}: {BrainX.Server.Services.LogSafe.Redact(ex.Message)}");
             // A streamed answer (fetch) may already be on the wire: the status
             // line is gone, so the only honest signal left is a cut-off body.
             if (ctx.Response.HasStarted)
@@ -103,6 +103,9 @@ public static class CloudRoutes
         return Error(429, "RATE_LIMITED", message);
     }
 
+    private static IResult Suspended()
+        => Error(403, "ACCOUNT_SUSPENDED", "this BrainX Cloud account is suspended — contact support");
+
     private static IResult Unauthorized(HttpContext ctx)
     {
         ctx.Response.Headers["WWW-Authenticate"] = "Bearer realm=\"brainx-cloud\"";
@@ -125,6 +128,8 @@ public static class CloudRoutes
         }
         if (!cloud.Limiter.TryAcquire("api:" + caller.Token.Id, cloud.Options.ApiPerMinutePerToken, Minute, out var retry))
             return (null, RateLimited(ctx, retry));
+        if (caller.Account.Suspended)
+            return (null, Suspended());
         if (need == TokenNeed.Device && !caller.Token.IsDevice)
             return (null, Error(403, "FORBIDDEN", "this needs a device token (the one login issued); API tokens cannot manage tokens"));
         if (need == TokenNeed.ReadWrite && !caller.Token.CanWrite)
@@ -264,8 +269,14 @@ public static class CloudRoutes
                 return Error(503, "LICENSE_SERVER_UNREACHABLE", "the license server cannot be reached right now — try again in a few minutes");
         }
 
+        if (account!.Suspended)
+        {
+            Console.WriteLine($"[cloud] login refused (suspended) acct={CloudIds.ShortId(account.Id)}");
+            return Suspended();
+        }
+
         var deviceName = CloudIds.CleanLabel(Str(root, "deviceName"), "device");
-        var issued = cloud.IssueToken(account!.Id, deviceName, CloudScopes.ReadWrite, CloudScopes.Device, evictWhenFull: true)!;
+        var issued = cloud.IssueToken(account.Id, deviceName, CloudScopes.ReadWrite, CloudScopes.Device, evictWhenFull: true)!;
         Console.WriteLine($"[cloud] login ok acct={CloudIds.ShortId(account.Id)} device=\"{deviceName}\" token={issued.Record.Id}"
                           + (issued.Evicted != null ? $" (token limit reached — revoked least-recent {issued.Evicted.Id})" : ""));
 

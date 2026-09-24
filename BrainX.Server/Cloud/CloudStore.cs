@@ -22,7 +22,18 @@ public sealed record AccountRecord
 
     /// <summary>Per-account override of the default quota; null = the node default.</summary>
     public long? QuotaBytes { get; init; }
+
+    /// <summary>Last 4 characters of the key — enough for the owner to tell
+    /// customers apart in the Server Manager, useless to anyone else.</summary>
+    public string? KeyHint { get; init; }
+
+    /// <summary>Set by the node owner (admin API). A suspended account gets 403
+    /// ACCOUNT_SUSPENDED on every cloud route and on /mcp.</summary>
+    public bool Suspended { get; init; }
 }
+
+/// <summary>Per-account token figures for the admin views.</summary>
+public sealed record TokenStats(int Live, DateTimeOffset? LastSeenUtc);
 
 public sealed record TokenRecord
 {
@@ -93,7 +104,9 @@ public sealed class CloudStore
                 lic_expires_ms   INTEGER NULL,
                 lic_days         INTEGER NULL,
                 lic_checked_ms   INTEGER NULL,
-                quota_bytes      INTEGER NULL
+                quota_bytes      INTEGER NULL,
+                key_hint         TEXT NULL,
+                suspended        INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS tokens (
                 id            TEXT PRIMARY KEY,
@@ -109,6 +122,22 @@ public sealed class CloudStore
             );
             CREATE INDEX IF NOT EXISTS ix_tokens_account ON tokens(account_id, revoked);
             """);
+        // Columns added after the first schema — a cloud.db created by an
+        // earlier build gains them in place, nothing is rebuilt.
+        EnsureColumn(c, "accounts", "key_hint", "key_hint TEXT NULL");
+        EnsureColumn(c, "accounts", "suspended", "suspended INTEGER NOT NULL DEFAULT 0");
+    }
+
+    private static void EnsureColumn(SqliteConnection c, string table, string column, string ddl)
+    {
+        using (var cmd = c.CreateCommand())
+        {
+            cmd.CommandText = $"PRAGMA table_info({table})";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+                if (string.Equals(r.GetString(1), column, StringComparison.OrdinalIgnoreCase)) return;
+        }
+        Exec(c, $"ALTER TABLE {table} ADD COLUMN {ddl}");
     }
 
     private SqliteConnection Open()
@@ -132,32 +161,47 @@ public sealed class CloudStore
 
     // ───────────── accounts ─────────────
 
+    private const string AccountColumns = """
+        id, key_protected, created_ms, lic_type, lic_status, lic_valid, lic_expired,
+        lic_expires_ms, lic_days, lic_checked_ms, quota_bytes, key_hint, suspended
+        """;
+
+    private static AccountRecord ReadAccount(SqliteDataReader r) => new()
+    {
+        Id = r.GetString(0),
+        KeyProtected = r.IsDBNull(1) ? null : r.GetString(1),
+        CreatedUtc = FromMs(r.GetInt64(2)),
+        LicenseType = r.IsDBNull(3) ? null : r.GetString(3),
+        LicenseStatus = r.IsDBNull(4) ? null : r.GetString(4),
+        LicenseValid = r.GetInt64(5) != 0,
+        LicenseExpired = r.GetInt64(6) != 0,
+        ExpiresUtc = FromMsOrNull(r, 7),
+        DaysRemaining = r.IsDBNull(8) ? null : (int)r.GetInt64(8),
+        CheckedUtc = FromMsOrNull(r, 9),
+        QuotaBytes = r.IsDBNull(10) ? null : r.GetInt64(10),
+        KeyHint = r.IsDBNull(11) ? null : r.GetString(11),
+        Suspended = r.GetInt64(12) != 0,
+    };
+
     public AccountRecord? GetAccount(string id)
     {
         using var c = Open();
         using var cmd = c.CreateCommand();
-        cmd.CommandText = """
-            SELECT id, key_protected, created_ms, lic_type, lic_status, lic_valid, lic_expired,
-                   lic_expires_ms, lic_days, lic_checked_ms, quota_bytes
-            FROM accounts WHERE id = $id
-            """;
+        cmd.CommandText = $"SELECT {AccountColumns} FROM accounts WHERE id = $id";
         cmd.Parameters.AddWithValue("$id", id);
         using var r = cmd.ExecuteReader();
-        if (!r.Read()) return null;
-        return new AccountRecord
-        {
-            Id = r.GetString(0),
-            KeyProtected = r.IsDBNull(1) ? null : r.GetString(1),
-            CreatedUtc = FromMs(r.GetInt64(2)),
-            LicenseType = r.IsDBNull(3) ? null : r.GetString(3),
-            LicenseStatus = r.IsDBNull(4) ? null : r.GetString(4),
-            LicenseValid = r.GetInt64(5) != 0,
-            LicenseExpired = r.GetInt64(6) != 0,
-            ExpiresUtc = FromMsOrNull(r, 7),
-            DaysRemaining = r.IsDBNull(8) ? null : (int)r.GetInt64(8),
-            CheckedUtc = FromMsOrNull(r, 9),
-            QuotaBytes = r.IsDBNull(10) ? null : r.GetInt64(10),
-        };
+        return r.Read() ? ReadAccount(r) : null;
+    }
+
+    public List<AccountRecord> ListAccounts()
+    {
+        using var c = Open();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = $"SELECT {AccountColumns} FROM accounts ORDER BY created_ms";
+        using var r = cmd.ExecuteReader();
+        var list = new List<AccountRecord>();
+        while (r.Read()) list.Add(ReadAccount(r));
+        return list;
     }
 
     /// <summary>Insert or fully replace an account row.</summary>
@@ -167,8 +211,8 @@ public sealed class CloudStore
         using var cmd = c.CreateCommand();
         cmd.CommandText = """
             INSERT INTO accounts (id, key_protected, created_ms, lic_type, lic_status, lic_valid, lic_expired,
-                                  lic_expires_ms, lic_days, lic_checked_ms, quota_bytes)
-            VALUES ($id, $key, $created, $type, $status, $valid, $expired, $expires, $days, $checked, $quota)
+                                  lic_expires_ms, lic_days, lic_checked_ms, quota_bytes, key_hint, suspended)
+            VALUES ($id, $key, $created, $type, $status, $valid, $expired, $expires, $days, $checked, $quota, $hint, $suspended)
             ON CONFLICT(id) DO UPDATE SET
                 key_protected  = excluded.key_protected,
                 lic_type       = excluded.lic_type,
@@ -178,8 +222,12 @@ public sealed class CloudStore
                 lic_expires_ms = excluded.lic_expires_ms,
                 lic_days       = excluded.lic_days,
                 lic_checked_ms = excluded.lic_checked_ms,
-                quota_bytes    = excluded.quota_bytes
+                quota_bytes    = excluded.quota_bytes,
+                key_hint       = excluded.key_hint,
+                suspended      = excluded.suspended
             """;
+        cmd.Parameters.AddWithValue("$hint", (object?)a.KeyHint ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$suspended", a.Suspended ? 1 : 0);
         cmd.Parameters.AddWithValue("$id", a.Id);
         cmd.Parameters.AddWithValue("$key", (object?)a.KeyProtected ?? DBNull.Value);
         cmd.Parameters.AddWithValue("$created", Ms(a.CreatedUtc));
@@ -332,6 +380,67 @@ public sealed class CloudStore
         cmd.Parameters.AddWithValue("$id", tokenId);
         cmd.Parameters.AddWithValue("$a", accountId);
         return cmd.ExecuteNonQuery() > 0;
+    }
+
+    /// <summary>Every token of an account, revoked ones included (admin detail view).</summary>
+    public List<TokenRecord> ListAllTokens(string accountId)
+    {
+        using var c = Open();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = $"SELECT {TokenColumns} FROM tokens WHERE account_id = $a ORDER BY created_ms";
+        cmd.Parameters.AddWithValue("$a", accountId);
+        using var r = cmd.ExecuteReader();
+        var list = new List<TokenRecord>();
+        while (r.Read()) list.Add(ReadToken(r));
+        return list;
+    }
+
+    /// <summary>Revoke every live token of an account; returns how many.</summary>
+    public int RevokeAllTokens(string accountId, DateTimeOffset now)
+    {
+        using var c = Open();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = "UPDATE tokens SET revoked = 1, revoked_ms = $now WHERE account_id = $a AND revoked = 0";
+        cmd.Parameters.AddWithValue("$now", Ms(now));
+        cmd.Parameters.AddWithValue("$a", accountId);
+        return cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>Live token count and last activity (last use, else creation) per account.</summary>
+    public Dictionary<string, TokenStats> TokenStatsByAccount()
+    {
+        using var c = Open();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = """
+            SELECT account_id,
+                   SUM(CASE WHEN revoked = 0 THEN 1 ELSE 0 END),
+                   MAX(COALESCE(last_used_ms, created_ms))
+            FROM tokens GROUP BY account_id
+            """;
+        using var r = cmd.ExecuteReader();
+        var map = new Dictionary<string, TokenStats>(StringComparer.Ordinal);
+        while (r.Read())
+            map[r.GetString(0)] = new TokenStats((int)r.GetInt64(1), FromMsOrNull(r, 2));
+        return map;
+    }
+
+    /// <summary>Remove an account and all of its tokens (admin delete).</summary>
+    public void DeleteAccount(string accountId)
+    {
+        lock (_tokenGate)
+        {
+            using var c = Open();
+            using var tx = c.BeginTransaction();
+            foreach (var sql in new[] { "DELETE FROM tokens WHERE account_id = $a", "DELETE FROM accounts WHERE id = $a" })
+            {
+                using var cmd = c.CreateCommand();
+                cmd.Transaction = tx;
+                cmd.CommandText = sql;
+                cmd.Parameters.AddWithValue("$a", accountId);
+                cmd.ExecuteNonQuery();
+            }
+            tx.Commit();
+        }
     }
 
     public void TouchToken(string tokenId, DateTimeOffset now)

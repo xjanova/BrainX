@@ -19,8 +19,9 @@ namespace BrainX.Server.Cloud;
 /// </summary>
 public sealed class CloudReindexer : IDisposable
 {
-    /// <summary>Re-index one account. True on success. Must honour <paramref name="ct"/> (shutdown).</summary>
-    public delegate Task<bool> Runner(string accountId, string vaultDir, string accountDir, CancellationToken ct);
+    /// <summary>Re-index one account. Must honour <paramref name="ct"/> (shutdown,
+    /// or the account being deleted).</summary>
+    public delegate Task<ReindexOutcome> Runner(string accountId, string vaultDir, string accountDir, CancellationToken ct);
 
     private readonly TimeSpan _debounce;
     private readonly Runner? _runner;
@@ -35,10 +36,13 @@ public sealed class CloudReindexer : IDisposable
         public Timer? Timer;
         public bool Running;
         public bool Pending;
+        public bool Forgotten;
         public string Vault = "";
         public string Dir = "";
         public int Completed;
         public int Succeeded;
+        public CancellationTokenSource? RunCts;
+        public ReindexResult? Last;
     }
 
     public CloudReindexer(TimeSpan debounce, int maxConcurrent, Runner? runner)
@@ -75,41 +79,83 @@ public sealed class CloudReindexer : IDisposable
     private async Task FireAsync(string accountId, State st)
     {
         string vault, dir;
+        CancellationTokenSource runCts;
         lock (st.Gate)
         {
-            if (_disposed) return;
+            if (_disposed || st.Forgotten) return;
             if (st.Running) { st.Pending = true; return; }
             st.Running = true;
             st.Pending = false;
             vault = st.Vault;
             dir = st.Dir;
+            runCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+            st.RunCts = runCts;
         }
 
-        var ok = false;
+        var outcome = new ReindexOutcome(false, "did not run");
         try
         {
-            await _global.WaitAsync(_cts.Token).ConfigureAwait(false);
-            try { ok = await _runner!(accountId, vault, dir, _cts.Token).ConfigureAwait(false); }
+            await _global.WaitAsync(runCts.Token).ConfigureAwait(false);
+            try { outcome = await _runner!(accountId, vault, dir, runCts.Token).ConfigureAwait(false); }
             finally { _global.Release(); }
         }
-        catch (OperationCanceledException) { /* shutting down */ }
+        catch (OperationCanceledException)
+        {
+            outcome = new ReindexOutcome(false, "cancelled");
+        }
         catch (Exception ex)
         {
-            Console.WriteLine($"[cloud] reindex {CloudIds.ShortId(accountId)} failed: {ex.GetType().Name}: {ex.Message}");
+            // Type only in the log: an IO message carries the vault path.
+            outcome = new ReindexOutcome(false, $"{ex.GetType().Name}: {ex.Message}");
+            Console.WriteLine($"[cloud] reindex {CloudIds.ShortId(accountId)} failed: {ex.GetType().Name}");
         }
         finally
         {
             lock (st.Gate)
             {
                 st.Running = false;
+                st.RunCts = null;
                 st.Completed++;
-                if (ok) st.Succeeded++;
-                if (st.Pending && !_disposed)
+                if (outcome.Ok) st.Succeeded++;
+                st.Last = new ReindexResult(DateTimeOffset.UtcNow, outcome.Ok, outcome.Message);
+                if (st.Pending && !_disposed && !st.Forgotten)
                 {
                     st.Pending = false;
                     try { st.Timer?.Change(_debounce, Timeout.InfiniteTimeSpan); } catch (ObjectDisposedException) { }
                 }
             }
+            runCts.Dispose();
+        }
+    }
+
+    /// <summary>The account's most recent re-index, or null if none ran since start.</summary>
+    public ReindexResult? LastResult(string accountId)
+    {
+        if (!_states.TryGetValue(accountId, out var st)) return null;
+        lock (st.Gate) return st.Last;
+    }
+
+    /// <summary>
+    /// Stop everything for one account (admin delete): no timer, no pending run,
+    /// the running export cancelled (its process is killed). Waits up to
+    /// <paramref name="wait"/> for that run to finish letting go of the vault.
+    /// </summary>
+    public async Task ForgetAsync(string accountId, TimeSpan wait)
+    {
+        if (!_states.TryRemove(accountId, out var st)) return;
+        lock (st.Gate)
+        {
+            st.Forgotten = true;
+            st.Pending = false;
+            st.Timer?.Dispose();
+            st.Timer = null;
+            try { st.RunCts?.Cancel(); } catch (ObjectDisposedException) { }
+        }
+        var deadline = DateTime.UtcNow + wait;
+        while (DateTime.UtcNow < deadline)
+        {
+            lock (st.Gate) if (!st.Running) return;
+            await Task.Delay(50).ConfigureAwait(false);
         }
     }
 
@@ -156,7 +202,12 @@ public static class CloudExport
     public static CloudReindexer.Runner Runner(string mcpExe)
         => (accountId, vault, dir, ct) => RunAsync(mcpExe, accountId, vault, dir, ct);
 
-    public static async Task<bool> RunAsync(string mcpExe, string accountId, string vaultDir, string accountDir, CancellationToken ct)
+    /// <summary>
+    /// The outcome's message is for the owner's admin view (local-only); the
+    /// node log gets only the exit code — brainx-mcp's stderr can name note
+    /// files, and the log never carries customer content.
+    /// </summary>
+    public static async Task<ReindexOutcome> RunAsync(string mcpExe, string accountId, string vaultDir, string accountDir, CancellationToken ct)
     {
         // brainx-mcp falls back to a default vault when the one it is handed
         // does not exist — so it must exist before the process starts.
@@ -197,29 +248,30 @@ public static class CloudExport
         catch (OperationCanceledException)
         {
             try { proc.Kill(entireProcessTree: true); } catch { /* already gone */ }
-            Console.WriteLine($"[cloud] reindex {CloudIds.ShortId(accountId)} "
-                              + (ct.IsCancellationRequested ? "cancelled (shutdown)" : $"killed after {MaxRunTime.TotalMinutes:0} min"));
-            return false;
+            var why = ct.IsCancellationRequested ? "cancelled" : $"killed after {MaxRunTime.TotalMinutes:0} min";
+            Console.WriteLine($"[cloud] reindex {CloudIds.ShortId(accountId)} {why}");
+            return new ReindexOutcome(false, why);
         }
 
         var err = await stderr.ConfigureAwait(false);
         await stdout.ConfigureAwait(false);
         if (proc.ExitCode != 0)
         {
-            Console.WriteLine($"[cloud] reindex {CloudIds.ShortId(accountId)} failed (exit {proc.ExitCode}): {Tail(err)}");
-            return false;
+            Console.WriteLine($"[cloud] reindex {CloudIds.ShortId(accountId)} failed (brainx-mcp exit {proc.ExitCode})");
+            return new ReindexOutcome(false, $"brainx-mcp export exited {proc.ExitCode}: {Tail(err)}");
         }
         if (!File.Exists(shadow))
         {
-            Console.WriteLine($"[cloud] reindex {CloudIds.ShortId(accountId)} produced no index (is brainx-mcp too old for `export --out`?)");
-            return false;
+            Console.WriteLine($"[cloud] reindex {CloudIds.ShortId(accountId)} produced no index");
+            return new ReindexOutcome(false, "brainx-mcp export produced no index (too old for `export --out`?)");
         }
 
         var target = Path.Combine(vaultDir, ".obsidianx", "brain-export.json");
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
         await CloudVaults.MoveWithRetryAsync(shadow, target).ConfigureAwait(false);
-        Console.WriteLine($"[cloud] reindexed {CloudIds.ShortId(accountId)} in {sw.Elapsed.TotalSeconds:0.0}s");
-        return true;
+        var took = sw.Elapsed.TotalSeconds.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture);
+        Console.WriteLine($"[cloud] reindexed {CloudIds.ShortId(accountId)} in {took}s");
+        return new ReindexOutcome(true, $"reindexed in {took}s");
     }
 
     private static string Tail(string s)
@@ -228,3 +280,13 @@ public static class CloudExport
         return s.Length <= 300 ? s : "…" + s[^300..];
     }
 }
+
+/// <summary>What one re-index run reports. A bare bool converts, for runners
+/// that have nothing more to say.</summary>
+public readonly record struct ReindexOutcome(bool Ok, string Message)
+{
+    public static implicit operator ReindexOutcome(bool ok) => new(ok, ok ? "ok" : "failed");
+}
+
+/// <summary>An account's most recent re-index, for the admin detail view.</summary>
+public sealed record ReindexResult(DateTimeOffset Utc, bool Ok, string Message);

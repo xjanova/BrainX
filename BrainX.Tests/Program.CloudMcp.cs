@@ -61,10 +61,17 @@ internal static partial class Program
     {
         const string ownerToken = "owner-write-token-0123456789abcdef";
         const string keyA = "MCPA-0000-0001", keyB = "MCPB-0000-0001";
+        // A runner that leaves an index behind, like the real export does.
         var reindexed = new ConcurrentDictionary<string, int>();
         await using var node = await CloudNode.StartAsync(
             quotaBytes: 1000, withMcp: true, sessionsPerAccount: 2, ownerWriteToken: ownerToken,
-            reindexRunner: (acct, _, _, _) => { reindexed.AddOrUpdate(acct, 1, (_, n) => n + 1); return Task.FromResult(true); });
+            reindexRunner: (acct, vault, _, _) =>
+            {
+                Directory.CreateDirectory(Path.Combine(vault, ".obsidianx"));
+                File.WriteAllText(Path.Combine(vault, ".obsidianx", "brain-export.json"), "{}");
+                reindexed.AddOrUpdate(acct, 1, (_, n) => n + 1);
+                return Task.FromResult<ReindexOutcome>(true);
+            });
         var sessions = node.Sessions!;
         var a = await node.NewAccountAsync(keyA, days: 1);
         var b = await node.NewAccountAsync(keyB);
@@ -78,6 +85,8 @@ internal static partial class Program
         var initA = await McpPost(node, StubMcpServer.InitBody(1), a, null);
         var a1 = initA.Session;
         Check("a cloud token opens a session", initA.Status == HttpStatusCode.OK && !string.IsNullOrEmpty(a1), initA.ToString());
+        Check("…and a space that was never indexed is indexed at once (no 'brain-export.json not found')",
+              await WaitUntil(() => reindexed.GetValueOrDefault(CloudIds.AccountIdFor(keyA)) >= 1, TimeSpan.FromSeconds(5)));
         var whoA = await McpPost(node, StubMcpServer.CallBody(2, StubMcpServer.WhoAmIQuery()), a, a1);
         Check("…whose child runs on THAT account's vault, sandboxed and headless",
               whoA.Text.Contains("vault=" + node.VaultOf(keyA) + ";") && whoA.Text.Contains("sandbox=1") && whoA.Text.Contains("headless=1"),
@@ -110,11 +119,13 @@ internal static partial class Program
         var overQuota = await McpPost(node, StubMcpServer.ToolCallBody(8, "brain_create_note", new JObject { ["title"] = "x" }), a, a1);
         Check("a write tool on a full account → 413 with error.data.code QUOTA_EXCEEDED",
               overQuota.Status == HttpStatusCode.RequestEntityTooLarge && overQuota.DataCode == "QUOTA_EXCEEDED", overQuota.ToString());
-        var bWrites = await McpPost(node, StubMcpServer.ToolCallBody(9, "brain_create_note", new JObject { ["title"] = "x" }), b, initB.Session);
         var bId = CloudIds.AccountIdFor(keyB);
+        await WaitUntil(() => node.Cloud.Reindexer.IsIdle(bId) && reindexed.GetValueOrDefault(bId) >= 1, TimeSpan.FromSeconds(5));
+        var bBefore = reindexed.GetValueOrDefault(bId);
+        var bWrites = await McpPost(node, StubMcpServer.ToolCallBody(9, "brain_create_note", new JObject { ["title"] = "x" }), b, initB.Session);
         Check("a write tool on an account with room goes through and schedules its re-index",
-              bWrites.Status == HttpStatusCode.OK && await WaitUntil(() => reindexed.GetValueOrDefault(bId) >= 1, TimeSpan.FromSeconds(5)),
-              bWrites.ToString());
+              bWrites.Status == HttpStatusCode.OK && await WaitUntil(() => reindexed.GetValueOrDefault(bId) > bBefore, TimeSpan.FromSeconds(5)),
+              $"{bWrites} · runs {bBefore} → {reindexed.GetValueOrDefault(bId)}");
 
         // Per-account cap (2), with both sessions just used → no eviction.
         var initA2 = await McpPost(node, StubMcpServer.InitBody(1), a, null);

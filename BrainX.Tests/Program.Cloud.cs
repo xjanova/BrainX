@@ -3,8 +3,10 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
+using BrainX.Server.Admin;
 using BrainX.Server.Cloud;
 using BrainX.Server.Mcp;
+using BrainX.Server.Services;
 using Microsoft.Data.Sqlite;
 using Newtonsoft.Json.Linq;
 
@@ -37,6 +39,9 @@ internal static partial class Program
         checks.Add(("owner gate + vault containment: /api/cloud is exempt, export paths cannot leave the vault", OwnerGateAndContainmentChecks));
         checks.Add(("audit log: concurrent records keep one unbroken HMAC chain", AuditChainChecks));
         checks.Add(("brain hub: only the target may answer a share request; FindExperts is bound to the caller", BrainHubAuthChecks));
+        checks.Add(("admin API: owner token AND a truly local request, every other request a plain 404", AdminGateChecks));
+        checks.Add(("admin API: accounts — list, detail, quota, suspend (403 everywhere), reverify, revoke, delete with confirm", AdminAccountChecks));
+        checks.Add(("node log + self-update: daily file, 14 kept, redacted; updater script uses /R:2 /W:2 and always restarts", NodeLogAndUpdaterChecks));
     }
 
     // ───────────────────────── fakes ─────────────────────────
@@ -91,6 +96,7 @@ internal static partial class Program
         public required ManualClock Clock { get; init; }
         public required string Root { get; init; }
         public McpSessionManager? Sessions { get; init; }
+        public NodeLog? Log { get; init; }
         public required WebApplication App { get; init; }
         public required HttpClient Http { get; init; }
 
@@ -101,7 +107,8 @@ internal static partial class Program
             int sessionsPerAccount = 3,
             TimeSpan? evictIdleAfter = null,
             string? ownerWriteToken = null,
-            TimeSpan? reindexDebounce = null)
+            TimeSpan? reindexDebounce = null,
+            string? adminToken = null)
         {
             var root = Path.Combine(Path.GetTempPath(), "brainx-cloud-" + Guid.NewGuid().ToString("N"));
             var clock = new ManualClock(DateTimeOffset.UtcNow);
@@ -109,7 +116,7 @@ internal static partial class Program
             var cloud = new CloudService(
                 new CloudOptions { Root = root, QuotaBytes = quotaBytes, ReindexDebounce = reindexDebounce ?? TimeSpan.FromMilliseconds(150) },
                 xman, clock,
-                reindexRunner ?? ((_, _, _, _) => Task.FromResult(true)));
+                reindexRunner ?? ((_, _, _, _) => Task.FromResult<ReindexOutcome>(true)));
 
             var builder = WebApplication.CreateBuilder();
             builder.Logging.ClearProviders();
@@ -127,6 +134,23 @@ internal static partial class Program
                                                      ownerEnabled: ownerWriteToken != null, cloud: cloud);
                 app.MapBrainMcp(sessions, resolver.ResolveAsync, TimeSpan.FromSeconds(20), cloud);
             }
+
+            NodeLog? log = null;
+            if (adminToken != null)
+            {
+                log = new NodeLog(Path.Combine(root, "logs"));   // not installed as the console tee
+                app.MapBrainAdmin(new AdminContext
+                {
+                    BearerToken = adminToken,
+                    Cloud = cloud,
+                    Sessions = sessions,
+                    OwnerMcpEnabled = ownerWriteToken != null,
+                    CloudMcpEnabled = withMcp,
+                    McpExeFound = withMcp,
+                    StorageName = "test",
+                    Log = log,
+                });
+            }
             await app.StartAsync();
 
             return new CloudNode
@@ -136,9 +160,29 @@ internal static partial class Program
                 Clock = clock,
                 Root = root,
                 Sessions = sessions,
+                Log = log,
                 App = app,
                 Http = new HttpClient { BaseAddress = new Uri(app.Urls.First()), Timeout = TimeSpan.FromMinutes(2) },
             };
+        }
+
+        /// <summary>A request as the Server Manager on the box sends it: no
+        /// Cloudflare headers unless the check adds them.</summary>
+        public async Task<Resp> Admin(HttpMethod method, string path, string? token, object? body = null,
+                                      IDictionary<string, string>? headers = null)
+        {
+            using var req = new HttpRequestMessage(method, path);
+            if (body != null)
+                req.Content = new StringContent(body as string ?? Newtonsoft.Json.JsonConvert.SerializeObject(body),
+                                                Encoding.UTF8, "application/json");
+            if (token != null) req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            if (headers != null) foreach (var (k, v) in headers) req.Headers.TryAddWithoutValidation(k, v);
+            using var res = await Http.SendAsync(req);
+            var raw = await res.Content.ReadAsStringAsync();
+            JObject json;
+            try { json = string.IsNullOrWhiteSpace(raw) ? new JObject() : JObject.Parse(raw); }
+            catch { json = new JObject(); }
+            return new Resp(res.StatusCode, json, res.Headers, raw);
         }
 
         public async Task<Resp> SendAsync(HttpMethod method, string path, object? body = null, string? token = null,
@@ -191,6 +235,7 @@ internal static partial class Program
             await App.StopAsync();
             await App.DisposeAsync();
             Cloud.Dispose();
+            Log?.Dispose();
             SqliteConnection.ClearAllPools();   // let go of cloud.db so the temp root can be removed
             try { Directory.Delete(Root, recursive: true); } catch { /* a child may still be exiting */ }
         }
@@ -847,7 +892,7 @@ internal static partial class Program
         var maxGlobal = 0;
         var started = new ConcurrentDictionary<string, TaskCompletionSource>();
 
-        async Task<bool> Runner(string acct, string vault, string dir, CancellationToken ct)
+        async Task<ReindexOutcome> Runner(string acct, string vault, string dir, CancellationToken ct)
         {
             var n = running.AddOrUpdate(acct, 1, (_, v) => v + 1);
             InterlockedMax(ref maxPerAccount, n);
@@ -893,7 +938,7 @@ internal static partial class Program
         await using (var node = await CloudNode.StartAsync(reindexDebounce: TimeSpan.FromSeconds(1), reindexRunner: (acct, _, _, _) =>
                      {
                          calls.AddOrUpdate(acct, 1, (_, v) => v + 1);
-                         return Task.FromResult(true);
+                         return Task.FromResult<ReindexOutcome>(true);
                      }))
         {
             const string key = "REINDEX-0000-0001";
@@ -929,7 +974,7 @@ internal static partial class Program
             var exportPath = Path.Combine(vaultDir, ".obsidianx", "brain-export.json");
             var json = File.Exists(exportPath) ? File.ReadAllText(exportPath) : "";
             Check("real `brainx-mcp export --out` rebuilds <vault>/.obsidianx/brain-export.json with both notes",
-                  ok && json.Contains("Alpha note") && json.Contains("บันทึกไทย"), ok ? Trim(json) : "export failed");
+                  ok.Ok && json.Contains("Alpha note") && json.Contains("บันทึกไทย"), ok.Ok ? Trim(json) : ok.Message);
             Check("…and writes no CLAUDE.md (or anything else) into the customer's vault",
                   !File.Exists(Path.Combine(vaultDir, "CLAUDE.md"))
                   && Directory.GetFiles(vaultDir, "*.md", SearchOption.AllDirectories).Length == 2);

@@ -174,6 +174,28 @@ public sealed class McpSessionManager : IAsyncDisposable
         return true;
     }
 
+    /// <summary>
+    /// End every session of one cloud account and wait for the children to
+    /// exit (admin suspend / revoke / delete — a delete must not race a child
+    /// that still has the vault open). Returns how many were ended.
+    /// </summary>
+    public async Task<int> EndAccountSessionsAsync(string accountId)
+    {
+        var closing = new List<Task>();
+        foreach (var (id, s) in _sessions)
+            if (string.Equals(s.AccountId, accountId, StringComparison.Ordinal)
+                && _sessions.TryRemove(new KeyValuePair<string, Session>(id, s)))
+                closing.Add(s.Child.DisposeAsync().AsTask());
+        await Task.WhenAll(closing);
+        return closing.Count;
+    }
+
+    /// <summary>Live sessions per cloud account (owner sessions are not included).</summary>
+    public Dictionary<string, int> SessionsByAccount()
+        => _sessions.Values.Where(s => s.AccountId != null)
+                           .GroupBy(s => s.AccountId!)
+                           .ToDictionary(g => g.Key, g => g.Count(), StringComparer.Ordinal);
+
     private void Reap()
     {
         var cutoff = DateTime.UtcNow - _idleTimeout;

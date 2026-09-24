@@ -35,7 +35,7 @@ public sealed class CloudAccounts
     }
 
     /// <summary>Insert a new account, or fold <paramref name="fresh"/> into an
-    /// existing row (keeping its creation time and quota override).</summary>
+    /// existing row (keeping its creation time, quota override and suspension).</summary>
     public AccountRecord Create(AccountRecord fresh)
     {
         lock (_locks.GetOrAdd(fresh.Id, _ => new object()))
@@ -43,10 +43,23 @@ public sealed class CloudAccounts
             var current = Get(fresh.Id);
             var next = current is null
                 ? fresh
-                : fresh with { CreatedUtc = current.CreatedUtc, QuotaBytes = current.QuotaBytes };
+                : fresh with { CreatedUtc = current.CreatedUtc, QuotaBytes = current.QuotaBytes, Suspended = current.Suspended };
             _store.SaveAccount(next);
             _cache[fresh.Id] = next;
             return next;
+        }
+    }
+
+    /// <summary>Every account, straight from the database (writes are write-through).</summary>
+    public List<AccountRecord> All() => _store.ListAccounts();
+
+    /// <summary>Remove an account's rows and forget it (admin delete).</summary>
+    public void Delete(string id)
+    {
+        lock (_locks.GetOrAdd(id, _ => new object()))
+        {
+            _store.DeleteAccount(id);
+            _cache.TryRemove(id, out _);
         }
     }
 }
@@ -227,12 +240,14 @@ public sealed class CloudLicenses
                     updated = _accounts.Update(accountId, cur => Apply(cur, check, now) with
                     {
                         KeyProtected = KeyMatches(cur, normalizedKey) ? cur.KeyProtected : _secrets.Protect(normalizedKey, accountId),
+                        KeyHint = cur.KeyHint ?? HintOf(normalizedKey),
                     });
                 else if (outcome == LoginOutcome.Valid)
                     updated = _accounts.Create(Apply(new AccountRecord
                     {
                         Id = accountId,
                         KeyProtected = _secrets.Protect(normalizedKey, accountId),
+                        KeyHint = HintOf(normalizedKey),
                         CreatedUtc = now,
                     }, check, now));
                 else
@@ -260,9 +275,50 @@ public sealed class CloudLicenses
         => string.Equals(_secrets.Unprotect(a.KeyProtected, a.Id), normalizedKey, StringComparison.Ordinal);
 
     private AccountRecord EnsureKeyStored(AccountRecord a, string normalizedKey)
-        => KeyMatches(a, normalizedKey)
+        => KeyMatches(a, normalizedKey) && a.KeyHint != null
             ? a
-            : _accounts.Update(a.Id, cur => cur with { KeyProtected = _secrets.Protect(normalizedKey, a.Id) });
+            : _accounts.Update(a.Id, cur => cur with
+            {
+                KeyProtected = KeyMatches(cur, normalizedKey) ? cur.KeyProtected : _secrets.Protect(normalizedKey, a.Id),
+                KeyHint = cur.KeyHint ?? HintOf(normalizedKey),
+            });
+
+    /// <summary>The last 4 characters of a key — the only part of it ever shown anywhere.</summary>
+    internal static string HintOf(string normalizedKey) => normalizedKey.Length <= 4 ? "" : normalizedKey[^4..];
+
+    /// <summary>
+    /// Admin "reverify": ask xman now, ignoring the cache, the retry gap and the
+    /// freshness rules. Still single-flight per account and still inside the
+    /// node-wide xman budget. Returns the account as it stands afterwards and
+    /// what xman said (null when no key could be recovered).
+    /// </summary>
+    public async Task<(AccountRecord? Account, LicenseCheck? Check)> ForceReverifyAsync(string accountId, CancellationToken ct)
+    {
+        var gate = _gates.GetOrAdd(accountId, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var a = _accounts.Get(accountId);
+            if (a is null) return (null, null);
+            var key = _secrets.Unprotect(a.KeyProtected, accountId);
+            if (key is null) return (a, LicenseCheck.Down("the stored license key cannot be read — the customer must log in again"));
+            _lastAttempt[accountId] = _clock.GetUtcNow();
+            var check = await CallXmanAsync(key, _shutdown).ConfigureAwait(false);
+            if (!check.IsDefinitive) return (a, check);
+            return (_accounts.Update(accountId, cur => Apply(cur, check, _clock.GetUtcNow())), check);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    /// <summary>Drop every per-account cache entry (admin delete).</summary>
+    public void Forget(string accountId)
+    {
+        _lastAttempt.TryRemove(accountId, out _);
+        _warned.TryRemove(accountId, out _);
+    }
 
     internal static AccountRecord Apply(AccountRecord a, LicenseCheck c, DateTimeOffset now) => a with
     {

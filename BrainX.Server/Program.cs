@@ -1,4 +1,5 @@
 using System.Text;
+using BrainX.Server.Admin;
 using BrainX.Server.Cloud;
 using BrainX.Server.Hubs;
 using BrainX.Server.Mcp;
@@ -27,6 +28,23 @@ builder.Host.UseWindowsService();
 // wide-open localhost) or standalone on a VPS (auth + restricted CORS).
 NodeConfig.Init(builder.Configuration);
 
+// The node's own daily log file (node-YYYYMMDD.log, 14 kept). A tee in front
+// of the console, so every line the node already prints lands there too —
+// redacted, and without MCP children's stderr (see NodeLog).
+NodeLog? nodeLog = null;
+if (!string.IsNullOrWhiteSpace(NodeConfig.LogDir))
+{
+    try
+    {
+        nodeLog = NodeLog.Install(new NodeLog(NodeConfig.LogDir));
+        Console.WriteLine($"[log] writing {nodeLog.CurrentFile}");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[log] file log disabled — {NodeConfig.LogDir} is not writable ({ex.GetType().Name})");
+    }
+}
+
 // Force-enable static web assets in any environment (Development OR
 // Production). WebApplication.CreateBuilder only auto-enables this in
 // Development, which would mean the bundled wwwroot/index.html dashboard
@@ -51,7 +69,10 @@ builder.Services.AddCors(options =>
 });
 
 // Opt-in node self-updater (BrainX__AutoUpdate=true). No-ops when disabled.
-builder.Services.AddHostedService<BrainX.Server.Services.SelfUpdateService>();
+// One instance, resolvable too: the admin API's "check now" runs the same
+// check the 6-hourly loop runs.
+builder.Services.AddSingleton<SelfUpdateService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<SelfUpdateService>());
 
 var app = builder.Build();
 
@@ -213,6 +234,23 @@ else if (cloud != null)
     Console.ResetColor();
 }
 
+// ── Owner admin API (/api/admin/*) — for the Server Manager on this box ──
+// Owner BearerToken AND a request from this machine (not through the tunnel);
+// anything else is a plain 404. See AdminGate.
+app.MapBrainAdmin(new AdminContext
+{
+    BearerToken = NodeConfig.BearerToken,
+    Cloud = cloud,
+    Sessions = mcpSessions,
+    OwnerMcpEnabled = ownerMcp,
+    CloudMcpEnabled = cloudMcp,
+    McpExeFound = mcpExe != null,
+    VaultPath = NodeConfig.VaultPath,
+    StorageName = storage?.ProviderName ?? "none",
+    Updater = app.Services.GetService<SelfUpdateService>(),
+    Log = nodeLog,
+});
+
 app.UseDefaultFiles();
 app.UseStaticFiles();
 
@@ -266,11 +304,12 @@ Console.WriteLine(@"
 Console.ResetColor();
 
 // REST API endpoints
+// Uptime = this process's, not the machine's (it used to be TickCount64).
 app.MapGet("/api/health", () => new
 {
     Status = "Healthy",
     Timestamp = DateTime.UtcNow,
-    Uptime = Environment.TickCount64 / 1000
+    Uptime = NodeInfo.UptimeSeconds
 });
 
 // Liveness probe for container orchestration — never touches the vault, so it
@@ -286,7 +325,7 @@ app.MapGet("/health", () => Results.Ok(new
     authRequired = NodeConfig.RequireAuth,
     storage = storage?.ProviderName ?? "none",
     cloud = cloud != null,
-    uptimeSec = Environment.TickCount64 / 1000
+    uptimeSec = NodeInfo.UptimeSeconds
 }));
 
 app.MapGet("/api/peers", () =>
@@ -305,7 +344,9 @@ app.MapGet("/api/stats", () =>
 // already exposed via /api/brain/expertise).
 app.MapGet("/api/server/info", () => Results.Ok(new
 {
-    version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "0.0.0",
+    // InformationalVersion — the release CI stamped. AssemblyVersion is pinned
+    // at 2.6.0.0 in the csproj, so it named every build the same.
+    version = NodeInfo.Version,
     embedded = NodeConfig.EmbeddedMode,
     requireAuth = NodeConfig.RequireAuth,
     vaultPath = NodeConfig.VaultPath ?? "",
@@ -1185,6 +1226,11 @@ public static class NodeConfig
     /// <summary>Live /mcp sessions across all cloud accounts (owner sessions are capped separately).</summary>
     public static int CloudMcpMaxSessions { get; private set; } = 16;
 
+    /// <summary>Folder of the node's daily log (node-YYYYMMDD.log). Default for a
+    /// standalone node: &lt;app folder's parent&gt;\logs — C:\brainx\logs on the
+    /// installer's layout. Null (no file log) for an embedded node unless set.</summary>
+    public static string? LogDir { get; private set; }
+
     /// <summary>Opt-in self-update: poll GitHub Releases and apply newer node builds.</summary>
     public static bool AutoUpdate { get; private set; }
     /// <summary>GitHub "owner/repo" the self-updater pulls releases from.</summary>
@@ -1225,6 +1271,15 @@ public static class NodeConfig
         LicenseApiBase = FirstNonEmpty(b["LicenseApiBase"]) ?? XmanLicenseVerifier.DefaultApiBase;
         CloudMcpSessionsPerAccount = ParseInt(b["CloudMcpSessionsPerAccount"], 3);
         CloudMcpMaxSessions = ParseInt(b["CloudMcpMaxSessions"], 16);
+
+        LogDir = FirstNonEmpty(b["LogDir"]) ?? (EmbeddedMode ? null : DefaultLogDir());
+    }
+
+    private static string DefaultLogDir()
+    {
+        var app = AppContext.BaseDirectory.TrimEnd('\\', '/');
+        var parent = Directory.GetParent(app)?.FullName ?? app;
+        return Path.Combine(parent, "logs");
     }
 
     static int ParseInt(string? s, int defaultValue)

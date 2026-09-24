@@ -169,6 +169,8 @@ public sealed class CloudService : IMcpTenantHooks, IDisposable
         }
         if (!Limiter.TryAcquire("mcp:" + caller.Token.Id, Options.McpPerMinutePerToken, TimeSpan.FromMinutes(1), out var retry))
             return McpCaller.Deny(429, "RATE_LIMITED", "too many requests for this token — slow down", caller.Account.Id, retry);
+        if (caller.Account.Suspended)
+            return McpCaller.Deny(403, "ACCOUNT_SUSPENDED", "this BrainX Cloud account is suspended — contact support", caller.Account.Id);
         Touch(caller.Token);
 
         var account = await Licenses.EnsureFreshAsync(caller.Account, ctx.RequestAborted).ConfigureAwait(false);
@@ -178,6 +180,11 @@ public sealed class CloudService : IMcpTenantHooks, IDisposable
                 account.Id);
 
         var vault = Vaults.EnsureVault(account.Id);
+        // A space that has never been indexed (new account, or notes uploaded
+        // seconds ago) would answer every tool with "brain-export.json not
+        // found". Index it now; the child picks the file up by its mtime.
+        if (!File.Exists(Path.Combine(vault, ".obsidianx", "brain-export.json")))
+            ScheduleReindex(account.Id, TimeSpan.Zero);
         var scope = caller.Token.CanWrite ? McpScope.ReadWrite : McpScope.Read;
         return McpCaller.Cloud(scope, account.Id, vault, CloudChildEnvironment);
     }
@@ -197,6 +204,52 @@ public sealed class CloudService : IMcpTenantHooks, IDisposable
     {
         Vaults.For(accountId).MarkDirty();
         ScheduleReindex(accountId);
+    }
+
+    // ───────────────────────── owner (admin API) ─────────────────────────
+
+    public AccountRecord? SetSuspended(string accountId, bool suspended)
+    {
+        if (Accounts.Get(accountId) is null) return null;
+        var a = Accounts.Update(accountId, cur => cur with { Suspended = suspended });
+        Console.WriteLine($"[cloud] account {CloudIds.ShortId(accountId)} {(suspended ? "SUSPENDED" : "reinstated")} by the owner");
+        return a;
+    }
+
+    /// <summary>Null/0 = back to the node default.</summary>
+    public AccountRecord? SetQuota(string accountId, long? quotaBytes)
+    {
+        if (Accounts.Get(accountId) is null) return null;
+        var q = quotaBytes is > 0 ? quotaBytes : null;
+        var a = Accounts.Update(accountId, cur => cur with { QuotaBytes = q });
+        Console.WriteLine($"[cloud] account {CloudIds.ShortId(accountId)} quota → {(q is { } b ? $"{b / (1024 * 1024)} MB" : "node default")}");
+        return a;
+    }
+
+    public int RevokeAllTokens(string accountId)
+    {
+        var n = Store.RevokeAllTokens(accountId, Clock.GetUtcNow());
+        Console.WriteLine($"[cloud] account {CloudIds.ShortId(accountId)}: {n} token(s) revoked by the owner");
+        return n;
+    }
+
+    /// <summary>
+    /// Remove an account completely: tokens first (every request after this
+    /// point is 401), then its re-index is cancelled, then its folder goes,
+    /// then its rows. The caller ends the account's /mcp sessions BEFORE this,
+    /// so no child still has the vault open. Null on success.
+    /// </summary>
+    public async Task<CloudError?> DeleteAccountAsync(string accountId, CancellationToken ct)
+    {
+        if (Accounts.Get(accountId) is null) return new CloudError(404, "NOT_FOUND", "no such account");
+        Store.RevokeAllTokens(accountId, Clock.GetUtcNow());
+        await Reindexer.ForgetAsync(accountId, TimeSpan.FromSeconds(15)).ConfigureAwait(false);
+        var storage = await Vaults.DeleteStorageAsync(accountId, ct).ConfigureAwait(false);
+        if (storage != null) return storage;
+        Accounts.Delete(accountId);
+        Licenses.Forget(accountId);
+        Console.WriteLine($"[cloud] account {CloudIds.ShortId(accountId)} DELETED by the owner");
+        return null;
     }
 
     public void Dispose()

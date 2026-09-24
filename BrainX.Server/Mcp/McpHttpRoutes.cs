@@ -287,6 +287,7 @@ public static class McpHttpRoutes
         {
             StatusCodes.Status401Unauthorized => -32001,
             StatusCodes.Status402PaymentRequired => -32010,
+            StatusCodes.Status403Forbidden => -32011,
             StatusCodes.Status429TooManyRequests => -32008,
             _ => -32000,
         };
