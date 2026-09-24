@@ -123,6 +123,8 @@ public class CloudAccount
     public DateTime? LastSeenUtc { get; set; }
     public bool Suspended { get; set; }
     public DateTime? CreatedUtc { get; set; }
+    /// <summary>True = a quota set for this account; false = the node default (CloudQuotaMb).</summary>
+    public bool? QuotaOverride { get; set; }
 
     public string ShortId => Id.Length > 8 ? Id[..8] : Id;
     public double UsedRatio => QuotaBytes > 0 ? Math.Clamp((double)UsedBytes / QuotaBytes, 0, 10) : 0;
@@ -168,6 +170,7 @@ public class CloudAccount
         LastSeenUtc = a.Date("lastSeenUtc");
         Suspended = a.Bool("suspended") ?? false;
         CreatedUtc = a.Date("createdUtc");
+        QuotaOverride = a.Bool("quotaOverride");
     }
 
     public static IReadOnlyList<CloudAccount> ParseList(JsonElement r)
@@ -223,6 +226,20 @@ public sealed class CloudToken
         LastUsedUtc = e.Date("lastUsedUtc"),
         Revoked = e.Bool("revoked") ?? false,
     };
+}
+
+/// <summary>
+/// POST …/reverify: the account after the check, and whether xman actually answered.
+/// Definitive=false means xman4289.com was unreachable and the node kept the last
+/// known state — the UI must not call that "checked".
+/// </summary>
+public sealed record ReverifyResult(CloudAccount Account, bool? Definitive, string? Verdict, string? Detail)
+{
+    public static ReverifyResult Parse(JsonElement r)
+    {
+        var v = r.Prop("verification");
+        return new ReverifyResult(CloudAccount.Parse(r), v?.Bool("definitive"), v?.Str("verdict"), v?.Str("detail"));
+    }
 }
 
 public sealed record UpdateCheckResult(string? Current, string? Latest, bool UpdateStarted, string? Message)

@@ -193,13 +193,14 @@ internal sealed class QuotaDialog : DialogBase
         AddText($"บัญชี {a.ShortId}", Theme.H2, Theme.Accent);
         AddText($"ใช้อยู่ {Fmt.Bytes(a.UsedBytes)} จากโควตาเดิม {Fmt.Bytes(a.QuotaBytes)}", color: Theme.Muted);
 
+        // 0 = back to the node default (BrainX__CloudQuotaMb) — the endpoint's own rule.
         _mb = new NumericUpDown
         {
-            Minimum = 1,
+            Minimum = 0,
             Maximum = 1_048_576,
             Increment = 256,
             ThousandsSeparator = true,
-            Value = Math.Clamp(a.QuotaBytes / 1024 / 1024, 1, 1_048_576),
+            Value = a.QuotaOverride == false ? 0 : Math.Clamp(a.QuotaBytes / 1024 / 1024, 0, 1_048_576),
             Width = 160,
             Margin = new Padding(0, 4, 8, 4),
         };
@@ -207,13 +208,14 @@ internal sealed class QuotaDialog : DialogBase
         var unit = Theme.Text("MB", Theme.Body, Theme.Muted);
         unit.Margin = new Padding(0, 8, 16, 0);
         var row = Theme.Row(_mb, unit);
-        foreach (var (label, mb) in new (string, long)[] { ("500 MB", 500), ("1 GB", 1024), ("5 GB", 5120), ("10 GB", 10240) })
+        foreach (var (label, mb) in new (string, long)[] { ("ค่าเริ่มต้น", 0), ("500 MB", 500), ("1 GB", 1024), ("5 GB", 5120), ("10 GB", 10240) })
         {
             var b = Theme.Button(label, Theme.BtnGray, (_, _) => _mb.Value = mb);
             b.Font = Theme.Small;
             row.Controls.Add(b);
         }
         AddRow(row);
+        AddText("0 = ใช้โควตาค่าเริ่มต้นของ node (CloudQuotaMb ในแท็บ ตั้งค่า)", Theme.Small, Theme.Muted);
 
         _warn = AddText("", Theme.Bold, Theme.Warn);
         _mb.ValueChanged += (_, _) => UpdateWarning();
@@ -224,7 +226,7 @@ internal sealed class QuotaDialog : DialogBase
 
     private void UpdateWarning()
     {
-        _warn.Text = QuotaMb < _usedMb
+        _warn.Text = QuotaMb > 0 && QuotaMb < _usedMb
             ? $"ต่ำกว่าที่ใช้อยู่ ({Fmt.Num(_usedMb)} MB) — ข้อมูลเดิมไม่ถูกลบ แต่ลูกค้าจะอัปโหลดเพิ่มไม่ได้จนกว่าจะลบของออก"
             : "";
         _warn.Visible = _warn.Text.Length > 0;

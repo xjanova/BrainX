@@ -28,7 +28,7 @@ internal static class ErrorText
         ["TOO_LARGE"] = "ข้อมูลใหญ่เกินกำหนด",
         ["BAD_PATH"] = "ชื่อไฟล์หรือพาธไม่ถูกต้อง",
         ["HASH_MISMATCH"] = "ข้อมูลเสียระหว่างส่ง (hash ไม่ตรง)",
-        ["NOT_FOUND"] = "ไม่พบข้อมูลที่ขอ",
+        ["NOT_FOUND"] = "ไม่พบบัญชีนี้บน node (อาจถูกลบไปแล้ว)",   // the admin API's only NOT_FOUND is "no such account"
         ["ACCOUNT_NOT_FOUND"] = "ไม่พบบัญชีนี้ (อาจถูกลบไปแล้ว)",
         ["CONFIRM_MISMATCH"] = "ID ที่พิมพ์ยืนยันไม่ตรงกับบัญชี — node ไม่ได้ลบอะไร",
         ["BAD_REQUEST"] = "คำขอไม่ถูกต้อง",

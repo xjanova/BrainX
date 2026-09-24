@@ -39,7 +39,7 @@ internal interface IServerBackend : IDisposable
     Task<ApiResult<CloudAccount>> SetQuotaAsync(string id, long quotaMb, CancellationToken ct);
     Task<ApiResult<CloudAccount>> SetSuspendedAsync(string id, bool suspended, CancellationToken ct);
     Task<ApiResult<int>> RevokeTokensAsync(string id, CancellationToken ct);
-    Task<ApiResult<CloudAccount>> ReverifyAsync(string id, CancellationToken ct);
+    Task<ApiResult<ReverifyResult>> ReverifyAsync(string id, CancellationToken ct);
     Task<ApiResult<bool>> DeleteAccountAsync(string id, string confirm, CancellationToken ct);
     Task<ApiResult<UpdateCheckResult>> CheckUpdateAsync(CancellationToken ct);
     Task<ApiResult<LogTail>> GetNodeLogAsync(int lines, CancellationToken ct);

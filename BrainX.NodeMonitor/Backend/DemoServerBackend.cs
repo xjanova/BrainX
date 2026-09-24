@@ -174,8 +174,13 @@ internal sealed class DemoServerBackend : IServerBackend
         return ApiResult<CloudAccount>.Success(a);
     }
 
+    /// <summary>0 = back to the node default (1024 MB here), like the real endpoint.</summary>
     public Task<ApiResult<CloudAccount>> SetQuotaAsync(string id, long quotaMb, CancellationToken ct)
-        => Mutate(id, a => a.QuotaBytes = quotaMb * 1024 * 1024, ct);
+        => Mutate(id, a =>
+        {
+            a.QuotaBytes = (quotaMb > 0 ? quotaMb : 1024) * 1024 * 1024;
+            a.QuotaOverride = quotaMb > 0;
+        }, ct);
 
     public Task<ApiResult<CloudAccount>> SetSuspendedAsync(string id, bool suspended, CancellationToken ct)
         => Mutate(id, a => { a.Suspended = suspended; if (suspended) a.ActiveSessions = 0; }, ct);
@@ -193,8 +198,16 @@ internal sealed class DemoServerBackend : IServerBackend
         return r.Ok ? ApiResult<int>.Success(n) : r.As<int>();
     }
 
-    public Task<ApiResult<CloudAccount>> ReverifyAsync(string id, CancellationToken ct)
-        => Mutate(id, a => a.LastVerifiedUtc = DateTime.UtcNow, ct);
+    /// <summary>The expired sample account plays "xman4289.com did not answer" (matches the sample log).</summary>
+    public async Task<ApiResult<ReverifyResult>> ReverifyAsync(string id, CancellationToken ct)
+    {
+        bool xmanDown = id.StartsWith("c47e2b9d", StringComparison.Ordinal);
+        var r = await Mutate(id, a => { if (!xmanDown) a.LastVerifiedUtc = DateTime.UtcNow; }, ct);
+        if (r is not { Ok: true, Value: { } acc }) return r.As<ReverifyResult>();
+        return ApiResult<ReverifyResult>.Success(xmanDown
+            ? new ReverifyResult(acc, false, null, "license server unreachable (timeout)")
+            : new ReverifyResult(acc, true, acc.IsExpired ? "expired" : "valid", null));
+    }
 
     public async Task<ApiResult<bool>> DeleteAccountAsync(string id, string confirm, CancellationToken ct)
     {
@@ -344,6 +357,7 @@ internal sealed class DemoServerBackend : IServerBackend
                 LastVerifiedUtc = now.AddMinutes(-37), UsedBytes = usedMb * MB, QuotaBytes = quotaMb * MB,
                 NoteCount = notes, TokenCount = list.Count(t => !t.Revoked), ActiveSessions = sessions,
                 LastSeenUtc = now - seen, Suspended = suspended, CreatedUtc = now.AddDays(-58 + days / 3.0),
+                QuotaOverride = quotaMb != 1024,
                 Tokens = list,
                 LastReindexUtc = notes > 0 ? now.AddMinutes(-11) : null,
                 LastReindexOk = notes > 0 ? true : null,

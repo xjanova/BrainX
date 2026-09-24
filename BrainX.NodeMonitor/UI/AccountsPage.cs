@@ -459,7 +459,8 @@ internal sealed class AccountsPage : UserControl, IManagerPage
         _dExpires.ForeColor = a.IsExpired ? Theme.Bad : a.DaysLeft is <= 7 ? Theme.Warn : Theme.Fg;
         _dVerified.Text = Fmt.Ago(a.LastVerifiedUtc);
         _dCreated.Text = Fmt.DateTimeLocal(a.CreatedUtc);
-        _dUsage.Text = $"{Fmt.Bytes(a.UsedBytes)} / {Fmt.Bytes(a.QuotaBytes)} ({a.UsedRatio * 100:0.#}%)";
+        _dUsage.Text = $"{Fmt.Bytes(a.UsedBytes)} / {Fmt.Bytes(a.QuotaBytes)} ({a.UsedRatio * 100:0.#}%)"
+                       + a.QuotaOverride switch { true => " · โควตากำหนดเอง", false => " · โควตาค่าเริ่มต้น", null => "" };
         _dNotes.Text = Fmt.Num(a.NoteCount);
         _dSessions.Text = a.ActiveSessions.ToString(System.Globalization.CultureInfo.InvariantCulture);
         _dSeen.Text = Fmt.Ago(a.LastSeenUtc);
@@ -549,13 +550,13 @@ internal sealed class AccountsPage : UserControl, IManagerPage
         if (_ctx.Alive) { _lastLoad = 0; await ReloadAsync(); }
     }
 
-    private bool Report<T>(ApiResult<T> r, string ok, string failTitle)
+    private bool Report<T>(ApiResult<T> r, string ok, string failTitle, CloudAccount? changed = null)
     {
         if (!_ctx.Alive) return r.Ok;   // the window went away while the call ran
         if (r.Ok)
         {
             _ctx.Notify(ok, false);
-            if (r.Value is CloudAccount updated && updated.Id.Length > 0)
+            if ((changed ?? r.Value as CloudAccount) is { } updated && updated.Id.Length > 0)
             {
                 var i = _all.FindIndex(x => x.Id == updated.Id);
                 if (i >= 0) _all[i] = updated;
@@ -574,7 +575,10 @@ internal sealed class AccountsPage : UserControl, IManagerPage
         if (d.ShowDialog(_ctx.Owner) != DialogResult.OK) return;
         var mb = d.QuotaMb;
         var r = await _ctx.Backend.SetQuotaAsync(a.Id, mb, _ctx.Life);
-        Report(r, $"ตั้งโควตาบัญชี {a.ShortId} เป็น {Fmt.Num(mb)} MB แล้ว", "ตั้งโควตาไม่สำเร็จ");
+        Report(r, mb == 0
+                ? $"บัญชี {a.ShortId} กลับไปใช้โควตาค่าเริ่มต้นของ node แล้ว ({Fmt.Bytes(r.Value?.QuotaBytes)})"
+                : $"ตั้งโควตาบัญชี {a.ShortId} เป็น {Fmt.Num(mb)} MB แล้ว",
+            "ตั้งโควตาไม่สำเร็จ");
     }
 
     private async Task SuspendAsync(CloudAccount a)
@@ -593,10 +597,23 @@ internal sealed class AccountsPage : UserControl, IManagerPage
     {
         _ctx.Notify($"กำลังตรวจ License ของ {a.ShortId} กับ xman4289.com…", false);
         var r = await _ctx.Backend.ReverifyAsync(a.Id, _ctx.Life);
-        var msg = r.Value is { } v
-            ? $"ตรวจ License ของ {a.ShortId} แล้ว: {(v.IsExpired ? "หมดอายุ" : "ใช้ได้")} · หมดอายุ {Fmt.Date(v.ExpiresUtc)}"
-            : "";
-        Report(r, msg, "ตรวจ License ไม่สำเร็จ");
+        string msg = "";
+        if (r.Value is { } v)
+        {
+            var acc = v.Account;
+            // Not definitive = xman did not answer; the node kept what it knew. Never call that "checked".
+            msg = v.Definitive == false
+                ? $"ตรวจกับ xman4289.com ไม่ได้ตอนนี้ — node ใช้สถานะเดิมของ {a.ShortId} (หมดอายุ {Fmt.Date(acc.ExpiresUtc)}) · ลองใหม่ภายหลัง"
+                : (v.Verdict?.ToLowerInvariant()) switch
+                {
+                    "valid" => $"ตรวจ License ของ {a.ShortId} แล้ว: ใช้ได้ถึง {Fmt.Date(acc.ExpiresUtc)}",
+                    "expired" => $"ตรวจ License ของ {a.ShortId} แล้ว: หมดอายุ ({Fmt.Date(acc.ExpiresUtc)})",
+                    "invalid" or "notfound" or "not_found" => $"ตรวจ License ของ {a.ShortId} แล้ว: xman ไม่รู้จัก key นี้ (ไม่ถูกต้อง)",
+                    null => $"ตรวจ License ของ {a.ShortId} แล้ว: {(acc.IsExpired ? "หมดอายุ" : "ใช้ได้")} · หมดอายุ {Fmt.Date(acc.ExpiresUtc)}",
+                    { } other => $"ตรวจ License ของ {a.ShortId} แล้ว: {other}",
+                };
+        }
+        Report(r, msg, "ตรวจ License ไม่สำเร็จ", r.Value?.Account);
     }
 
     private async Task RevokeAsync(CloudAccount a)

@@ -80,8 +80,8 @@ internal sealed class NodeApiClient : IDisposable
         => Admin(HttpMethod.Post, AccountPath(id) + "/revoke-tokens", null, r => r.Int("revoked") ?? 0, TimeSpan.FromSeconds(15), ct);
 
     /// <summary>The node asks xman4289.com (rate-limited 60/min per server IP), so allow for a slow answer.</summary>
-    public Task<ApiResult<CloudAccount>> ReverifyAsync(string id, CancellationToken ct)
-        => Admin(HttpMethod.Post, AccountPath(id) + "/reverify", null, CloudAccount.Parse, TimeSpan.FromSeconds(30), ct);
+    public Task<ApiResult<ReverifyResult>> ReverifyAsync(string id, CancellationToken ct)
+        => Admin(HttpMethod.Post, AccountPath(id) + "/reverify", null, ReverifyResult.Parse, TimeSpan.FromSeconds(30), ct);
 
     public Task<ApiResult<bool>> DeleteAccountAsync(string id, string confirm, CancellationToken ct)
         => Admin(HttpMethod.Delete, AccountPath(id), new { confirm }, r => r.Bool("ok") ?? true, TimeSpan.FromSeconds(60), ct);
@@ -175,6 +175,8 @@ internal sealed class NodeApiClient : IDisposable
                 if (authLike && i + 1 < candidates.Count) continue;   // the other token may be the one the node uses
 
                 last = MapFailure<T>(status, code, admin, sw.ElapsedMilliseconds);
+                if (last.Failure == ApiFailure.NoAdminApi && await AllTokensRejectedAsync(candidates, ct).ConfigureAwait(false))
+                    last = ApiResult<T>.Fail(ApiFailure.Unauthorized, ErrorText.Unauthorized, 404, null, sw.ElapsedMilliseconds);
                 if (auth && last.Failure is ApiFailure.Unauthorized or ApiFailure.NoAdminApi)
                 {
                     lock (_gate)
@@ -201,6 +203,37 @@ internal sealed class NodeApiClient : IDisposable
             }
         }
         return last ?? ApiResult<T>.Fail(ApiFailure.NoToken, ErrorText.NoToken);
+    }
+
+    /// <summary>
+    /// A plain 404 from /api/admin means "no such route" on an old node — but the
+    /// new node's admin gate ALSO answers a wrong token with a plain 404 (it is
+    /// exempt from the global 401 gate so it never reveals itself). Tell them apart
+    /// with /api/server/info, which sits behind the global bearer gate on old and
+    /// new nodes alike: any token accepted there → the admin API really is missing;
+    /// every token refused (401) → the token is the problem. Anything else → cannot
+    /// tell, keep "no admin API". Runs at most once per back-off window.
+    /// </summary>
+    private async Task<bool> AllTokensRejectedAsync(IReadOnlyList<string?> candidates, CancellationToken ct)
+    {
+        bool anyRejected = false;
+        foreach (var token in candidates)
+        {
+            if (token == null) continue;
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(4));
+            try
+            {
+                using var req = new HttpRequestMessage(HttpMethod.Get, new Uri(BaseUrl, "/api/server/info"));
+                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token).ConfigureAwait(false);
+                if (resp.IsSuccessStatusCode) return false;              // this token is good: the route is what is missing
+                if ((int)resp.StatusCode == 401) anyRejected = true;
+                else return false;                                         // some other answer: cannot tell
+            }
+            catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException) { return false; }
+        }
+        return anyRejected;
     }
 
     private static ApiResult<T> MapFailure<T>(int status, string? code, bool admin, long ms)

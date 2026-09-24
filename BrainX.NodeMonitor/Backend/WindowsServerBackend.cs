@@ -117,7 +117,7 @@ internal sealed partial class WindowsServerBackend : IServerBackend
     public Task<ApiResult<int>> RevokeTokensAsync(string id, CancellationToken ct)
         => Logged(_api.RevokeTokensAsync(id, ct), $"account {Short(id)}: revoke all tokens");
 
-    public Task<ApiResult<CloudAccount>> ReverifyAsync(string id, CancellationToken ct)
+    public Task<ApiResult<ReverifyResult>> ReverifyAsync(string id, CancellationToken ct)
         => Logged(_api.ReverifyAsync(id, ct), $"account {Short(id)}: re-verify license");
 
     public Task<ApiResult<bool>> DeleteAccountAsync(string id, string confirm, CancellationToken ct)
