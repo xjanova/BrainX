@@ -58,33 +58,51 @@ public static class AuditLog
                     catch { /* corrupt last line — start fresh chain from sentinel */ }
                 }
             }
-            _initialized = true;
+            Volatile.Write(ref _initialized, true);
         }
     }
 
     public static void Record(string eventType, string actor, string detail)
     {
-        if (!_initialized) return;
-        var entry = new AuditEntry
-        {
-            Ts = DateTime.UtcNow,
-            Event = eventType,
-            Actor = actor,
-            Detail = detail,
-            PrevHmac = _lastHashHex
-        };
+        if (!Volatile.Read(ref _initialized)) return;
 
-        // HMAC over the canonical bytes of all fields except Hmac itself,
-        // chained via PrevHmac so any in-place edit downstream is visible.
-        var canonical = Encoding.UTF8.GetBytes(
-            $"{entry.Ts:O}\n{entry.Event}\n{entry.Actor}\n{entry.Detail}\n{entry.PrevHmac}");
-        var hmac = HMACSHA256.HashData(_hmacKey, canonical);
-        entry.Hmac = Convert.ToHexString(hmac).ToLowerInvariant();
-
-        var line = JsonConvert.SerializeObject(entry, Formatting.None);
+        // The WHOLE link — read the previous hash, compute this one, append,
+        // publish — happens under one lock. Reading _lastHashHex outside it (as
+        // this did) let two concurrent records chain onto the same predecessor:
+        // the file then held two entries with one PrevHmac, and the structural
+        // check in /api/audit reported a tamper-evident log as BROKEN with no
+        // tampering at all. Ts is taken inside too, so file order is time order.
         lock (Gate)
         {
-            File.AppendAllText(_path, line + "\n");
+            var entry = new AuditEntry
+            {
+                Ts = DateTime.UtcNow,
+                Event = eventType,
+                Actor = actor,
+                Detail = detail,
+                PrevHmac = _lastHashHex
+            };
+
+            // HMAC over the canonical bytes of all fields except Hmac itself,
+            // chained via PrevHmac so any in-place edit downstream is visible.
+            var canonical = Encoding.UTF8.GetBytes(
+                $"{entry.Ts:O}\n{entry.Event}\n{entry.Actor}\n{entry.Detail}\n{entry.PrevHmac}");
+            var hmac = HMACSHA256.HashData(_hmacKey, canonical);
+            entry.Hmac = Convert.ToHexString(hmac).ToLowerInvariant();
+
+            var line = JsonConvert.SerializeObject(entry, Formatting.None);
+            try
+            {
+                File.AppendAllText(_path, line + "\n");
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // An audit write must never take a hub call down with it. The
+                // chain head does NOT advance, so the file stays consistent: the
+                // next entry links to the last one that actually reached disk.
+                Console.WriteLine($"[audit] could not append '{eventType}': {ex.GetType().Name}");
+                return;
+            }
             _lastHashHex = entry.Hmac;
         }
     }
