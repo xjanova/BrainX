@@ -12855,6 +12855,7 @@ public partial class MainWindow : Window
         SettingsBrainAddress.Text = _identity.Address;
         SettingsVaultPath.Text = _vaultPath;
         if (SettingsLocalAiBase != null) SettingsLocalAiBase.Text = _localAiBase;
+        RefreshServerHostPanel();
 
         // A regenerated identity has to be explained where the address is
         // shown, not only in a status line that the next message overwrites.

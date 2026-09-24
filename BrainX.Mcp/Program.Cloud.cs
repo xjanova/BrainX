@@ -513,6 +513,11 @@ internal static partial class Program
         CloudErrorCodes.LicenseServerUnreachable => "The license could not be verified right now (license server unreachable). Try again in a few minutes.",
         CloudErrorCodes.RateLimited => "Too many attempts — wait a minute and try again.",
         CloudErrorCodes.QuotaExceeded => "The cloud space is full. Deselect folders or remove notes, then sync again.",
+        CloudErrorCodes.AccountSuspended => "This BrainX Cloud account is suspended. Contact XMAN Studio support.",
+        CloudErrorCodes.TokenLimit => "The account has the maximum number of access tokens. Revoke one (brainx-mcp cloud token list / revoke) and retry.",
+        CloudErrorCodes.TooLarge => "A note is larger than the cloud's 2 MB per-note limit.",
+        CloudErrorCodes.InsufficientStorage or CloudErrorCodes.IoError or CloudErrorCodes.InternalError =>
+            "BrainX Cloud had a problem on its side; nothing local was lost. Try again later.",
         CloudErrorCodes.Network or CloudErrorCodes.Timeout => "BrainX Cloud cannot be reached. Check the internet connection; nothing was lost.",
         CloudErrorCodes.Unauthorized => "This machine's sign-in is no longer valid (it may have been revoked). Sign in again: brainx-mcp cloud login",
         CloudErrorCodes.Forbidden => "This access token is not allowed to do that (read-only, or not a device sign-in).",

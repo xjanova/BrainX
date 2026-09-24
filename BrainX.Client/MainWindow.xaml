@@ -5893,6 +5893,20 @@
                                                     <TextBlock x:Name="LocalAiBaseStatus" FontSize="11" VerticalAlignment="Center"
                                                                Foreground="{StaticResource NeuralText3}"/>
                                                 </StackPanel>
+
+                                                <!-- Only on the one machine that runs the BrainXNode service.
+                                                     Server administration lives in the separate, elevated
+                                                     Server Manager that ships with the node (owner decision
+                                                     2026-09-24); this is just the door to it. -->
+                                                <StackPanel x:Name="ServerHostPanel" Visibility="Collapsed" Margin="0,18,0,0">
+                                                    <TextBlock Text="THIS PC RUNS THE BRAINX SERVER" FontSize="11" Margin="0,0,0,4"
+                                                               Foreground="{StaticResource NeuralText3}" FontWeight="SemiBold"/>
+                                                    <TextBlock x:Name="ServerHostStatus" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8"
+                                                               Foreground="{StaticResource NeuralText3}"/>
+                                                    <Button x:Name="OpenServerManagerBtn" Content="Open Server Manager"
+                                                            Style="{StaticResource NeuralBtnGhost}" HorizontalAlignment="Left"
+                                                            Click="OpenServerManager_Click" Padding="14,6"/>
+                                                </StackPanel>
                                             </StackPanel>
                                         </Border>
 

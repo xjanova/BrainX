@@ -1060,6 +1060,14 @@ public partial class MainWindow
             "Too many attempts. Wait a minute, then try again.",
         CloudErrorCodes.QuotaExceeded =>
             "Your cloud space is full. Untick a folder or remove notes, then sync again.",
+        CloudErrorCodes.AccountSuspended =>
+            "This BrainX Cloud account is suspended. Contact XMAN Studio support to have it restored.",
+        CloudErrorCodes.TokenLimit =>
+            "This account already has the most access tokens it can hold. Revoke one you no longer use, then try again.",
+        CloudErrorCodes.TooLarge =>
+            "A note is too large for the cloud (2 MB per note). Split it or move it out of the synced folders.",
+        CloudErrorCodes.InsufficientStorage or CloudErrorCodes.IoError or CloudErrorCodes.InternalError =>
+            "BrainX Cloud had a problem on its side. Nothing here was lost — please try again later.",
         CloudErrorCodes.Network or CloudErrorCodes.Timeout =>
             "Can't reach BrainX Cloud. Check your internet connection — your notes are safe here and will sync when you're back online.",
         CloudErrorCodes.Unauthorized =>
@@ -1082,6 +1090,7 @@ public partial class MainWindow
         CloudErrorCodes.Network or CloudErrorCodes.Timeout => "offline",
         CloudErrorCodes.LicenseExpired => "license expired",
         CloudErrorCodes.QuotaExceeded => "cloud space full",
+        CloudErrorCodes.AccountSuspended => "account suspended",
         CloudErrorCodes.Unauthorized => "signed out",
         CloudSyncResult.Busy => "another sync was running",
         CloudSyncResult.VaultMissing => "vault not found",

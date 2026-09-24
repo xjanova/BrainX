@@ -122,6 +122,13 @@ public static class CloudErrorCodes
     public const string BadPath = "BAD_PATH";
     public const string HashMismatch = "HASH_MISMATCH";
 
+    // Server codes beyond the v1 contract table (BrainX.Server cloud routes).
+    public const string AccountSuspended = "ACCOUNT_SUSPENDED";   // 403 — the owner suspended this account
+    public const string TokenLimit = "TOKEN_LIMIT";               // 409 — too many access tokens
+    public const string InsufficientStorage = "INSUFFICIENT_STORAGE"; // 507 — the server's disk is full
+    public const string IoError = "IO_ERROR";
+    public const string InternalError = "INTERNAL_ERROR";
+
     // Client-side: the request never produced a contract error body.
     public const string Network = "NETWORK";
     public const string Timeout = "TIMEOUT";
