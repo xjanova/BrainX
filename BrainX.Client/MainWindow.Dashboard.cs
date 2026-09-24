@@ -1515,6 +1515,9 @@ public partial class MainWindow
         // then post to a dead dispatcher.
         try { _calibrationCts.Cancel(); _calibrationCts.Dispose(); } catch { }
         try { _claudeTally?.Dispose(); } catch { }
+        // A cloud sync in flight stops here too (its finished batches are
+        // already saved; the next launch resumes the rest).
+        try { ShutdownCloud(); } catch { }
         base.OnClosed(e);
     }
 

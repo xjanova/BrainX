@@ -88,6 +88,11 @@ public partial class MainWindow
             "Move vault", MessageBoxButton.OKCancel, MessageBoxImage.Warning);
         if (confirm != MessageBoxResult.OK) return;
 
+        // A BrainX Cloud sync reads this vault and writes its state into it.
+        // Stop it before the folder moves under it — a moved vault is the same
+        // vault, and its sync state travels with it; the relaunch resumes.
+        StopCloudForVaultMove();
+
         // Release everything THIS process holds open in the vault.
         try { _vaultWatcher?.Dispose(); } catch { }
         _vaultWatcher = null;
@@ -176,6 +181,7 @@ public partial class MainWindow
         catch { _storage = null; }
         _accessLogTimer?.Start();
         StartVaultWatcher();
+        ResumeCloudAfterAbortedMove();
     }
 
     private static void CopyDirectory(string src, string dst)
