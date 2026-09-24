@@ -148,6 +148,9 @@ internal static class CloudSelfTest
             string.Join("/", Enumerable.Repeat(new string('y', 150), 3)) + ".md",
             // The server's whitespace rule: any whitespace, and the whole path's ends.
             "a /b.md", "a　/b.md", " a/b.md", "a/b.md ",
+            // The server's full device-name set, and text that is not Unicode.
+            "CONIN$.md", "a/CLOCK$.md", "COM0.md", "LPT0.md", "COM¹.md", "a/b\u0085.md",
+            "a/b\uD800.md", "a/\uDC00b.md",
         };
         foreach (var p in bad) Check($"rejected: {Printable(p)}", !CloudPathRules.IsValid(p));
 
@@ -158,6 +161,9 @@ internal static class CloudSelfTest
         Check("CloudNameComparer: NFD + other case is the same folder",
               CloudNameComparer.Instance.Equals("CAFÉ", "café")
               && CloudNameComparer.Instance.GetHashCode("CAFÉ") == CloudNameComparer.Instance.GetHashCode("café"));
+        Check("Nfc leaves a lone surrogate alone instead of throwing",
+              CloudPathRules.Nfc("a\uD800.md") == "a\uD800.md");
+        Check("an emoji (a valid surrogate pair) is a legal name", CloudPathRules.IsValid("notes/\U0001F600 idea.md"));
         var nfdState = new CloudSyncState();
         nfdState.Folders.Add("Café");
         Check("a folder ticked in NFD is still ticked for its NFC cloud paths",

@@ -21,12 +21,26 @@ public static class CloudPathRules
 
     private static readonly char[] ForbiddenChars = { '<', '>', ':', '"', '|', '?', '*', '\\' };
 
-    private static readonly HashSet<string> ReservedNames = new(StringComparer.OrdinalIgnoreCase)
+    /// <summary>
+    /// Windows device names — the server's set (BrainX.Server CloudPaths):
+    /// reserved with any extension and in any case, including COM0/LPT0 and
+    /// the superscript digits current Windows also treats as devices.
+    /// </summary>
+    private static readonly HashSet<string> ReservedNames = BuildReserved();
+
+    private static HashSet<string> BuildReserved()
     {
-        "CON", "PRN", "AUX", "NUL",
-        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-    };
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$",
+        };
+        foreach (var d in "0123456789¹²³")
+        {
+            set.Add("COM" + d);
+            set.Add("LPT" + d);
+        }
+        return set;
+    }
 
     /// <summary>
     /// Files BrainX itself rewrites at the vault root on every export or rules
@@ -55,10 +69,19 @@ public static class CloudPathRules
         if (path[0] == '/') return "rooted path";
         if (path.Length >= 2 && path[1] == ':') return "drive-letter path";
 
-        foreach (var c in path)
+        for (var i = 0; i < path.Length; i++)
         {
-            if (c < 0x20 || c == 0x7F) return "control character in path";
+            var c = path[i];
+            if (char.IsControl(c)) return "control character in path";
             if (Array.IndexOf(ForbiddenChars, c) >= 0) return $"character '{c}' not allowed";
+            // A lone surrogate is not text; the server refuses it, and NFC
+            // normalisation would throw on it.
+            if (char.IsHighSurrogate(c))
+            {
+                if (i + 1 >= path.Length || !char.IsLowSurrogate(path[i + 1])) return "path is not valid Unicode";
+                i++;
+            }
+            else if (char.IsLowSurrogate(c)) return "path is not valid Unicode";
         }
 
         if (!path.EndsWith(".md", StringComparison.OrdinalIgnoreCase)) return "not a .md file";
@@ -106,8 +129,19 @@ public static class CloudPathRules
     }
 
     /// <summary>Unicode NFC — the form the server stores and answers every path in.</summary>
-    public static string Nfc(string s) =>
-        s.IsNormalized(System.Text.NormalizationForm.FormC) ? s : s.Normalize(System.Text.NormalizationForm.FormC);
+    public static string Nfc(string s)
+    {
+        try
+        {
+            return s.IsNormalized(System.Text.NormalizationForm.FormC) ? s : s.Normalize(System.Text.NormalizationForm.FormC);
+        }
+        catch (ArgumentException)
+        {
+            // Not well-formed UTF-16 (a lone surrogate — NTFS allows one in a
+            // file name). Left as-is; Validate refuses it as invalid Unicode.
+            return s;
+        }
+    }
 
     /// <summary>
     /// Map a cloud path to a file under <paramref name="root"/>, refusing
