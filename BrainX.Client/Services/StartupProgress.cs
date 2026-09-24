@@ -57,7 +57,9 @@ public static class StartupProgress
     /// How long the boot has been SILENT — time since the last Report or
     /// Complete.
     ///
-    /// Guard timers read this instead of measuring "N seconds since launch".
+    /// The boot watchdog reads this instead of measuring "N seconds since
+    /// launch", and only once the host's own work is done: the vault read
+    /// before that reports nothing for as long as it takes.
     /// A first launch is legitimately slower than every launch after it — the
     /// WebView2 profile is created from scratch, nothing is in the file cache,
     /// there is no shader cache and no embedding cache — and an absolute
@@ -95,9 +97,11 @@ public static class StartupProgress
     }
 
     /// <summary>
-    /// Signal that boot is done — splash should fade out + close.
-    /// Idempotent: calling more than once is a no-op so MainWindow's
-    /// Loaded handler firing twice on theme reload doesn't matter.
+    /// Signal that the boot is over: the loading screen has CLOSED, not merely
+    /// finished counting (MainWindow.CompleteBootOnceScreensClosed). The boot
+    /// music fades on this, so raising it while any loading screen is still
+    /// on screen takes the music away from a boot that is still running.
+    /// Idempotent: calling more than once is a no-op.
     /// </summary>
     public static void Complete()
     {

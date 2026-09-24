@@ -18,4 +18,16 @@
     <ProjectReference Include="..\BrainX.Server\BrainX.Server.csproj" />
   </ItemGroup>
 
+  <!-- The release signer's logic, linked (not copied), so the harness signs with
+       throwaway keys through the exact code CI runs. -->
+  <ItemGroup>
+    <Compile Include="..\tools\NodeReleaseSigner\PackageSigner.cs" Link="Linked\PackageSigner.cs" />
+  </ItemGroup>
+
+  <!-- A real SignalR client, so the BrainHub authorization checks drive the hub
+       exactly as a peer does (same version BrainX.Client ships). -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="10.0.5" />
+  </ItemGroup>
+
 </Project>

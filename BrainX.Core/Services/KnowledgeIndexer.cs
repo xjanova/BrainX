@@ -16,6 +16,13 @@ public partial class KnowledgeIndexer
     /// </summary>
     public CategoryRegistry? CustomCategories { get; set; }
 
+    /// <summary>
+    /// How many notes <see cref="IndexVault"/> reads and parses at once. The
+    /// cost it hides is latency — the first open of each file after a reboot —
+    /// so a few in flight is what matters; 1 is the old sequential read.
+    /// </summary>
+    public int ReadParallelism { get; set; } = Math.Clamp(Environment.ProcessorCount, 2, 8);
+
     private static readonly Dictionary<KnowledgeCategory, string[]> CategoryKeywords = new()
     {
         [KnowledgeCategory.Programming] = ["code", "function", "class", "algorithm", "variable", "loop", "array", "api", "debug", "compiler", "syntax", "git", "repository", "refactor", "IDE"],
@@ -65,7 +72,28 @@ public partial class KnowledgeIndexer
         // — `Imported/.claude` holds 24 real notes.
         var ignore = VaultIgnore.Load(vaultPath);
         var mdFiles = Directory.GetFiles(vaultPath, "*.md", SearchOption.AllDirectories)
-            .Where(f => IsIndexedNote(f, vaultPath, ignore));
+            .Where(f => IsIndexedNote(f, vaultPath, ignore))
+            .ToList();
+
+        // Read and parse the notes in parallel, then take them in file order.
+        // After a reboot it is the FIRST open of each file that costs — ~10 ms
+        // a note on the owner's machine, with on-access scanning — which made
+        // the one-at-a-time read 30-50 s of a cold boot; eight opens in flight
+        // measured ~6x faster. Nothing below sees a different order, so the
+        // graph is the one the sequential loop built.
+        var parsed = new KnowledgeNode[mdFiles.Count];
+        try
+        {
+            Parallel.For(0, mdFiles.Count,
+                new ParallelOptions { CancellationToken = ct, MaxDegreeOfParallelism = Math.Max(1, ReadParallelism) },
+                i => parsed[i] = IndexFile(mdFiles[i], vaultPath));
+        }
+        catch (AggregateException ae) when (ae.InnerExceptions.Count > 0)
+        {
+            // Callers were written against the sequential loop: a note that
+            // cannot be read surfaces as its own exception, not a wrapper.
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ae.InnerExceptions[0]).Throw();
+        }
 
         var nodeMap = new Dictionary<string, KnowledgeNode>();
         // Track notes by relative path too so canvas file-references
@@ -73,10 +101,10 @@ public partial class KnowledgeIndexer
         // case-insensitive to match Obsidian's lookup behaviour.
         var nodeByPath = new Dictionary<string, KnowledgeNode>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var file in mdFiles)
+        for (int fi = 0; fi < mdFiles.Count; fi++)
         {
-            ct.ThrowIfCancellationRequested();
-            var node = IndexFile(file, vaultPath);
+            var file = mdFiles[fi];
+            var node = parsed[fi];
             graph.Nodes.Add(node);
             nodeMap[node.Title.ToLowerInvariant()] = node;
             // Agents cite each other by id — `[[b5934f5023a9]] (description)` is
@@ -101,8 +129,8 @@ public partial class KnowledgeIndexer
             // Filename-only key for "file": "Note.md" without folder
             nodeByPath[Path.GetFileName(file)] = node;
         }
-        // mdFiles is a deferred query — the counts are only real once the loop
-        // above has pulled it, so read the report here and not a line earlier.
+        // The ignore counts are only real once mdFiles has been pulled — it is
+        // materialised above now, but the report stays here, after the notes.
         graph.IgnoreReport = ignore.Describe();
 
         // Build edges from [[wiki-links]] and ![[embeds]]. The regex

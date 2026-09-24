@@ -1,17 +1,33 @@
+using System.Diagnostics;
+using System.Globalization;
 using System.IO.Compression;
+using System.Net;
 using System.Reflection;
-using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 
 namespace BrainX.Server.Services;
 
+/// <summary>What the updater last did — for the owner's admin overview.</summary>
+public sealed record UpdateStatus(bool Enabled, DateTime? LastCheckUtc, string? LatestVersion, string? LastResult);
+
+/// <summary>Answer to one check (the 6-hourly loop or the owner's "check now").</summary>
+public sealed record UpdateCheckResult(string Current, string? Latest, bool UpdateStarted, string Message);
+
 /// <summary>
-/// Opt-in self-updater for the standalone node. When <c>BrainX__AutoUpdate=true</c>
-/// it polls GitHub Releases; on a newer build whose assets include
-/// <c>brainx-node-win-x64.zip</c> it downloads + stages the new files, writes a
-/// tiny updater <c>.cmd</c>, launches it detached, and asks the host to shut down
-/// so the script can swap files and restart (a Windows service via
-/// <c>BrainX__UpdateServiceName</c>, else by relaunching the exe).
+/// Opt-in self-updater for the standalone node (<c>BrainX__AutoUpdate=true</c>).
+///
+/// Every check (2 minutes after start, then every 6 hours, or the owner's
+/// "check now" from the admin API — one code path, one at a time):
+///   1. asks GitHub for the latest release, and when it is newer, installs it —
+///      the FULL package (server + mcp\ + manager\) when the release has one,
+///      otherwise the small server-only package;
+///   2. when this node is up to date but its install is incomplete (no
+///      mcp\brainx-mcp.exe — e.g. it was updated by the OLD updater, which only
+///      knows the small asset — or no manager\), installs the full package of
+///      the version it already runs. At most once per version.
+/// All decisions are <see cref="UpdatePlanner"/>'s (pure, tested); this class
+/// only downloads, stages and hands over to the updater script — and only a
+/// package whose signature and every file verify (<see cref="CheckPackage"/>).
 ///
 /// Hard rule: this NEVER throws into the host and NO-OPS entirely when AutoUpdate
 /// is off (the default) — a broken updater must not take the node down.
@@ -20,9 +36,22 @@ public sealed class SelfUpdateService : BackgroundService
 {
     private readonly IHostApplicationLifetime _life;
     private static readonly TimeSpan Interval = TimeSpan.FromHours(6);
-    private const string AssetName = "brainx-node-win-x64.zip";
+    private static readonly TimeSpan DownloadTimeout = TimeSpan.FromMinutes(30);
+    private readonly SemaphoreSlim _checkGate = new(1, 1);
+    private volatile UpdateStatus _status;
 
-    public SelfUpdateService(IHostApplicationLifetime life) => _life = life;
+    public SelfUpdateService(IHostApplicationLifetime life)
+    {
+        _life = life;
+        _status = new UpdateStatus(NodeConfig.AutoUpdate, null, null, null);
+    }
+
+    public UpdateStatus Status => _status;
+
+    /// <summary>The version this node runs, as CI stamped it.</summary>
+    public static string CurrentVersion =>
+        (Assembly.GetEntryAssembly() ?? Assembly.GetExecutingAssembly())
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "0.0.0";
 
     protected override async Task ExecuteAsync(CancellationToken stop)
     {
@@ -31,119 +60,332 @@ public sealed class SelfUpdateService : BackgroundService
             Console.WriteLine("[selfupdate] disabled (set BrainX__AutoUpdate=true to enable)");
             return;
         }
-        // Let the node finish booting before the first check.
+        // Let the node finish booting before the first check (which is also
+        // where an incomplete install gets repaired).
         try { await Task.Delay(TimeSpan.FromMinutes(2), stop); } catch { return; }
 
         while (!stop.IsCancellationRequested)
         {
-            try { await CheckOnceAsync(stop); }
+            try { await CheckNowAsync(stop); }
             catch (Exception ex) { Console.WriteLine($"[selfupdate] check failed: {ex.Message}"); }
             try { await Task.Delay(Interval, stop); } catch { break; }
         }
     }
 
-    private async Task CheckOnceAsync(CancellationToken stop)
+    private void Record(string? latest, string result)
+        => _status = new UpdateStatus(NodeConfig.AutoUpdate, DateTime.UtcNow, latest ?? _status.LatestVersion, result);
+
+    /// <summary>One check: update, repair, or nothing — see the class remarks.</summary>
+    public async Task<UpdateCheckResult> CheckNowAsync(CancellationToken ct)
     {
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(25) };
-        http.DefaultRequestHeaders.UserAgent.ParseAdd("brainx-node-selfupdate");
-        http.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
-
-        var json = await http.GetStringAsync(
-            $"https://api.github.com/repos/{NodeConfig.UpdateRepo}/releases/latest", stop);
-
-        using var doc = JsonDocument.Parse(json);
-        var root = doc.RootElement;
-        var tag = root.TryGetProperty("tag_name", out var t) ? t.GetString() ?? "" : "";
-        var clean = tag.StartsWith("v", StringComparison.OrdinalIgnoreCase) ? tag[1..] : tag;
-        if (!IsNewer(clean)) return;
-
-        string? url = null;
-        if (root.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array)
-            foreach (var a in assets.EnumerateArray())
-            {
-                if (string.Equals(a.GetProperty("name").GetString(), AssetName, StringComparison.OrdinalIgnoreCase))
-                {
-                    url = a.GetProperty("browser_download_url").GetString();
-                    break;
-                }
-            }
-        if (string.IsNullOrEmpty(url))
+        var current = CurrentVersion;
+        if (!await _checkGate.WaitAsync(0, ct))
+            return new UpdateCheckResult(current, _status.LatestVersion, false, "a check is already running");
+        try
         {
-            Console.WriteLine($"[selfupdate] release {tag} has no {AssetName} asset — skipping");
-            return;
+            var appDir = AppContext.BaseDirectory.TrimEnd('\\', '/');
+            var rootDir = Directory.GetParent(appDir)?.FullName ?? appDir;
+            var statePath = Path.Combine(rootDir, "selfupdate-state.json");
+
+            using var api = new HttpClient { Timeout = TimeSpan.FromSeconds(25) };
+            api.DefaultRequestHeaders.UserAgent.ParseAdd("brainx-node-selfupdate");
+            api.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+
+            var latest = await FetchReleaseAsync(api, "releases/latest", ct);
+            var install = InstallState.Probe(appDir);
+            var state = UpdateState.Load(statePath);
+            ReleaseInfo? currentRelease = null;
+            if (UpdatePlanner.NeedsCurrentRelease(current, latest, install, state))
+                currentRelease = await FetchReleaseAsync(api, "releases/tags/v" + UpdatePlanner.Triple(current), ct);
+
+            var plan = UpdatePlanner.Decide(current, latest, currentRelease, install, state, DateTimeOffset.UtcNow);
+            Console.WriteLine($"[selfupdate] running {current} · latest {latest?.Tag ?? "unknown"}"
+                              + $" · mcp {(install.McpPresent ? "present" : "MISSING")} · manager {(install.ManagerPresent ? "present" : "missing")}");
+            Console.WriteLine($"[selfupdate] {plan.Kind.ToString().ToLowerInvariant()}: {plan.Reason}");
+            if (plan.Kind == UpdateKind.None)
+            {
+                Record(latest?.Version, plan.Reason);
+                return new UpdateCheckResult(current, latest?.Version, false, plan.Reason);
+            }
+            return await StageAndHandOverAsync(plan, current, appDir, rootDir, statePath, state, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[selfupdate] check failed: {ex.GetType().Name}: {ex.Message}");
+            Record(null, $"check failed: {ex.GetType().Name}: {ex.Message}");
+            return new UpdateCheckResult(current, _status.LatestVersion, false, $"check failed: {ex.Message}");
+        }
+        finally
+        {
+            _checkGate.Release();
+        }
+    }
+
+    private static async Task<ReleaseInfo?> FetchReleaseAsync(HttpClient api, string relative, CancellationToken ct)
+    {
+        using var res = await api.GetAsync($"https://api.github.com/repos/{NodeConfig.UpdateRepo}/{relative}", ct);
+        if (res.StatusCode == HttpStatusCode.NotFound) return null;
+        res.EnsureSuccessStatusCode();
+        return UpdatePlanner.ParseRelease(await res.Content.ReadAsStringAsync(ct));
+    }
+
+    private async Task<UpdateCheckResult> StageAndHandOverAsync(UpdatePlan plan, string current, string appDir, string rootDir,
+                                                                string statePath, UpdateState state, CancellationToken ct)
+    {
+        var release = plan.Release!;
+        var asset = plan.Asset!;
+        var version = UpdatePlanner.Triple(release.Version);
+        var isFull = string.Equals(asset.Name, UpdatePlanner.FullAsset, StringComparison.OrdinalIgnoreCase);
+        var zipPath = Path.Combine(rootDir, $"node-{version}.zip");
+        var staging = Path.Combine(rootDir, $"staging-{version}");
+
+        UpdateCheckResult Refuse(string why)
+        {
+            Console.WriteLine($"[selfupdate] {why}");
+            Record(release.Version, why);
+            return new UpdateCheckResult(current, release.Version, false, why);
         }
 
-        Console.WriteLine($"[selfupdate] new node {tag} found — downloading…");
-        var appDir = AppContext.BaseDirectory.TrimEnd('\\', '/');
-        var rootDir = Directory.GetParent(appDir)?.FullName ?? appDir;
-        var zipPath = Path.Combine(rootDir, $"node-{clean}.zip");
-        var staging = Path.Combine(rootDir, $"staging-{clean}");
+        // Zip + extracted copy + what robocopy writes: ~4x the download.
+        if (asset.Size > 0 && FreeBytes(rootDir) is { } free && free < asset.Size * 4)
+            return Refuse($"not enough free disk space to stage {asset.Name} ({Mb(asset.Size)} needs about {Mb(asset.Size * 4)}, {Mb(free)} free)");
 
-        var bytes = await http.GetByteArrayAsync(url, stop);
-        await File.WriteAllBytesAsync(zipPath, bytes, stop);
+        // Streamed to disk with a generous deadline: the full package is
+        // ~100 MB+, which the old 25 s in-memory download could not survive.
+        Console.WriteLine($"[selfupdate] downloading {asset.Name} of {release.Tag} ({Mb(asset.Size)})…");
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            using var dl = new HttpClient { Timeout = DownloadTimeout };
+            dl.DefaultRequestHeaders.UserAgent.ParseAdd("brainx-node-selfupdate");
+            using var res = await dl.GetAsync(asset.Url, HttpCompletionOption.ResponseHeadersRead, ct);
+            res.EnsureSuccessStatusCode();
+            await using var fs = new FileStream(zipPath, FileMode.Create, FileAccess.Write, FileShare.None);
+            await res.Content.CopyToAsync(fs, ct);
+        }
+        catch
+        {
+            try { File.Delete(zipPath); } catch { }
+            throw;
+        }
+        Console.WriteLine($"[selfupdate] downloaded {Mb(new FileInfo(zipPath).Length)} in {sw.Elapsed.TotalSeconds.ToString("0", CultureInfo.InvariantCulture)} s");
+
         if (Directory.Exists(staging)) Directory.Delete(staging, true);
+        Directory.CreateDirectory(staging);
+        // Staging is private (SYSTEM + Administrators) before a single file
+        // lands in it: what is verified below is what gets installed.
+        if (OperatingSystem.IsWindows()) FolderAcl.MakePrivateIfSystem(staging);
         ZipFile.ExtractToDirectory(zipPath, staging);
         File.Delete(zipPath);
+        Console.WriteLine($"[selfupdate] extracted to {staging}");
 
-        var cmd = WriteUpdaterScript(rootDir, staging, appDir);
-        Console.WriteLine($"[selfupdate] staged {tag} → launching updater + shutting down for swap");
-        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        var now = DateTimeOffset.UtcNow;
+        var refusal = CheckPackage(plan, staging, current);
+        if (refusal != null)
+        {
+            // Remember it, so this package is not downloaded again for nothing
+            // (a bad signature is either an attack or a broken release —
+            // neither gets better by retrying two minutes after every start).
+            var remembered = plan.Kind == UpdateKind.Repair
+                ? state with { FullPackageStagedFor = version }
+                : state with { LastUpdateTarget = version, LastUpdateUtc = now };
+            try { SaveState(remembered, statePath); } catch (Exception ex) { Console.WriteLine($"[selfupdate] could not save state: {ex.GetType().Name}"); }
+            try { Directory.Delete(staging, true); } catch { }
+            return Refuse($"not applying {asset.Name} of {release.Tag}: {refusal}");
+        }
+        UpdatePackageVerifier.RemoveSignatureFiles(staging);
+        Console.WriteLine($"[selfupdate] {asset.Name} of {release.Tag}: signature and every file verified");
+
+        // The script runs as SYSTEM, so it is always a brand-new file: one left
+        // behind — or planted while the install root was still writable by
+        // users — keeps whatever ACL it had, and its owner could edit it
+        // between this write and cmd.exe reading it. Deleting it takes only
+        // our rights on the folder, not any on the file.
+        var logFile = Path.Combine(NodeLog.Current?.Directory ?? rootDir, "selfupdate.log");
+        var cmd = Path.Combine(rootDir, "selfupdate.cmd");
+        try
+        {
+            WriteFreshFile(cmd, BuildUpdaterScript(staging, appDir, NodeConfig.UpdateServiceName, logFile, Environment.ProcessId, release.Tag));
+        }
+        catch (Exception ex)
+        {
+            try { Directory.Delete(staging, true); } catch { }
+            return Refuse($"could not write {cmd} ({ex.GetType().Name}) — not updating");
+        }
+
+        // The loop guard reaches the disk BEFORE anything restarts. No guard, no restart.
+        var next = plan.Kind == UpdateKind.Repair
+            ? state with { FullPackageStagedFor = version }
+            : state with
+            {
+                LastUpdateTarget = version,
+                LastUpdateUtc = now,
+                FullPackageStagedFor = isFull ? version : state.FullPackageStagedFor,
+            };
+        try
+        {
+            SaveState(next, statePath);
+        }
+        catch (Exception ex)
+        {
+            try { Directory.Delete(staging, true); } catch { }
+            try { File.Delete(cmd); } catch { }
+            return Refuse($"could not write {statePath} ({ex.GetType().Name}) — not restarting without the restart-loop guard");
+        }
+        Console.WriteLine($"[selfupdate] recorded the {(plan.Kind == UpdateKind.Repair ? "repair" : "update")} of {version} in {statePath}");
+
+        Console.WriteLine($"[selfupdate] {(plan.Kind == UpdateKind.Repair ? "repairing from" : "updating to")} {release.Tag} ({asset.Name}) — "
+                          + $"launching {cmd} and shutting down; its log: {logFile}");
+        Process.Start(new ProcessStartInfo
         {
             FileName = "cmd.exe",
             Arguments = $"/c \"{cmd}\"",
             UseShellExecute = true,
             CreateNoWindow = true,
-            WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden,
+            WindowStyle = ProcessWindowStyle.Hidden,
         });
+        var message = plan.Kind == UpdateKind.Repair
+            ? $"repairing the install from {release.Tag} — the node restarts in a few seconds"
+            : $"updating to {release.Tag} — the node restarts in a few seconds";
+        Record(release.Version, message);
         _life.StopApplication();
+        return new UpdateCheckResult(current, release.Version, true, message);
     }
 
-    private static string WriteUpdaterScript(string rootDir, string staging, string appDir)
+    /// <summary>
+    /// May this staged package be installed? Null = yes, else why not.
+    ///
+    /// The SIGNATURE comes first: nothing in the package is trusted — not even
+    /// read — until update-manifest.sig verifies against the release key built
+    /// into this node and every file matches the signed manifest byte for byte
+    /// (no extra files either). An unsigned package is refused outright. The
+    /// version it was signed as must be the release tag, and newer than this
+    /// node (update) or exactly this node's version (repair). Only then the
+    /// planner's own sanity checks. The admin "check now" runs this too.
+    /// </summary>
+    public static string? CheckPackage(UpdatePlan plan, string staging, string currentVersion, byte[]? publicKeySpki = null)
     {
-        var cmdPath = Path.Combine(rootDir, "selfupdate.cmd");
-        // Restart strategy: a registered Windows service (clean) or, failing that,
-        // relaunch the exe directly (good for a cloudflared+console run).
-        string restart = string.IsNullOrWhiteSpace(NodeConfig.UpdateServiceName)
+        var rule = plan.Kind == UpdateKind.Repair
+            ? UpdatePackageVerifier.VersionRule.MustEqualCurrent
+            : UpdatePackageVerifier.VersionRule.MustBeNewer;
+        var verdict = publicKeySpki is null
+            ? UpdatePackageVerifier.Verify(staging, plan.Release!.Version, currentVersion, rule)
+            : UpdatePackageVerifier.Verify(staging, plan.Release!.Version, currentVersion, rule, publicKeySpki);
+        if (!verdict.IsValid) return $"signature check failed ({verdict.Result}): {verdict.Detail}";
+        return UpdatePlanner.CheckStaged(plan, rel => File.Exists(Path.Combine(staging, rel)));
+    }
+
+    /// <summary>
+    /// Replace <paramref name="path"/> with a file this process creates (never
+    /// reopens an existing one), then make it private when running as SYSTEM.
+    /// Throws when that cannot be guaranteed — e.g. something re-created the
+    /// file between the delete and the create.
+    /// </summary>
+    public static void WriteFreshFile(string path, string content)
+    {
+        if (File.Exists(path)) File.Delete(path);
+        using (var fs = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        using (var writer = new StreamWriter(fs, new System.Text.UTF8Encoding(false)))
+            writer.Write(content);
+        if (OperatingSystem.IsWindows()) FolderAcl.MakePrivateIfSystem(path);
+    }
+
+    /// <summary>Save, then make the file private again: it is written as a temp
+    /// file + rename, and the fresh file inherits the root's Users entry.</summary>
+    private static void SaveState(UpdateState state, string path)
+    {
+        state.Save(path);
+        if (OperatingSystem.IsWindows()) FolderAcl.MakePrivateIfSystem(path);
+    }
+
+    private static long? FreeBytes(string dir)
+    {
+        try
+        {
+            var root = Path.GetPathRoot(Path.GetFullPath(dir));
+            return string.IsNullOrEmpty(root) ? null : new DriveInfo(root).AvailableFreeSpace;
+        }
+        catch (Exception) { return null; }
+    }
+
+    private static string Mb(long bytes)
+        => (bytes / (1024.0 * 1024)).ToString("0.0", CultureInfo.InvariantCulture) + " MB";
+
+    /// <summary>
+    /// The updater script. It waits for THIS process to exit (not a fixed
+    /// sleep), mirrors the staged build over the app dir, logs robocopy's exit
+    /// code, and restarts the node whatever happened — a node left stopped
+    /// after a half-applied update is worse than one running the old files.
+    ///
+    ///   • /R:2 /W:2 — robocopy's default is 1,000,000 retries x 30 s, i.e. one
+    ///     locked file hangs the update forever.
+    ///   • exit code below 8 = success (1 = copied, 2 = extras, 4 = mismatches);
+    ///     8 or more = something was not copied: logged, then restart anyway.
+    ///   • manager\ (the Server Manager) is copied on its own afterwards, so a
+    ///     locked manager — the owner has it open — neither hides nor blocks
+    ///     the node's own update.
+    /// </summary>
+    public static string BuildUpdaterScript(string staging, string appDir, string? serviceName, string logFile, int nodePid, string tag)
+    {
+        tag = SafeTag(tag);
+        var restart = string.IsNullOrWhiteSpace(serviceName)
             ? $"start \"\" \"{Path.Combine(appDir, "BrainX.Server.exe")}\""
-            : $"net stop \"{NodeConfig.UpdateServiceName}\" & net start \"{NodeConfig.UpdateServiceName}\"";
-        var script =
+            : $"net stop \"{serviceName}\" >nul 2>&1 & net start \"{serviceName}\" >> \"{logFile}\" 2>&1";
+        var stagedManager = Path.Combine(staging, "manager");
+        var liveManager = Path.Combine(appDir, "manager");
+        return
 $@"@echo off
 rem brainx-node self-updater — waits for the node to exit, mirrors the staged
 rem build over the app dir (keeping data files), then restarts the node.
-timeout /t 4 /nobreak >nul
-robocopy ""{staging}"" ""{appDir}"" /E /XF selfupdate.cmd /R:3 /W:2 >nul
+setlocal
+echo [%date% %time%] update to {tag}: waiting for node pid {nodePid} to exit >> ""{logFile}""
+set /a WAITED=0
+:waitnode
+tasklist /FI ""PID eq {nodePid}"" 2>nul | find ""{nodePid}"" >nul
+if not errorlevel 1 (
+  if %WAITED% GEQ 60 goto copyapp
+  rem ping, not timeout: timeout exits at once when stdin is redirected (service session)
+  ping -n 2 127.0.0.1 >nul
+  set /a WAITED+=1
+  goto waitnode
+)
+:copyapp
+robocopy ""{staging}"" ""{appDir}"" /E /XD ""{stagedManager}"" /XF selfupdate.cmd {UpdatePackageVerifier.ManifestFileName} {UpdatePackageVerifier.SignatureFileName} /R:2 /W:2 /NP /NFL /NDL >> ""{logFile}"" 2>&1
+set RC=%ERRORLEVEL%
+if %RC% GEQ 8 (
+  echo [%date% %time%] robocopy app FAILED exit %RC% - some files were not replaced; restarting anyway >> ""{logFile}""
+) else (
+  echo [%date% %time%] robocopy app ok exit %RC% >> ""{logFile}""
+)
+if exist ""{stagedManager}"" (
+  robocopy ""{stagedManager}"" ""{liveManager}"" /E /R:2 /W:2 /NP /NFL /NDL >> ""{logFile}"" 2>&1
+  call :logmanager
+)
 rmdir /s /q ""{staging}"" 2>nul
+echo [%date% %time%] restarting the node >> ""{logFile}""
 {restart}
+exit /b 0
+
+:logmanager
+set RCM=%ERRORLEVEL%
+if %RCM% GEQ 8 (
+  echo [%date% %time%] robocopy manager exit %RCM% - manager in use, it updates next time >> ""{logFile}""
+) else (
+  echo [%date% %time%] robocopy manager ok exit %RCM% >> ""{logFile}""
+)
+exit /b 0
 ";
-        File.WriteAllText(cmdPath, script);
-        return cmdPath;
     }
 
-    /// <summary>Compare the release SemVer to our stamped InformationalVersion
-    /// (CI sets it to the release version). Uses the bare x.y.z triple.</summary>
-    private static bool IsNewer(string remote)
+    /// <summary>Letters, digits, '.', '-', '+' only, at most 64 chars.</summary>
+    public static string SafeTag(string? tag)
     {
-        var info = (Assembly.GetEntryAssembly() ?? Assembly.GetExecutingAssembly())
-            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "0.0.0";
-        return CompareTriple(remote, info) > 0;
-    }
-
-    private static int CompareTriple(string a, string b)
-    {
-        var (a0, a1, a2) = ParseTriple(a);
-        var (b0, b1, b2) = ParseTriple(b);
-        if (a0 != b0) return a0.CompareTo(b0);
-        if (a1 != b1) return a1.CompareTo(b1);
-        return a2.CompareTo(b2);
-    }
-
-    private static (int, int, int) ParseTriple(string v)
-    {
-        // Strip "+build" / "-suffix" metadata, then read the first three ints.
-        var plus = v.IndexOf('+'); if (plus >= 0) v = v[..plus];
-        var dash = v.IndexOf('-'); if (dash >= 0) v = v[..dash];
-        var p = v.Split('.');
-        int N(int i) => i < p.Length && int.TryParse(p[i], out var n) ? n : 0;
-        return (N(0), N(1), N(2));
+        if (string.IsNullOrEmpty(tag)) return "";
+        var s = new string(tag.Where(c => c is (>= '0' and <= '9') or (>= 'a' and <= 'z') or (>= 'A' and <= 'Z') or '.' or '-' or '+').ToArray());
+        return s.Length <= 64 ? s : s[..64];
     }
 }

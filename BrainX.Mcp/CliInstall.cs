@@ -81,6 +81,9 @@ internal static class CliInstall
         Console.WriteLine("  brainx-mcp canary [--vault]          Can the newest notes be found by their own titles? (brain_recall's");
         Console.WriteLine("                                       ranking; sessions also run it every 12 h → findability.json)");
         Console.WriteLine("  brainx-mcp dream [--vault] [--limit] What brain_dream proposes, supersede candidates included (read-only)");
+        Console.WriteLine("  brainx-mcp cloud <login|status|logout|pull|push|token>  BrainX Cloud — `brainx-mcp cloud help` for details");
+        Console.WriteLine("  brainx-mcp register-claude --cloud   Register \"brainx-cloud\": this binary serving your BrainX Cloud notes");
+        Console.WriteLine("  brainx-mcp --cloud                   Run as MCP server on the BrainX Cloud cache (also: BRAINX_CLOUD=1)");
         Console.WriteLine("  brainx-mcp --version | -v | version  Print version + binary path + build time");
         Console.WriteLine("  brainx-mcp help                      Show this help");
         Console.WriteLine();
@@ -438,19 +441,22 @@ internal static class CliInstall
     /// </summary>
     public static async Task<int> RegisterClaudeAsync(string[] args)
     {
-        string? vaultArg = null;
-        bool showHelp = false;
+        string? vaultArg = null, nameArg = null;
+        bool showHelp = false, cloud = false;
         for (int i = 0; i < args.Length; i++)
         {
             switch (args[i])
             {
                 case "--vault" when i + 1 < args.Length: vaultArg = args[++i]; break;
+                case "--name" when i + 1 < args.Length: nameArg = args[++i]; break;
+                case "--cloud": cloud = true; break;
                 case "-h" or "--help" or "help": showHelp = true; break;
             }
         }
         if (showHelp)
         {
             Console.WriteLine("Usage: brainx-mcp register-claude [--vault PATH]");
+            Console.WriteLine("       brainx-mcp register-claude --cloud [--name NAME]");
             Console.WriteLine();
             Console.WriteLine("Registers this binary with Claude Code by running the equivalent of:");
             Console.WriteLine("  claude mcp remove brainx-brain -s local   (if it exists)");
@@ -460,8 +466,14 @@ internal static class CliInstall
             Console.WriteLine("BRAINX_MCP_VERSION env var surfaces the running version under");
             Console.WriteLine("Claude Desktop's Advanced options. The MCP server self-heals this var");
             Console.WriteLine("on every boot if the binary's ServerVersion has moved past it.");
+            Console.WriteLine();
+            Console.WriteLine($"--cloud registers \"{CloudMcpServerName}\" instead: the same binary serving your BrainX Cloud");
+            Console.WriteLine("notes from a local cache (no BRAINX_VAULT; sign in first with `brainx-mcp cloud login`).");
+            Console.WriteLine("It sits beside brainx-brain and never replaces it.");
             return 0;
         }
+        if (cloud) return await RegisterClaudeCloudAsync(string.IsNullOrWhiteSpace(nameArg) ? CloudMcpServerName : nameArg.Trim())
+            .ConfigureAwait(false);
 
         var vault = ResolveVault(vaultArg);
         var exePath = ResolveSelfPath();
@@ -580,6 +592,119 @@ internal static class CliInstall
             else
                 Console.WriteLine($"  ✓ added \"{newKey}\"");
             Console.WriteLine($"  → {path}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  ✗ failed to write Claude Desktop config: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Claude registration name for cloud mode. Deliberately NOT brainx-brain:
+    /// the desktop app self-heals the brainx-brain entry back to the local vault
+    /// on every start (MainWindow.AutoOnboard), and a machine that has both a
+    /// local brain and a cloud account should see both, not have one replace
+    /// the other.
+    /// </summary>
+    public const string CloudMcpServerName = "brainx-cloud";
+
+    /// <summary>
+    /// `register-claude --cloud`: register this binary in cloud mode — no vault,
+    /// BRAINX_CLOUD=1 — with Claude Code and Claude Desktop. The token is not
+    /// put in either config: the server reads it from this user's DPAPI-wrapped
+    /// store (CloudCredentialStore), so a copied config file carries no secret.
+    /// </summary>
+    private static async Task<int> RegisterClaudeCloudAsync(string name)
+    {
+        var exePath = ResolveSelfPath();
+        var pathQuality = ClassifyExePath(exePath);
+        Console.WriteLine($"brainx-mcp register-claude --cloud · v{Program.ServerVersion}");
+        Console.WriteLine($"  exe:  {exePath}");
+        Console.WriteLine($"  name: {name}");
+        Console.WriteLine();
+        if (pathQuality != ExePathQuality.Ok)
+        {
+            Console.WriteLine($"  ⚠  {DescribePathQuality(pathQuality)}");
+            Console.WriteLine("     Run this command from the published Release exe instead.");
+            return 2;
+        }
+        if (name.StartsWith(McpServerName, StringComparison.OrdinalIgnoreCase))
+        {
+            // The desktop app would rewrite it back to the local vault, and
+            // EnsureDesktopConfigVersion treats every brainx-brain* key as local.
+            Console.WriteLine($"  ✗ \"{name}\" is reserved for the local brain — pick another --name.");
+            return 2;
+        }
+        var rec = new BrainX.Core.Services.Cloud.CloudCredentialStore().Load();
+        if (rec == null || !rec.IsSignedIn)
+        {
+            Console.WriteLine("  ⚠  Not signed in to BrainX Cloud on this machine yet. The registration works as soon as you run:");
+            Console.WriteLine("       brainx-mcp cloud login <license key>");
+            Console.WriteLine();
+        }
+
+        // User scope, like the desktop app's own registration: the cloud brain
+        // is for every project on this machine, not the folder this ran in.
+        Console.WriteLine($"[1/3] Claude Code (CLI): removing any existing {name} registration...");
+        await RunClaudeAsync("mcp", "remove", name, "-s", "user").ConfigureAwait(false);
+        Console.WriteLine("[2/3] Claude Code (CLI): adding the cloud-mode registration...");
+        var rc = await RunClaudeAsync(
+            "mcp", "add", name,
+            "-s", "user",
+            "-e", "BRAINX_CLOUD=1",
+            "-e", $"BRAINX_MCP_VERSION={Program.ServerVersion}",
+            "--", exePath
+        ).ConfigureAwait(false);
+        if (rc != 0)
+        {
+            Console.WriteLine($"  ✗ `claude mcp add` exited with code {rc}. Run it manually:");
+            Console.WriteLine($"    claude mcp add {name} -s user -e BRAINX_CLOUD=1 -e BRAINX_MCP_VERSION={Program.ServerVersion} -- \"{exePath}\"");
+            return rc;
+        }
+        Console.WriteLine("[3/3] Claude Desktop: updating claude_desktop_config.json...");
+        UpdateClaudeDesktopConfigCloud(exePath, name);
+        Console.WriteLine();
+        Console.WriteLine($"✓ Done. Claude reaches your BrainX Cloud notes through \"{name}\" (a local cache, refreshed on start;");
+        Console.WriteLine("  notes Claude writes are sent back to the cloud). A local brainx-brain, if any, is untouched.");
+        Console.WriteLine("  RESTART Claude Code / Claude Desktop to pick it up.");
+        return 0;
+    }
+
+    /// <summary>Add or replace ONLY the <paramref name="name"/> entry — never the local brainx-brain ones.</summary>
+    private static void UpdateClaudeDesktopConfigCloud(string exePath, string name)
+    {
+        var path = ResolveClaudeDesktopConfigPath();
+        if (path == null || !File.Exists(path))
+        {
+            Console.WriteLine("  ⓘ  no Claude Desktop config found — skipped (Claude Code is registered)");
+            return;
+        }
+        JObject json;
+        try { json = JObject.Parse(File.ReadAllText(path)); }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  ✗ failed to parse Claude Desktop config: {ex.Message} — nothing written");
+            return;
+        }
+        if (json["mcpServers"] is not JObject servers)
+        {
+            servers = new JObject();
+            json["mcpServers"] = servers;
+        }
+        servers[name] = new JObject
+        {
+            ["command"] = exePath,
+            ["args"] = new JArray(),
+            ["env"] = new JObject
+            {
+                ["BRAINX_CLOUD"] = "1",
+                ["BRAINX_MCP_VERSION"] = Program.ServerVersion,
+            },
+        };
+        try
+        {
+            File.WriteAllText(path, json.ToString(Newtonsoft.Json.Formatting.Indented));
+            Console.WriteLine($"  ✓ \"{name}\" → {path}");
         }
         catch (Exception ex)
         {

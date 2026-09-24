@@ -1,10 +1,12 @@
-using System;
-using System.IO;
 using System.Text.Json;
 
-namespace BrainX.NodeMonitor;
+namespace BrainX.ServerManager.Dev;
 
-/// <summary>Persisted monitor settings (%APPDATA%\BrainX\NodeMonitor\settings.json).</summary>
+/// <summary>
+/// Dev-mode settings (%APPDATA%\BrainX\NodeMonitor\settings.json). The path keeps
+/// the old product's folder on purpose, so a dev box keeps its port/vault/storage
+/// choices across the rename to Server Manager.
+/// </summary>
 public sealed class MonitorSettings
 {
     public int Port { get; set; } = 5142;

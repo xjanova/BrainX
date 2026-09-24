@@ -35,12 +35,14 @@ public partial class MainWindow : Window
     private readonly NetworkClient _network = new();
 
     // Two independent endpoints (see RemoteNodeConfig):
-    //  _hubUrl      — the public mesh rendezvous (SignalR /brain-hub) for Join
-    //                 Brain (BitTorrent-style file sharing / discovery).
+    //  _hubUrl      — the mesh rendezvous (SignalR /brain-hub) on BrainX Cloud
+    //                 for Join Brain (file sharing / discovery). FIXED: it was
+    //                 an editable, per-vault setting; the owner decided the app
+    //                 never shows or changes the cloud address.
     //  _localAiBase — this client's OWN brain + AI on localhost. Search is
     //                 local-first; the server that answers here runs SEPARATELY
     //                 (the client never launches or bundles it).
-    private string _hubUrl = RemoteNodeConfig.DefaultHubUrl;
+    private readonly string _hubUrl = RemoteNodeConfig.DefaultHubUrl;
     private string _localAiBase = RemoteNodeConfig.DefaultLocalAiBase;
     private readonly List<ShareRequest> _incomingShares = [];
     private readonly List<string> _shareHistory = [];
@@ -2748,15 +2750,22 @@ public partial class MainWindow : Window
             // checklist gone, window unresponsive, nothing on screen admitting
             // why. Awaited (not fire-and-forget) so the row below it is the
             // truth, and so nothing starts re-indexing underneath it.
-            var exported = true;
-            try
+            //
+            // Usually already done: the index writes the snapshot as it
+            // finishes, and nothing has changed the graph since. Writing it
+            // again was ~4 s of a cold boot spent on an identical file.
+            var exported = ReferenceEquals(_exportedGraph, _graph);
+            if (!exported)
             {
-                await Task.Run(() => _exporter.Export(_vaultPath, _identity, _graph));
-            }
-            catch (Exception ex)
-            {
-                exported = false;
-                Debug.WriteLine($"Auto-export failed: {ex.Message}");
+                try
+                {
+                    await Task.Run(() => _exporter.Export(_vaultPath, _identity, _graph));
+                    exported = true;
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"Auto-export failed: {ex.Message}");
+                }
             }
             // Settles either way — a vault on a drive that went away must not
             // hold the boot screen — but says which happened.
@@ -2768,6 +2777,11 @@ public partial class MainWindow : Window
         // thread — starting the watcher first left a window where a single
         // saved note could rewrite the graph mid-serialise.
         StartVaultWatcher();
+
+        // BrainX Cloud card + auto-sync. After the watcher (it feeds auto-sync),
+        // and never blocking: a returning user's card is filled from the cached
+        // account at once, and the refresh and first sync run in the background.
+        InitCloud();
 
         // Wire network events (dispatch to UI thread)
         _network.StatusChanged += s => Dispatcher.Invoke(() => OnNetworkStatus(s));
@@ -2847,20 +2861,23 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Safety net for the handover above: if the HUD never reports (WebView2
-    /// missing, a page error, graphics driver refusing a context), the boot
-    /// must still be declared over rather than left open forever.
+    /// Safety net for the handover above: if the HUD never finishes (a page
+    /// error, a renderer that died, a row nothing will ever tick), the boot
+    /// must still end rather than stay open forever.
     ///
-    /// <para>It waits on SILENCE, not on a stopwatch. The old version was a
-    /// one-shot 20 s timer that called Complete() no matter what the boot was
-    /// doing — and since the splash window was retired, the one thing
-    /// Complete() still changes for the user is that the boot music fades. So
-    /// on a first launch, where WebView2 builds its profile from scratch and
-    /// nothing is cached, this fired mid-boot and took the music out from
-    /// under a loading screen that was still counting steps. A boot that is
-    /// alive keeps reporting stages; one that has said nothing for
-    /// <see cref="BootSilenceDeadline"/> has stopped, and only then is there
-    /// anything to rescue.</para>
+    /// <para>It waits on SILENCE, not on a stopwatch, and it is armed only
+    /// here, after the host's own work — the stretch before this includes the
+    /// vault read, which says nothing for as long as it takes (80 s on the
+    /// owner's machine, 2026-09-24).</para>
+    ///
+    /// <para>It ends the boot by lifting the LOADING SCREEN, not by calling
+    /// Complete(). Since the splash was retired, Complete() changes exactly
+    /// one thing the owner can perceive — the boot music fades — and a
+    /// watchdog that only called it left the curtain up with the music gone:
+    /// the one combination the owner has ruled out. So it does what its
+    /// report has always said, shows the app anyway, and the music fades when
+    /// that screen is gone (<see cref="CompleteBootOnceScreensClosed"/>). Only
+    /// a page that does not answer at all is completed from here.</para>
     /// </summary>
     private void StartUniverseBootWatchdog()
     {
@@ -2868,27 +2885,60 @@ public partial class MainWindow : Window
         {
             Interval = TimeSpan.FromSeconds(2)
         };
+        var abandonedAt = DateTime.MinValue;
         watchdog.Tick += (_, _) =>
         {
             if (Services.StartupProgress.IsComplete) { watchdog.Stop(); return; }
-            var silence = Services.StartupProgress.SinceLastReport;
-            if (silence < BootSilenceDeadline) return;
+            if (!_bootScreensAbandoned)
+            {
+                var silence = Services.StartupProgress.SinceLastReport;
+                if (silence < BootSilenceDeadline) return;
+                Debug.WriteLine($"Universe boot watchdog: silent for {silence.TotalSeconds:F0}s.");
+                Services.StartupProgress.Report("Universe still loading — showing the app anyway", 1.0, tag: "universe");
+                abandonedAt = DateTime.UtcNow;
+                AbandonBootScreens();
+                return;
+            }
+            // The page was told to lift its curtain and has not said it did —
+            // a renderer that died, a HUD script that never ran. Nothing on
+            // screen is answering, so nothing on screen is a loading screen.
+            if (DateTime.UtcNow - abandonedAt < BootScreenCloseGrace) return;
             watchdog.Stop();
-            Debug.WriteLine($"Universe boot watchdog: silent for {silence.TotalSeconds:F0}s.");
-            Services.StartupProgress.Report("Universe still loading — showing the app anyway", 1.0, tag: "universe");
             Services.StartupProgress.Complete();
         };
         watchdog.Start();
     }
 
+    /// <summary>Set once the watchdog has given up on the boot. A HUD page that
+    /// announces itself after that is told to lift its curtain at once.</summary>
+    private bool _bootScreensAbandoned;
+
+    /// <summary>Take every loading screen down: settle the HUD's stragglers as
+    /// skipped (which lifts its curtain and reports back through
+    /// <c>hudBootClosed</c>) and fade the WPF loader if it is still up.</summary>
+    private void AbandonBootScreens()
+    {
+        if (_bootScreensAbandoned) return;
+        _bootScreensAbandoned = true;
+        // No page has announced a curtain, so the loader is the whole of the
+        // loading screen and its fade is the end of the boot.
+        if (_hudPageReady) PostHud("hudBootGiveUp", new { });
+        else _hudBootClosed = true;
+        if (UniverseLoadingOverlay?.Visibility == Visibility.Visible) HideUniverseLoadingOverlay();
+        else CompleteBootOnceScreensClosed();
+    }
+
     /// <summary>
     /// How long the boot may say nothing at all before it is presumed dead.
-    /// Matches BootMusic's own guard so the two can never disagree about when
-    /// the boot ended, and is well past the HUD's 20 s "a section never
-    /// arrived" deadline — once the page is up, that deadline finishes the
-    /// boot on its own and this never gets a turn.
+    /// Well past the HUD's 20 s "a section never arrived" deadline and the
+    /// 12 s budget of the slowest row still running when this is armed, so a
+    /// healthy boot always finishes first and this never gets a turn.
     /// </summary>
     private static readonly TimeSpan BootSilenceDeadline = TimeSpan.FromSeconds(45);
+
+    /// <summary>How long a page that was told to lift its curtain gets to say
+    /// it has. The lift itself is under a second.</summary>
+    private static readonly TimeSpan BootScreenCloseGrace = TimeSpan.FromSeconds(10);
 
     // ═══════════════════════════════════════
     // RENDER LOOP — called ~60fps by WPF
@@ -6550,6 +6600,7 @@ public partial class MainWindow : Window
             {
                 var r = _exporter.Export(_vaultPath, _identity, _graph);
                 _lastExportMsg = $" · exported {r.NodeCount} nodes → brain-export.json";
+                _exportedGraph = _graph;
             }
         }
         catch (Exception ex)
@@ -6569,6 +6620,11 @@ public partial class MainWindow : Window
     /// <summary>Carries the export outcome from the worker back to the status
     /// line, which only the UI thread may touch.</summary>
     private string _lastExportMsg = "";
+
+    /// <summary>The graph the last successful index-time export wrote to disk.
+    /// The boot compares it with <c>_graph</c> so it does not write the same
+    /// ~12 MB snapshot and CLAUDE.md a second time a few seconds later.</summary>
+    private KnowledgeGraph? _exportedGraph;
 
     private void ReportIndexResult()
     {
@@ -8568,6 +8624,10 @@ public partial class MainWindow : Window
         // not the tidiness of the process list.
         try { StopBrokerHost(); } catch (Exception ex) { Debug.WriteLine($"broker teardown: {ex.Message}"); }
 
+        // A BrainX Cloud sync in flight stops now; its finished batches are
+        // already saved and the next launch resumes the rest.
+        try { ShutdownCloud(); } catch { }
+
         // Save any unsaved editor work
         _mdEditor?.Save();
 
@@ -8790,8 +8850,29 @@ public partial class MainWindow : Window
         {
             UniverseLoadingOverlay.Visibility = Visibility.Collapsed;
             UniverseLoadingOverlay.Opacity = 1.0;  // reset for any future re-show
+            CompleteBootOnceScreensClosed();
         };
         UniverseLoadingOverlay.BeginAnimation(OpacityProperty, fade);
+    }
+
+    /// <summary>
+    /// End the boot — which, since the splash was retired, means one thing the
+    /// owner can hear: the boot music starts to fade. Only once NOTHING of the
+    /// loading screen is left on screen: "fade after the loading window has
+    /// closed, never before" (owner, 2026-09-24).
+    ///
+    /// <para>Two screens take turns covering the boot — this window's WPF
+    /// loader, then the HUD's curtain inside the WebView — so this is called
+    /// from the end of both, and the one that finishes last completes. The
+    /// curtain is normally last by far; the loader is checked because on a boot
+    /// where the host was done before the page appeared, the curtain can lift
+    /// within a second of the handover and beat the loader's own fade.</para>
+    /// </summary>
+    private void CompleteBootOnceScreensClosed()
+    {
+        if (!_hudBootClosed) return;
+        if (UniverseLoadingOverlay?.Visibility == Visibility.Visible) return;
+        Services.StartupProgress.Complete();
     }
 
     private void OnUniverseMessage(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
@@ -8912,6 +8993,9 @@ public partial class MainWindow : Window
                     // second of the two racers to arrive.
                     if (_hudBrainReady) AnnounceHudBrainReady();
                     else PushAllHudPayloads();
+                    // A page that arrives after the watchdog gave up on the boot
+                    // must not put a fresh curtain back over the app.
+                    if (_bootScreensAbandoned) PostHud("hudBootGiveUp", new { });
                     // The HUD's boot curtain exists as of this message, so the
                     // WPF loader that has been covering the window since it
                     // painted can stand down. Short beat so the curtain has a
@@ -8945,9 +9029,20 @@ public partial class MainWindow : Window
                 Dispatcher.BeginInvoke(new Action(() =>
                 {
                     // Stops the boot heartbeat: from here on the deadline it was
-                    // holding off has nothing left to rescue.
+                    // holding off has nothing left to rescue. NOT the end of the
+                    // boot: every row has settled, but the curtain is still on
+                    // screen for another ~800 ms — see hudBootClosed.
                     _hudBootDone = true;
-                    Services.StartupProgress.Complete();
+                }));
+            }
+            else if (msg?.type == "hudBootClosed")
+            {
+                // The curtain has finished lifting. This is the moment the boot
+                // music is allowed to start fading.
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    _hudBootClosed = true;
+                    CompleteBootOnceScreensClosed();
                 }));
             }
             else if (msg?.type == "hudAction")
@@ -9254,7 +9349,8 @@ public partial class MainWindow : Window
         NetStatusText.Text = online ? "ONLINE" : "OFFLINE";
         NetStatusDot.Fill = new SolidColorBrush(online
             ? Color.FromRgb(0x4A, 0xE3, 0xA7) : Color.FromRgb(0xFF, 0x6B, 0x6B));
-        NetHostText.Text = RemoteNodeConfig.HostLabel(_hubUrl);
+        // A name, not the host: the cloud address is not shown anywhere in the app.
+        NetHostText.Text = RemoteNodeConfig.NeutralLabel;
 
         bool tls = _hubUrl.StartsWith("https", StringComparison.OrdinalIgnoreCase)
                 || _hubUrl.StartsWith("wss",   StringComparison.OrdinalIgnoreCase);
@@ -9432,10 +9528,8 @@ public partial class MainWindow : Window
     /// Auto-join the BrainX mesh on startup so the connection "just works" on
     /// open — no manual "Join Network" click. Background + error-swallowing;
     /// NetworkClient.WithAutomaticReconnect handles drops afterwards. No-ops if
-    /// already connected, no identity, or the hub URL is still the redacted
-    /// placeholder (meaning no real node is configured in settings.json yet).
-    /// The verified working path (server + handshake + identity) is proven —
-    /// this just calls it automatically instead of waiting for a button.
+    /// already connected or there is no identity. The hub is BrainX Cloud,
+    /// fixed in code — there is no longer a placeholder to skip.
     /// </summary>
     private async System.Threading.Tasks.Task AutoJoinMeshAsync()
     {
@@ -9443,11 +9537,7 @@ public partial class MainWindow : Window
         {
             if (_network.IsConnected || _identity == null) return;
 
-            var host = RemoteNodeConfig.HostLabel(_hubUrl);
-            if (string.IsNullOrEmpty(host) || host.Contains("example.com", StringComparison.OrdinalIgnoreCase))
-                return;   // no real node configured — don't dial the placeholder
-
-            await Dispatcher.InvokeAsync(() => { if (StatusText != null) StatusText.Text = $"Auto-joining BrainX mesh ({host})…"; });
+            await Dispatcher.InvokeAsync(() => { if (StatusText != null) StatusText.Text = "Auto-joining the BrainX network…"; });
 
             var myInfo = new PeerInfo
             {
@@ -9503,12 +9593,13 @@ public partial class MainWindow : Window
         {
             JoinNetworkBtn.Content = "\U0001F310 Join BrainX Network";
             JoinNetworkBtn.IsEnabled = true;
-            StatusText.Text = "Failed to connect. Is the server running?";
+            StatusText.Text = "Could not reach the BrainX network — try again in a moment.";
+            // No address and no setting to change: the network is BrainX Cloud,
+            // fixed in the app. What the owner can act on is their connection.
             MessageBox.Show(
-                "Could not connect to the BrainX mesh hub.\n\n" +
-                "The hub is the public bootnode that brokers peers. If it's down, " +
-                "you can point at a local one in Settings → Server URL.\n\n" +
-                $"Hub URL: {_hubUrl}",
+                "Could not connect to the BrainX network right now.\n\n" +
+                "Check this PC's internet connection and try again in a few minutes. " +
+                "Your brain keeps working locally in the meantime — nothing is lost.",
                 "Connection Failed", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }
@@ -10191,6 +10282,8 @@ public partial class MainWindow : Window
     {
         _vaultWatcher = new VaultWatcher(_vaultPath, TimeSpan.FromSeconds(3));
         _vaultWatcher.Triggered += OnVaultChanged;
+        // BrainX Cloud auto-sync rides the same debounced signal (MainWindow.Cloud.cs).
+        _vaultWatcher.Triggered += OnVaultChangedForCloud;
         _vaultWatcher.Start();
         _vaultWatcher.Enabled = true;
     }
@@ -10652,6 +10745,9 @@ public partial class MainWindow : Window
     // ═══════════════════════════════════════
     private void OnNetworkStatus(string status)
     {
+        // Failure statuses relay the SignalR exception text, which names the
+        // host; the app never shows the cloud's address.
+        status = RemoteNodeConfig.HideAddress(status);
         NetworkStatusText.Text = status;
         // Dashboard NETWORK card (replaces SYSTEM LOAD per user spec).
         // Same status text but a shorter/punchier rendering.
@@ -12842,8 +12938,8 @@ public partial class MainWindow : Window
         SettingsBrainName.Text = _identity.DisplayName;
         SettingsBrainAddress.Text = _identity.Address;
         SettingsVaultPath.Text = _vaultPath;
-        SettingsServerUrl.Text = _hubUrl;
         if (SettingsLocalAiBase != null) SettingsLocalAiBase.Text = _localAiBase;
+        RefreshServerHostPanel();
 
         // A regenerated identity has to be explained where the address is
         // shown, not only in a status line that the next message overwrites.
@@ -12962,16 +13058,6 @@ public partial class MainWindow : Window
         }
     }
 
-    private void SaveServerUrl_Click(object s, RoutedEventArgs e)
-    {
-        var url = SettingsServerUrl.Text.Trim();
-        if (string.IsNullOrEmpty(url)) return;
-        // This is the MESH hub (network rendezvous), not the local AI base.
-        _hubUrl = url;
-        SaveSettingsToFile();
-        StatusText.Text = $"Mesh hub URL saved: {url}";
-    }
-
     private string SettingsFilePath => Path.Combine(_vaultPath, ".obsidianx", "settings.json");
 
     private void SaveSettingsToFile()
@@ -12982,7 +13068,9 @@ public partial class MainWindow : Window
             if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
             var settings = new Dictionary<string, object>
             {
-                ["HubUrl"] = _hubUrl,
+                // HubUrl removed: the mesh/cloud address is fixed in the app now.
+                // Not writing it also retires the legacy value (the example.com
+                // placeholder among them) from the vault file on the next save.
                 // BrainName removed: it was written here and read by NOTHING —
                 // the display name lives in identity.json, which SaveBrainName_Click
                 // writes directly. Two copies where one drifted stale.
@@ -13026,13 +13114,12 @@ public partial class MainWindow : Window
             var json = File.ReadAllText(SettingsFilePath);
             var settings = Newtonsoft.Json.JsonConvert.DeserializeObject<Dictionary<string, object>>(json);
             if (settings == null) return;
-            //  • HubUrl — the public mesh rendezvous (Join Brain). Vault-scoped
-            //    on purpose: which mesh a brain belongs to is a property of the
-            //    brain. LocalAiBase is NOT — it is a machine endpoint and lives
-            //    in machine-settings.json now (the legacy "ServerUrl" key is
-            //    migrated there too).
-            if (settings.TryGetValue("HubUrl", out var hu) && hu != null)
-                _hubUrl = hu.ToString() ?? _hubUrl;
+            //  • HubUrl — IGNORED. It used to pick the mesh server per vault; the
+            //    server is BrainX Cloud, fixed in the app, and a stale value
+            //    (e.g. the old example.com placeholder) must not redirect it.
+            //    LocalAiBase is a machine endpoint and lives in
+            //    machine-settings.json (the legacy "ServerUrl" key is migrated
+            //    there too).
             if (settings.TryGetValue("ServerUrl", out var legacy) && legacy != null
                 && _localAiBase == RemoteNodeConfig.DefaultLocalAiBase)
                 _localAiBase = RemoteNodeConfig.RestBase(legacy.ToString() ?? _localAiBase);

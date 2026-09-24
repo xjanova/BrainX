@@ -255,6 +255,12 @@ internal static partial class Program
             try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
             return DreamCli(args.Skip(1).ToArray());
         }
+        // BrainX Cloud: sign-in, status, manual pull/push, access tokens (Program.Cloud.cs).
+        if (args.Length > 0 && args[0].Equals("cloud", StringComparison.OrdinalIgnoreCase))
+        {
+            try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
+            return await CloudCliAsync(args.Skip(1).ToArray()).ConfigureAwait(false);
+        }
         if (args.Length > 0 && (args[0] == "--version" || args[0] == "-v" || args[0].Equals("version", StringComparison.OrdinalIgnoreCase)))
         {
             Console.OutputEncoding = new UTF8Encoding(false);
@@ -284,6 +290,24 @@ internal static partial class Program
         Console.InputEncoding = new UTF8Encoding(false);
         Console.OutputEncoding = new UTF8Encoding(false);
 
+        // CLOUD (--cloud or BRAINX_CLOUD=1): the vault is the signed-in
+        // account's local cache, brought up to date before the first request
+        // is read (bounded — offline serves the cache as it is). Must run
+        // before anything below touches _vaultPath.
+        var cloud = IsCloudServeRequested(args);
+        if (cloud)
+        {
+            args = args.Where(a => !a.Equals("--cloud", StringComparison.OrdinalIgnoreCase)).ToArray();
+            try { await StartCloudServeAsync().ConfigureAwait(false); }
+            catch (Exception ex)
+            {
+                // Never fall back to the LOCAL vault here: a session registered
+                // as the cloud brain that quietly served this machine's own
+                // notes would be the worst kind of wrong answer.
+                UseCloudUnavailableVault(ex);
+            }
+        }
+
         Log($"Starting MCP server · vault={_vaultPath}");
 
         // Phase C (v2.6.0): warm the note-memo from the prior MCP
@@ -307,6 +331,11 @@ internal static partial class Program
         // desktop client. All skipped; the server itself behaves as usual.
         var sandbox = Environment.GetEnvironmentVariable("BRAINX_SANDBOX") == "1";
         if (sandbox) Log("sandbox mode — nothing outside the vault is touched");
+        // Cloud mode serves a CACHE, not the owner's vault. The installers below
+        // name the vault in machine-wide places (Codex's global AGENTS.md, the
+        // Claude memory rules), and on a machine that also runs the desktop
+        // app they would re-point those at the cache. Same treatment as sandbox.
+        if (cloud) sandbox = true;
 
         // Self-install brain-first memory rules into the user's Claude
         // Code project memory dir, idempotently. Mirrors what
@@ -405,6 +434,9 @@ internal static partial class Program
         // an orphaned engine server keeps an editor socket open and would fight
         // the next session for it.
         McpBridgeHub.Shutdown();
+        // Cloud: one bounded last push of anything still queued. Whatever does
+        // not make it stays in the cache and goes up at the next start.
+        if (cloud) await CloudShutdownAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
         return 0;
     }
 
@@ -702,7 +734,10 @@ internal static partial class Program
             "• cached:true = an identical call ran within 10 minutes, or the note's sha is unchanged: it is already in your context, so do not re-fetch " +
             "or re-narrate it; bypass_cache:true forces a fresh read. brain_append_note's diff IS the verification.\n" +
             "• \"What is the other agent doing?\" → agent_activity (agent_peers only says who is online); tell the user in their own words, " +
-            "and check it before interrupting a busy peer.";
+            "and check it before interrupting a busy peer." +
+            // Tail, not head: the head is held to the ~2,000 characters a
+            // client shows, and this line only exists in cloud mode.
+            CloudInstructionsLine();
     }
 
     /// <summary>
@@ -1697,6 +1732,10 @@ internal static partial class Program
             // doing instead of inferring it from a spinning counter.
             NoteActivity(name, summary);
 
+            // Cloud mode: a note written into the cache goes back to the cloud
+            // in the background — queued, never awaited here.
+            CloudNoteToolCall(name);
+
             var content = new JArray { new JObject
             {
                 ["type"] = "text",
@@ -2471,7 +2510,7 @@ internal static partial class Program
         var binPath = asm.Location ?? "";
         var binBuilt = string.IsNullOrEmpty(binPath) ? null : (DateTime?)new FileInfo(binPath).LastWriteTimeUtc;
 
-        return new JObject
+        var stats = new JObject
         {
             ["serverInfo"] = new JObject
             {
@@ -2554,6 +2593,9 @@ internal static partial class Program
                 ["change"] = "brain_set_mode mode=economy|balanced|full"
             }
         };
+        // Present only in cloud mode, so a local brain's stats read exactly as before.
+        if (_cloudMode) stats["cloud"] = CloudStats();
+        return stats;
     }
 
     /// <summary>

@@ -18,13 +18,44 @@ namespace BrainX.Core.Services;
 ///   keyword_cooccur  — rare keywords appearing in both nodes
 ///   simhash_sim      — 1 - hamming/64 when SimHashes available
 ///
-/// Performance: inverted indices keep this at O(N·k) rather than
-/// O(N^2). Each node is compared only to candidates that share at
-/// least one index bucket (tag, category, token, source, or hash).
+/// Candidates come from inverted indices (tag, category, token, source), so a
+/// node is only scored against notes that share a bucket. That is NOT O(N·k)
+/// on a real vault: the category bucket holds hundreds of notes, so the pair
+/// count grows with the square of the vault — measured 2.0 / 5.8 / 13.7 /
+/// 25.3 s at 466 / 933 / 1,400 / 1,867 notes (2026-09-24), on the boot path.
+/// What keeps it affordable is the cost PER PAIR, so everything
+/// <see cref="Score"/> compares is worked out once per note
+/// (<see cref="Features"/>) — it used to re-run the title regex and build
+/// four fresh hash sets for every pair.
 /// </summary>
 public partial class AutoLinker
 {
     public AutoLinkOptions Options { get; set; } = new();
+
+    /// <summary>
+    /// The comparable parts of one note, computed once. The sets use the same
+    /// comparers the per-pair LINQ used — tags and title tokens ignore case,
+    /// keywords do not — and the token order is the order the title yields
+    /// them, so the candidate order (which decides ties in the unstable sort
+    /// below) is exactly what it was.
+    /// </summary>
+    private sealed class Features
+    {
+        public readonly HashSet<string> Tags;
+        public readonly List<string> TitleTokens = [];
+        public readonly HashSet<string> TitleTokenSet = new(StringComparer.OrdinalIgnoreCase);
+        public readonly HashSet<string> Keywords;
+        public readonly string Source;
+
+        public Features(KnowledgeNode n)
+        {
+            Tags = new HashSet<string>(n.Tags, StringComparer.OrdinalIgnoreCase);
+            foreach (var tok in SignificantTitleTokens(n.Title))
+                if (TitleTokenSet.Add(tok)) TitleTokens.Add(tok);
+            Keywords = n.KeywordScores.Keys.ToHashSet();
+            Source = TryReadSourceFolder(n.FilePath);
+        }
+    }
 
     public int AddAutoEdges(KnowledgeGraph graph)
     {
@@ -32,6 +63,9 @@ public partial class AutoLinker
 
         var existingEdges = new HashSet<(string, string)>(graph.Edges
             .Select(e => Norm(e.SourceId, e.TargetId)));
+
+        var feats = new Features[graph.Nodes.Count];
+        for (int i = 0; i < feats.Length; i++) feats[i] = new Features(graph.Nodes[i]);
 
         // ─── Build inverted indices once ───
         var byTag = new Dictionary<string, List<int>>(StringComparer.OrdinalIgnoreCase);
@@ -53,42 +87,52 @@ public partial class AutoLinker
                 (byCategory.TryGetValue(sc, out var scl)
                     ? scl : byCategory[sc] = []).Add(i);
 
-            foreach (var tok in SignificantTitleTokens(n.Title))
+            foreach (var tok in feats[i].TitleTokens)
                 (byToken.TryGetValue(tok, out var tl) ? tl : byToken[tok] = []).Add(i);
 
-            var source = TryReadSourceFolder(n.FilePath);
+            var source = feats[i].Source;
             if (!string.IsNullOrEmpty(source))
                 (bySource.TryGetValue(source, out var sl) ? sl : bySource[source] = []).Add(i);
         }
 
         // ─── Per-node: gather candidates, score, emit best-K ───
+        // Candidates in first-seen order, deduplicated with a stamp per node —
+        // the same order the Dictionary this replaces enumerated in.
+        var stamp = new int[graph.Nodes.Count];
+        var candidates = new List<int>();
+        void Bump(int j, int self)
+        {
+            if (j == self || stamp[j] == self + 1) return;
+            stamp[j] = self + 1;
+            candidates.Add(j);
+        }
+
         int added = 0;
         for (int i = 0; i < graph.Nodes.Count; i++)
         {
             var a = graph.Nodes[i];
-            var candidates = new Dictionary<int, double>();
+            var fa = feats[i];
+            candidates.Clear();
 
             foreach (var tag in a.Tags)
                 if (byTag.TryGetValue(tag, out var peers))
-                    foreach (var j in peers) if (j != i) Bump(candidates, j);
+                    foreach (var j in peers) Bump(j, i);
 
             if (byCategory.TryGetValue(a.PrimaryCategory, out var catPeers))
-                foreach (var j in catPeers) if (j != i) Bump(candidates, j);
+                foreach (var j in catPeers) Bump(j, i);
 
-            foreach (var tok in SignificantTitleTokens(a.Title))
+            foreach (var tok in fa.TitleTokens)
                 if (byToken.TryGetValue(tok, out var peers))
-                    foreach (var j in peers) if (j != i) Bump(candidates, j);
+                    foreach (var j in peers) Bump(j, i);
 
-            var srcA = TryReadSourceFolder(a.FilePath);
-            if (!string.IsNullOrEmpty(srcA) && bySource.TryGetValue(srcA, out var srcPeers))
-                foreach (var j in srcPeers) if (j != i) Bump(candidates, j);
+            if (!string.IsNullOrEmpty(fa.Source) && bySource.TryGetValue(fa.Source, out var srcPeers))
+                foreach (var j in srcPeers) Bump(j, i);
 
             // Score each candidate properly now
             var scored = new List<(int idx, double w, string why)>();
-            foreach (var (j, _) in candidates)
+            foreach (var j in candidates)
             {
-                var b = graph.Nodes[j];
-                var (weight, why) = Score(a, b);
+                var (weight, why) = Score(a, fa, graph.Nodes[j], feats[j]);
                 if (weight >= Options.Threshold) scored.Add((j, weight, why));
             }
 
@@ -122,7 +166,7 @@ public partial class AutoLinker
 
     // ─── Scoring ───
 
-    private (double weight, string why) Score(KnowledgeNode a, KnowledgeNode b)
+    private (double weight, string why) Score(KnowledgeNode a, Features fa, KnowledgeNode b, Features fb)
     {
         double w = 0;
         var top = "";
@@ -135,10 +179,10 @@ public partial class AutoLinker
         }
 
         // 1. Tag overlap (Jaccard)
-        if (a.Tags.Count > 0 && b.Tags.Count > 0)
+        if (fa.Tags.Count > 0 && fb.Tags.Count > 0)
         {
-            var union = a.Tags.Union(b.Tags, StringComparer.OrdinalIgnoreCase).Count();
-            var inter = a.Tags.Intersect(b.Tags, StringComparer.OrdinalIgnoreCase).Count();
+            var inter = Overlap(fa.Tags, fb.Tags);
+            var union = fa.Tags.Count + fb.Tags.Count - inter;
             if (union > 0)
             {
                 var jacc = (double)inter / union;
@@ -154,28 +198,26 @@ public partial class AutoLinker
             Note("cat", Options.WeightCategory * 0.5);
 
         // 3. Title token overlap
-        var ta = SignificantTitleTokens(a.Title).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var tb = SignificantTitleTokens(b.Title).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var ta = fa.TitleTokenSet;
+        var tb = fb.TitleTokenSet;
         if (ta.Count > 0 && tb.Count > 0)
         {
-            var inter = ta.Intersect(tb, StringComparer.OrdinalIgnoreCase).Count();
-            var union = ta.Union(tb, StringComparer.OrdinalIgnoreCase).Count();
+            var inter = Overlap(ta, tb);
+            var union = ta.Count + tb.Count - inter;
             if (inter > 0 && union > 0)
                 Note("title", ((double)inter / union) * Options.WeightTitle);
         }
 
         // 4. Source folder proximity (for imported notes)
-        var sa = TryReadSourceFolder(a.FilePath);
-        var sb = TryReadSourceFolder(b.FilePath);
-        if (!string.IsNullOrEmpty(sa) && sa.Equals(sb, StringComparison.OrdinalIgnoreCase))
+        if (!string.IsNullOrEmpty(fa.Source) && fa.Source.Equals(fb.Source, StringComparison.OrdinalIgnoreCase))
             Note("src", Options.WeightSource);
 
         // 5. Keyword co-occurrence (rare keywords weigh more)
-        var ka = a.KeywordScores.Keys.ToHashSet();
-        var kb = b.KeywordScores.Keys.ToHashSet();
+        var ka = fa.Keywords;
+        var kb = fb.Keywords;
         if (ka.Count > 0 && kb.Count > 0)
         {
-            var shared = ka.Intersect(kb).Count();
+            var shared = Overlap(ka, kb);
             if (shared > 0)
             {
                 var rarity = 1.0 / Math.Max(1, ka.Count + kb.Count - shared);
@@ -186,9 +228,14 @@ public partial class AutoLinker
         return (Math.Min(1.0, w), string.IsNullOrEmpty(top) ? "mixed" : top);
     }
 
-    private static void Bump(Dictionary<int, double> dict, int idx)
+    /// <summary>|a ∩ b| for two sets built with the same comparer — walks the
+    /// smaller one, allocates nothing.</summary>
+    private static int Overlap(HashSet<string> a, HashSet<string> b)
     {
-        dict[idx] = dict.TryGetValue(idx, out var v) ? v + 1 : 1;
+        if (a.Count > b.Count) (a, b) = (b, a);
+        var n = 0;
+        foreach (var x in a) if (b.Contains(x)) n++;
+        return n;
     }
 
     private static IEnumerable<string> SignificantTitleTokens(string title)

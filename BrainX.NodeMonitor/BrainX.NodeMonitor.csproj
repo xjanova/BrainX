@@ -1,22 +1,65 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- BrainX Node Monitor — a tiny standalone Windows tray app to start/stop
-       the brainx-node server and open its dashboard. Separate program from the
-       BrainX client (own exe), part of the brainx-node toolset. -->
+  <!-- BrainX Server Manager — the owner's control panel for the BrainX node on
+       the Windows Server box (service BrainXNode + the cloudflared tunnel), and
+       the old dev tray controller when no service is installed.
+
+       The folder keeps its old name (BrainX.NodeMonitor) on purpose: renaming it
+       would churn the solution files, publish.ps1 and every open branch for no
+       gain. The PRODUCT and the exe are "BrainX Server Manager" /
+       BrainX.ServerManager.exe.
+
+       Shipped as ONE self-contained, compressed single-file exe inside the node
+       zip at app\manager\ (see ShadowLauncher.cs for why it never runs from
+       there). Publish with: -c Release -r win-x64, self-contained true,
+       PublishSingleFile=true, EnableCompressionInSingleFile=true,
+       IncludeNativeLibrariesForSelfExtract=true. No trimming: WinForms does not
+       support it. -->
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
+    <!-- Deliberately the unversioned windows TFM: platform 7.0 means the CA1416
+         analyzer flags any API annotated for a newer Windows 10 build, which is
+         the guard we want for Windows Server 2019 (build 17763). A versioned
+         TFM would also drag in the WinRT projection (~25 MB) for nothing. -->
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <AssemblyName>BrainX.NodeMonitor</AssemblyName>
-    <RootNamespace>BrainX.NodeMonitor</RootNamespace>
-    <Version>1.0.0</Version>
-    <Product>BrainX Node Monitor</Product>
+    <AssemblyName>BrainX.ServerManager</AssemblyName>
+    <RootNamespace>BrainX.ServerManager</RootNamespace>
+    <Product>BrainX Server Manager</Product>
+    <AssemblyTitle>BrainX Server Manager</AssemblyTitle>
+    <Company>xman</Company>
+    <Version>2.0.0</Version>
+    <InformationalVersion>2.0.0-dev</InformationalVersion>
+    <!-- Keep InformationalVersion exactly "BUILD_VERSION+BUILD_COMMIT"; the SDK
+         would otherwise append the full git SHA a second time. -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+
+    <!-- Service control + HKLM writes need admin. A Run key cannot auto-start a
+         requireAdministrator app, which is why "start at logon" is a Scheduled
+         Task with highest privileges (SelfInstall.cs). -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- SystemAware + AutoScaleMode.Dpi on every form: predictable at 100% and
+         125%, and an RDP reconnect at another DPI is bitmap-stretched by Windows
+         instead of re-laid-out mid-session. -->
     <ApplicationHighDpiMode>SystemAware</ApplicationHighDpiMode>
-    <!-- The exe's own icon (Explorer, Start menu). The tray keeps its coloured
-         status dots on purpose: those say whether the node is up. -->
     <ApplicationIcon>..\BrainX.Client\Assets\Logo.ico</ApplicationIcon>
+
+    <!-- The WinForms runtime pack carries satellite resources for 13 languages;
+         the UI here is Thai-first with English technical terms, so none apply. -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- One file on disk: the shadow copy then has nothing beside the exe to
+         keep in step, and crash stacks in manager.log still carry line numbers. -->
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <!-- CI stamps the version the same way as the node (BUILD_VERSION =
+       "2.0.<commitCount>"), so the manager shipped in a node zip reports the
+       release it came from. Local builds say 2.0.0-dev. -->
+  <PropertyGroup Condition="'$(BUILD_VERSION)' != ''">
+    <Version>$(BUILD_VERSION)</Version>
+    <InformationalVersion>$(BUILD_VERSION)+$(BUILD_COMMIT)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

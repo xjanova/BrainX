@@ -26,6 +26,9 @@ internal static class StubMcpServer
     private const string SlowMarker = "__slow:";
     /// <summary>Emit stray stdout + a notification before the answer.</summary>
     private const string NoiseMarker = "__noise__";
+    /// <summary>Answer with the vault + sandbox flags this child was started
+    /// with — how the cloud checks prove a session runs on ITS account's vault.</summary>
+    private const string WhoAmIMarker = "__whoami__";
 
     /// <summary>Text stamped into a slow call's result. If this ever comes back
     /// as the answer to a LATER call, the pipe has desynced — which is the whole
@@ -93,6 +96,15 @@ internal static class StubMcpServer
     {
         var query = parameters?["arguments"]?["query"]?.ToString() ?? "";
 
+        if (query.Contains(WhoAmIMarker, StringComparison.Ordinal))
+            return Content(id,
+                $"vault={Environment.GetEnvironmentVariable("BRAINX_VAULT")};"
+                + $"sandbox={Environment.GetEnvironmentVariable("BRAINX_SANDBOX")};"
+                + $"headless={Environment.GetEnvironmentVariable("BRAINX_HEADLESS")};"
+                + $"embed={Environment.GetEnvironmentVariable("BRAINX_EMBED_BACKEND")};"
+                + $"embedOnWrite={Environment.GetEnvironmentVariable("BRAINX_EMBED_ON_WRITE")};"
+                + $"escalate={Environment.GetEnvironmentVariable("BRAINX_SEARCH_ESCALATE")}");
+
         if (query.Contains(NoiseMarker, StringComparison.Ordinal))
         {
             // The three things a real server leaks onto the pipe that are NOT the
@@ -154,6 +166,16 @@ internal static class StubMcpServer
 
     public static string SlowQuery(int ms) => $"{SlowMarker}{ms}__";
     public static string NoisyQuery() => NoiseMarker;
+    public static string WhoAmIQuery() => WhoAmIMarker;
+
+    /// <summary>A tools/call of an arbitrary (allowlisted) tool name.</summary>
+    public static string ToolCallBody(object id, string tool, JObject? arguments = null) => new JObject
+    {
+        ["jsonrpc"] = "2.0",
+        ["id"] = JToken.FromObject(id),
+        ["method"] = "tools/call",
+        ["params"] = new JObject { ["name"] = tool, ["arguments"] = arguments ?? new JObject() },
+    }.ToString(Formatting.None);
 
     public static string InitBody(object id) => new JObject
     {
