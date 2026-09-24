@@ -26,7 +26,8 @@ public sealed record UpdateCheckResult(string Current, string? Latest, bool Upda
 ///      knows the small asset — or no manager\), installs the full package of
 ///      the version it already runs. At most once per version.
 /// All decisions are <see cref="UpdatePlanner"/>'s (pure, tested); this class
-/// only downloads, stages and hands over to the updater script.
+/// only downloads, stages and hands over to the updater script — and only a
+/// package whose signature and every file verify (<see cref="CheckPackage"/>).
 ///
 /// Hard rule: this NEVER throws into the host and NO-OPS entirely when AutoUpdate
 /// is off (the default) — a broken updater must not take the node down.
@@ -174,21 +175,46 @@ public sealed class SelfUpdateService : BackgroundService
         Console.WriteLine($"[selfupdate] downloaded {Mb(new FileInfo(zipPath).Length)} in {sw.Elapsed.TotalSeconds.ToString("0", CultureInfo.InvariantCulture)} s");
 
         if (Directory.Exists(staging)) Directory.Delete(staging, true);
+        Directory.CreateDirectory(staging);
+        // Staging is private (SYSTEM + Administrators) before a single file
+        // lands in it: what is verified below is what gets installed.
+        if (OperatingSystem.IsWindows()) FolderAcl.MakePrivateIfSystem(staging);
         ZipFile.ExtractToDirectory(zipPath, staging);
         File.Delete(zipPath);
         Console.WriteLine($"[selfupdate] extracted to {staging}");
 
         var now = DateTimeOffset.UtcNow;
-        var refusal = UpdatePlanner.CheckStaged(plan, rel => File.Exists(Path.Combine(staging, rel)));
+        var refusal = CheckPackage(plan, staging, current);
         if (refusal != null)
         {
-            // Remember it, so this package is not downloaded again for nothing.
+            // Remember it, so this package is not downloaded again for nothing
+            // (a bad signature is either an attack or a broken release —
+            // neither gets better by retrying two minutes after every start).
             var remembered = plan.Kind == UpdateKind.Repair
                 ? state with { FullPackageStagedFor = version }
                 : state with { LastUpdateTarget = version, LastUpdateUtc = now };
-            try { remembered.Save(statePath); } catch (Exception ex) { Console.WriteLine($"[selfupdate] could not save state: {ex.GetType().Name}"); }
+            try { SaveState(remembered, statePath); } catch (Exception ex) { Console.WriteLine($"[selfupdate] could not save state: {ex.GetType().Name}"); }
             try { Directory.Delete(staging, true); } catch { }
             return Refuse($"not applying {asset.Name} of {release.Tag}: {refusal}");
+        }
+        UpdatePackageVerifier.RemoveSignatureFiles(staging);
+        Console.WriteLine($"[selfupdate] {asset.Name} of {release.Tag}: signature and every file verified");
+
+        // The script runs as SYSTEM, so it is always a brand-new file: one left
+        // behind — or planted while the install root was still writable by
+        // users — keeps whatever ACL it had, and its owner could edit it
+        // between this write and cmd.exe reading it. Deleting it takes only
+        // our rights on the folder, not any on the file.
+        var logFile = Path.Combine(NodeLog.Current?.Directory ?? rootDir, "selfupdate.log");
+        var cmd = Path.Combine(rootDir, "selfupdate.cmd");
+        try
+        {
+            WriteFreshFile(cmd, BuildUpdaterScript(staging, appDir, NodeConfig.UpdateServiceName, logFile, Environment.ProcessId, release.Tag));
+        }
+        catch (Exception ex)
+        {
+            try { Directory.Delete(staging, true); } catch { }
+            return Refuse($"could not write {cmd} ({ex.GetType().Name}) — not updating");
         }
 
         // The loop guard reaches the disk BEFORE anything restarts. No guard, no restart.
@@ -202,18 +228,16 @@ public sealed class SelfUpdateService : BackgroundService
             };
         try
         {
-            next.Save(statePath);
+            SaveState(next, statePath);
         }
         catch (Exception ex)
         {
             try { Directory.Delete(staging, true); } catch { }
+            try { File.Delete(cmd); } catch { }
             return Refuse($"could not write {statePath} ({ex.GetType().Name}) — not restarting without the restart-loop guard");
         }
         Console.WriteLine($"[selfupdate] recorded the {(plan.Kind == UpdateKind.Repair ? "repair" : "update")} of {version} in {statePath}");
 
-        var logFile = Path.Combine(NodeLog.Current?.Directory ?? rootDir, "selfupdate.log");
-        var cmd = Path.Combine(rootDir, "selfupdate.cmd");
-        File.WriteAllText(cmd, BuildUpdaterScript(staging, appDir, NodeConfig.UpdateServiceName, logFile, Environment.ProcessId, release.Tag));
         Console.WriteLine($"[selfupdate] {(plan.Kind == UpdateKind.Repair ? "repairing from" : "updating to")} {release.Tag} ({asset.Name}) — "
                           + $"launching {cmd} and shutting down; its log: {logFile}");
         Process.Start(new ProcessStartInfo
@@ -230,6 +254,52 @@ public sealed class SelfUpdateService : BackgroundService
         Record(release.Version, message);
         _life.StopApplication();
         return new UpdateCheckResult(current, release.Version, true, message);
+    }
+
+    /// <summary>
+    /// May this staged package be installed? Null = yes, else why not.
+    ///
+    /// The SIGNATURE comes first: nothing in the package is trusted — not even
+    /// read — until update-manifest.sig verifies against the release key built
+    /// into this node and every file matches the signed manifest byte for byte
+    /// (no extra files either). An unsigned package is refused outright. The
+    /// version it was signed as must be the release tag, and newer than this
+    /// node (update) or exactly this node's version (repair). Only then the
+    /// planner's own sanity checks. The admin "check now" runs this too.
+    /// </summary>
+    public static string? CheckPackage(UpdatePlan plan, string staging, string currentVersion, byte[]? publicKeySpki = null)
+    {
+        var rule = plan.Kind == UpdateKind.Repair
+            ? UpdatePackageVerifier.VersionRule.MustEqualCurrent
+            : UpdatePackageVerifier.VersionRule.MustBeNewer;
+        var verdict = publicKeySpki is null
+            ? UpdatePackageVerifier.Verify(staging, plan.Release!.Version, currentVersion, rule)
+            : UpdatePackageVerifier.Verify(staging, plan.Release!.Version, currentVersion, rule, publicKeySpki);
+        if (!verdict.IsValid) return $"signature check failed ({verdict.Result}): {verdict.Detail}";
+        return UpdatePlanner.CheckStaged(plan, rel => File.Exists(Path.Combine(staging, rel)));
+    }
+
+    /// <summary>
+    /// Replace <paramref name="path"/> with a file this process creates (never
+    /// reopens an existing one), then make it private when running as SYSTEM.
+    /// Throws when that cannot be guaranteed — e.g. something re-created the
+    /// file between the delete and the create.
+    /// </summary>
+    public static void WriteFreshFile(string path, string content)
+    {
+        if (File.Exists(path)) File.Delete(path);
+        using (var fs = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        using (var writer = new StreamWriter(fs, new System.Text.UTF8Encoding(false)))
+            writer.Write(content);
+        if (OperatingSystem.IsWindows()) FolderAcl.MakePrivateIfSystem(path);
+    }
+
+    /// <summary>Save, then make the file private again: it is written as a temp
+    /// file + rename, and the fresh file inherits the root's Users entry.</summary>
+    private static void SaveState(UpdateState state, string path)
+    {
+        state.Save(path);
+        if (OperatingSystem.IsWindows()) FolderAcl.MakePrivateIfSystem(path);
     }
 
     private static long? FreeBytes(string dir)
@@ -284,7 +354,7 @@ if not errorlevel 1 (
   goto waitnode
 )
 :copyapp
-robocopy ""{staging}"" ""{appDir}"" /E /XD ""{stagedManager}"" /XF selfupdate.cmd /R:2 /W:2 /NP /NFL /NDL >> ""{logFile}"" 2>&1
+robocopy ""{staging}"" ""{appDir}"" /E /XD ""{stagedManager}"" /XF selfupdate.cmd {UpdatePackageVerifier.ManifestFileName} {UpdatePackageVerifier.SignatureFileName} /R:2 /W:2 /NP /NFL /NDL >> ""{logFile}"" 2>&1
 set RC=%ERRORLEVEL%
 if %RC% GEQ 8 (
   echo [%date% %time%] robocopy app FAILED exit %RC% - some files were not replaced; restarting anyway >> ""{logFile}""

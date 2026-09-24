@@ -100,7 +100,10 @@ internal static class StubMcpServer
             return Content(id,
                 $"vault={Environment.GetEnvironmentVariable("BRAINX_VAULT")};"
                 + $"sandbox={Environment.GetEnvironmentVariable("BRAINX_SANDBOX")};"
-                + $"headless={Environment.GetEnvironmentVariable("BRAINX_HEADLESS")}");
+                + $"headless={Environment.GetEnvironmentVariable("BRAINX_HEADLESS")};"
+                + $"embed={Environment.GetEnvironmentVariable("BRAINX_EMBED_BACKEND")};"
+                + $"embedOnWrite={Environment.GetEnvironmentVariable("BRAINX_EMBED_ON_WRITE")};"
+                + $"escalate={Environment.GetEnvironmentVariable("BRAINX_SEARCH_ESCALATE")}");
 
         if (query.Contains(NoiseMarker, StringComparison.Ordinal))
         {

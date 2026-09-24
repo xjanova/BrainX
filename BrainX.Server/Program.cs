@@ -45,6 +45,33 @@ if (!string.IsNullOrWhiteSpace(NodeConfig.LogDir))
     }
 }
 
+// ── Owner secrets on disk (standalone node only) ──
+// 1. The install root (C:\brainx) holds bearer-token.txt and app\, whose
+//    binaries this service loads as SYSTEM: lock it to SYSTEM + Administrators.
+//    Only the service (LocalSystem) does this; see InstallRootAcl's guards.
+// 2. The owner token no longer lives in the service's registry Environment: a
+//    leftover BrainX__BearerToken line is removed once the token file holds it.
+if (!NodeConfig.EmbeddedMode)
+{
+    Console.WriteLine($"[auth] owner token: {NodeConfig.BearerTokenSource ?? "none"}");
+    var (rootAcl, rootAclMessage) = InstallRootAcl.Apply(AppContext.BaseDirectory, NodeConfig.HardenInstallRoot);
+    Console.WriteLine($"[security] {rootAclMessage}");
+    if (OperatingSystem.IsWindows() && Microsoft.Extensions.Hosting.WindowsServices.WindowsServiceHelpers.IsWindowsService()
+        && NodeConfig.BearerTokenFile is { } tokenFile && rootAcl is not CloudRootAcl.Outcome.Failed)
+    {
+        try
+        {
+            if (OwnerToken.MigrateServiceEnvironment(NodeConfig.UpdateServiceName ?? "BrainXNode",
+                                                     Environment.ProcessPath ?? "", tokenFile) is { } migrated)
+                Console.WriteLine($"[auth] {migrated}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[auth] could not tidy the service environment ({ex.GetType().Name}) — the token stays where it is");
+        }
+    }
+}
+
 // Force-enable static web assets in any environment (Development OR
 // Production). WebApplication.CreateBuilder only auto-enables this in
 // Development, which would mean the bundled wwwroot/index.html dashboard
@@ -150,6 +177,7 @@ if (NodeConfig.CloudEnabled)
             QuotaBytes = NodeConfig.CloudQuotaBytes,
             McpExePath = mcpExe,
             HardenRootAcl = true,   // SYSTEM + Administrators; guarded inside (Windows, identity, probe)
+            AllowedLicenseTypes = NodeConfig.CloudLicenseTypes,
         }, ver);
         cloud = svc;
         app.MapBrainCloud(svc);
@@ -1187,6 +1215,14 @@ public static class NodeConfig
     public static bool EmbeddedMode { get; private set; } = true;
     public static bool RequireAuth { get; private set; }
     public static string? BearerToken { get; private set; }
+    /// <summary>Where the owner token file is (BrainX:BearerTokenFile; default
+    /// &lt;install root&gt;\bearer-token.txt for a standalone node).</summary>
+    public static string? BearerTokenFile { get; private set; }
+    /// <summary>"config", "file", or why there is none — for the startup log.</summary>
+    public static string? BearerTokenSource { get; private set; }
+    /// <summary>BrainX:HardenInstallRoot (default true): the service locks its
+    /// install root to SYSTEM + Administrators at startup (see InstallRootAcl).</summary>
+    public static bool HardenInstallRoot { get; private set; } = true;
     public static string? Urls { get; private set; }
     public static string[] AllowedOrigins { get; private set; } = [];
 
@@ -1226,6 +1262,9 @@ public static class NodeConfig
     public static int CloudMcpSessionsPerAccount { get; private set; } = 3;
     /// <summary>Live /mcp sessions across all cloud accounts (owner sessions are capped separately).</summary>
     public static int CloudMcpMaxSessions { get; private set; } = 16;
+    /// <summary>xman license types that are a BrainX Cloud plan (BrainX:CloudLicenseTypes,
+    /// comma-separated). Default monthly, yearly, lifetime — a demo/free key is INVALID_LICENSE.</summary>
+    public static string[] CloudLicenseTypes { get; private set; } = CloudLicenses.DefaultLicenseTypes;
 
     /// <summary>Folder of the node's daily log (node-YYYYMMDD.log). Default for a
     /// standalone node: &lt;app folder's parent&gt;\logs — C:\brainx\logs on the
@@ -1248,7 +1287,25 @@ public static class NodeConfig
         VaultPath = FirstNonEmpty(Environment.GetEnvironmentVariable("BrainX__VaultPath"), b["VaultPath"]);
         EmbeddedMode = ParseBool(b["EmbeddedMode"], defaultValue: true);
         RequireAuth = ParseBool(b["RequireAuth"], defaultValue: false);
+        // The owner token: config/env first (as before), else the token FILE —
+        // <install root>\bearer-token.txt on a standalone node, where the
+        // installer writes it and only SYSTEM + Administrators can read it.
+        // Only on the installer's layout (…\app\BrainX.Server.exe): anywhere
+        // else the "install root" is just the exe folder's parent, which may
+        // be writable by any user — and a token file planted there would be
+        // trusted as the owner's. BrainX:BearerTokenFile names one explicitly.
+        BearerTokenFile = FirstNonEmpty(b["BearerTokenFile"])
+                          ?? (EmbeddedMode || InstallRootAcl.LayoutRefusal(AppContext.BaseDirectory) != null
+                              ? null
+                              : Path.Combine(InstallRootAcl.InstallRootOf(AppContext.BaseDirectory), OwnerToken.DefaultFileName));
         BearerToken = FirstNonEmpty(b["BearerToken"]);
+        BearerTokenSource = BearerToken != null ? "config" : null;
+        if (BearerToken is null && BearerTokenFile is not null)
+        {
+            BearerToken = OwnerToken.ReadTokenFile(BearerTokenFile, out var tokenProblem);
+            BearerTokenSource = BearerToken != null ? "file" : $"none ({BearerTokenFile}: {tokenProblem})";
+        }
+        HardenInstallRoot = ParseBool(b["HardenInstallRoot"], defaultValue: true);
         Urls = FirstNonEmpty(b["Urls"]);
         AllowedOrigins = (b["AllowedOrigins"] ?? "")
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -1260,7 +1317,7 @@ public static class NodeConfig
 
         McpEnabled = ParseBool(b["McpEnabled"], defaultValue: false);
         McpExePath = FirstNonEmpty(b["McpExePath"]);
-        McpWriteToken = FirstNonEmpty(b["McpWriteToken"], b["BearerToken"]);
+        McpWriteToken = FirstNonEmpty(b["McpWriteToken"], BearerToken);   // falls back to the RESOLVED owner token
         McpReadToken = FirstNonEmpty(b["McpReadToken"]);
         McpMaxSessions = ParseInt(b["McpMaxSessions"], 8);
         McpIdleMinutes = ParseInt(b["McpIdleMinutes"], 30);
@@ -1272,6 +1329,9 @@ public static class NodeConfig
         LicenseApiBase = FirstNonEmpty(b["LicenseApiBase"]) ?? XmanLicenseVerifier.DefaultApiBase;
         CloudMcpSessionsPerAccount = ParseInt(b["CloudMcpSessionsPerAccount"], 3);
         CloudMcpMaxSessions = ParseInt(b["CloudMcpMaxSessions"], 16);
+        var types = (b["CloudLicenseTypes"] ?? "")
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        CloudLicenseTypes = types.Length > 0 ? types : CloudLicenses.DefaultLicenseTypes;
 
         LogDir = FirstNonEmpty(b["LogDir"]) ?? (EmbeddedMode ? null : DefaultLogDir());
     }

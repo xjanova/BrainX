@@ -13,4 +13,7 @@
   <Project Path="BrainX.Mcp/BrainX.Mcp.csproj" />
   <Project Path="BrainX.Mind/BrainX.Mind.csproj" />
   <Project Path="BrainX.Tests/BrainX.Tests.csproj" />
+  <!-- Signs the node release packages (build-and-release.yml). Listed so PR CI
+       compiles it; a signer that only builds at release time breaks releases. -->
+  <Project Path="tools/NodeReleaseSigner/NodeReleaseSigner.csproj" />
 </Solution>

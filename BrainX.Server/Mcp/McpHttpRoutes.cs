@@ -1,5 +1,6 @@
 using System.Globalization;
 using BrainX.Server.Cloud;
+using Microsoft.AspNetCore.Http.Features;
 using Newtonsoft.Json.Linq;
 
 namespace BrainX.Server.Mcp;
@@ -71,6 +72,12 @@ public static class McpHttpRoutes
         // ── POST /mcp — the whole protocol ────────────────────────────────
         app.MapPost("/mcp", async (HttpContext ctx) =>
         {
+            // Kestrel's own cap, set before anything touches the body: a
+            // chunked request has no Content-Length for the check below, and
+            // Kestrel's default would let it stream 30 MB into ReadToEndAsync.
+            var sizeFeature = ctx.Features.Get<IHttpMaxRequestBodySizeFeature>();
+            if (sizeFeature is { IsReadOnly: false }) sizeFeature.MaxRequestBodySize = MaxBodyBytes;
+
             var caller = await resolveCaller(ctx);
             var sessionId = ctx.Request.Headers[SessionHeader].ToString();
             if (caller.IsDenied)
@@ -91,8 +98,15 @@ public static class McpHttpRoutes
                 return RpcError(null, -32600, "request too large", StatusCodes.Status413PayloadTooLarge);
 
             string body;
-            using (var reader = new StreamReader(ctx.Request.Body))
+            try
+            {
+                using var reader = new StreamReader(ctx.Request.Body);
                 body = await reader.ReadToEndAsync();
+            }
+            catch (BadHttpRequestException ex) when (ex.StatusCode == StatusCodes.Status413PayloadTooLarge)
+            {
+                return RpcError(null, -32600, "request too large", StatusCodes.Status413PayloadTooLarge);
+            }
             if (body.Length > MaxBodyBytes)
                 return RpcError(null, -32600, "request too large", StatusCodes.Status413PayloadTooLarge);
             if (string.IsNullOrWhiteSpace(body))
@@ -193,11 +207,12 @@ public static class McpHttpRoutes
                     return RpcError(id, -32006, refusal.Message, refusal.Status, refusal.Code);
             }
 
+            // A cloud write is accounted for however the call ends — a timed-out
+            // or abandoned call may still have written its note.
+            var cloudWrite = caller.IsCloud && tenantHooks != null && McpRemotePolicy.IsWriteTool(tool);
             try
             {
                 var line = await sess.SendAsync(body, deadline, ctx.RequestAborted);
-                if (caller.IsCloud && tenantHooks != null && McpRemotePolicy.IsWriteTool(tool))
-                    tenantHooks.AfterWrite(caller.AccountId!);
                 if (line is null) return Results.StatusCode(StatusCodes.Status202Accepted);   // notification
 
                 // Never advertise what we would refuse — and never leak that the
@@ -249,6 +264,11 @@ public static class McpHttpRoutes
                 Console.WriteLine($"[mcp] session {sessionId[..8]} error: {ex.Message}");
                 sessions.Remove(sessionId);
                 return RpcError(id, -32603, "MCP child failed — session dropped, re-initialize", StatusCodes.Status502BadGateway);
+            }
+            finally
+            {
+                if (cloudWrite)
+                    tenantHooks!.AfterWrite(caller.AccountId!, System.Text.Encoding.UTF8.GetByteCount(body));
             }
         })
         .DisableAntiforgery();

@@ -69,8 +69,11 @@ public interface IMcpTenantHooks
     /// <summary>Null = the write may proceed.</summary>
     McpRefusal? RefuseWrite(string accountId);
 
-    /// <summary>A write tool finished on this account's vault.</summary>
-    void AfterWrite(string accountId);
+    /// <summary>A write tool was forwarded to this account's child (whatever it
+    /// answered — a timed-out call may still have written).
+    /// <paramref name="requestBytes"/> = the request's size, the upper bound of
+    /// what it can have added to the vault.</summary>
+    void AfterWrite(string accountId, long requestBytes);
 }
 
 /// <summary>

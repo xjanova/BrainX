@@ -230,9 +230,11 @@ public static class CloudExport
         psi.Environment["BRAINX_VAULT"] = vaultDir;
         // Nothing outside the account's vault is touched (no Claude/Codex rule
         // installers, no desktop side effects) — a customer's export must never
-        // write into the node owner's own tooling.
+        // write into the node owner's own tooling. The rest of the cloud child
+        // environment comes along too: an export that ever started embedding
+        // must not do it with an in-process model either.
         psi.Environment["BRAINX_HEADLESS"] = "1";
-        psi.Environment["BRAINX_SANDBOX"] = "1";
+        foreach (var (k, v) in CloudService.CloudChildEnvironment) psi.Environment[k] = v;
 
         var sw = Stopwatch.StartNew();
         using var proc = Process.Start(psi) ?? throw new InvalidOperationException("failed to start brainx-mcp export");

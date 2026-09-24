@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Signs a published BrainX node folder for the node's self-updater (see
+       Program.cs). Run by .github/workflows/build-and-release.yml; never shipped.
+       It compiles the NODE'S OWN verifier in (linked, not copied), so the
+       self-check after signing is exactly the check the node will run. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>BrainX.NodeReleaseSigner</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\BrainX.Server\Services\UpdatePackageVerifier.cs" Link="Shared\UpdatePackageVerifier.cs" />
+  </ItemGroup>
+
+</Project>

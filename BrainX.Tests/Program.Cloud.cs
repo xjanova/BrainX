@@ -99,6 +99,9 @@ internal static partial class Program
         public NodeLog? Log { get; init; }
         public required WebApplication App { get; init; }
         public required HttpClient Http { get; init; }
+        /// <summary>The request-body limit each handler left on Kestrel's
+        /// IHttpMaxRequestBodySizeFeature, by path (recorded after the request).</summary>
+        public ConcurrentDictionary<string, long?> BodyLimits { get; init; } = new();
 
         public static async Task<CloudNode> StartAsync(
             long quotaBytes = 1024L * 1024 * 1024,
@@ -122,6 +125,13 @@ internal static partial class Program
             builder.Logging.ClearProviders();
             builder.WebHost.UseUrls("http://127.0.0.1:0");
             var app = builder.Build();
+            var bodyLimits = new ConcurrentDictionary<string, long?>();
+            app.Use(async (ctx, next) =>
+            {
+                await next();
+                bodyLimits[ctx.Request.Path.Value ?? ""] =
+                    ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>()?.MaxRequestBodySize;
+            });
             app.MapBrainCloud(cloud);
 
             McpSessionManager? sessions = null;
@@ -163,6 +173,7 @@ internal static partial class Program
                 Log = log,
                 App = app,
                 Http = new HttpClient { BaseAddress = new Uri(app.Urls.First()), Timeout = TimeSpan.FromMinutes(2) },
+                BodyLimits = bodyLimits,
             };
         }
 

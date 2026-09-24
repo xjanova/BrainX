@@ -153,6 +153,10 @@ public static class CloudRoutes
         if (ctx.Request.ContentLength is { } declared && declared > maxBytes)
             return (null, Error(413, "TOO_LARGE", $"request body is larger than {maxBytes / 1024} KB"));
 
+        // Kestrel enforces the same cap itself (a chunked body has no length to check above).
+        var sizeFeature = ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>();
+        if (sizeFeature is { IsReadOnly: false }) sizeFeature.MaxRequestBodySize = maxBytes;
+
         var buffer = ArrayPool<byte>.Shared.Rent(64 * 1024);
         using var ms = new MemoryStream();
         try
@@ -164,6 +168,10 @@ public static class CloudRoutes
                     return (null, Error(413, "TOO_LARGE", $"request body is larger than {maxBytes / 1024} KB"));
                 ms.Write(buffer, 0, n);
             }
+        }
+        catch (BadHttpRequestException ex) when (ex.StatusCode == StatusCodes.Status413PayloadTooLarge)
+        {
+            return (null, Error(413, "TOO_LARGE", $"request body is larger than {maxBytes / 1024} KB"));
         }
         catch (Exception ex) when (ex is IOException or OperationCanceledException or BadHttpRequestException)
         {

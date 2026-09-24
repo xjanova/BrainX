@@ -7,7 +7,15 @@
   - Robust against the "service marked for deletion" race that breaks repeat installs.
   - Writes a full transcript to <root>\install-log.txt; if the service won't start
     it captures the node's own startup output to <root>\node-startup.txt.
-  - Generates + persists a bearer token; binds Kestrel to localhost only.
+  - Generates + persists a bearer token (OS CSPRNG) in <root>\bearer-token.txt,
+    where the node reads it; it is NOT put in the service environment.
+  - Locks <root> Program Files style: SYSTEM + Administrators full, Users read &
+    execute; the token, logs, vault, cloud, self-update state and the Server
+    Manager's backups are SYSTEM + Administrators only (the service runs as
+    LocalSystem).
+  - Binds Kestrel to localhost only.
+  - Keep this file pure ASCII: Windows PowerShell 5.1 reads a BOM-less script
+    in the ANSI codepage.
 #>
 [CmdletBinding()]
 param(
@@ -48,13 +56,53 @@ if (Test-SvcExists $svc) {
     }
 }
 
-# Bearer token - reuse an existing one across re-installs, else generate 24 bytes hex.
+# Bearer token - reuse an existing one across re-installs, else 32 bytes from the
+# OS CSPRNG as hex (Get-Random is not a cryptographic generator). ASCII, no newline.
 $tokenFile = Join-Path $root "bearer-token.txt"
-if (Test-Path $tokenFile) { $token = (Get-Content $tokenFile -Raw).Trim() }
-else {
-    $token = -join ((1..24) | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) })
-    $token | Out-File $tokenFile -Encoding ascii -NoNewline
+$token = ""
+if (Test-Path $tokenFile) { $token = ([string](Get-Content $tokenFile -Raw)).Trim() }
+if (-not $token) {
+    $bytes = New-Object byte[] 32
+    $rng = New-Object System.Security.Cryptography.RNGCryptoServiceProvider
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    $token = -join ($bytes | ForEach-Object { '{0:x2}' -f $_ })
+    [System.IO.File]::WriteAllText($tokenFile, $token, [System.Text.Encoding]::ASCII)
+    Write-Host "New owner token written to $tokenFile"
 }
+
+# Permissions, Program Files style. Inherited from C:\, the install root was
+# readable by every user (bearer-token.txt) and writable by Authenticated Users
+# (a DLL planted in app\ runs as SYSTEM).
+#  1) the root and everything below it, app\ included: SYSTEM + Administrators
+#     full, Users read & execute, inheritance off. Nobody else can write, and an
+#     unelevated BrainX client can still see app\manager\BrainX.ServerManager.exe
+#     (Windows must read its manifest to raise UAC).
+#  2) then the private children: SYSTEM + Administrators only. After step 1,
+#     because its /reset would otherwise undo them.
+# Well-known SIDs, not names: account names are localized.
+$sidSystem = "*S-1-5-18"       # NT AUTHORITY\SYSTEM
+$sidAdmins = "*S-1-5-32-544"   # BUILTIN\Administrators
+$sidUsers  = "*S-1-5-32-545"   # BUILTIN\Users
+& icacls.exe $root /inheritance:r /grant:r "${sidSystem}:(OI)(CI)F" "${sidAdmins}:(OI)(CI)F" "${sidUsers}:(OI)(CI)RX" /Q | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-Host "[warn] icacls on $root failed (exit $LASTEXITCODE)" }
+& icacls.exe (Join-Path $root "*") /reset /T /C /Q | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-Host "[warn] icacls /reset under $root reported errors (exit $LASTEXITCODE)" }
+
+New-Item -ItemType Directory -Force (Join-Path $root "logs") | Out-Null
+$private = @($tokenFile, (Join-Path $root "logs"), (Join-Path $root "cloud"), (Join-Path $root "selfupdate-state.json"), (Join-Path $root "manager-backups"))
+$private += @(Get-ChildItem -Path $root -Directory -Filter "staging-*" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+$vaultFull = [System.IO.Path]::GetFullPath($VaultDir).TrimEnd('\')
+$rootFull  = [System.IO.Path]::GetFullPath($root).TrimEnd('\')
+if ($vaultFull.StartsWith($rootFull + '\', [System.StringComparison]::OrdinalIgnoreCase)) { $private += $vaultFull }
+foreach ($p in $private) {
+    if (Test-Path -LiteralPath $p -PathType Container) {
+        & icacls.exe $p /inheritance:r /grant:r "${sidSystem}:(OI)(CI)F" "${sidAdmins}:(OI)(CI)F" /Q | Out-Null
+    } elseif (Test-Path -LiteralPath $p -PathType Leaf) {
+        & icacls.exe $p /inheritance:r /grant:r "${sidSystem}:F" "${sidAdmins}:F" /Q | Out-Null
+    } else { continue }
+    if ($LASTEXITCODE -ne 0) { Write-Host "[warn] icacls on $p failed (exit $LASTEXITCODE)" }
+}
+Write-Host "Permissions: $root = SYSTEM + Administrators full, Users read; token, logs, vault, cloud, backups = SYSTEM + Administrators only"
 
 # Create the service, retrying through any lingering deletion.
 $created = $false
@@ -76,12 +124,13 @@ if (-not $created) {
 & sc.exe description $svc "BrainX brain-matchmaking node (Kestrel on $Port)" *> $null
 & sc.exe failure $svc reset= 86400 actions= restart/5000/restart/5000/restart/5000 *> $null
 
-# Service environment (registry MultiString).
+# Service environment (registry MultiString). No token here: the node reads
+# <root>\bearer-token.txt, which only SYSTEM + Administrators can open, while
+# this registry value is readable far more widely.
 $envs = @(
     "ASPNETCORE_URLS=http://127.0.0.1:$Port",
     "BrainX__EmbeddedMode=false",
     "BrainX__RequireAuth=true",
-    "BrainX__BearerToken=$token",
     "BrainX__VaultPath=$VaultDir",
     "BrainX__AutoUpdate=true",
     "BrainX__UpdateServiceName=$svc"

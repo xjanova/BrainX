@@ -1,6 +1,6 @@
 using System.Runtime.Versioning;
 using System.Security.AccessControl;
-using System.Security.Principal;
+using BrainX.Server.Services;
 
 namespace BrainX.Server.Cloud;
 
@@ -17,7 +17,8 @@ namespace BrainX.Server.Cloud;
 /// Only ever applied by a process that keeps access afterwards: LocalSystem
 /// (how BrainXNode runs) or an elevated administrator. A developer's console
 /// run as a normal user would lock ITSELF out, so it skips instead. After
-/// applying, a probe write proves access; if it fails the change is undone.
+/// applying, a probe write proves access; if it fails the change is undone
+/// (see <see cref="FolderAcl"/>).
 /// </summary>
 public static class CloudRootAcl
 {
@@ -28,6 +29,7 @@ public static class CloudRootAcl
         SkippedDisabled,
         SkippedNotWindows,
         SkippedIdentity,
+        SkippedLayout,
         Failed,
     }
 
@@ -55,57 +57,19 @@ public static class CloudRootAcl
     [SupportedOSPlatform("windows")]
     private static (Outcome, string) ApplyWindows(string root, bool createdNow)
     {
-        var dir = new DirectoryInfo(root);
-        var current = dir.GetAccessControl(AccessControlSections.Access);
-        if (!ShouldHarden(createdNow, current.AreAccessRulesProtected))
+        if (!ShouldHarden(createdNow, FolderAcl.IsProtected(root)))
             return (Outcome.AlreadyExplicit, "CloudRoot already has explicit permissions — left as they are");
-
-        using (var me = WindowsIdentity.GetCurrent())
-        {
-            var admin = new WindowsPrincipal(me).IsInRole(WindowsBuiltInRole.Administrator);
-            if (!IdentityCanHarden(me.IsSystem, admin))
-                return (Outcome.SkippedIdentity,
-                        "CloudRoot keeps its inherited permissions: the node is not running as SYSTEM or an elevated administrator, and hardening would lock it out");
-        }
-
-        var before = current.GetSecurityDescriptorSddlForm(AccessControlSections.Access);
-        dir.SetAccessControl(BuildSecurity());
-
-        var probe = Path.Combine(root, ".acl-probe-" + Guid.NewGuid().ToString("N"));
-        try
-        {
-            File.WriteAllText(probe, "ok");
-            File.Delete(probe);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // Never leave the node unable to read its own data: put back what was there.
-            var restore = new DirectorySecurity();
-            restore.SetSecurityDescriptorSddlForm(before, AccessControlSections.Access);
-            dir.SetAccessControl(restore);
-            return (Outcome.Failed, "hardened CloudRoot permissions locked the node out — restored the previous permissions");
-        }
-        return (Outcome.Applied, "CloudRoot permissions: SYSTEM + Administrators only (inheritance disabled)");
+        var (isSystem, isAdmin) = FolderAcl.CurrentIdentity();
+        if (!IdentityCanHarden(isSystem, isAdmin))
+            return (Outcome.SkippedIdentity,
+                    "CloudRoot keeps its inherited permissions: the node is not running as SYSTEM or an elevated administrator, and hardening would lock it out");
+        return FolderAcl.ApplyWithProbe(root, BuildSecurity(), out var message)
+            ? (Outcome.Applied, "CloudRoot permissions: SYSTEM + Administrators only (inheritance disabled)")
+            : (Outcome.Failed, "CloudRoot: " + message);
     }
 
     /// <summary>SYSTEM and BUILTIN\Administrators, full control, inherited by
     /// every folder and file below; nothing inherited from above.</summary>
     [SupportedOSPlatform("windows")]
-    public static DirectorySecurity BuildSecurity()
-    {
-        var sec = new DirectorySecurity();
-        sec.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-        foreach (var sid in new[]
-                 {
-                     new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
-                     new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
-                 })
-        {
-            sec.AddAccessRule(new FileSystemAccessRule(
-                sid, FileSystemRights.FullControl,
-                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
-                PropagationFlags.None, AccessControlType.Allow));
-        }
-        return sec;
-    }
+    public static DirectorySecurity BuildSecurity() => FolderAcl.BuildSecurity();
 }
