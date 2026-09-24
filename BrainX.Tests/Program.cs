@@ -68,6 +68,7 @@ internal static partial class Program
         RegisterIndexerChecks(sshChecks);
         RegisterLiveIndexChecks(sshChecks);
         RegisterCloudChecks(sshChecks);
+        RegisterCloudFollowupChecks(sshChecks);
         foreach (var (name, check) in sshChecks) await Run(name, check);
 
         Console.WriteLine();

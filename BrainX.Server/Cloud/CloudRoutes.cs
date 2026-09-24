@@ -458,12 +458,13 @@ public static class CloudRoutes
         {
             var (list, pathsErr) = StringArray(doc!.RootElement, "paths", MaxFetchPaths);
             if (pathsErr != null) return pathsErr;
-            paths = list!;
+            // The API speaks NFC: each path is answered under its NFC form.
+            paths = list!.Select(CloudPaths.Normalize).ToList();
         }
-        foreach (var p in paths)
+        for (var i = 0; i < paths.Count; i++)
         {
-            var why = CloudPaths.Validate(p);
-            if (why != null) return Error(400, "BAD_PATH", $"'{CloudVaults.Show(p)}': {why}");
+            var why = CloudPaths.Validate(paths[i]);
+            if (why != null) return Error(400, "BAD_PATH", $"'{CloudVaults.Show(paths[i])}': {why}");
         }
 
         // Streamed: one note in memory at a time, however many were asked for.

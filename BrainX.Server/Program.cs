@@ -149,6 +149,7 @@ if (NodeConfig.CloudEnabled)
             Root = NodeConfig.CloudRoot,
             QuotaBytes = NodeConfig.CloudQuotaBytes,
             McpExePath = mcpExe,
+            HardenRootAcl = true,   // SYSTEM + Administrators; guarded inside (Windows, identity, probe)
         }, ver);
         cloud = svc;
         app.MapBrainCloud(svc);
