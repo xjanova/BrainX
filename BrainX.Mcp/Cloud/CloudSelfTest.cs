@@ -254,6 +254,16 @@ internal static class CloudSelfTest
         var noDel = CloudSyncEngine.PlanPush(scan, new[] { "P", "M" }, manifest, state, allowDeletes: false, allowMassDelete: false);
         Check("allowDeletes=false never deletes", noDel.Deletes.Count == 0);
 
+        // A selection saved as "work" for notes uploaded under "Work/": the
+        // folder is the same choice — and while it is missing, nothing goes.
+        var ci = new CloudSyncState { AccountId = "acc" };
+        ci.Uploaded["Work/a.md"] = H("a");
+        var ciScan = new LocalScan();
+        ciScan.MissingFolders.Add("work");
+        var ciPlan = CloudSyncEngine.PlanPush(ciScan, new[] { "work" }, M(("Work/a.md", "a")), ci, true, false);
+        Check("a selection differing only by letter case still protects a missing folder",
+              ciPlan.Deletes.Count == 0 && ciPlan.HeldForMissingFolder == 1);
+
         // Mass-deletion guard: 30 of 40 notes vanish from a still-selected folder.
         var big = new CloudSyncState { AccountId = "acc" };
         var bigScan = new LocalScan();

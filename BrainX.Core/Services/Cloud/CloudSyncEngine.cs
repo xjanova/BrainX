@@ -261,7 +261,10 @@ public sealed class CloudSyncEngine
         foreach (var (p, _) in state.Uploaded)
         {
             var top = CloudPathRules.TopFolderOf(p);
-            var selected = folders == null || folders.Contains(top, StringComparer.Ordinal);
+            // Case-insensitive, like the scan's folder lookup: a selection saved
+            // as "programming" for a folder on disk as "Programming" is the same
+            // choice — read as "unticked", it would delete the folder's notes.
+            var selected = folders == null || folders.Contains(top, StringComparer.OrdinalIgnoreCase);
             if (selected) uploadedByFolder[top] = uploadedByFolder.GetValueOrDefault(top) + 1;
             if (present.Contains(p)) continue;
             if (selected && scan.MissingFolders.Contains(top)) { plan.HeldForMissingFolder++; continue; }

@@ -271,6 +271,25 @@ public partial class MainWindow
         {
             CloudFolderList.Children.Clear();
             var onDisk = CloudSyncEngine.TopLevelFolders(_vaultPath);
+            // Keep the saved choice in the casing the disk uses (a folder
+            // renamed by case only, or a choice typed on the CLI), so a ticked
+            // folder shows ticked and "uploaded under it" counts it right.
+            if (!_cloudSyncRunning)
+            {
+                var changed = false;
+                for (var i = 0; i < _cloudState.Folders.Count; i++)
+                {
+                    var f = _cloudState.Folders[i];
+                    if (f == CloudSyncState.RootToken) continue;
+                    var actual = onDisk.FirstOrDefault(d => string.Equals(d, f, StringComparison.OrdinalIgnoreCase));
+                    if (actual != null && actual != f) { _cloudState.Folders[i] = actual; changed = true; }
+                }
+                if (changed)
+                {
+                    _cloudState.Folders = _cloudState.Folders.Distinct(StringComparer.Ordinal).ToList();
+                    SaveCloudState();
+                }
+            }
             var selected = _cloudState.Folders;
             var rows = new List<(string Token, string Label, bool Missing)>
             {

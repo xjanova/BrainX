@@ -123,7 +123,7 @@ public sealed class CloudSyncState
     }
 
     public bool IsFolderSelected(string topFolder) =>
-        Folders.Contains(topFolder, StringComparer.Ordinal);
+        Folders.Contains(topFolder, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Cloud paths in <see cref="Uploaded"/> that live under a top-level folder.</summary>
     public List<string> UploadedUnder(string topFolder) =>

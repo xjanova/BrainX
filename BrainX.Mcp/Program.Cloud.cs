@@ -331,6 +331,11 @@ internal static partial class Program
                     Console.Error.WriteLine($"✗ Not a usable top-level folder name: {string.Join(", ", bad)}");
                     return 1;
                 }
+                // Saved in the casing the disk uses, so "programming" and the
+                // folder "Programming" are one choice everywhere after this.
+                var onDisk = CloudSyncEngine.TopLevelFolders(vault);
+                folders = folders.Select(f => onDisk.FirstOrDefault(d => string.Equals(d, f, StringComparison.OrdinalIgnoreCase)) ?? f)
+                                 .Distinct(StringComparer.Ordinal).ToList();
             }
             else folders = state.Folders.ToList();
 
