@@ -60,6 +60,7 @@ internal static class McpLauncher
     private static int _swapAttempts;
     private const int MaxSwapAttempts = 3;
     private static volatile bool _swapping;
+    private static volatile bool _shuttingDown;
     private static int _rapidFailures;
     private static DateTime _lastSpawn = DateTime.MinValue;
 
@@ -128,6 +129,26 @@ internal static class McpLauncher
 
         Log("client closed stdin — shutting down");
         McpInstances.Unregister();
+        // A cloud-mode worker may still hold notes it has not pushed yet. Let
+        // it see its own stdin close and make one bounded last push (5 s)
+        // before the kill below; a local-mode worker is killed at once, as before.
+        if (Program.IsCloudServeRequested(args))
+        {
+            _shuttingDown = true;   // the worker's exit below is planned — no respawn
+            try
+            {
+                await ChildGate.WaitAsync().ConfigureAwait(false);
+                try { _childIn?.Close(); } finally { ChildGate.Release(); }
+                var child = _child;
+                if (child != null)
+                {
+                    using var grace = new CancellationTokenSource(TimeSpan.FromSeconds(7));
+                    try { await child.WaitForExitAsync(grace.Token).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { }
+                }
+            }
+            catch (Exception ex) { Log($"cloud worker shutdown: {ex.Message}"); }
+        }
         // entireProcessTree is for the worker's OWN children — the MCP bridges
         // it spawned (Unity, Unreal), which have no reason to outlive it. It is
         // safe again only because TryLaunchClientIfNotRunning now starts the GUI
@@ -284,7 +305,7 @@ internal static class McpLauncher
         catch (Exception ex) { Log($"worker pump ended: {ex.Message}"); }
 
         // EOF. Planned (swap/session end) or a crash — _swapping tells us which.
-        if (_swapping) return;
+        if (_swapping || _shuttingDown) return;
         try { proc.WaitForExit(1000); } catch { }
         if (_child != proc) return;                     // already replaced
 

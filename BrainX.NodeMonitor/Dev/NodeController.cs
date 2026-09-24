@@ -1,21 +1,25 @@
-using System;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO;
-using System.Linq;
 
-namespace BrainX.NodeMonitor;
+namespace BrainX.ServerManager.Dev;
 
 /// <summary>
-/// Launches and stops the brainx-node server (BrainX.Server) as a hidden child
-/// process. Uses the service-style spawn (UseShellExecute=false + CreateNoWindow
-/// + drained stdout/stderr) documented in the brain note "Service-style
-/// Process.Start, status-bar polling". Binary is picked newest-by-mtime across
-/// Release/Debug (never a hardcoded config order — see "MCP-spawned sibling apps").
+/// DEV MODE ONLY (no BrainXNode service on this machine). Launches and stops the
+/// brainx-node server (BrainX.Server) as a hidden child process. Uses the
+/// service-style spawn (UseShellExecute=false + CreateNoWindow + drained
+/// stdout/stderr) documented in the brain note "Service-style Process.Start,
+/// status-bar polling". Binary is picked newest-by-mtime across Release/Debug
+/// (never a hardcoded config order — see "MCP-spawned sibling apps").
 /// </summary>
-public sealed class NodeController
+public sealed class NodeController : IDisposable
 {
     private Process? _proc;
+
+    /// <summary>Releases the handle only; a child the owner chose to keep running keeps running.</summary>
+    public void Dispose()
+    {
+        _proc?.Dispose();
+        _proc = null;
+    }
 
     /// <summary>Raised for each line the server writes to stdout/stderr.</summary>
     public event Action<string>? Log;
@@ -129,6 +133,10 @@ public sealed class NodeController
             }
         }
         catch { /* already gone */ }
-        finally { _proc = null; }
+        finally
+        {
+            _proc?.Dispose();
+            _proc = null;
+        }
     }
 }

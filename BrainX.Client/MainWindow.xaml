@@ -5675,6 +5675,11 @@
                                                 Click="SettingsJump_Click" Tag="Network"
                                                 HorizontalContentAlignment="Left" Padding="14,8"
                                                 Margin="0,0,0,2"/>
+                                        <Button x:Name="SettingsNavCloud" Content="BrainX Cloud"
+                                                Style="{StaticResource NavButton}"
+                                                Click="SettingsJump_Click" Tag="Cloud"
+                                                HorizontalContentAlignment="Left" Padding="14,8"
+                                                Margin="0,0,0,2"/>
                                         <Button x:Name="SettingsNavMcp" Content="Mcp"
                                                 Style="{StaticResource NavButton}"
                                                 Click="SettingsJump_Click" Tag="Mcp"
@@ -5862,29 +5867,20 @@
                                                 <StackPanel Margin="0,0,0,16">
                                                     <TextBlock Text="Network" FontSize="16" FontWeight="Bold"
                                                                Foreground="{StaticResource NeuralText}"/>
-                                                    <TextBlock Text="Mesh server endpoint that brokers peer connections."
-                                                               FontSize="12.5" FontWeight="Medium"
+                                                    <!-- The mesh server used to be an editable "Server URL" here.
+                                                         It is BrainX Cloud now, fixed in the app (owner decision,
+                                                         cloud contract v1): no address is shown or editable. -->
+                                                    <TextBlock Text="Peers find each other through BrainX Cloud automatically — nothing to configure."
+                                                               FontSize="12.5" FontWeight="Medium" TextWrapping="Wrap"
                                                                Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0"/>
                                                 </StackPanel>
-                                                <TextBlock Text="SERVER URL" FontSize="11"
-                                                           Foreground="{StaticResource NeuralText3}" Margin="0,0,0,4"
-                                                           FontWeight="SemiBold"/>
-                                                <!-- No hardcoded Text: the previous default was a private
-                                                     hostname that had been scrubbed from the code constants
-                                                     and survived only here, and it is overwritten by
-                                                     PopulateSettings on every load anyway — dead text that
-                                                     leaked a real host. -->
-                                                <TextBox x:Name="SettingsServerUrl" Style="{StaticResource NeonTextBox}"
-                                                         Margin="0,0,0,12"/>
-                                                <Button Content="Save Server URL" Style="{StaticResource NeuralBtnPrimary}"
-                                                        Click="SaveServerUrl_Click" HorizontalAlignment="Left" Padding="16,8"/>
 
                                                 <!-- LocalAiBase had no control anywhere in the app, yet it is
                                                      the destination of every AI call, the API-key POST and the
                                                      hook command written into the user's Claude config. If the
                                                      local server was not on :5142 the only repair was editing
                                                      JSON by hand. -->
-                                                <TextBlock Text="LOCAL AI / BRAIN SERVER" FontSize="11" Margin="0,16,0,4"
+                                                <TextBlock Text="LOCAL AI / BRAIN SERVER" FontSize="11" Margin="0,0,0,4"
                                                            Foreground="{StaticResource NeuralText3}" FontWeight="SemiBold"/>
                                                 <TextBlock Text="This machine's own brain server. AI keys are only ever sent here, and only if it is localhost."
                                                            FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4"
@@ -5897,6 +5893,201 @@
                                                     <TextBlock x:Name="LocalAiBaseStatus" FontSize="11" VerticalAlignment="Center"
                                                                Foreground="{StaticResource NeuralText3}"/>
                                                 </StackPanel>
+
+                                                <!-- Only on the one machine that runs the BrainXNode service.
+                                                     Server administration lives in the separate, elevated
+                                                     Server Manager that ships with the node (owner decision
+                                                     2026-09-24); this is just the door to it. -->
+                                                <StackPanel x:Name="ServerHostPanel" Visibility="Collapsed" Margin="0,18,0,0">
+                                                    <TextBlock Text="THIS PC RUNS THE BRAINX SERVER" FontSize="11" Margin="0,0,0,4"
+                                                               Foreground="{StaticResource NeuralText3}" FontWeight="SemiBold"/>
+                                                    <TextBlock x:Name="ServerHostStatus" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8"
+                                                               Foreground="{StaticResource NeuralText3}"/>
+                                                    <Button x:Name="OpenServerManagerBtn" Content="Open Server Manager"
+                                                            Style="{StaticResource NeuralBtnGhost}" HorizontalAlignment="Left"
+                                                            Click="OpenServerManager_Click" Padding="14,6"/>
+                                                </StackPanel>
+                                            </StackPanel>
+                                        </Border>
+
+                                        <!-- BrainX Cloud — paid, per-user cloud brain. Driven by
+                                             MainWindow.Cloud.cs; the server address is fixed in code
+                                             and deliberately appears nowhere on this card. -->
+                                        <Border x:Name="SettingsAnchorCloud"
+                                                Style="{StaticResource NeuralCard}"
+                                                Padding="22" Margin="0,0,0,14">
+                                            <StackPanel>
+                                                <StackPanel Margin="0,0,0,16">
+                                                    <TextBlock Text="BrainX Cloud" FontSize="16" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText}"/>
+                                                    <TextBlock Text="Upload the folders you choose to your own private cloud brain, and any Claude on any machine can use them. This vault stays the master copy."
+                                                               FontSize="12.5" FontWeight="Medium" TextWrapping="Wrap"
+                                                               Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0"/>
+                                                </StackPanel>
+
+                                                <!-- Signed out -->
+                                                <StackPanel x:Name="CloudSignedOutPanel">
+                                                    <TextBlock Text="LICENSE KEY" FontSize="11" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource NeuralText3}" Margin="0,0,0,4"/>
+                                                    <Grid Margin="0,0,0,8">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="*"/>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                        </Grid.ColumnDefinitions>
+                                                        <PasswordBox x:Name="CloudKeyBox" Grid.Column="0" FontSize="12" Padding="8,6"
+                                                                     FontFamily="{StaticResource MonoFont}"
+                                                                     Background="{StaticResource DarkPanelBrush}"
+                                                                     Foreground="{StaticResource TextPrimaryBrush}"
+                                                                     BorderBrush="{StaticResource SurfaceLightBrush}"
+                                                                     CaretBrush="{StaticResource NeonCyanBrush}"
+                                                                     KeyDown="CloudKeyBox_KeyDown"/>
+                                                        <Button x:Name="CloudSignInBtn" Grid.Column="1" Content="Sign in"
+                                                                Style="{StaticResource NeuralBtnPrimary}" Click="CloudSignIn_Click"
+                                                                Padding="18,0" Margin="8,0,0,0"/>
+                                                    </Grid>
+                                                    <TextBlock FontSize="11.5" TextWrapping="Wrap" Foreground="{StaticResource NeuralText3}">
+                                                        No key yet?
+                                                        <Hyperlink Click="CloudBuyLink_Click" Foreground="{StaticResource NeonCyanBrush}"><Run x:Name="CloudBuyLinkText" Text="Buy BrainX Cloud"/></Hyperlink>
+                                                        — the key is used once to sign in and is never stored on this PC.
+                                                    </TextBlock>
+                                                </StackPanel>
+
+                                                <!-- Signed in -->
+                                                <StackPanel x:Name="CloudSignedInPanel" Visibility="Collapsed">
+                                                    <Grid Margin="0,0,0,6">
+                                                        <Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                        <TextBlock Grid.Column="0" Text="License" FontSize="12" Foreground="{StaticResource NeuralText3}"/>
+                                                        <TextBlock Grid.Column="1" x:Name="CloudLicenseText" Text="—" FontSize="12" TextWrapping="Wrap"
+                                                                   Foreground="{StaticResource NeuralText}"/>
+                                                    </Grid>
+                                                    <Grid Margin="0,0,0,6">
+                                                        <Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                        <TextBlock Grid.Column="0" Text="Valid until" FontSize="12" Foreground="{StaticResource NeuralText3}"/>
+                                                        <TextBlock Grid.Column="1" x:Name="CloudExpiryText" Text="—" FontSize="12" TextWrapping="Wrap"
+                                                                   Foreground="{StaticResource NeuralText}"/>
+                                                    </Grid>
+                                                    <Grid Margin="0,0,0,6">
+                                                        <Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                        <TextBlock Grid.Column="0" Text="Cloud storage" FontSize="12" Foreground="{StaticResource NeuralText3}"/>
+                                                        <StackPanel Grid.Column="1">
+                                                            <TextBlock x:Name="CloudStorageText" Text="—" FontSize="12"
+                                                                       Foreground="{StaticResource NeuralText}"/>
+                                                            <ProgressBar x:Name="CloudStorageBar" Height="5" Minimum="0" Maximum="100" Value="0"
+                                                                         Margin="0,4,0,0" MaxWidth="320" HorizontalAlignment="Left" Width="320"
+                                                                         Foreground="{StaticResource NeonCyanBrush}"
+                                                                         Background="{StaticResource SurfaceLightBrush}" BorderThickness="0"/>
+                                                        </StackPanel>
+                                                    </Grid>
+                                                    <Grid Margin="0,0,0,6">
+                                                        <Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                        <TextBlock Grid.Column="0" Text="Notes in the cloud" FontSize="12" Foreground="{StaticResource NeuralText3}"/>
+                                                        <TextBlock Grid.Column="1" x:Name="CloudNotesText" Text="—" FontSize="12"
+                                                                   Foreground="{StaticResource NeuralText}"/>
+                                                    </Grid>
+                                                    <Grid Margin="0,0,0,10">
+                                                        <Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                        <TextBlock Grid.Column="0" Text="This PC" FontSize="12" Foreground="{StaticResource NeuralText3}"/>
+                                                        <TextBlock Grid.Column="1" x:Name="CloudDeviceText" Text="—" FontSize="12"
+                                                                   Foreground="{StaticResource NeuralText}"/>
+                                                    </Grid>
+                                                    <TextBlock FontSize="11.5" Margin="0,0,0,4">
+                                                        <Hyperlink Click="CloudBuyLink_Click" Foreground="{StaticResource NeonCyanBrush}"><Run x:Name="CloudRenewLinkText" Text="Renew"/></Hyperlink>
+                                                    </TextBlock>
+
+                                                    <Border Height="1" Background="{StaticResource NeuralLine}" Margin="0,12,0,14"/>
+
+                                                    <TextBlock Text="FOLDERS TO UPLOAD" FontSize="11" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource NeuralText3}" Margin="0,0,0,2"/>
+                                                    <TextBlock Text="Only ticked folders go to the cloud. Unticking one asks whether its notes should also leave the cloud."
+                                                               FontSize="11" TextWrapping="Wrap" Margin="0,0,0,6"
+                                                               Foreground="{StaticResource NeuralText3}"/>
+                                                    <Border Background="{StaticResource DarkPanelBrush}" BorderBrush="{StaticResource SurfaceLightBrush}"
+                                                            BorderThickness="1" CornerRadius="8" Padding="10,6" Margin="0,0,0,10">
+                                                        <ScrollViewer MaxHeight="220" VerticalScrollBarVisibility="Auto"
+                                                                      HorizontalScrollBarVisibility="Disabled">
+                                                            <StackPanel x:Name="CloudFolderList"/>
+                                                        </ScrollViewer>
+                                                    </Border>
+                                                    <CheckBox x:Name="CloudAutoSyncCheck" Click="CloudAutoSync_Click" FontSize="12"
+                                                              Foreground="{StaticResource NeuralText}" Margin="0,0,0,12"
+                                                              Content="Sync automatically — shortly after notes change, and every 30 minutes"/>
+                                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                                        <Button x:Name="CloudSyncBtn" Content="Sync now" Style="{StaticResource NeuralBtnPrimary}"
+                                                                Click="CloudSyncNow_Click" Padding="16,8" Margin="0,0,8,0"/>
+                                                        <Button x:Name="CloudCancelBtn" Content="Cancel" Style="{StaticResource NeuralBtnGhost}"
+                                                                Click="CloudCancelSync_Click" Padding="16,8" Visibility="Collapsed"/>
+                                                    </StackPanel>
+                                                    <ProgressBar x:Name="CloudSyncProgressBar" Height="5" Minimum="0" Maximum="100"
+                                                                 Visibility="Collapsed" Margin="0,0,0,4"
+                                                                 Foreground="{StaticResource NeonCyanBrush}"
+                                                                 Background="{StaticResource SurfaceLightBrush}" BorderThickness="0"/>
+                                                    <TextBlock x:Name="CloudSyncProgressText" FontSize="11" Visibility="Collapsed"
+                                                               Foreground="{StaticResource NeuralText2}" TextWrapping="Wrap" Margin="0,0,0,4"/>
+                                                    <TextBlock x:Name="CloudLastSyncText" FontSize="11" TextWrapping="Wrap"
+                                                               Foreground="{StaticResource NeuralText3}"/>
+
+                                                    <Border Height="1" Background="{StaticResource NeuralLine}" Margin="0,16,0,14"/>
+
+                                                    <TextBlock Text="CONNECT ANOTHER MACHINE" FontSize="11" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource NeuralText3}" Margin="0,0,0,2"/>
+                                                    <TextBlock Text="Name the other computer (e.g. Laptop), choose what it may do, and create an access token for Claude there — nothing to install."
+                                                               FontSize="11" TextWrapping="Wrap" Margin="0,0,0,6"
+                                                               Foreground="{StaticResource NeuralText3}"/>
+                                                    <Grid Margin="0,0,0,8">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="*"/>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                        </Grid.ColumnDefinitions>
+                                                        <TextBox x:Name="CloudTokenNameBox" Grid.Column="0" Style="{StaticResource NeonTextBox}"
+                                                                 MaxLength="48" ToolTip="A name you will recognise, e.g. Laptop"/>
+                                                        <ComboBox x:Name="CloudTokenScopeCombo" Grid.Column="1" Margin="8,0,0,0" MinWidth="140"
+                                                                  VerticalContentAlignment="Center"
+                                                                  Background="{StaticResource SurfaceBrush}"
+                                                                  Foreground="{StaticResource TextPrimaryBrush}">
+                                                            <ComboBoxItem Content="Read &amp; write" IsSelected="True"/>
+                                                            <ComboBoxItem Content="Read only"/>
+                                                        </ComboBox>
+                                                        <Button x:Name="CloudCreateTokenBtn" Grid.Column="2" Content="Create access token"
+                                                                Style="{StaticResource NeuralBtnGhost}" Click="CloudCreateToken_Click"
+                                                                Padding="14,6" Margin="8,0,0,0"/>
+                                                    </Grid>
+                                                    <Border x:Name="CloudNewTokenPanel" Visibility="Collapsed"
+                                                            Background="{StaticResource DarkPanelBrush}" BorderBrush="{StaticResource SurfaceLightBrush}"
+                                                            BorderThickness="1" CornerRadius="8" Padding="12" Margin="0,0,0,10">
+                                                        <StackPanel>
+                                                            <TextBlock Text="Run this in a terminal on the other machine. The token is shown only now — copy it before closing."
+                                                                       FontSize="11.5" TextWrapping="Wrap" Foreground="#FFC040" Margin="0,0,0,6"/>
+                                                            <TextBox x:Name="CloudConnectCmdBox" IsReadOnly="True" TextWrapping="Wrap"
+                                                                     FontFamily="{StaticResource MonoFont}" FontSize="11"
+                                                                     Style="{StaticResource NeonTextBox}" Margin="0,0,0,8"/>
+                                                            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                                                <Button Content="Copy command" Style="{StaticResource NeuralBtnPrimary}"
+                                                                        Click="CloudCopyCmd_Click" Padding="14,6" Margin="0,0,8,0"/>
+                                                                <Button Content="Done" Style="{StaticResource NeuralBtnGhost}"
+                                                                        Click="CloudDoneToken_Click" Padding="14,6"/>
+                                                            </StackPanel>
+                                                            <TextBlock FontSize="11" TextWrapping="Wrap" Foreground="{StaticResource NeuralText3}">
+                                                                Prefer the notes cached on that machine (works offline)? Install BrainX there and run
+                                                                <Run FontFamily="{StaticResource MonoFont}">brainx-mcp cloud login</Run>
+                                                                with your license key, then
+                                                                <Run FontFamily="{StaticResource MonoFont}">brainx-mcp register-claude --cloud</Run>.
+                                                            </TextBlock>
+                                                        </StackPanel>
+                                                    </Border>
+                                                    <TextBlock Text="ACCESS TOKENS" FontSize="11" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource NeuralText3}" Margin="0,4,0,6"/>
+                                                    <StackPanel x:Name="CloudTokenList" Margin="0,0,0,4"/>
+
+                                                    <Border Height="1" Background="{StaticResource NeuralLine}" Margin="0,14,0,12"/>
+                                                    <Button x:Name="CloudSignOutBtn" Content="Sign out of BrainX Cloud"
+                                                            Style="{StaticResource NeuralBtnGhost}" Click="CloudSignOut_Click"
+                                                            HorizontalAlignment="Left" Padding="14,6"
+                                                            Foreground="{StaticResource DangerBrush}"/>
+                                                </StackPanel>
+
+                                                <TextBlock x:Name="CloudStatusText" FontSize="11.5" TextWrapping="Wrap" Margin="0,10,0,0"
+                                                           Visibility="Collapsed" Foreground="{StaticResource NeuralText2}"/>
                                             </StackPanel>
                                         </Border>
 

@@ -84,7 +84,11 @@ public sealed class McpChild : IAsyncDisposable
         _sessionId = sessionId;
     }
 
-    public static McpChild Start(string exePath, string? vaultPath, string sessionId)
+    /// <param name="extraEnvironment">Set on top of the inherited environment —
+    /// a BrainX Cloud session passes BRAINX_SANDBOX=1 so a customer's child can
+    /// never write into the node owner's own tooling (see CloudService).</param>
+    public static McpChild Start(string exePath, string? vaultPath, string sessionId,
+                                 IReadOnlyDictionary<string, string>? extraEnvironment = null)
     {
         var psi = new ProcessStartInfo(exePath)
         {
@@ -109,6 +113,8 @@ public sealed class McpChild : IAsyncDisposable
         // client or rewriting Claude Desktop's config from a server process
         // would be both useless and surprising.
         psi.Environment["BRAINX_HEADLESS"] = "1";
+        if (extraEnvironment != null)
+            foreach (var (k, v) in extraEnvironment) psi.Environment[k] = v;
 
         var proc = Process.Start(psi)
                    ?? throw new InvalidOperationException($"failed to start MCP child: {exePath}");

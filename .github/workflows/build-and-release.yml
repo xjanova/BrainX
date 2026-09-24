@@ -135,15 +135,71 @@ jobs:
       - name: Publish + zip node (server self-update)
         # brainx-node-win-x64.zip is exactly the asset SelfUpdateService looks
         # for. BUILD_VERSION stamps the node so its version-compare matches the tag.
+        # It stays SERVER ONLY: nodes still running the old updater download it
+        # into memory under a 25 s timeout, so it must not grow. It carries the
+        # new updater, which then repairs the install from the full package.
+        # SIGNED: tools/NodeReleaseSigner writes update-manifest.json (size +
+        # SHA-256 of every file) and update-manifest.sig (ECDSA P-256) into the
+        # folder, then verifies it with the node's own verifier and built-in
+        # public key. The node installs nothing that does not verify, so a
+        # missing or wrong BRAINX_NODE_SIGNING_KEY fails the release HERE.
+        shell: pwsh
+        env:
+          BUILD_VERSION: ${{ steps.ver.outputs.version }}
+          BUILD_COMMIT:  ${{ steps.ver.outputs.sha }}
+          BRAINX_NODE_SIGNING_KEY: ${{ secrets.BRAINX_NODE_SIGNING_KEY }}
+        run: |
+          dotnet publish BrainX.Server/BrainX.Server.csproj `
+            -c Release -r win-x64 --self-contained true `
+            -p:PublishSingleFile=false -o publish/node-win-x64
+          dotnet run --project tools/NodeReleaseSigner -c Release -- sign publish/node-win-x64 ${{ steps.ver.outputs.version }}
+          if ($LASTEXITCODE -ne 0) { throw "signing the server-only node package failed" }
+          Compress-Archive -Path publish/node-win-x64/* -DestinationPath brainx-node-win-x64.zip -Force
+
+      - name: Assemble full node package (server + mcp + manager)
+        # brainx-node-full-win-x64.zip = the server + mcp\ + manager\. The
+        # current updater prefers it, and repairs an incomplete install from it.
+        # brainx-mcp goes in <app>\mcp\ — where the node's ResolveMcpExe looks;
+        # /mcp and the BrainX Cloud re-index both run it.
+        # BrainX Server Manager goes in <app>\manager\ (single file, self-
+        # contained: the server box has no .NET Desktop runtime). It shadow-
+        # copies itself before running, so the updater can always replace it.
+        # publish.ps1 -Node builds the same layout for BrainXNode.iss.
         shell: pwsh
         env:
           BUILD_VERSION: ${{ steps.ver.outputs.version }}
           BUILD_COMMIT:  ${{ steps.ver.outputs.sha }}
         run: |
-          dotnet publish BrainX.Server/BrainX.Server.csproj `
+          New-Item -ItemType Directory -Force publish/node-full-win-x64 | Out-Null
+          Copy-Item -Path publish/node-win-x64/* -Destination publish/node-full-win-x64 -Recurse -Force
+          dotnet publish BrainX.Mcp/BrainX.Mcp.csproj `
             -c Release -r win-x64 --self-contained true `
-            -p:PublishSingleFile=false -o publish/node-win-x64
-          Compress-Archive -Path publish/node-win-x64/* -DestinationPath brainx-node-win-x64.zip -Force
+            -p:PublishSingleFile=false -o publish/node-full-win-x64/mcp
+          dotnet publish BrainX.NodeMonitor/BrainX.NodeMonitor.csproj `
+            -c Release -r win-x64 --self-contained true `
+            -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -o publish/node-full-win-x64/manager
+
+      - name: Zip full node package
+        shell: pwsh
+        env:
+          BRAINX_NODE_SIGNING_KEY: ${{ secrets.BRAINX_NODE_SIGNING_KEY }}
+        run: |
+          # Every file the updater's repair check looks for must be here, or a
+          # node would download this package, find it still incomplete, and
+          # keep the gap until the next release.
+          if (-not (Test-Path publish/node-full-win-x64/BrainX.Server.exe)) { throw "full node package: BrainX.Server.exe is missing" }
+          if (-not (Test-Path publish/node-full-win-x64/mcp/brainx-mcp.exe)) { throw "full node package: mcp\brainx-mcp.exe is missing" }
+          if (-not (Test-Path publish/node-full-win-x64/manager/BrainX.ServerManager.exe)) { throw "full node package: manager\BrainX.ServerManager.exe is missing" }
+          # Signed last, after everything is in place: the manifest must list
+          # exactly what ships (it replaces the copy inherited from node-win-x64).
+          dotnet run --project tools/NodeReleaseSigner -c Release -- sign publish/node-full-win-x64 ${{ steps.ver.outputs.version }}
+          if ($LASTEXITCODE -ne 0) { throw "signing the full node package failed" }
+          Compress-Archive -Path publish/node-full-win-x64/* -DestinationPath brainx-node-full-win-x64.zip -Force
+          foreach ($z in 'brainx-node-win-x64.zip', 'brainx-node-full-win-x64.zip') {
+            Write-Host ("{0}: {1:N1} MB" -f $z, ((Get-Item $z).Length / 1MB))
+          }
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -170,6 +226,7 @@ jobs:
           files: |
             BrainX-${{ steps.ver.outputs.version }}-win-x64.zip
             brainx-node-win-x64.zip
+            brainx-node-full-win-x64.zip
             Releases/*
           generate_release_notes: true
           fail_on_unmatched_files: true
