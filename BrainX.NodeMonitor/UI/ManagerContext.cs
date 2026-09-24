@@ -25,6 +25,8 @@ internal sealed class ManagerContext
     public Action RequestPoll { get; set; } = () => { };
     /// <summary>Ask the shell to run the public reachability check now.</summary>
     public Action RequestPublicProbe { get; set; } = () => { };
+    /// <summary>The owner token changed (rotated): pages that summarise it refresh.</summary>
+    public Action TokenChanged { get; set; } = () => { };
 
     /// <summary>True while the owner window exists; check after every await before touching controls.</summary>
     public bool Alive => Owner is { IsDisposed: false, Disposing: false } && !Life.IsCancellationRequested;

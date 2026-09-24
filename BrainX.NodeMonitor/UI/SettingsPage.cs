@@ -39,7 +39,7 @@ internal sealed class SettingsPage : UserControl, IManagerPage
     private readonly Dictionary<string, FieldEditor> _fields = new(StringComparer.OrdinalIgnoreCase);
     private readonly DataGridView _adv;
     private readonly FlatButton _btnSave, _btnRevert, _btnReload, _btnAddRow, _btnDelRow, _btnApplyAuto;
-    private readonly Label _dirty, _envError, _authWarn, _autoStatus, _pLogDir;
+    private readonly Label _dirty, _envError, _legacyToken, _authWarn, _autoStatus, _pLogDir;
     private readonly CheckBox _chkShortcut, _chkTask;
     private List<string> _original = [];
     private bool _loading, _loaded, _saving, _autoBusy, _wrongKind;
@@ -72,6 +72,12 @@ internal sealed class SettingsPage : UserControl, IManagerPage
         env.Add(Theme.Text(@"HKLM\SYSTEM\CurrentControlSet\Services\" + b.NodeServiceName + @"\Environment · REG_MULTI_SZ · มีผลหลังรีสตาร์ท Service",
             Theme.Small, Theme.Muted, wrap: true));
         _envError = env.Add(Theme.Text("", Theme.Bold, Theme.Warn, wrap: true));
+        // The owner token no longer lives here (anyone on the box can read this value).
+        // It is never shown or editable; an old node's leftover line only gets a note.
+        _legacyToken = env.Add(Theme.Text(
+            "ℹ Service Environment ยังมี BrainX__BearerToken (node รุ่นเก่า) — การอัปเดต node ครั้งถัดไปจะย้าย Token ไปไว้ในไฟล์ bearer-token.txt ให้เอง",
+            Theme.Small, Theme.Warn, wrap: true));
+        _legacyToken.Visible = false;
         _btnSave = Theme.Button("บันทึก…", Theme.BtnGreen, async (_, _) => await SaveAsync());
         _btnRevert = Theme.Button("ยกเลิกการแก้ไข", Theme.BtnGray, async (_, _) => await RevertAsync());
         _btnReload = Theme.Button("โหลดใหม่", Theme.BtnGray, async (_, _) => await ReloadClickedAsync());
@@ -160,7 +166,7 @@ internal sealed class SettingsPage : UserControl, IManagerPage
         kv.Add("ต้นฉบับ (origin)", ctx.Args.Origin ?? "— (ไม่ได้รันจากสำเนา)");
         kv.Add("ทางลัด/Task ชี้ไปที่", ctx.TargetExe);
         paths.Add(Theme.Row(
-            Theme.Button("เปิดโฟลเดอร์สำรอง", Theme.BtnGray, (_, _) => Shell.Open(b.Paths.BackupDir)),
+            Theme.Button("ดูไฟล์สำรอง…", Theme.BtnGray, (_, _) => Shell.Browse(ctx.Owner, b.Paths.BackupDir, b.Paths.Root)),
             Theme.Button("เปิด manager.log", Theme.BtnGray, (_, _) => Shell.Reveal(ManagerLog.FilePath))));
         Stack(paths);
 
@@ -255,6 +261,7 @@ internal sealed class SettingsPage : UserControl, IManagerPage
             _envError.Text = _wrongKind
                 ? "⚠ ค่า Environment ใน Registry เป็น REG_SZ แต่ Windows อ่านเฉพาะ REG_MULTI_SZ — กดบันทึกเพื่อแก้ชนิดให้ถูก"
                 : "";
+            _legacyToken.Visible = EnvDocument.HasLegacyTokenLine(_original);
             foreach (var f in _fields.Values) Fill(f, EnvDocument.Get(_original, f.Field.Key));
             FillAdvanced();
             _loaded = true;
@@ -322,9 +329,13 @@ internal sealed class SettingsPage : UserControl, IManagerPage
         if (!_ctx.Alive || _autoBusy) return;
         _chkShortcut.Checked = s.ShortcutExists;
         _chkTask.Checked = s.TaskExists;
+        bool rightTarget = string.Equals(s.ShortcutTarget, s.ExpectedTarget, StringComparison.OrdinalIgnoreCase);
         var parts = new List<string>
         {
-            s.ShortcutExists ? (s.ShortcutCurrent ? "ทางลัด: มี ✓" : $"ทางลัด: มี แต่ชี้ไปที่ {s.ShortcutTarget ?? "?"}") : "ทางลัด: ไม่มี",
+            !s.ShortcutExists ? "ทางลัด: ไม่มี"
+                : s.ShortcutCurrent ? "ทางลัด: มี ✓"
+                : rightTarget ? "ทางลัด: มี แต่ยังไม่ได้ตั้ง “Run as administrator” (C:\\brainx อนุญาตเฉพาะ Administrator)"
+                : $"ทางลัด: มี แต่ชี้ไปที่ {s.ShortcutTarget ?? "?"}",
             s.TaskExists ? (s.TaskCurrent ? "Task: มี ✓" : $"Task: มี แต่ชี้ไปที่ {s.TaskCommand ?? "?"}") : "Task: ไม่มี",
         };
         if (s.Error != null) parts.Add(s.Error);
@@ -481,7 +492,12 @@ internal sealed class SettingsPage : UserControl, IManagerPage
         foreach (var r in AdvancedRows())
         {
             if (EnvDocument.ValidateKey(r.Key) is { } ke) { errors.Add("Advanced: " + ke); continue; }
-            if (EnvDocument.IsManaged(r.Key)) { errors.Add($"Advanced: {r.Key} แก้ที่ช่องด้านบน (หรือแท็บ Token) — ลบแถวนี้ออก"); continue; }
+            if (EnvDocument.SameKey(r.Key, EnvDocument.BearerTokenKey))
+            {
+                errors.Add("Advanced: Token เจ้าของไม่เก็บใน Service Environment แล้ว (ทุกคนบนเครื่องอ่านค่านี้ได้) — อยู่ในไฟล์ bearer-token.txt · ลบแถวนี้ออก");
+                continue;
+            }
+            if (EnvDocument.IsManaged(r.Key)) { errors.Add($"Advanced: {r.Key} แก้ที่ช่องด้านบน — ลบแถวนี้ออก"); continue; }
             if (!seen.Add(EnvDocument.Normalize(r.Key))) errors.Add($"Advanced: {r.Key} มีซ้ำ");
             if (EnvDocument.ValidateValue(r.Key, r.Value) is { } ve) errors.Add("Advanced: " + ve);
         }

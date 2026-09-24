@@ -3,13 +3,18 @@ using BrainX.ServerManager.Infrastructure;
 
 namespace BrainX.ServerManager.Backend;
 
-public enum DemoScenario { Normal, Empty, Stopped, OldNode, TunnelDown, ReadOnly, Pending, NoToken }
+public enum DemoScenario { Normal, Empty, Stopped, OldNode, TunnelDown, ReadOnly, Pending, NoToken, LegacyEnv }
 
 /// <summary>
 /// Sample data behind the real service-mode UI: <c>--demo[=scenario]</c> and the
 /// screenshots. Deterministic (fixed seed, times relative to "now") so two runs
 /// render the same pages. Actions really change the in-memory state, so the
 /// flows (confirm → call → refresh) can be clicked through.
+///
+/// The owner token is modelled the way the node really behaves: a CURRENT node
+/// reads bearer-token.txt (and, when it starts with a leftover env line, uses it
+/// for that run and removes it); an OLD node (<see cref="DemoScenario.LegacyEnv"/>,
+/// <see cref="DemoScenario.OldNode"/>) reads only the service Environment.
 /// </summary>
 internal sealed class DemoServerBackend : IServerBackend
 {
@@ -17,10 +22,12 @@ internal sealed class DemoServerBackend : IServerBackend
 
     private readonly DemoScenario _scenario;
     private readonly int _opDelayMs;
+    private readonly bool _nodeReadsFile;
     private readonly Dictionary<string, SvcState> _svc = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<CloudAccountDetail> _accounts;
     private List<string> _env;
-    private string? _token;
+    private string? _fileToken;
+    private string? _nodeToken;
     private DateTime _startedUtc = DateTime.UtcNow.AddDays(-3).AddHours(-4).AddMinutes(-12);
     private bool _shortcut = true, _task;
     private readonly Random _rng = new(42);
@@ -34,6 +41,7 @@ internal sealed class DemoServerBackend : IServerBackend
         "readonly" => DemoScenario.ReadOnly,
         "pending" => DemoScenario.Pending,
         "notoken" => DemoScenario.NoToken,
+        "legacyenv" or "legacy" => DemoScenario.LegacyEnv,
         _ => DemoScenario.Normal,
     };
 
@@ -41,6 +49,7 @@ internal sealed class DemoServerBackend : IServerBackend
     {
         _scenario = scenario;
         _opDelayMs = fast ? 0 : 900;
+        _nodeReadsFile = scenario is not (DemoScenario.LegacyEnv or DemoScenario.OldNode);
         _svc[NodeServiceName] = scenario switch
         {
             DemoScenario.Stopped => SvcState.Stopped,
@@ -49,8 +58,27 @@ internal sealed class DemoServerBackend : IServerBackend
         };
         _svc[TunnelServiceName] = scenario == DemoScenario.TunnelDown ? SvcState.Stopped : SvcState.Running;
         _accounts = scenario == DemoScenario.Empty ? [] : SampleAccounts();
-        _token = scenario == DemoScenario.NoToken ? null : DemoToken;
-        _env = SampleEnv(_token);
+        _fileToken = scenario == DemoScenario.NoToken ? null : DemoToken;
+        // Old installers wrote the token into the Environment too; a current node has removed that line.
+        _env = SampleEnv(_nodeReadsFile ? null : DemoToken);
+        _nodeToken = _nodeReadsFile ? _fileToken : DemoToken;
+    }
+
+    /// <summary>What the node process does with the token when it (re)starts.</summary>
+    private void OnNodeStarted()
+    {
+        var envToken = EnvDocument.Get(_env, EnvDocument.BearerTokenKey)?.Trim();
+        if (_nodeReadsFile)
+        {
+            if (!string.IsNullOrEmpty(envToken))
+            {
+                _nodeToken = envToken;                                          // this run: what the SCM passed
+                _env = EnvDocument.Remove(_env, EnvDocument.BearerTokenKey);    // next run: the file
+            }
+            else _nodeToken = _fileToken;
+        }
+        else _nodeToken = string.IsNullOrEmpty(envToken) ? null : envToken;
+        _startedUtc = DateTime.UtcNow;
     }
 
     public DemoScenario Scenario => _scenario;
@@ -98,17 +126,21 @@ internal sealed class DemoServerBackend : IServerBackend
         _svc[name] = SvcState.StartPending;
         await Delay(ct);
         _svc[name] = SvcState.Running;
-        if (node) _startedUtc = DateTime.UtcNow;
+        if (node) OnNodeStarted();
         return OpResult.Success(action == ServiceAction.Restart ? $"รีสตาร์ท {name} แล้ว" : $"เริ่ม {name} แล้ว");
     }
 
     // ───────────────────────── node HTTP ─────────────────────────
 
+    /// <summary>The manager presents the file token, then an env token (old nodes); the node accepts only its own.</summary>
     private ApiResult<T>? Gate<T>(bool admin)
     {
         if (!NodeUp) return ApiResult<T>.Fail(ApiFailure.NodeDown, ErrorText.NodeDown);
         if (!admin) return null;
-        if (_token == null) return ApiResult<T>.Fail(ApiFailure.NoToken, ErrorText.NoToken);
+        var presented = new[] { _fileToken, EnvDocument.Get(_env, EnvDocument.BearerTokenKey)?.Trim() }
+            .Where(t => !string.IsNullOrEmpty(t)).ToList();
+        if (presented.Count == 0) return ApiResult<T>.Fail(ApiFailure.NoToken, ErrorText.NoToken);
+        if (_nodeToken == null || !presented.Contains(_nodeToken)) return ApiResult<T>.Fail(ApiFailure.Unauthorized, ErrorText.Unauthorized, 401);
         if (_scenario == DemoScenario.OldNode) return ApiResult<T>.Fail(ApiFailure.NoAdminApi, ErrorText.NoAdminApi, 404);
         return null;
     }
@@ -260,18 +292,45 @@ internal sealed class DemoServerBackend : IServerBackend
     }
 
     public Task<TokenSnapshot> ReadTokenAsync(CancellationToken ct)
-        => Task.FromResult(new TokenSnapshot(
-            _token, _token != null, null,
-            EnvDocument.Get(_env, EnvDocument.BearerTokenKey), null,
-            !string.IsNullOrEmpty(EnvDocument.Get(_env, EnvDocument.McpWriteTokenKey))));
+    {
+        var envToken = EnvDocument.Get(_env, EnvDocument.BearerTokenKey)?.Trim();
+        return Task.FromResult(new TokenSnapshot(
+            _fileToken, _fileToken != null, null,
+            string.IsNullOrEmpty(envToken) ? null : envToken, null,
+            !string.IsNullOrEmpty(EnvDocument.Get(_env, EnvDocument.McpWriteTokenKey)),
+            EnvDocument.HasLegacyTokenLine(_env)));
+    }
 
-    public async Task<OpResult> RotateTokenAsync(CancellationToken ct)
+    /// <summary>Same contract as the real one: the file only; a legacy env line is removed, never added.</summary>
+    public async Task<TokenRotation> RotateTokenAsync(CancellationToken ct)
+    {
+        if (!IsElevated) return TokenRotation.Fail(ErrorText.NeedAdmin);
+        await Delay(ct, 400);
+        var previousFile = _fileToken;
+        var previousEnv = _env.ToList();
+        var token = TokenFile.NewToken();
+        _fileToken = token;
+        bool removed = EnvDocument.HasLegacyTokenLine(_env);
+        if (removed) _env = EnvDocument.Remove(_env, EnvDocument.BearerTokenKey);
+        return new TokenRotation
+        {
+            Ok = true,
+            Message = "สร้าง Token ใหม่แล้ว (demo)",
+            RemovedEnvLine = removed,
+            NewFingerprint = TokenFile.Fingerprint(token),
+            PreviousFile = previousFile == null ? null : System.Text.Encoding.ASCII.GetBytes(previousFile),
+            PreviousEnv = removed ? previousEnv : null,
+            EnvAfter = removed ? _env.ToList() : null,
+        };
+    }
+
+    public async Task<OpResult> RollbackTokenAsync(TokenRotation rotation, CancellationToken ct)
     {
         if (!IsElevated) return OpResult.Fail(ErrorText.NeedAdmin);
-        await Delay(ct, 400);
-        _token = "d3m0" + Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(22)).ToLowerInvariant();
-        _env = EnvDocument.Set(_env, EnvDocument.BearerTokenKey, _token);
-        return OpResult.Success("สร้าง Token ใหม่แล้ว (demo)");
+        await Delay(ct, 300);
+        _fileToken = rotation.PreviousFile == null ? null : System.Text.Encoding.ASCII.GetString(rotation.PreviousFile);
+        if (rotation.PreviousEnv != null) _env = rotation.PreviousEnv.ToList();
+        return OpResult.Success("คืน Token เดิมแล้ว (demo)");
     }
 
     // ───────────────────────── files / auto-start ─────────────────────────

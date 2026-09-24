@@ -210,16 +210,23 @@ internal sealed class LogPage : UserControl, IManagerPage
         catch (ExternalException) { _ctx.Notify("คัดลอกไม่สำเร็จ — คลิปบอร์ดถูกโปรแกรมอื่นใช้อยู่", true); }
     }
 
+    /// <summary>Node files sit under C:\brainx (Administrators only): browsed elevated, never via the user's Explorer.</summary>
     private async Task OpenFolderAsync()
     {
-        if (_currentFile != null && File.Exists(_currentFile)) { Shell.Reveal(_currentFile); return; }
+        var root = _ctx.Backend.Paths.Root;
+        if (_currentFile != null && File.Exists(_currentFile))
+        {
+            Shell.Browse(_ctx.Owner, Path.GetDirectoryName(_currentFile)!, root, selectFile: _currentFile);
+            return;
+        }
         var dir = _source switch
         {
             Source.Node => await _ctx.Backend.ResolveLogDirAsync(_ctx.Life),
-            Source.Install => _ctx.Backend.Paths.Root,
+            Source.Install => root,
             _ => ManagerLog.Dir,
         };
-        if (Directory.Exists(dir)) Shell.Open(dir);
+        if (!_ctx.Alive) return;
+        if (Directory.Exists(dir)) Shell.Browse(_ctx.Owner, dir, root);
         else _ctx.Notify($"ไม่พบโฟลเดอร์ {dir}", true);
     }
 

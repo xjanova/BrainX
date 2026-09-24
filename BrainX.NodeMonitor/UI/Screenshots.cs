@@ -61,11 +61,12 @@ internal static class Screenshots
             return;
         }
 
-        async Task Scenario(DemoScenario sc, string prefix, string[]? pages, Func<ManagerContext, Task>? then = null, string? thenPage = null)
+        async Task Scenario(DemoScenario sc, string prefix, string[]? pages, Func<MainForm, Task>? then = null, string? thenPage = null)
         {
             using var b = new DemoServerBackend(sc, fast: true);
             await CaptureAsync(b, true, args, dir, prefix, pages, suffix, after: then, afterPage: thenPage);
         }
+        static Task Rotate(MainForm f) => ((TokenPage)f.Pages.First(p => p.Key == "token")).RunRotationAsync();
 
         await Scenario(DemoScenario.Normal, "demo", null);
         await Scenario(DemoScenario.Empty, "scenario-empty", ["accounts"]);
@@ -76,13 +77,17 @@ internal static class Screenshots
         await Scenario(DemoScenario.NoToken, "scenario-notoken", ["token", "overview"]);
         // Stuck StartPending: the state itself, then a Start that gives up with the 60 s message.
         await Scenario(DemoScenario.Pending, "scenario-pending", ["overview"],
-            then: async c => await c.Services.RunAsync(c.Backend.NodeServiceName, ServiceAction.Start, skipConfirm: true),
+            then: async f => await f.Context.Services.RunAsync(f.Context.Backend.NodeServiceName, ServiceAction.Start, skipConfirm: true),
             thenPage: "overview");
+        // Owner token: a current node takes the rotated file token; an old node (token still in the
+        // service Environment) rejects it, and the rotation is rolled back.
+        await Scenario(DemoScenario.Normal, "token-rotate", ["token"], then: Rotate, thenPage: "token");
+        await Scenario(DemoScenario.LegacyEnv, "scenario-legacyenv", ["settings", "token"], then: Rotate, thenPage: "token");
         if (string.IsNullOrEmpty(suffix)) CaptureDialogs(dir);
     }
 
     private static async Task CaptureAsync(IServerBackend? backend, bool serviceMode, AppArgs args, string dir, string prefix,
-        string[]? only, string suffix, bool elevated = true, Func<ManagerContext, Task>? after = null, string? afterPage = null)
+        string[]? only, string suffix, bool elevated = true, Func<MainForm, Task>? after = null, string? afterPage = null)
     {
         var ctx = new ManagerContext
         {
@@ -112,7 +117,7 @@ internal static class Screenshots
         }
         if (after != null)
         {
-            await after(ctx);
+            await after(form);
             await form.PrepareForScreenshotAsync();
             var p = form.Pages.First(x => x.Key == afterPage);
             await form.ShowPageForCaptureAsync(p);
@@ -149,6 +154,12 @@ internal static class Screenshots
         Dialog(new ConfirmDialog("หยุด BrainXNode?", "ยืนยันก่อนดำเนินการ:", "Stop BrainXNode", danger: true,
                 detail: "• ลูกค้า Cloud และ MCP ที่เชื่อมต่ออยู่จะหลุดทันที\n• https://serverbrain.xman4289.com จะใช้ไม่ได้จนกว่าจะ Start ใหม่\n• Windows จะไม่เปิดให้เองจนกว่าจะรีบูต"),
             Path.Combine(dir, "dialog-stop-node.png"));
+        Dialog(new ConfirmDialog(TokenPage.ConfirmTitle, TokenPage.ConfirmMessage, "เปลี่ยน Token", danger: true,
+                detail: TokenPage.ConfirmDetail(@"C:\brainx\bearer-token.txt", legacyEnvLine: true, mcpWriteTokenSet: false)),
+            Path.Combine(dir, "dialog-rotate-token.png"));
+        Dialog(new ConfirmDialog(TokenPage.ReminderTitle, TokenPage.ReminderMessage, "คัดลอก Token ใหม่", danger: false,
+                detail: TokenPage.TokenReminder, cancelText: "ปิด"),
+            Path.Combine(dir, "dialog-token-rotated.png"));
     }
 
     private static void Dialog(Form d, string path)

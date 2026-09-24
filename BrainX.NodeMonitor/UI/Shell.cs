@@ -37,6 +37,58 @@ internal static class Shell
         catch (Exception ex) { ManagerLog.Warn($"reveal {file} failed: {ex.GetType().Name}"); }
     }
 
+    /// <summary>
+    /// Look inside a folder. Folders under the node root (C:\brainx) are SYSTEM +
+    /// Administrators only; the unelevated Explorer answers them with "You don't
+    /// currently have permission — Continue", and Continue PERMANENTLY adds the
+    /// user to that folder's ACL, undoing the node's hardening. So those are
+    /// browsed from this elevated process instead: a file dialog, and the chosen
+    /// file opens in Notepad (System32, not whatever the association says).
+    /// </summary>
+    public static void Browse(IWin32Window owner, string folder, string? protectedRoot, string? selectFile = null)
+    {
+        if (!IsUnder(folder, protectedRoot))
+        {
+            if (selectFile != null) Reveal(selectFile); else Open(folder);
+            return;
+        }
+        if (!Directory.Exists(folder))
+        {
+            MessageBox.Show(owner, $"ไม่พบโฟลเดอร์ {folder}", AppInfo.Product, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        using var d = new OpenFileDialog
+        {
+            InitialDirectory = folder,
+            Title = $"ไฟล์ใน {folder} — เปิดด้วยสิทธิ์ Administrator",
+            Filter = "Log / ข้อความ (*.log;*.txt;*.json)|*.log;*.txt;*.json|ทุกไฟล์ (*.*)|*.*",
+            CheckFileExists = true,
+            Multiselect = false,
+            RestoreDirectory = true,
+            FileName = selectFile != null ? Path.GetFileName(selectFile) : "",
+        };
+        if (d.ShowDialog(owner) != DialogResult.OK) return;
+        try
+        {
+            var psi = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "notepad.exe")) { UseShellExecute = false };
+            psi.ArgumentList.Add(d.FileName);
+            using var _ = Process.Start(psi);
+        }
+        catch (Exception ex) { ManagerLog.Warn($"open {Path.GetFileName(d.FileName)} in notepad failed: {ex.GetType().Name}"); }
+    }
+
+    private static bool IsUnder(string path, string? root)
+    {
+        if (string.IsNullOrEmpty(root)) return false;
+        try
+        {
+            var p = Path.GetFullPath(path).TrimEnd('\\') + "\\";
+            var r = Path.GetFullPath(root).TrimEnd('\\') + "\\";
+            return p.StartsWith(r, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
     /// <summary>The web dashboard on localhost (same origin the installer's shortcut uses, so a saved login still applies).</summary>
     public static string DashboardUrl(Uri nodeBase)
     {
