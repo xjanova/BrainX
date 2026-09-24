@@ -27,23 +27,22 @@ namespace BrainX.Client.Services;
 /// DLL.</para>
 ///
 /// <para><b>When it stops.</b> On <see cref="StartupProgress.Complete"/> —
-/// the one signal that owns "the boot is over", raised when the HUD reports
-/// <c>hudBootDone</c>, i.e. when the loading screen the user is watching is
-/// finished. That is the whole contract: the track fades as the last thing
-/// lands, and the app is quiet by the time it is usable. Nothing may cut it
-/// short of that, because music that stops over a loading screen still
+/// the one signal that owns "the boot is over", raised once the loading
+/// screen has CLOSED: the HUD's boot curtain has finished lifting
+/// (<c>hudBootClosed</c>) and the WPF loader under it is gone (see
+/// <c>MainWindow.CompleteBootOnceScreensClosed</c>). That is the whole
+/// contract, in the owner's words: the track fades after the loading window
+/// has closed, never before. Music that stops over a loading screen still
 /// counting says the app is ready when it is not.</para>
 ///
-/// <para>That seam has produced three separate defects where a completion
-/// signal never arrived (see the vault note "The BrainX loading screen was
-/// honest about everything except when it was allowed to stop"), so this does
-/// not trust it blindly: <see cref="GuardTimeout"/> fades the music anyway
-/// once the boot has gone SILENT for that long. Silent, not elapsed — the
-/// guard used to be a flat 45 s from launch, which is a bet that no healthy
-/// boot ever takes longer, and a first launch (cold WebView2 profile, cold
-/// vault, no shader cache) loses that bet. It cut the music over a loading
-/// screen that was still visibly working. A boot that is still working is
-/// still reporting, so the wait is bounded by silence instead.</para>
+/// <para><b>No clock of its own.</b> This class used to fade the track anyway
+/// once the boot had reported nothing for 45 s, as a backstop for a completion
+/// signal that never arrived. It cannot see the loading screen, so that was a
+/// guess about when the screen would close — sized for a ~15 s vault read that
+/// reports nothing while it runs. On the owner's machine that read took 80 s
+/// (2026-09-24), and the music faded half a minute before the loading screen
+/// did. The backstop lives in MainWindow's boot watchdog now, which can see
+/// the screen and ends a dead boot by lifting it; the music follows.</para>
 ///
 /// <para>Nothing in here is allowed to throw. A machine with no audio device,
 /// a Windows N edition without the media codecs, or a locked temp directory
@@ -63,26 +62,11 @@ internal static class BootMusic
     private static readonly TimeSpan FadeDuration = TimeSpan.FromSeconds(3.5);
     private static readonly TimeSpan FadeStep = TimeSpan.FromMilliseconds(50);
 
-    /// <summary>
-    /// Backstop for a boot that DIED, measured as silence on
-    /// <see cref="StartupProgress"/> rather than as time since launch. Three
-    /// times the longest quiet stretch a healthy boot has (the ~15 s vault
-    /// read, which reports nothing between "Indexing vault notes" and its
-    /// result) and comfortably past the HUD's own 20 s boot deadline — so a
-    /// boot that is merely slow never reaches it, and one that has stopped
-    /// reporting cannot outlast it.
-    /// </summary>
-    private static readonly TimeSpan GuardTimeout = TimeSpan.FromSeconds(45);
-
-    /// <summary>How often the guard asks. Cheap: one long subtraction.</summary>
-    private static readonly TimeSpan GuardPoll = TimeSpan.FromSeconds(2);
-
     private static readonly object _gate = new();
 
     private static MediaPlayer? _player;
     private static Dispatcher? _dispatcher;
     private static DispatcherTimer? _fadeTimer;
-    private static DispatcherTimer? _guardTimer;
     private static string? _tempFile;
     private static DateTime _fadeStartedUtc;
     private static bool _started;
@@ -135,29 +119,7 @@ internal static class BootMusic
             // fired on a very fast boot, and a fade that arrives before the
             // player does would leave the music running.
             StartupProgress.Reported += OnStartupStage;
-            if (StartupProgress.IsComplete)
-            {
-                BeginFadeOut();
-                return;
-            }
-
-            // Polls rather than firing once, so every stage the boot reports
-            // pushes the deadline out. A one-shot timer armed here is an
-            // absolute limit on how long a boot is allowed to take, and that
-            // is not a thing this class is entitled to decide.
-            _guardTimer = new DispatcherTimer(DispatcherPriority.Background)
-            {
-                Interval = GuardPoll
-            };
-            _guardTimer.Tick += (_, _) =>
-            {
-                var silence = StartupProgress.SinceLastReport;
-                if (silence < GuardTimeout) return;
-                Debug.WriteLine($"BootMusic: boot silent for {silence.TotalSeconds:F0}s " +
-                                "without reporting complete — fading on the guard timer.");
-                BeginFadeOut();
-            };
-            _guardTimer.Start();
+            if (StartupProgress.IsComplete) BeginFadeOut();
         }
         catch (Exception ex)
         {
@@ -179,8 +141,8 @@ internal static class BootMusic
     }
 
     /// <summary>
-    /// Ramp the volume down and dispose. Idempotent — Complete() firing twice,
-    /// or racing the guard timer, must not restart the ramp.
+    /// Ramp the volume down and dispose. Idempotent — Complete() firing twice
+    /// must not restart the ramp.
     /// </summary>
     public static void BeginFadeOut()
     {
@@ -192,9 +154,6 @@ internal static class BootMusic
 
         try
         {
-            _guardTimer?.Stop();
-            _guardTimer = null;
-
             _fadeStartedUtc = DateTime.UtcNow;
             _fadeTimer = new DispatcherTimer(DispatcherPriority.Render) { Interval = FadeStep };
             _fadeTimer.Tick += (_, _) =>
@@ -229,8 +188,6 @@ internal static class BootMusic
 
         try { _fadeTimer?.Stop(); } catch { }
         _fadeTimer = null;
-        try { _guardTimer?.Stop(); } catch { }
-        _guardTimer = null;
 
         var player = _player;
         _player = null;

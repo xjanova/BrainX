@@ -160,10 +160,15 @@ function adoptManifest(rows) {
 
 function armBootDeadline() {
     clearTimeout(bootDeadline);
-    bootDeadline = setTimeout(() => {
-        STEPS.forEach(s => { if (!state.done.has(s.id)) markStep(s.id, 'skip'); });
-        extraSteps.forEach(s => { if (!state.done.has(s.id)) markStep(s.id, 'skip'); });
-    }, BOOT_DEADLINE_MS);
+    bootDeadline = setTimeout(settleStragglers, BOOT_DEADLINE_MS);
+}
+
+/** Settle every row still pending as skipped, which lifts the curtain. Two
+ *  callers: the deadline above, for a host that went quiet, and the host's own
+ *  watchdog (`hudBootGiveUp`), for a boot it has decided will not finish. */
+function settleStragglers() {
+    STEPS.forEach(s => { if (!state.done.has(s.id)) markStep(s.id, 'skip'); });
+    extraSteps.forEach(s => { if (!state.done.has(s.id)) markStep(s.id, 'skip'); });
 }
 
 /** Tick a row the host owns.
@@ -310,10 +315,34 @@ function markStep(id, status = 'ok') {
 function finishBoot() {
     if (state.finished) return;
     state.finished = true;
-    post({ type: 'hudBootDone' });      // releases the splash covering all of this
+    post({ type: 'hudBootDone' });      // every row settled: the host stops its heartbeat
     // Let the bar visibly reach 100% before the curtain lifts; snapping both at
     // once reads as a glitch rather than a completion.
-    setTimeout(() => $('hud-boot')?.classList.add('done'), 260);
+    setTimeout(liftCurtain, 260);
+}
+
+/** Lift the curtain, and tell the host once it is GONE — not when it starts to
+ *  go. The boot music fades on `hudBootClosed`, and the owner's rule is that it
+ *  fades after the loading screen has closed, never while any of it is still on
+ *  screen. `hudBootDone` is ~800 ms too early for that: the bar holds at 100%,
+ *  then the curtain takes 520 ms to fade. */
+function liftCurtain() {
+    const el = $('hud-boot');
+    let told = false;
+    const closed = () => {
+        if (told) return;
+        told = true;
+        post({ type: 'hudBootClosed' });
+    };
+    if (!el) { closed(); return; }
+    el.addEventListener('transitionend', e => {
+        if (e.target === el && e.propertyName === 'opacity') closed();
+    });
+    el.classList.add('done');
+    // transitionend never comes when the fade does not run — a WebView that is
+    // hidden (another view, 2D mode), a style that stopped transitioning. Set
+    // well past the 520 ms fade in hud.css so it never beats the real thing.
+    setTimeout(closed, 1000);
 }
 
 // ── Panel renderers ──────────────────────────────────────────────
@@ -1272,6 +1301,10 @@ function onHudMessage(evt) {
         case 'hudBootHost':
             noteHostStep(m.payload?.id, m.payload?.label, m.payload?.done, m.payload?.skipped);
             break;
+        // The host's watchdog: the boot has said nothing for 45 s and is not
+        // going to finish. Show the app anyway — the heartbeat would otherwise
+        // hold this curtain up forever over a row that will never tick.
+        case 'hudBootGiveUp': settleStragglers(); break;
         case 'hudNotice':    renderNotice(m.payload); break;
         // A wallpaper covered by a fullscreen window stops its galaxy (app.js
         // handles the scene); the agent bus is its own render loop and has to

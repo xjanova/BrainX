@@ -44,6 +44,12 @@ public partial class MainWindow
     /// working.</summary>
     private bool _hudBootDone;
 
+    /// <summary>Set when the boot curtain has finished LIFTING — gone from the
+    /// screen, not just told to go. This, not <see cref="_hudBootDone"/>, is
+    /// what the boot music waits for; see
+    /// <see cref="CompleteBootOnceScreensClosed"/>.</summary>
+    private bool _hudBootClosed;
+
     /// <summary>
     /// False until the vault has finished indexing.
     ///
