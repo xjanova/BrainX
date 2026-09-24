@@ -148,13 +148,15 @@ jobs:
             -p:PublishSingleFile=false -o publish/node-win-x64
           Compress-Archive -Path publish/node-win-x64/* -DestinationPath brainx-node-win-x64.zip -Force
 
-      - name: Assemble full node package (server + mcp)
-        # brainx-node-full-win-x64.zip = the server + mcp\ (+ manager\). The
+      - name: Assemble full node package (server + mcp + manager)
+        # brainx-node-full-win-x64.zip = the server + mcp\ + manager\. The
         # current updater prefers it, and repairs an incomplete install from it.
         # brainx-mcp goes in <app>\mcp\ — where the node's ResolveMcpExe looks;
         # /mcp and the BrainX Cloud re-index both run it.
-        # Anything published into publish/node-full-win-x64/manager by a step
-        # BEFORE "Zip full node package" ships in the full package too.
+        # BrainX Server Manager goes in <app>\manager\ (single file, self-
+        # contained: the server box has no .NET Desktop runtime). It shadow-
+        # copies itself before running, so the updater can always replace it.
+        # publish.ps1 -Node builds the same layout for BrainXNode.iss.
         shell: pwsh
         env:
           BUILD_VERSION: ${{ steps.ver.outputs.version }}
@@ -165,14 +167,21 @@ jobs:
           dotnet publish BrainX.Mcp/BrainX.Mcp.csproj `
             -c Release -r win-x64 --self-contained true `
             -p:PublishSingleFile=false -o publish/node-full-win-x64/mcp
+          dotnet publish BrainX.NodeMonitor/BrainX.NodeMonitor.csproj `
+            -c Release -r win-x64 --self-contained true `
+            -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -o publish/node-full-win-x64/manager
 
       - name: Zip full node package
         shell: pwsh
         run: |
+          # Every file the updater's repair check looks for must be here, or a
+          # node would download this package, find it still incomplete, and
+          # keep the gap until the next release.
           if (-not (Test-Path publish/node-full-win-x64/BrainX.Server.exe)) { throw "full node package: BrainX.Server.exe is missing" }
           if (-not (Test-Path publish/node-full-win-x64/mcp/brainx-mcp.exe)) { throw "full node package: mcp\brainx-mcp.exe is missing" }
-          if (Test-Path publish/node-full-win-x64/manager) { Write-Host "full node package: includes manager\" }
-          else { Write-Host "full node package: no manager\ in this build" }
+          if (-not (Test-Path publish/node-full-win-x64/manager/BrainX.ServerManager.exe)) { throw "full node package: manager\BrainX.ServerManager.exe is missing" }
           Compress-Archive -Path publish/node-full-win-x64/* -DestinationPath brainx-node-full-win-x64.zip -Force
           foreach ($z in 'brainx-node-win-x64.zip', 'brainx-node-full-win-x64.zip') {
             Write-Host ("{0}: {1:N1} MB" -f $z, ((Get-Item $z).Length / 1MB))

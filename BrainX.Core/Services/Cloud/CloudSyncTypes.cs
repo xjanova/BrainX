@@ -142,7 +142,7 @@ public sealed class CloudPullPlan
 public sealed class LocalScan
 {
     public List<LocalNote> Notes { get; } = new();
-    public HashSet<string> MissingFolders { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public HashSet<string> MissingFolders { get; } = new(CloudNameComparer.Instance);
     public List<CloudSkip> Skipped { get; } = new();
     public int Ignored { get; set; }
 }

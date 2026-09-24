@@ -123,11 +123,11 @@ public sealed class CloudSyncState
     }
 
     public bool IsFolderSelected(string topFolder) =>
-        Folders.Contains(topFolder, StringComparer.OrdinalIgnoreCase);
+        Folders.Contains(topFolder, CloudNameComparer.Instance);
 
     /// <summary>Cloud paths in <see cref="Uploaded"/> that live under a top-level folder.</summary>
     public List<string> UploadedUnder(string topFolder) =>
-        Uploaded.Keys.Where(p => string.Equals(CloudPathRules.TopFolderOf(p), topFolder, StringComparison.OrdinalIgnoreCase)).ToList();
+        Uploaded.Keys.Where(p => CloudNameComparer.Instance.Equals(CloudPathRules.TopFolderOf(p), topFolder)).ToList();
 
     internal static bool IsSha(string? s) =>
         s is { Length: 64 } && s.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');

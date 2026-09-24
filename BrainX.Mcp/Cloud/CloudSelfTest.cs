@@ -146,8 +146,22 @@ internal static class CloudSelfTest
             "x.txt", "a/<b>.md", "a/b|c.md", "a/b?.md", "con.md", "a/COM1.md", "nul.txt.md", "a//b.md",
             "a /b.md", "a./b.md", "a/b\u0001.md", new string('x', 201) + ".md",
             string.Join("/", Enumerable.Repeat(new string('y', 150), 3)) + ".md",
+            // The server's whitespace rule: any whitespace, and the whole path's ends.
+            "a /b.md", "a　/b.md", " a/b.md", "a/b.md ",
         };
         foreach (var p in bad) Check($"rejected: {Printable(p)}", !CloudPathRules.IsValid(p));
+
+        // Identity is NFC + ignore-case, as the server stores and answers it.
+        var nfdRoot = Path.Combine(Path.GetTempPath(), "nfc-root");
+        Check("ToCloudPath answers in NFC for a decomposed (NFD) name",
+              CloudPathRules.ToCloudPath(nfdRoot, Path.Combine(nfdRoot, "Café", "x.md")) == "Café/x.md");
+        Check("CloudNameComparer: NFD + other case is the same folder",
+              CloudNameComparer.Instance.Equals("CAFÉ", "café")
+              && CloudNameComparer.Instance.GetHashCode("CAFÉ") == CloudNameComparer.Instance.GetHashCode("café"));
+        var nfdState = new CloudSyncState();
+        nfdState.Folders.Add("Café");
+        Check("a folder ticked in NFD is still ticked for its NFC cloud paths",
+              nfdState.IsFolderSelected(CloudPathRules.TopFolderOf("Café/x.md")));
 
         Check("CLAUDE.md at the root is machine-managed", CloudPathRules.IsMachineManaged("CLAUDE.md") && CloudPathRules.IsMachineManaged("claude.md"));
         Check("Notes/CLAUDE.md is ordinary", !CloudPathRules.IsMachineManaged("Notes/CLAUDE.md"));

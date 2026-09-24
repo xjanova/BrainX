@@ -261,10 +261,11 @@ public sealed class CloudSyncEngine
         foreach (var (p, _) in state.Uploaded)
         {
             var top = CloudPathRules.TopFolderOf(p);
-            // Case-insensitive, like the scan's folder lookup: a selection saved
-            // as "programming" for a folder on disk as "Programming" is the same
-            // choice — read as "unticked", it would delete the folder's notes.
-            var selected = folders == null || folders.Contains(top, StringComparer.OrdinalIgnoreCase);
+            // Case- and normalization-insensitive (CloudNameComparer), like the
+            // scan's folder lookup: a selection saved as "programming" (or in NFD)
+            // for a folder the cloud path spells "Programming" (in NFC) is the
+            // same choice — read as "unticked", it would delete the folder's notes.
+            var selected = folders == null || folders.Contains(top, CloudNameComparer.Instance);
             if (selected) uploadedByFolder[top] = uploadedByFolder.GetValueOrDefault(top) + 1;
             if (present.Contains(p)) continue;
             if (selected && scan.MissingFolders.Contains(top)) { plan.HeldForMissingFolder++; continue; }
@@ -718,7 +719,7 @@ public sealed class CloudSyncEngine
                 // Use the name as it is on disk, so the cloud path carries the
                 // real casing even if the selection was saved with another.
                 var actual = onDisk.FirstOrDefault(d => string.Equals(d, f, StringComparison.Ordinal))
-                          ?? onDisk.FirstOrDefault(d => string.Equals(d, f, StringComparison.OrdinalIgnoreCase));
+                          ?? onDisk.FirstOrDefault(d => CloudNameComparer.Instance.Equals(d, f));
                 if (actual == null) { scan.MissingFolders.Add(f); continue; }
                 sources.Add((Path.Combine(rootFull, actual), true));
             }

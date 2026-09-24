@@ -51,6 +51,7 @@ public static class CloudPathRules
     {
         if (string.IsNullOrEmpty(path)) return "empty path";
         if (path.Length > MaxPathLength) return "path longer than 400 characters";
+        if (char.IsWhiteSpace(path[0]) || char.IsWhiteSpace(path[^1])) return "path starts or ends with whitespace";
         if (path[0] == '/') return "rooted path";
         if (path.Length >= 2 && path[1] == ':') return "drive-letter path";
 
@@ -72,7 +73,8 @@ public static class CloudPathRules
             // Windows silently drops a trailing dot or space, so "notes." and
             // "notes" are the same folder there and different ones elsewhere —
             // a path that means two things is not one we can promise to round-trip.
-            if (seg[^1] == ' ' || seg[^1] == '.') return "segment ends with a space or '.'";
+            // Any whitespace (NBSP, ideographic space), as the server rules it.
+            if (char.IsWhiteSpace(seg[^1]) || seg[^1] == '.') return "segment ends with whitespace or '.'";
             var stem = seg;
             var dot = stem.IndexOf('.');
             if (dot >= 0) stem = stem[..dot];
@@ -87,8 +89,11 @@ public static class CloudPathRules
 
     /// <summary>
     /// The cloud path for a file under <paramref name="root"/>, or null when the
-    /// file is not under it. Separators become '/'; nothing else is rewritten —
-    /// a path is either sent as it is or not at all.
+    /// file is not under it. Separators become '/', and the name is Unicode NFC
+    /// — the server's identity for a path. A name saved decomposed (NFD, e.g. a
+    /// vault that came from a Mac) would otherwise be re-sent on every sync,
+    /// because the server answers in NFC. The note is still READ from its real
+    /// on-disk path (LocalNote.FullPath), never from this string.
     /// </summary>
     public static string? ToCloudPath(string root, string fullPath)
     {
@@ -97,8 +102,12 @@ public static class CloudPathRules
         var prefix = rootFull + Path.DirectorySeparatorChar;
         if (!full.StartsWith(prefix, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
             return null;
-        return full[prefix.Length..].Replace(Path.DirectorySeparatorChar, '/');
+        return Nfc(full[prefix.Length..].Replace(Path.DirectorySeparatorChar, '/'));
     }
+
+    /// <summary>Unicode NFC — the form the server stores and answers every path in.</summary>
+    public static string Nfc(string s) =>
+        s.IsNormalized(System.Text.NormalizationForm.FormC) ? s : s.Normalize(System.Text.NormalizationForm.FormC);
 
     /// <summary>
     /// Map a cloud path to a file under <paramref name="root"/>, refusing
@@ -129,4 +138,26 @@ public static class CloudPathRules
     /// <summary>Is a top-level folder name one the folder picker may offer?</summary>
     public static bool IsSelectableFolderName(string name) =>
         !string.IsNullOrEmpty(name) && Validate(name + "/x.md") == null;
+}
+
+/// <summary>
+/// Name identity as the server rules it: Unicode NFC, then ordinal ignore-case.
+/// For folder choices above all — a selection saved in one form and a cloud
+/// path in the other must still be "the same folder", or an unticked-looking
+/// folder would have its notes deleted from the cloud.
+/// </summary>
+public sealed class CloudNameComparer : StringComparer
+{
+    public static readonly CloudNameComparer Instance = new();
+
+    private CloudNameComparer() { }
+
+    public override int Compare(string? x, string? y) =>
+        StringComparer.OrdinalIgnoreCase.Compare(x == null ? null : CloudPathRules.Nfc(x), y == null ? null : CloudPathRules.Nfc(y));
+
+    public override bool Equals(string? x, string? y) =>
+        StringComparer.OrdinalIgnoreCase.Equals(x == null ? null : CloudPathRules.Nfc(x), y == null ? null : CloudPathRules.Nfc(y));
+
+    public override int GetHashCode(string obj) =>
+        StringComparer.OrdinalIgnoreCase.GetHashCode(CloudPathRules.Nfc(obj));
 }
