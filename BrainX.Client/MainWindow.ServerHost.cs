@@ -90,11 +90,14 @@ public partial class MainWindow
 
         try
         {
-            // UseShellExecute so the manager's requireAdministrator manifest
-            // raises the UAC prompt; this app itself stays unelevated.
+            // "runas" asks for elevation BEFORE the exe is opened: the node
+            // hardens its install folder, and an unelevated shell may not be
+            // allowed to read the manifest that would otherwise trigger UAC.
+            // This app itself stays unelevated.
             Process.Start(new ProcessStartInfo(manager)
             {
                 UseShellExecute = true,
+                Verb = "runas",
                 WorkingDirectory = Path.GetDirectoryName(manager)!,
             });
         }
