@@ -298,7 +298,14 @@ internal static partial class Program
         if (cloud)
         {
             args = args.Where(a => !a.Equals("--cloud", StringComparison.OrdinalIgnoreCase)).ToArray();
-            await StartCloudServeAsync().ConfigureAwait(false);
+            try { await StartCloudServeAsync().ConfigureAwait(false); }
+            catch (Exception ex)
+            {
+                // Never fall back to the LOCAL vault here: a session registered
+                // as the cloud brain that quietly served this machine's own
+                // notes would be the worst kind of wrong answer.
+                UseCloudUnavailableVault(ex);
+            }
         }
 
         Log($"Starting MCP server · vault={_vaultPath}");

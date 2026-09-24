@@ -53,6 +53,7 @@ public partial class MainWindow
     private bool _cloudClosing;
     private bool _cloudSuspended;       // vault move in progress
     private bool _cloudUiUpdating;      // suppress Click handlers while the card is rebuilt
+    private bool _cloudPrompting;       // a cloud question is on screen — timers must not start a sync under it
     private DispatcherTimer? _cloudDebounceTimer;
     private DispatcherTimer? _cloudPeriodicTimer;
 
@@ -72,9 +73,29 @@ public partial class MainWindow
 
     private bool CloudSignedIn => _cloudRecord?.IsSignedIn == true;
 
+    /// <summary>
+    /// A modal question from this card. A MessageBox still pumps the
+    /// dispatcher, so the auto-sync timers keep ticking under it — and a sync
+    /// started while the owner is deciding about a folder would write the
+    /// same state the answer is about to change. While one is open, syncs wait.
+    /// </summary>
+    private MessageBoxResult CloudAsk(string text, MessageBoxButton buttons, MessageBoxImage image)
+    {
+        _cloudPrompting = true;
+        try { return MessageBox.Show(this, text, "BrainX Cloud", buttons, image); }
+        finally { _cloudPrompting = false; }
+    }
+
     private bool CloudAutoSyncActive =>
         CloudSignedIn && !_cloudClosing && !_cloudSuspended
-        && _cloudState is { AutoSync: true } s && s.Folders.Count > 0;
+        && _cloudState is { AutoSync: true } && CloudHasWork;
+
+    /// <summary>
+    /// Something for a sync to do: a ticked folder, or notes this vault still
+    /// owns in the cloud (an unticked folder whose notes the owner chose to
+    /// remove — they must still be deleted when the LAST folder is unticked).
+    /// </summary>
+    private bool CloudHasWork => _cloudState is { } s && (s.Folders.Count > 0 || s.Uploaded.Count > 0);
 
     // ═════════════════════════════════════════════════════════════════
     // LIFECYCLE
@@ -333,7 +354,7 @@ public partial class MainWindow
         CloudSignInBtn.IsEnabled = !busy;
         CloudSignInBtn.Content = busy && !CloudSignedIn ? "Signing in…" : "Sign in";
         CloudKeyBox.IsEnabled = !busy;
-        CloudSyncBtn.IsEnabled = !busy && !syncing && (_cloudState?.Folders.Count ?? 0) > 0;
+        CloudSyncBtn.IsEnabled = !busy && !syncing && CloudHasWork;
         CloudSyncBtn.Content = syncing ? "Syncing…" : "Sync now";
         CloudCancelBtn.Visibility = syncing ? Visibility.Visible : Visibility.Collapsed;
         CloudCancelBtn.IsEnabled = syncing;
@@ -425,7 +446,20 @@ public partial class MainWindow
             var previous = _cloudRecord;
             // Saved even if the window is closing now: the sign-in happened
             // server-side, and dropping its token would orphan it.
-            _cloudRecord = _cloudStore.SaveLogin(login, device, key);
+            try
+            {
+                _cloudRecord = _cloudStore.SaveLogin(login, device, key);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                                           or System.Security.Cryptography.CryptographicException)
+            {
+                // Could not keep the sign-in on this PC. Hand the token back
+                // rather than leave a live one nobody holds.
+                _ = RetireOldDeviceTokenAsync(login.Token);
+                if (!_cloudClosing)
+                    SetCloudStatus("Signed in, but this PC couldn't store the sign-in (is the user profile folder writable?). Please try again.", warn: true);
+                return;
+            }
             _cloudApi.SetToken(login.Token);
             key = "";
             if (previous?.Token is { Length: > 0 } oldToken && previous.TokenId != login.TokenId)
@@ -468,12 +502,12 @@ public partial class MainWindow
     private async void CloudSignOut_Click(object sender, RoutedEventArgs e)
     {
         if (_cloudBusy || _cloudApi == null || !CloudSignedIn) return;
-        var ok = MessageBox.Show(this,
+        var ok = CloudAsk(
             "Sign out of BrainX Cloud on this PC?\n\n" +
             "Your notes stay in the cloud and other machines keep their access. " +
             "This PC stops syncing and its access token is revoked.",
-            "BrainX Cloud", MessageBoxButton.OKCancel, MessageBoxImage.Question);
-        if (ok != MessageBoxResult.OK) return;
+            MessageBoxButton.OKCancel, MessageBoxImage.Question);
+        if (ok != MessageBoxResult.OK || _cloudBusy || !CloudSignedIn) return;
 
         _cloudBusy = true;
         UpdateCloudButtons();
@@ -494,10 +528,10 @@ public partial class MainWindow
             catch (CloudApiException)
             {
                 if (_cloudClosing) return;
-                var anyway = MessageBox.Show(this,
+                var anyway = CloudAsk(
                     "BrainX Cloud can't be reached, so this PC's access token can't be revoked right now.\n\n" +
                     "Sign out on this PC anyway? You can revoke the token later from the access-token list on another machine.",
-                    "BrainX Cloud", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                    MessageBoxButton.YesNo, MessageBoxImage.Warning);
                 if (anyway != MessageBoxResult.Yes)
                 {
                     SetCloudStatus(CloudMessage(CloudErrorCodes.Network), warn: true);
@@ -583,14 +617,14 @@ public partial class MainWindow
             var owned = _cloudState.UploadedUnder(token);
             if (owned.Count > 0)
             {
-                var answer = MessageBox.Show(this,
+                var answer = CloudAsk(
                     $"{label} has {owned.Count.ToString("N0", CultureInfo.InvariantCulture)} note(s) in BrainX Cloud.\n\n" +
                     "Remove them from the cloud as well?\n\n" +
                     "Yes — delete them from the cloud at the next sync.\n" +
                     "No — keep them in the cloud; they just stop syncing from this PC.\n" +
                     "Cancel — keep the folder ticked.",
-                    "BrainX Cloud", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
-                if (answer == MessageBoxResult.Cancel || answer == MessageBoxResult.None)
+                    MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+                if (answer == MessageBoxResult.Cancel || answer == MessageBoxResult.None || _cloudSyncRunning)
                 {
                     _cloudUiUpdating = true;
                     cb.IsChecked = true;
@@ -609,7 +643,7 @@ public partial class MainWindow
         SaveCloudState();
         UpdateCloudButtons();
         if (CloudAutoSyncActive) ScheduleCloudSync(TimeSpan.FromSeconds(5));
-        else if (_cloudState.Folders.Count > 0 && !_cloudState.AutoSync)
+        else if (CloudHasWork && !_cloudState.AutoSync)
             SetCloudStatus("Folder choice saved. Press Sync now to apply it.");
     }
 
@@ -655,13 +689,13 @@ public partial class MainWindow
             return;
         }
         if (_cloudSyncRunning) { _cloudSyncAgain = true; return; }
-        if (_cloudBusy)
+        if (_cloudBusy || _cloudPrompting)
         {
             if (manual) SetCloudStatus("One moment — another BrainX Cloud action is still running.");
             else ScheduleCloudSync(TimeSpan.FromSeconds(30));
             return;
         }
-        if (_cloudState.Folders.Count == 0)
+        if (!CloudHasWork)
         {
             if (manual) SetCloudStatus("Tick at least one folder to upload first.", warn: true);
             return;
@@ -722,11 +756,11 @@ public partial class MainWindow
             var n = result.HeldBackDeletes.ToString("N0", CultureInfo.InvariantCulture);
             if (manual)
             {
-                var answer = MessageBox.Show(this,
+                var answer = CloudAsk(
                     $"{n} note(s) disappeared from folders you sync — more than half of a folder.\n\n" +
                     "That can be a folder moved or emptied by mistake, so they have NOT been removed from BrainX Cloud yet.\n\n" +
                     "Remove them from the cloud too?",
-                    "BrainX Cloud", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                    MessageBoxButton.YesNo, MessageBoxImage.Warning);
                 if (answer == MessageBoxResult.Yes)
                 {
                     await RunCloudSyncAsync(manual: true, allowMassDelete: true);
@@ -961,12 +995,12 @@ public partial class MainWindow
     private async void CloudRevokeToken_Click(object sender, RoutedEventArgs e)
     {
         if (_cloudBusy || _cloudApi == null || sender is not Button { Tag: CloudTokenInfo t }) return;
-        var answer = MessageBox.Show(this,
+        var answer = CloudAsk(
             $"Revoke “{(string.IsNullOrWhiteSpace(t.Name) ? "(unnamed)" : t.Name)}”?\n\n" +
             "Any machine using it loses access to BrainX Cloud immediately. This can't be undone — " +
             "you would create a new token instead.",
-            "BrainX Cloud", MessageBoxButton.YesNo, MessageBoxImage.Warning);
-        if (answer != MessageBoxResult.Yes) return;
+            MessageBoxButton.YesNo, MessageBoxImage.Warning);
+        if (answer != MessageBoxResult.Yes || _cloudBusy) return;
 
         var record = _cloudRecord;
         _cloudBusy = true;

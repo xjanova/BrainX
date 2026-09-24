@@ -90,6 +90,13 @@ internal static partial class Program
             Console.Error.WriteLine("✗ " + CloudFriendly(ex.Code));
             return 2;
         }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or CryptographicException)
+        {
+            // Local trouble (profile folder not writable, DPAPI refusing). The
+            // message names a path at most — never a token or key.
+            Console.Error.WriteLine($"✗ This machine's BrainX Cloud files could not be read or written: {ex.Message}");
+            return 5;
+        }
     }
 
     private static int CloudHelp()
@@ -569,8 +576,22 @@ internal static partial class Program
 
         if (string.IsNullOrEmpty(token))
         {
-            UseCloudPlaceholderVault("_signed-out");
-            _cloudStatus = "not signed in — run `brainx-mcp cloud login <license key>` on this machine";
+            // Signed in once but the token cannot be used here any more (a
+            // profile restored elsewhere, DPAPI refusing it): the notes cached
+            // for that account are still the owner's — serve them, unsynced,
+            // rather than an empty brain.
+            var knownCache = rec?.AccountId is { Length: > 0 } known ? CloudCredentialStore.CacheDirFor(known) : null;
+            if (knownCache != null && Directory.Exists(knownCache))
+            {
+                _vaultPath = knownCache;
+                _cloudStatus = "not signed in — serving the notes cached earlier, without syncing; run `brainx-mcp cloud login <license key>`";
+                if (!File.Exists(Path.Combine(_vaultPath, ".obsidianx", "brain-export.json"))) RunCloudExport("cached");
+            }
+            else
+            {
+                UseCloudPlaceholderVault("_signed-out");
+                _cloudStatus = "not signed in — run `brainx-mcp cloud login <license key>` on this machine";
+            }
             Log("cloud: " + _cloudStatus);
             return;
         }
@@ -617,6 +638,20 @@ internal static partial class Program
         }
 
         _cloudWorker = Task.Run(() => CloudWorkerLoopAsync(startup, _cloudCts.Token));
+    }
+
+    /// <summary>Cloud mode could not even set up its cache folder: serve an empty brain from temp and say why.</summary>
+    internal static void UseCloudUnavailableVault(Exception ex)
+    {
+        _cloudMode = true;
+        _cloudStatus = $"cloud cache unavailable ({ex.GetType().Name}) — nothing to serve; check %LOCALAPPDATA%\\BrainX";
+        Log($"cloud: could not start: {ex.GetType().Name}: {ex.Message}");
+        try
+        {
+            _vaultPath = Path.Combine(Path.GetTempPath(), "brainx-cloud-unavailable");
+            Directory.CreateDirectory(_vaultPath);
+        }
+        catch { /* the tools answer "no brain-export" — still better than the local vault */ }
     }
 
     private static void UseCloudPlaceholderVault(string name)
@@ -797,6 +832,7 @@ internal static partial class Program
         {
             _cloudOnline = true;
             _cloudLastPushUtc = DateTime.UtcNow;
+            _cloudStatus = "in sync";
             if (r.Uploaded > 0) Log($"cloud push: sent {r.Uploaded} note(s)");
             foreach (var s in r.Skipped.Take(5)) Log($"cloud push: skipped {s.Path}: {s.Reason}");
             return PushOutcome.Done;
@@ -809,6 +845,14 @@ internal static partial class Program
             return PushOutcome.Retry;
         }
         if (r.ErrorCode is CloudErrorCodes.Network or CloudErrorCodes.Timeout) _cloudOnline = false;
+        // brain_stats must not keep saying "in sync" while writes are refused.
+        _cloudStatus = r.ErrorCode switch
+        {
+            CloudErrorCodes.Network or CloudErrorCodes.Timeout => "offline — new notes are kept here and sent when the cloud is reachable",
+            CloudErrorCodes.LicenseExpired => "license expired — new notes stay on this machine until it is renewed at " + CloudEndpoints.BuyUrl,
+            CloudErrorCodes.Forbidden => "this token is read-only — new notes stay on this machine",
+            _ => "last push failed: " + CloudFriendly(r.ErrorCode),
+        };
         Log($"cloud push: {r.ErrorCode} — {CloudFriendly(r.ErrorCode)} (the notes stay in the cache and are retried)");
         // A license, permission or quota problem will not fix itself in
         // seconds, and retrying it in a loop would only hammer the server. The
