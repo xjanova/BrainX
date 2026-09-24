@@ -643,18 +643,22 @@ internal static class CliInstall
             Console.WriteLine();
         }
 
+        // User scope, like the desktop app's own registration: the cloud brain
+        // is for every project on this machine, not the folder this ran in.
         Console.WriteLine($"[1/3] Claude Code (CLI): removing any existing {name} registration...");
-        await RunClaudeAsync("mcp", "remove", name, "-s", "local").ConfigureAwait(false);
+        await RunClaudeAsync("mcp", "remove", name, "-s", "user").ConfigureAwait(false);
         Console.WriteLine("[2/3] Claude Code (CLI): adding the cloud-mode registration...");
         var rc = await RunClaudeAsync(
-            "mcp", "add", name, exePath,
+            "mcp", "add", name,
+            "-s", "user",
             "-e", "BRAINX_CLOUD=1",
-            "-e", $"BRAINX_MCP_VERSION={Program.ServerVersion}"
+            "-e", $"BRAINX_MCP_VERSION={Program.ServerVersion}",
+            "--", exePath
         ).ConfigureAwait(false);
         if (rc != 0)
         {
             Console.WriteLine($"  ✗ `claude mcp add` exited with code {rc}. Run it manually:");
-            Console.WriteLine($"    claude mcp add {name} \"{exePath}\" -e BRAINX_CLOUD=1 -e BRAINX_MCP_VERSION={Program.ServerVersion}");
+            Console.WriteLine($"    claude mcp add {name} -s user -e BRAINX_CLOUD=1 -e BRAINX_MCP_VERSION={Program.ServerVersion} -- \"{exePath}\"");
             return rc;
         }
         Console.WriteLine("[3/3] Claude Desktop: updating claude_desktop_config.json...");

@@ -127,7 +127,7 @@ public sealed class CloudSyncState
 
     /// <summary>Cloud paths in <see cref="Uploaded"/> that live under a top-level folder.</summary>
     public List<string> UploadedUnder(string topFolder) =>
-        Uploaded.Keys.Where(p => string.Equals(CloudPathRules.TopFolderOf(p), topFolder, StringComparison.Ordinal)).ToList();
+        Uploaded.Keys.Where(p => string.Equals(CloudPathRules.TopFolderOf(p), topFolder, StringComparison.OrdinalIgnoreCase)).ToList();
 
     internal static bool IsSha(string? s) =>
         s is { Length: 64 } && s.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
