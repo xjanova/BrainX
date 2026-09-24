@@ -11,6 +11,11 @@ name: CI
 # self-contained runtimes and packs a Velopack installer — minutes of work to
 # answer a question the compiler answers in seconds. Release stays the only
 # thing that builds release artifacts; this is only the gate in front of it.
+#
+# And the gate INSIDE it: build-and-release.yml calls this file (workflow_call)
+# and publishes nothing unless it passes on the commit being released. A PR is
+# not the only way into main — on 2026-09-23 main was pushed to directly, and
+# v2.0.408 reached every installed client with no check run on GitHub at all.
 on:
   # pull_request ONLY, and the omission is the point. The first version also
   # had `push: branches-ignore: [main]`, which looked like it covered branches
@@ -19,23 +24,47 @@ on:
   # two windows runners to answer one question. Observed on PR #2: two `build`
   # check runs, same commit, same result.
   #
-  # Nothing here reaches main without a PR, so pull_request is full coverage.
-  # A branch with no PR gets no CI, which is correct: it also cannot merge.
+  # A branch with no PR gets no CI of its own. What it can no longer do is
+  # release untested: main is one `git push` away without any PR, so the
+  # release pipeline runs this file itself (workflow_call, below).
   pull_request:
   # For a branch you want compiled before opening the PR.
   workflow_dispatch:
+  # build-and-release.yml's `test` job. Not the same question asked twice: a
+  # PR's check ran on its merge preview, and main can move after that — or be
+  # pushed to with no PR at all. This run is about the commit being published.
+  workflow_call:
 
 # A second push supersedes the first: the older run is answering a question
 # about code that no longer exists.
+#
+# github.workflow is in the key for the CALLED run, where every github.* value
+# is the caller's: its group is "ci-Build and Release-refs/heads/main", so a CI
+# dispatched by hand on main cannot cancel the gate in front of a release. And
+# it can never equal the caller's own "release-…" group — a called workflow
+# that shares its caller's group is cancelled as a deadlock.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# The harness runs whatever the branch contains, and reading is all it needs.
+# Called from the release pipeline it would otherwise hold that run's write
+# grant — the one that tags and publishes.
+permissions:
+  contents: read
+
 jobs:
+  # No `if:` on this job or its steps. In the called run github.event_name is
+  # the caller's (push / workflow_dispatch), so a condition written with pull
+  # requests in mind would quietly decide whether releases are tested at all.
   build:
     # windows-latest is not a preference. BrainX.Client is WPF and does not
     # compile anywhere else, and the solution builds as one unit.
     runs-on: windows-latest
+    # The whole job took 3.5 minutes on 2026-09-23 (harness 484 checks: 72 s).
+    # Without a limit a hung harness holds the runner — and the release
+    # waiting on it — for GitHub's default six hours before anyone hears.
+    timeout-minutes: 20
 
     steps:
       - name: Checkout

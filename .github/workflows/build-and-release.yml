@@ -2,6 +2,11 @@ name: Build and Release
 
 # Triggers a build on every push to main (which is what happens after a PR
 # merge), and lets us kick one off manually from the Actions tab too.
+#
+# Nothing is built for release until the verification harness has passed on
+# the same commit — the `test` job, which runs ci.yml. A push to main does not
+# need a PR (v2.0.408 went out on 2026-09-23 with no check run on GitHub), so
+# the gate sits on the path that publishes, not beside it.
 on:
   push:
     branches: [main]
@@ -18,7 +23,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The same checks a pull request gets (ci.yml), on this run's commit —
+  # called rather than copied, so there is one definition of "the checks
+  # pass". `./` resolves to the ci.yml of this same commit.
+  test:
+    uses: ./.github/workflows/ci.yml
+    # The write grant above is for tagging; the harness only reads.
+    permissions:
+      contents: read
+
   release:
+    # A failed or cancelled `test` skips this whole job: no build, no tag, no
+    # Release — installed clients and nodes are offered nothing new.
+    needs: test
     runs-on: windows-latest
 
     steps:
