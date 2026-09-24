@@ -24,6 +24,9 @@ public sealed class CloudOptions
     /// <summary>Failed token presentations per client IP per minute before 429.</summary>
     public int AuthFailuresPerMinutePerIp { get; init; } = 60;
     public string RenewUrl { get; init; } = "https://xman4289.com/products/brainx";
+    /// <summary>Restrict CloudRoot to SYSTEM + Administrators (see CloudRootAcl).
+    /// On for the real node; off by default so tests never touch ACLs.</summary>
+    public bool HardenRootAcl { get; init; }
 }
 
 /// <summary>An authenticated cloud request: the token and the account it belongs to.</summary>
@@ -60,8 +63,14 @@ public sealed class CloudService : IMcpTenantHooks, IDisposable
         Options = options;
         Clock = clock ?? TimeProvider.System;
         var root = Path.GetFullPath(options.Root);
+        var createdNow = !Directory.Exists(root);
         Directory.CreateDirectory(root);
         RootDir = root;
+
+        // Before cloud.db / cloud.key exist, so they inherit the hardened ACL.
+        var (aclOutcome, aclMessage) = CloudRootAcl.Apply(root, options.HardenRootAcl, createdNow);
+        RootAcl = aclOutcome;
+        if (aclOutcome != CloudRootAcl.Outcome.SkippedDisabled) Console.WriteLine($"[cloud] {aclMessage}");
 
         Store = new CloudStore(Path.Combine(root, "cloud.db"));
         var secrets = CloudSecrets.LoadOrCreate(Path.Combine(root, "cloud.key"));
@@ -76,6 +85,7 @@ public sealed class CloudService : IMcpTenantHooks, IDisposable
     public CloudOptions Options { get; }
     public TimeProvider Clock { get; }
     public string RootDir { get; }
+    public CloudRootAcl.Outcome RootAcl { get; }
     public CloudStore Store { get; }
     public CloudAccounts Accounts { get; }
     public CloudLicenses Licenses { get; }

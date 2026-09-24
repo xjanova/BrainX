@@ -15,7 +15,11 @@ public sealed record UploadSummary(int Written, int Unchanged, int Changed, long
 
 public sealed record DeleteSummary(int Deleted, long UsedBytes, IReadOnlyList<string> Failed);
 
-public sealed record NoteEntry(string Path, long Size, long MtimeTicks, string Sha256)
+/// <param name="Path">What the API calls this note: NFC, forward slashes.</param>
+/// <param name="DiskPath">Its actual name on disk (relative, forward slashes). The
+/// same as <paramref name="Path"/> for everything the API wrote; differs only for
+/// a file the MCP child created in another case or in decomposed Unicode.</param>
+public sealed record NoteEntry(string Path, string DiskPath, long Size, long MtimeTicks, string Sha256)
 {
     public DateTime ModifiedUtc => new(MtimeTicks, DateTimeKind.Utc);
 }
@@ -205,20 +209,21 @@ public sealed class CloudVaults
             {
                 foreach (var (full, size, mtime) in enumeration)
                 {
-                    var rel = Path.GetRelativePath(v.VaultDir, full).Replace('\\', '/');
-                    if (CloudPaths.Validate(rel) != null) continue;      // never advertise what cannot be fetched
-                    if (entries.ContainsKey(rel)) continue;              // A.md + a.md on a case-sensitive disk: first wins
+                    var disk = Path.GetRelativePath(v.VaultDir, full).Replace('\\', '/');
+                    var api = CloudPaths.Normalize(disk);
+                    if (CloudPaths.Validate(api) != null) continue;      // never advertise what cannot be fetched
+                    if (entries.ContainsKey(api)) continue;              // A.md + a.md, or NFC + NFD twins: first wins
 
-                    var sha = v.Entries.TryGetValue(rel, out var old)
+                    var sha = v.Entries.TryGetValue(api, out var old)
                               && old.Size == size && old.MtimeTicks == mtime
-                              && string.Equals(old.Path, rel, StringComparison.Ordinal)
+                              && string.Equals(old.DiskPath, disk, StringComparison.Ordinal)
                         ? old.Sha256
                         : TryHashFile(full);
                     if (sha is null) continue;                           // vanished or unreadable mid-scan
 
-                    entries[rel] = new NoteEntry(rel, size, mtime, sha);
+                    entries[api] = new NoteEntry(api, disk, size, mtime, sha);
                     used += size;
-                    AddDirs(dirs, rel);
+                    AddDirs(dirs, api, disk);
                 }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -254,15 +259,15 @@ public sealed class CloudVaults
         }
     }
 
-    private static void AddDirs(Dictionary<string, string> dirs, string rel)
+    /// <summary>Record every folder of a note: NFC name → name on disk. NFC does
+    /// not add or remove '/', so both paths have the same folders in order.</summary>
+    private static void AddDirs(Dictionary<string, string> dirs, string api, string disk)
     {
-        var slash = rel.IndexOf('/');
-        while (slash > 0)
-        {
-            var prefix = rel[..slash];
-            dirs.TryAdd(prefix, prefix);
-            slash = rel.IndexOf('/', slash + 1);
-        }
+        var apiSegs = api.Split('/');
+        var diskSegs = disk.Split('/');
+        if (apiSegs.Length != diskSegs.Length) return;
+        for (var i = 1; i < apiSegs.Length; i++)
+            dirs.TryAdd(string.Join('/', apiSegs, 0, i), string.Join('/', diskSegs, 0, i));
     }
 
     // ───────────────────────── read side ─────────────────────────
@@ -394,13 +399,15 @@ public sealed class CloudVaults
     public (string Content, string Sha256)? ReadNote(string accountId, string validatedPath)
     {
         var v = For(accountId);
+        validatedPath = CloudPaths.Normalize(validatedPath);
         var full = CloudPaths.ResolveInside(v.VaultRoot, validatedPath);
         if (full is null) return null;
         if (!File.Exists(full))
         {
-            // NTFS already matched case-insensitively; a case-sensitive disk needs help.
-            if (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()) return null;
-            full = ResolveCaseInsensitive(v.VaultRoot, validatedPath);
+            // Not under that exact name. NTFS already matched case; a file the
+            // MCP child named in decomposed Unicode (or another case, on a
+            // case-sensitive disk) is found by comparing NFC names.
+            full = ResolveLoose(v.VaultRoot, validatedPath);
             if (full is null) return null;
         }
         try
@@ -415,7 +422,9 @@ public sealed class CloudVaults
         catch (DirectoryNotFoundException) { return null; }
     }
 
-    private static string? ResolveCaseInsensitive(string root, string rel)
+    /// <summary>Walk <paramref name="rel"/> segment by segment, matching each by
+    /// path identity (NFC + case-insensitive) rather than by exact name.</summary>
+    private static string? ResolveLoose(string root, string rel)
     {
         var current = root;
         foreach (var seg in rel.Split('/'))
@@ -424,13 +433,14 @@ public sealed class CloudVaults
             try
             {
                 foreach (var entry in Directory.EnumerateFileSystemEntries(current))
-                    if (string.Equals(Path.GetFileName(entry), seg, StringComparison.OrdinalIgnoreCase)) { match = entry; break; }
+                    if (CloudPaths.Identity.Equals(CloudPaths.Normalize(Path.GetFileName(entry)), seg)) { match = entry; break; }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
             if (match is null) return null;
             current = match;
         }
-        return CloudPaths.ResolveInside(root, Path.GetRelativePath(root, current).Replace('\\', '/'));
+        var found = CloudPaths.ResolveInside(root, Path.GetRelativePath(root, current).Replace('\\', '/'));
+        return found != null && File.Exists(found) ? found : null;
     }
 
     // ───────────────────────── write side ─────────────────────────
@@ -448,16 +458,18 @@ public sealed class CloudVaults
         var v = For(accountId);
 
         // 1. Everything that needs no lock: shape, size, hash, duplicates.
+        //    Paths are compared in NFC, case-insensitively.
         var prepared = new List<Prepared>(items.Count);
         var inBatch = new HashSet<string>(CloudPaths.Identity);
         foreach (var it in items)
         {
-            var why = CloudPaths.Validate(it.Path);
+            var path = CloudPaths.Normalize(it.Path);
+            var why = CloudPaths.Validate(path);
             if (why != null) return (null, new CloudError(400, "BAD_PATH", $"'{Show(it.Path)}': {why}"));
-            if (CloudPaths.ResolveInside(v.VaultRoot, it.Path) is null)
+            if (CloudPaths.ResolveInside(v.VaultRoot, path) is null)
                 return (null, new CloudError(400, "BAD_PATH", $"'{Show(it.Path)}': resolves outside the vault"));
-            if (!inBatch.Add(it.Path))
-                return (null, new CloudError(400, "BAD_PATH", $"'{Show(it.Path)}' appears twice in one batch (paths are case-insensitive)"));
+            if (!inBatch.Add(path))
+                return (null, new CloudError(400, "BAD_PATH", $"'{Show(it.Path)}' appears twice in one batch (paths are compared case-insensitively, in NFC)"));
 
             byte[] bytes;
             try { bytes = StrictUtf8.GetBytes(it.Content); }
@@ -468,7 +480,7 @@ public sealed class CloudVaults
             var sha = Hex(SHA256.HashData(bytes));
             if (!string.Equals(sha, it.Sha256.Trim(), StringComparison.OrdinalIgnoreCase))
                 return (null, new CloudError(400, "HASH_MISMATCH", $"sha256 of '{Show(it.Path)}' does not match its content"));
-            prepared.Add(new Prepared(it.Path, bytes, sha));
+            prepared.Add(new Prepared(path, bytes, sha));
         }
         if (prepared.Count == 0) return (new UploadSummary(0, 0, 0, v.UsedBytes), null);
 
@@ -482,43 +494,45 @@ public sealed class CloudVaults
             if (v.Deleted) return (null, new CloudError(401, "UNAUTHORIZED", "this account no longer exists"));
             EnsureScannedLocked(v, allowAged: true);
 
-            // 3. Where each note lands: an existing note keeps its spelling;
-            //    a new one joins existing folders under THEIR spelling.
+            // 3. Where each note lands: an existing note keeps its spelling on
+            //    disk; a new one joins existing folders under THEIR spelling.
+            //    Api = the NFC identity the manifest shows; Disk = the real name.
             var batchDirs = new Dictionary<string, string>(CloudPaths.Identity);
-            var plan = new List<(Prepared P, string Target, NoteEntry? Existing)>(prepared.Count);
+            var plan = new List<(Prepared P, string Api, string Disk, NoteEntry? Existing)>(prepared.Count);
             var targets = new HashSet<string>(CloudPaths.Identity);
             foreach (var p in prepared)
             {
-                string target;
                 v.Entries.TryGetValue(p.Requested, out var existing);
-                target = existing?.Path ?? ResolveDirCase(v, batchDirs, p.Requested);
-                targets.Add(target);
-                AddDirs(batchDirs, target);
-                plan.Add((p, target, existing));
+                var disk = existing?.DiskPath ?? ResolveDirCase(v, batchDirs, p.Requested);
+                var api = existing?.Path ?? CloudPaths.Normalize(disk);
+                targets.Add(api);
+                AddDirs(batchDirs, api, disk);
+                plan.Add((p, api, disk, existing));
             }
 
             // A note where a folder must go, or a folder where a note must go.
-            foreach (var (p, target, _) in plan)
+            foreach (var (p, api, disk, _) in plan)
             {
-                var full = CloudPaths.ResolveInside(v.VaultRoot, target);
+                var full = CloudPaths.ResolveInside(v.VaultRoot, disk);
                 if (full is null) return (null, new CloudError(400, "BAD_PATH", $"'{Show(p.Requested)}': resolves outside the vault"));
-                if (v.Dirs.ContainsKey(target) || batchDirs.ContainsKey(target) || Directory.Exists(full))
+                if (v.Dirs.ContainsKey(api) || batchDirs.ContainsKey(api) || Directory.Exists(full))
                     return (null, new CloudError(400, "BAD_PATH", $"'{Show(p.Requested)}': a folder with that name already exists"));
-                var slash = target.IndexOf('/');
-                while (slash > 0)
+                var apiSegs = api.Split('/');
+                var diskSegs = disk.Split('/');
+                for (var i = 1; i < apiSegs.Length && i < diskSegs.Length; i++)
                 {
-                    var prefix = target[..slash];
-                    if (v.Entries.ContainsKey(prefix) || targets.Contains(prefix)
-                        || File.Exists(CloudPaths.ResolveInside(v.VaultRoot, prefix) ?? ""))
-                        return (null, new CloudError(400, "BAD_PATH", $"'{Show(p.Requested)}': '{Show(prefix)}' is a note, not a folder"));
-                    slash = target.IndexOf('/', slash + 1);
+                    var apiPrefix = string.Join('/', apiSegs, 0, i);
+                    var diskPrefix = string.Join('/', diskSegs, 0, i);
+                    if (v.Entries.ContainsKey(apiPrefix) || targets.Contains(apiPrefix)
+                        || File.Exists(CloudPaths.ResolveInside(v.VaultRoot, diskPrefix) ?? ""))
+                        return (null, new CloudError(400, "BAD_PATH", $"'{Show(p.Requested)}': '{Show(apiPrefix)}' is a note, not a folder"));
                 }
             }
 
             // 4. Quota. Replacing notes with smaller ones is always allowed,
             //    even for an account that is already over (quota lowered).
             long delta = 0;
-            foreach (var (p, _, existing) in plan) delta += p.Bytes.LongLength - (existing?.Size ?? 0);
+            foreach (var (p, _, _, existing) in plan) delta += p.Bytes.LongLength - (existing?.Size ?? 0);
             var used = v.UsedBytes;
             if (delta > 0 && used + delta > quotaBytes)
                 return (null, new CloudError(413, "QUOTA_EXCEEDED",
@@ -528,9 +542,9 @@ public sealed class CloudVaults
             //    request's cancellation is deliberately ignored.
             int written = 0, unchanged = 0, changed = 0;
             CloudError? failure = null;
-            foreach (var (p, target, existing) in plan)
+            foreach (var (p, api, disk, existing) in plan)
             {
-                var full = CloudPaths.ResolveInside(v.VaultRoot, target)!;
+                var full = CloudPaths.ResolveInside(v.VaultRoot, disk)!;
                 if (existing is not null && existing.Sha256 == p.Sha && existing.Size == p.Bytes.LongLength && File.Exists(full))
                 {
                     unchanged++;
@@ -564,8 +578,8 @@ public sealed class CloudVaults
                 catch (Exception) { mtime = DateTime.UtcNow.Ticks; v.Dirty = true; }
 
                 used += size - (existing?.Size ?? 0);
-                v.Entries[target] = new NoteEntry(target, size, mtime, p.Sha);
-                AddDirs(v.Dirs, target);
+                v.Entries[api] = new NoteEntry(api, disk, size, mtime, p.Sha);
+                AddDirs(v.Dirs, api, disk);
                 written++;
                 changed++;
             }
@@ -581,26 +595,32 @@ public sealed class CloudVaults
         }
     }
 
+    /// <summary>
+    /// The on-disk path for a NEW note at <paramref name="requested"/> (NFC):
+    /// every folder that already exists — on disk, or earlier in this batch —
+    /// keeps the spelling it has there; the rest is the requested NFC name.
+    /// Folders are looked up by their NFC identity, which is how both maps are keyed.
+    /// </summary>
     private static string ResolveDirCase(AccountVault v, Dictionary<string, string> batchDirs, string requested)
     {
         var segs = requested.Split('/');
         if (segs.Length == 1) return requested;
-        var resolved = new List<string>(segs.Length);
+        var disk = new List<string>(segs.Length);
         for (var i = 0; i < segs.Length - 1; i++)
         {
-            var candidate = resolved.Count == 0 ? segs[i] : string.Join('/', resolved) + "/" + segs[i];
-            if (v.Dirs.TryGetValue(candidate, out var actual) || batchDirs.TryGetValue(candidate, out actual))
+            var apiPrefix = string.Join('/', segs, 0, i + 1);
+            if (v.Dirs.TryGetValue(apiPrefix, out var actual) || batchDirs.TryGetValue(apiPrefix, out actual))
             {
-                resolved.Clear();
-                resolved.AddRange(actual.Split('/'));
+                disk.Clear();
+                disk.AddRange(actual.Split('/'));
             }
             else
             {
-                resolved.Add(segs[i]);
+                disk.Add(segs[i]);
             }
         }
-        resolved.Add(segs[^1]);
-        return string.Join('/', resolved);
+        disk.Add(segs[^1]);
+        return string.Join('/', disk);
     }
 
     /// <summary>
@@ -611,12 +631,15 @@ public sealed class CloudVaults
         string accountId, IReadOnlyList<string> paths, CancellationToken ct)
     {
         var v = For(accountId);
-        foreach (var p in paths)
+        var normalized = new List<string>(paths.Count);
+        foreach (var raw in paths)
         {
+            var p = CloudPaths.Normalize(raw);
             var why = CloudPaths.Validate(p);
-            if (why != null) return (null, new CloudError(400, "BAD_PATH", $"'{Show(p)}': {why}"));
+            if (why != null) return (null, new CloudError(400, "BAD_PATH", $"'{Show(raw)}': {why}"));
             if (CloudPaths.ResolveInside(v.VaultRoot, p) is null)
-                return (null, new CloudError(400, "BAD_PATH", $"'{Show(p)}': resolves outside the vault"));
+                return (null, new CloudError(400, "BAD_PATH", $"'{Show(raw)}': resolves outside the vault"));
+            normalized.Add(p);
         }
 
         EnsureVault(accountId);
@@ -629,10 +652,10 @@ public sealed class CloudVaults
             var deleted = 0;
             var failed = new List<string>();
             var used = v.UsedBytes;
-            foreach (var p in paths.Distinct(CloudPaths.Identity))
+            foreach (var p in normalized.Distinct(CloudPaths.Identity))
             {
                 v.Entries.TryGetValue(p, out var entry);
-                var full = CloudPaths.ResolveInside(v.VaultRoot, entry?.Path ?? p)!;
+                var full = CloudPaths.ResolveInside(v.VaultRoot, entry?.DiskPath ?? p)!;
                 if (!File.Exists(full))
                 {
                     if (entry != null) { v.Entries.Remove(p); used -= entry.Size; }
@@ -674,7 +697,7 @@ public sealed class CloudVaults
             {
                 if (Directory.EnumerateFileSystemEntries(current).Any()) return;
                 Directory.Delete(current, recursive: false);
-                v.Dirs.Remove(Path.GetRelativePath(v.VaultRoot, current).Replace('\\', '/'));
+                v.Dirs.Remove(CloudPaths.Normalize(Path.GetRelativePath(v.VaultRoot, current).Replace('\\', '/')));
             }
             catch (Exception) { return; }   // raced with a writer, or in use — leave it
             current = Path.GetDirectoryName(current) ?? root;

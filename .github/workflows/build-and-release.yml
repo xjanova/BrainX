@@ -135,6 +135,9 @@ jobs:
       - name: Publish + zip node (server self-update)
         # brainx-node-win-x64.zip is exactly the asset SelfUpdateService looks
         # for. BUILD_VERSION stamps the node so its version-compare matches the tag.
+        # It stays SERVER ONLY: nodes still running the old updater download it
+        # into memory under a 25 s timeout, so it must not grow. It carries the
+        # new updater, which then repairs the install from the full package.
         shell: pwsh
         env:
           BUILD_VERSION: ${{ steps.ver.outputs.version }}
@@ -143,12 +146,37 @@ jobs:
           dotnet publish BrainX.Server/BrainX.Server.csproj `
             -c Release -r win-x64 --self-contained true `
             -p:PublishSingleFile=false -o publish/node-win-x64
-          # brainx-mcp in <app>\mcp\ — where the node's ResolveMcpExe looks. /mcp and
-          # the BrainX Cloud re-index both run it; without it they stay off.
+          Compress-Archive -Path publish/node-win-x64/* -DestinationPath brainx-node-win-x64.zip -Force
+
+      - name: Assemble full node package (server + mcp)
+        # brainx-node-full-win-x64.zip = the server + mcp\ (+ manager\). The
+        # current updater prefers it, and repairs an incomplete install from it.
+        # brainx-mcp goes in <app>\mcp\ — where the node's ResolveMcpExe looks;
+        # /mcp and the BrainX Cloud re-index both run it.
+        # Anything published into publish/node-full-win-x64/manager by a step
+        # BEFORE "Zip full node package" ships in the full package too.
+        shell: pwsh
+        env:
+          BUILD_VERSION: ${{ steps.ver.outputs.version }}
+          BUILD_COMMIT:  ${{ steps.ver.outputs.sha }}
+        run: |
+          New-Item -ItemType Directory -Force publish/node-full-win-x64 | Out-Null
+          Copy-Item -Path publish/node-win-x64/* -Destination publish/node-full-win-x64 -Recurse -Force
           dotnet publish BrainX.Mcp/BrainX.Mcp.csproj `
             -c Release -r win-x64 --self-contained true `
-            -p:PublishSingleFile=false -o publish/node-win-x64/mcp
-          Compress-Archive -Path publish/node-win-x64/* -DestinationPath brainx-node-win-x64.zip -Force
+            -p:PublishSingleFile=false -o publish/node-full-win-x64/mcp
+
+      - name: Zip full node package
+        shell: pwsh
+        run: |
+          if (-not (Test-Path publish/node-full-win-x64/BrainX.Server.exe)) { throw "full node package: BrainX.Server.exe is missing" }
+          if (-not (Test-Path publish/node-full-win-x64/mcp/brainx-mcp.exe)) { throw "full node package: mcp\brainx-mcp.exe is missing" }
+          if (Test-Path publish/node-full-win-x64/manager) { Write-Host "full node package: includes manager\" }
+          else { Write-Host "full node package: no manager\ in this build" }
+          Compress-Archive -Path publish/node-full-win-x64/* -DestinationPath brainx-node-full-win-x64.zip -Force
+          foreach ($z in 'brainx-node-win-x64.zip', 'brainx-node-full-win-x64.zip') {
+            Write-Host ("{0}: {1:N1} MB" -f $z, ((Get-Item $z).Length / 1MB))
+          }
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -175,6 +203,7 @@ jobs:
           files: |
             BrainX-${{ steps.ver.outputs.version }}-win-x64.zip
             brainx-node-win-x64.zip
+            brainx-node-full-win-x64.zip
             Releases/*
           generate_release_notes: true
           fail_on_unmatched_files: true

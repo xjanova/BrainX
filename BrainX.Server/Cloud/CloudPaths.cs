@@ -1,3 +1,5 @@
+using System.Text;
+
 namespace BrainX.Server.Cloud;
 
 /// <summary>
@@ -13,6 +15,13 @@ namespace BrainX.Server.Cloud;
 ///   2. <see cref="ResolveInside"/> — after Path.GetFullPath the target must
 ///      still be under the account's vault root. Layer 1 should make this
 ///      impossible to fail; layer 2 is what holds if layer 1 ever has a hole.
+///
+/// UNICODE: the API speaks NFC only. Every path a client sends is normalised
+/// to NFC (<see cref="Normalize"/>) before it is validated, compared or used;
+/// every path the server returns is NFC. A macOS client that reads "Café.md"
+/// or "한글.md" off disk in decomposed form (NFD) therefore reaches the same
+/// note as a Windows client — NTFS itself would store the two spellings as
+/// two different files. Identity = NFC + case-insensitive.
 /// </summary>
 public static class CloudPaths
 {
@@ -41,14 +50,36 @@ public static class CloudPaths
     }
 
     /// <summary>
+    /// The NFC form of <paramref name="path"/>, which is what every other method
+    /// here expects. A string that is not well-formed UTF-16 is returned as-is
+    /// so <see cref="Validate"/> refuses it (normalising it would throw).
+    /// </summary>
+    public static string Normalize(string? path)
+    {
+        if (string.IsNullOrEmpty(path)) return path ?? "";
+        if (!IsWellFormedUtf16(path)) return path;
+        try
+        {
+            return path.IsNormalized(NormalizationForm.FormC) ? path : path.Normalize(NormalizationForm.FormC);
+        }
+        catch (ArgumentException)
+        {
+            return path;   // unassigned code points etc. — Validate decides
+        }
+    }
+
+    /// <summary>
     /// Null when <paramref name="path"/> is acceptable, otherwise a short reason
     /// (English, safe to return to the caller — it never echoes server paths).
+    /// Expects the NFC form (<see cref="Normalize"/>); anything else is refused.
     /// </summary>
     public static string? Validate(string? path)
     {
         if (string.IsNullOrEmpty(path)) return "path is empty";
         if (path.Length > MaxPathLength) return $"path is longer than {MaxPathLength} characters";
         if (!IsWellFormedUtf16(path)) return "path is not valid Unicode";
+        if (char.IsWhiteSpace(path[0]) || char.IsWhiteSpace(path[^1])) return "path may not start or end with whitespace";
+        if (!IsNfc(path)) return "path is not in Unicode NFC form";
         if (path.Contains('\\')) return "use forward slashes";
         if (path[0] == '/') return "path must be relative";
         if (path.Length >= 2 && path[1] == ':') return "drive letters are not allowed";
@@ -68,9 +99,10 @@ public static class CloudPaths
             // Covers "..", ".", ".obsidianx", ".git", ".trash" and any hidden file.
             if (seg[0] == '.') return "path segments may not start with '.'";
             if (seg.Length > MaxSegmentLength) return $"a path segment is longer than {MaxSegmentLength} characters";
-            // Win32 silently strips trailing dots and spaces, so "a./x.md" and
-            // "a/x.md" would be two names for one file.
-            if (seg[^1] is '.' or ' ') return "path segments may not end with '.' or a space";
+            // Win32 silently strips trailing dots and spaces, so "a./x.md",
+            // "a /x.md" and "a/x.md" would be three names for one folder.
+            // Any trailing whitespace is refused, not only the ASCII space.
+            if (seg[^1] == '.' || char.IsWhiteSpace(seg[^1])) return "path segments may not end with '.' or whitespace";
             if (IsReservedName(seg)) return "reserved device names (CON, NUL, COM1, ...) are not allowed";
         }
         return null;
@@ -116,6 +148,12 @@ public static class CloudPaths
         OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
             ? StringComparison.OrdinalIgnoreCase
             : StringComparison.Ordinal;
+
+    private static bool IsNfc(string s)
+    {
+        try { return s.IsNormalized(NormalizationForm.FormC); }
+        catch (ArgumentException) { return false; }
+    }
 
     private static bool IsWellFormedUtf16(string s)
     {
