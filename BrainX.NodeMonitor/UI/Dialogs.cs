@@ -107,7 +107,7 @@ internal sealed class ConfirmDialog : DialogBase
     private readonly string? _expect;
 
     public ConfirmDialog(string title, string message, string okText, bool danger,
-        string? detail = null, string? warning = null, string? typeToConfirm = null)
+        string? detail = null, string? warning = null, string? typeToConfirm = null, string cancelText = "ยกเลิก")
         : base(title)
     {
         AddText(title, Theme.H2, danger ? Theme.Bad : Theme.Accent);
@@ -157,7 +157,7 @@ internal sealed class ConfirmDialog : DialogBase
             AddRow(_typed);
         }
 
-        (_ok, var cancel) = AddButtons(okText, danger ? Theme.BtnRed : Theme.BtnBlue);
+        (_ok, var cancel) = AddButtons(okText, danger ? Theme.BtnRed : Theme.BtnBlue, cancelText);
         _ok.Enabled = _typed == null;
         if (danger)
         {
@@ -171,9 +171,9 @@ internal sealed class ConfirmDialog : DialogBase
     private bool Matches() => _typed != null && string.Equals(_typed.Text.Trim(), _expect, StringComparison.Ordinal);
 
     public static bool Ask(IWin32Window? owner, string title, string message, string okText, bool danger,
-        string? detail = null, string? warning = null, string? typeToConfirm = null)
+        string? detail = null, string? warning = null, string? typeToConfirm = null, string cancelText = "ยกเลิก")
     {
-        using var d = new ConfirmDialog(title, message, okText, danger, detail, warning, typeToConfirm);
+        using var d = new ConfirmDialog(title, message, okText, danger, detail, warning, typeToConfirm, cancelText);
         return d.ShowDialog(owner) == DialogResult.OK && (typeToConfirm == null || d.Matches());
     }
 }

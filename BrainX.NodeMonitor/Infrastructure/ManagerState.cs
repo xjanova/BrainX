@@ -13,6 +13,13 @@ internal sealed class ManagerState
     public bool TrayHintShown { get; set; }
     public bool LogAutoScroll { get; set; } = true;
     public string? LastPage { get; set; }
+    /// <summary>
+    /// <see cref="TokenFile.Fingerprint"/> of the last token THIS app generated
+    /// (CSPRNG). While the current token has another fingerprint, the Token page
+    /// suggests one rotation: older installers used Get-Random. Not the token;
+    /// not reversible (the token has 192 random bits).
+    /// </summary>
+    public string? RotatedTokenFingerprint { get; set; }
 
     /// <summary>Demo and screenshot runs keep state in memory only.</summary>
     [System.Text.Json.Serialization.JsonIgnore]

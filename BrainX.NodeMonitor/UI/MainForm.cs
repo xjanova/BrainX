@@ -48,6 +48,7 @@ internal sealed class MainForm : Form
     private Overall? _lastOverall;
 
     public IReadOnlyList<IManagerPage> Pages => _pages;
+    public ManagerContext Context => _ctx;
 
     public MainForm(ManagerContext ctx, bool serviceMode, bool startHidden)
     {
@@ -60,6 +61,7 @@ internal sealed class MainForm : Form
         ctx.Notify = Notify;
         ctx.RequestPoll = () => { _lastCore = long.MinValue / 2; _ = PollCoreAsync(); };
         ctx.RequestPublicProbe = () => { _lastPublic = Environment.TickCount64; _ = ProbePublicAsync(); };
+        ctx.TokenChanged = () => _ = RefreshTokenAdviceAsync();
         ctx.ShowError = ShowError;
 
         SuspendLayout();
@@ -239,6 +241,7 @@ internal sealed class MainForm : Form
         try
         {
             if (_active != null) await SafeAsync(_active.OnShownAsync);
+            await RefreshTokenAdviceAsync();
             await StartOriginWatcherAsync();
             await MaybeOfferSelfInstallAsync();
         }
@@ -687,11 +690,28 @@ internal sealed class MainForm : Form
 
     // ───────────────────────── screenshots ─────────────────────────
 
+    /// <summary>
+    /// Older installers made the owner token with Get-Random; until the owner has
+    /// rotated once with this app, the Overview points at the Token page.
+    /// </summary>
+    private async Task RefreshTokenAdviceAsync()
+    {
+        if (!_serviceMode || _overview == null) return;
+        try
+        {
+            var s = await _ctx.Backend.ReadTokenAsync(_life.Token);
+            if (!Alive) return;
+            _overview.SetTokenAdvice(TokenPage.ShouldAdviseRotation(s, _ctx.State));
+        }
+        catch (OperationCanceledException) { }
+    }
+
     public async Task PrepareForScreenshotAsync()
     {
         if (!_serviceMode) return;
         await PollCoreAsync();
         await ProbePublicAsync();
+        await RefreshTokenAdviceAsync();
     }
 
     public async Task ShowPageForCaptureAsync(IManagerPage p)

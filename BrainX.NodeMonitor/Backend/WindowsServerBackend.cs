@@ -3,7 +3,6 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Net.Http.Headers;
 using System.Security;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -319,17 +318,20 @@ internal sealed partial class WindowsServerBackend : IServerBackend
                 if (t.Length > 0) file = t; else fileErr = "ไฟล์ว่างเปล่า";
             }
         }
-        catch (UnauthorizedAccessException) { exists = true; fileErr = "อ่านไฟล์ไม่ได้ (ไม่มีสิทธิ์)"; }
+        // C:\brainx is SYSTEM + Administrators only on a current node: unelevated, the file is simply unreadable.
+        catch (UnauthorizedAccessException) { exists = true; fileErr = "อ่านไฟล์ไม่ได้ — อ่านได้เฉพาะ Administrator (เปิด Server Manager แบบ Administrator)"; }
         catch (IOException) { exists = true; fileErr = "อ่านไฟล์ไม่ได้ (ไฟล์ถูกใช้งานหรือเสีย)"; }
 
+        // The Environment value is only a fallback for nodes from before the token moved to the file.
         var env = ReadEnvLines();
         var envToken = env.Ok ? EnvDocument.Get(env.Lines, EnvDocument.BearerTokenKey)?.Trim() : null;
         if (string.IsNullOrEmpty(envToken)) envToken = null;
         bool mcpSet = env.Ok && !string.IsNullOrWhiteSpace(EnvDocument.Get(env.Lines, EnvDocument.McpWriteTokenKey));
-        return new TokenSnapshot(file, exists, fileErr, envToken, env.Ok ? null : env.Error, mcpSet);
+        bool legacyLine = env.Ok && EnvDocument.HasLegacyTokenLine(env.Lines);
+        return new TokenSnapshot(file, exists, fileErr, envToken, env.Ok ? null : env.Error, mcpSet, legacyLine);
     }
 
-    public async Task<OpResult> RotateTokenAsync(CancellationToken ct)
+    public async Task<TokenRotation> RotateTokenAsync(CancellationToken ct)
     {
         await _envWriteLock.WaitAsync(ct).ConfigureAwait(false);
         try { return await Task.Run(RotateNow, CancellationToken.None).ConfigureAwait(false); }
@@ -337,37 +339,102 @@ internal sealed partial class WindowsServerBackend : IServerBackend
     }
 
     /// <summary>
-    /// Environment first (with a backup), then the file; if the file cannot be
-    /// written the Environment is put back, so the two never disagree.
+    /// The token lives in bearer-token.txt only. 1) write the file atomically
+    /// (its hardened ACL is kept); 2) take a legacy BrainX__BearerToken line out
+    /// of the service Environment (never add one). If step 2 fails, step 1 is
+    /// undone so the file and the node's current token agree again.
     /// </summary>
-    private OpResult RotateNow()
+    private TokenRotation RotateNow()
     {
-        if (!IsElevated) return OpResult.Fail(ErrorText.NeedAdmin);
+        if (!IsElevated) return TokenRotation.Fail(ErrorText.NeedAdmin);
         var env = ReadEnvLines();
-        if (!env.Ok) return OpResult.Fail(env.Error ?? "อ่าน Registry ไม่สำเร็จ");
+        if (!env.Ok) return TokenRotation.Fail(env.Error ?? "อ่าน Registry ไม่สำเร็จ");
 
-        var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
-        var newLines = EnvDocument.Set(env.Lines, EnvDocument.BearerTokenKey, token);
-        var w = WriteEnvNow(newLines, env.Lines);
-        if (w.Status != EnvWriteStatus.Written) return OpResult.Fail(w.Message);
+        byte[]? previousFile;
+        try { previousFile = TokenFile.ReadRaw(Paths.TokenFile); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return TokenRotation.Fail("อ่านไฟล์ bearer-token.txt เดิมไม่ได้ — ยังไม่ได้เปลี่ยนอะไร");
+        }
 
+        var token = TokenFile.NewToken();
         try
         {
-            File.WriteAllText(Paths.TokenFile, token, Encoding.ASCII);   // same shape as the installer: ASCII, no newline
+            TokenFile.WriteAtomic(Paths.TokenFile, token, hardenNewFile: true);
         }
         catch (Exception ex)
         {
-            var back = WriteEnvNow(env.Lines, newLines);
-            ManagerLog.Error($"token file write failed; environment rolled back: {back.Status == EnvWriteStatus.Written}", ex);
-            return OpResult.Fail(back.Status == EnvWriteStatus.Written
-                ? "เขียนไฟล์ bearer-token.txt ไม่ได้ — ยกเลิกการเปลี่ยน Token แล้ว (Token เดิมยังใช้ได้)"
-                : "เขียนไฟล์ Token ไม่ได้ และคืนค่า Registry ไม่สำเร็จ — ค่าเดิมอยู่ใน " + (w.BackupPath ?? Paths.BackupDir));
+            ManagerLog.Error("token file write failed; nothing changed", ex);
+            return TokenRotation.Fail("เขียนไฟล์ bearer-token.txt ไม่สำเร็จ — ยังไม่ได้เปลี่ยนอะไร (Token เดิมยังใช้ได้)");
+        }
+
+        bool removed = false;
+        IReadOnlyList<string>? envAfter = null;
+        if (EnvDocument.HasLegacyTokenLine(env.Lines))
+        {
+            var without = EnvDocument.Remove(env.Lines, EnvDocument.BearerTokenKey);
+            var w = WriteEnvNow(without, env.Lines);
+            if (w.Status != EnvWriteStatus.Written)
+            {
+                string undone;
+                try { TokenFile.Restore(Paths.TokenFile, previousFile, hardenNewFile: true); undone = "คืนไฟล์เดิมแล้ว"; }
+                catch (Exception ex) { ManagerLog.Error("token file restore failed", ex); undone = "คืนไฟล์เดิมไม่สำเร็จ"; }
+                ManagerLog.Warn($"legacy token line could not be removed ({w.Status}); rotation abandoned, {(undone == "คืนไฟล์เดิมแล้ว" ? "file restored" : "file NOT restored")}");
+                return TokenRotation.Fail($"เอา BrainX__BearerToken ออกจาก Service Environment ไม่สำเร็จ ({w.Message}) — {undone} · Token เดิมยังใช้ได้");
+            }
+            removed = true;
+            envAfter = without;
         }
 
         _tokenCache = null;
         _api.ResetBackoff();
-        ManagerLog.Info("owner token rotated (bearer-token.txt + service environment); service restart follows");
-        return OpResult.Success("สร้าง Token ใหม่แล้ว");
+        ManagerLog.Info($"owner token rotated in bearer-token.txt{(removed ? "; legacy BrainX__BearerToken env line removed" : "")}; service restart follows");
+        return new TokenRotation
+        {
+            Ok = true,
+            Message = "สร้าง Token ใหม่แล้ว",
+            RemovedEnvLine = removed,
+            NewFingerprint = TokenFile.Fingerprint(token),
+            PreviousFile = previousFile,
+            PreviousEnv = removed ? env.Lines : null,
+            EnvAfter = envAfter,
+        };
+    }
+
+    public async Task<OpResult> RollbackTokenAsync(TokenRotation rotation, CancellationToken ct)
+    {
+        await _envWriteLock.WaitAsync(ct).ConfigureAwait(false);
+        try { return await Task.Run(() => RollbackNow(rotation), CancellationToken.None).ConfigureAwait(false); }
+        finally { _envWriteLock.Release(); }
+    }
+
+    /// <summary>
+    /// Only for an OLD node that turned out to read the token from the service
+    /// Environment: put the previous Environment (with its old token line) and the
+    /// previous file back. That restores what was there; it never adds the NEW
+    /// token to the Environment.
+    /// </summary>
+    private OpResult RollbackNow(TokenRotation r)
+    {
+        if (!IsElevated) return OpResult.Fail(ErrorText.NeedAdmin);
+        var problems = new List<string>();
+        if (r.PreviousEnv != null && r.EnvAfter != null)
+        {
+            var w = WriteEnvNow(r.PreviousEnv, r.EnvAfter);
+            if (w.Status != EnvWriteStatus.Written) problems.Add("คืน Service Environment ไม่สำเร็จ: " + w.Message);
+        }
+        try { TokenFile.Restore(Paths.TokenFile, r.PreviousFile, hardenNewFile: true); }
+        catch (Exception ex)
+        {
+            ManagerLog.Error("token file rollback failed", ex);
+            problems.Add("คืนไฟล์ bearer-token.txt ไม่สำเร็จ");
+        }
+        _tokenCache = null;
+        _api.ResetBackoff();
+        ManagerLog.Warn($"owner token rotation rolled back{(problems.Count > 0 ? " with problems" : "")}");
+        return problems.Count == 0
+            ? OpResult.Success("คืน Token เดิมแล้ว")
+            : OpResult.Fail(string.Join(" · ", problems) + " — ค่าเดิมอยู่ใน " + Paths.BackupDir);
     }
 
     // ───────────────────────── files / auto-start ─────────────────────────

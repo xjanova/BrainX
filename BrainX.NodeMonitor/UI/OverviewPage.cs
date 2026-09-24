@@ -30,6 +30,10 @@ internal sealed class OverviewPage : UserControl, IManagerPage
     // update
     private readonly Label _uCurrent, _uLatest, _uLast, _uAuto, _uNote;
     private readonly FlatButton _btnUpdate;
+    // shortcuts
+    private readonly Label _tokenAdvice;
+
+    public void SetTokenAdvice(bool show) => _tokenAdvice.Visible = show;
 
     public string Key => "overview";
     public string Title => "ภาพรวม";
@@ -114,9 +118,13 @@ internal sealed class OverviewPage : UserControl, IManagerPage
         // ── shortcuts ──
         var quick = new Card("ทางลัด");
         quick.Add(Theme.Text("เว็บแดชบอร์ดจะถาม Token — คัดลอกได้จากแท็บ “Token เจ้าของ”", Theme.Small, Theme.Muted, wrap: true));
+        _tokenAdvice = quick.Add(Theme.Text(
+            "แนะนำ: เปลี่ยน Token เจ้าของหนึ่งครั้ง (ตัวติดตั้งรุ่นก่อนใช้ตัวสุ่มที่เดาได้) → แท็บ “Token เจ้าของ”",
+            Theme.Bold, Theme.Warn, wrap: true));
+        _tokenAdvice.Visible = false;
         quick.Add(Theme.Row(
             Theme.Button("เปิดเว็บแดชบอร์ด", Theme.BtnBlue, (_, _) => Shell.Open(Shell.DashboardUrl(b.NodeBaseUrl))),
-            Theme.Button($"เปิดโฟลเดอร์ {b.Paths.Root}", Theme.BtnGray, (_, _) => Shell.Open(b.Paths.Root))));
+            Theme.Button($"ดูไฟล์ใน {b.Paths.Root}…", Theme.BtnGray, (_, _) => Shell.Browse(ctx.Owner, b.Paths.Root, b.Paths.Root))));
 
         grid.RowCount = 3;
         for (int i = 0; i < 3; i++) grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));

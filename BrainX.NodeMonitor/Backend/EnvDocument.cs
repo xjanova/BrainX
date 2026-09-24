@@ -65,6 +65,16 @@ public static class EnvDocument
         return null;
     }
 
+    /// <summary>Every line of <paramref name="key"/> gone (both "BrainX__X" and "BrainX:X" spellings); nothing added.</summary>
+    public static List<string> Remove(IReadOnlyList<string> lines, string key)
+        => lines.Where(l => !(Split(l) is { } kv && SameKey(kv.Key, key))).ToList();
+
+    /// <summary>
+    /// An owner token still in the service Environment = a node from before the
+    /// token moved to bearer-token.txt (a current node removes the line at startup).
+    /// </summary>
+    public static bool HasLegacyTokenLine(IReadOnlyList<string> lines) => Get(lines, BearerTokenKey) != null;
+
     /// <summary>Replace or append <paramref name="key"/> (first occurrence in place, later duplicates dropped).</summary>
     public static List<string> Set(IReadOnlyList<string> lines, string key, string value)
     {

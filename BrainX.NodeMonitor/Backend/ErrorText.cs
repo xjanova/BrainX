@@ -12,7 +12,7 @@ internal static class ErrorText
 {
     public const string NoAdminApi = "เวอร์ชัน node นี้ยังไม่มี admin API — อัปเดตก่อน";
     public const string NodeDown = "เชื่อมต่อ node ไม่ได้ — Service อาจหยุดอยู่หรือกำลังเริ่ม";
-    public const string NoToken = "ไม่พบ Token เจ้าของ (ทั้งไฟล์ bearer-token.txt และ Service Environment)";
+    public const string NoToken = "ไม่พบ Token เจ้าของ — ไฟล์ bearer-token.txt ไม่มีหรืออ่านไม่ได้";
     public const string Unauthorized = "node ไม่รับ Token เจ้าของ (HTTP 401) — ดูแท็บ Token เจ้าของ";
     public const string BadResponse = "ข้อมูลจาก node อ่านไม่ได้ (รูปแบบไม่ตรงกับที่คาดไว้)";
     public const string NeedAdmin = "ต้องเปิด Server Manager แบบ Administrator ก่อน";

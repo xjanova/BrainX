@@ -38,10 +38,11 @@ internal static class AutoStart
     {
         string? error = null;
         string? shortcutTarget = null;
+        bool runsAsAdmin = true;
         bool shortcutExists = File.Exists(ShortcutPath);
         if (shortcutExists)
         {
-            try { shortcutTarget = ReadShortcutTarget(ShortcutPath); }
+            try { (shortcutTarget, runsAsAdmin) = ReadShortcut(ShortcutPath); }
             catch { error = "อ่านทางลัดเดิมไม่ได้"; }
         }
 
@@ -60,7 +61,7 @@ internal static class AutoStart
         {
             error = "ถามสถานะ Scheduled Task ไม่ได้";
         }
-        return new AutoStartStatus(shortcutExists, shortcutTarget, taskExists, taskCommand, expectedExe, error);
+        return new AutoStartStatus(shortcutExists, shortcutTarget, taskExists, taskCommand, expectedExe, error, runsAsAdmin);
     }
 
     public static OpResult Apply(string exe, bool shortcut, bool logonTask)
@@ -248,6 +249,9 @@ internal static class AutoStart
 
     // ───────────────────────── .lnk via IShellLinkW ─────────────────────────
 
+    /// <summary>"Run as administrator" in a .lnk (the Advanced… checkbox in the shortcut's properties).</summary>
+    private const uint SLDF_RUNAS_USER = 0x00002000;
+
     private static void CreateShortcut(string lnkPath, string exe)
     {
         var link = (IShellLinkW)new ShellLink();
@@ -257,12 +261,18 @@ internal static class AutoStart
             link.SetWorkingDirectory(Path.GetDirectoryName(exe) ?? "");
             link.SetDescription("ควบคุม BrainX Node (Service, Tunnel, ลูกค้า Cloud)");
             link.SetIconLocation(exe, 0);
+            // The node keeps C:\brainx for SYSTEM + Administrators only: an unelevated
+            // Explorer cannot even open the exe to discover that it wants elevation.
+            // With RUNAS the shell asks UAC first and starts it with the admin token.
+            var data = (IShellLinkDataList)link;
+            data.GetFlags(out var flags);
+            data.SetFlags(flags | SLDF_RUNAS_USER);
             ((IPersistFile)link).Save(lnkPath, true);
         }
         finally { Marshal.FinalReleaseComObject(link); }
     }
 
-    private static string? ReadShortcutTarget(string lnkPath)
+    private static (string? target, bool runsAsAdmin) ReadShortcut(string lnkPath)
     {
         var link = (IShellLinkW)new ShellLink();
         try
@@ -270,9 +280,20 @@ internal static class AutoStart
             ((IPersistFile)link).Load(lnkPath, 0);
             var sb = new StringBuilder(1024);
             link.GetPath(sb, sb.Capacity, IntPtr.Zero, 0);
-            return sb.Length == 0 ? null : sb.ToString();
+            ((IShellLinkDataList)link).GetFlags(out var flags);
+            return (sb.Length == 0 ? null : sb.ToString(), (flags & SLDF_RUNAS_USER) != 0);
         }
         finally { Marshal.FinalReleaseComObject(link); }
+    }
+
+    [ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("45e2b4ae-b1c3-11d0-b92f-00a0c90312e1")]
+    private interface IShellLinkDataList
+    {
+        void AddDataBlock(IntPtr pDataBlock);
+        void CopyDataBlock(uint dwSig, out IntPtr ppDataBlock);
+        void RemoveDataBlock(uint dwSig);
+        void GetFlags(out uint pdwFlags);
+        void SetFlags(uint dwFlags);
     }
 
     [ComImport, Guid("00021401-0000-0000-C000-000000000046")]

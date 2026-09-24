@@ -59,8 +59,15 @@ internal interface IServerBackend : IDisposable
 
     // ── owner token ──
     Task<TokenSnapshot> ReadTokenAsync(CancellationToken ct);
-    /// <summary>New random token into bearer-token.txt AND BrainX__BearerToken. The caller restarts the service.</summary>
-    Task<OpResult> RotateTokenAsync(CancellationToken ct);
+    /// <summary>
+    /// New CSPRNG token into bearer-token.txt ONLY (atomic replace, ACL kept); a
+    /// legacy BrainX__BearerToken env line is removed, never added. The caller
+    /// restarts the service and verifies; if an old node rejects the new token it
+    /// calls <see cref="RollbackTokenAsync"/>.
+    /// </summary>
+    Task<TokenRotation> RotateTokenAsync(CancellationToken ct);
+    /// <summary>Put the previous token file and service Environment back exactly as they were.</summary>
+    Task<OpResult> RollbackTokenAsync(TokenRotation rotation, CancellationToken ct);
 
     // ── files ──
     /// <summary>Settings validation ("the folder must exist") goes through here so the demo can answer too.</summary>
@@ -128,13 +135,32 @@ public sealed record EnvWriteResult(EnvWriteStatus Status, string Message, strin
 public sealed record TokenSnapshot(
     string? FileToken, bool FileExists, string? FileError,
     string? EnvToken, string? EnvError,
-    bool McpWriteTokenSet)
+    bool McpWriteTokenSet,
+    bool EnvLinePresent = false)
 {
-    /// <summary>The file wins; the service Environment is the fallback.</summary>
+    /// <summary>The file wins; the service Environment is only a fallback for old nodes.</summary>
     public string? Effective => FileToken ?? EnvToken;
     public string Source => FileToken != null ? "file" : EnvToken != null ? "env" : "none";
-    /// <summary>The node itself reads the Environment value, so a stale file means 401s.</summary>
+    /// <summary>An old node reads the Environment value, so a different file value means 401s there.</summary>
     public bool Mismatch => FileToken != null && EnvToken != null && !string.Equals(FileToken, EnvToken, StringComparison.Ordinal);
+}
+
+/// <summary>The outcome of writing a new owner token, and what is needed to undo it.</summary>
+public sealed class TokenRotation
+{
+    public bool Ok { get; init; }
+    public string Message { get; init; } = "";
+    /// <summary>A legacy BrainX__BearerToken line was taken out of the service Environment.</summary>
+    public bool RemovedEnvLine { get; init; }
+    /// <summary><see cref="Infrastructure.TokenFile.Fingerprint"/> of the new token (not the token).</summary>
+    public string? NewFingerprint { get; init; }
+
+    // Undo state. In memory only; never logged, never shown.
+    internal byte[]? PreviousFile { get; init; }
+    internal IReadOnlyList<string>? PreviousEnv { get; init; }
+    internal IReadOnlyList<string>? EnvAfter { get; init; }
+
+    public static TokenRotation Fail(string message) => new() { Ok = false, Message = message };
 }
 
 public sealed record PublicProbeResult(bool Ok, int? Status, long? LatencyMs, string Message, DateTime AtUtc);
@@ -142,9 +168,15 @@ public sealed record PublicProbeResult(bool Ok, int? Status, long? LatencyMs, st
 public sealed record AutoStartStatus(
     bool ShortcutExists, string? ShortcutTarget,
     bool TaskExists, string? TaskCommand,
-    string ExpectedTarget, string? Error)
+    string ExpectedTarget, string? Error,
+    bool ShortcutRunsAsAdmin = true)
 {
-    public bool ShortcutCurrent => ShortcutExists && string.Equals(ShortcutTarget, ExpectedTarget, StringComparison.OrdinalIgnoreCase);
+    /// <summary>
+    /// Right target AND "Run as administrator": C:\brainx is Administrators-only,
+    /// so an unelevated launch of the exe there fails before UAC is even asked.
+    /// </summary>
+    public bool ShortcutCurrent => ShortcutExists && ShortcutRunsAsAdmin
+                                   && string.Equals(ShortcutTarget, ExpectedTarget, StringComparison.OrdinalIgnoreCase);
     public bool TaskCurrent => TaskExists && string.Equals(TaskCommand, ExpectedTarget, StringComparison.OrdinalIgnoreCase);
 }
 
