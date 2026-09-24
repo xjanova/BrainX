@@ -2748,15 +2748,22 @@ public partial class MainWindow : Window
             // checklist gone, window unresponsive, nothing on screen admitting
             // why. Awaited (not fire-and-forget) so the row below it is the
             // truth, and so nothing starts re-indexing underneath it.
-            var exported = true;
-            try
+            //
+            // Usually already done: the index writes the snapshot as it
+            // finishes, and nothing has changed the graph since. Writing it
+            // again was ~4 s of a cold boot spent on an identical file.
+            var exported = ReferenceEquals(_exportedGraph, _graph);
+            if (!exported)
             {
-                await Task.Run(() => _exporter.Export(_vaultPath, _identity, _graph));
-            }
-            catch (Exception ex)
-            {
-                exported = false;
-                Debug.WriteLine($"Auto-export failed: {ex.Message}");
+                try
+                {
+                    await Task.Run(() => _exporter.Export(_vaultPath, _identity, _graph));
+                    exported = true;
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"Auto-export failed: {ex.Message}");
+                }
             }
             // Settles either way — a vault on a drive that went away must not
             // hold the boot screen — but says which happened.
@@ -6586,6 +6593,7 @@ public partial class MainWindow : Window
             {
                 var r = _exporter.Export(_vaultPath, _identity, _graph);
                 _lastExportMsg = $" · exported {r.NodeCount} nodes → brain-export.json";
+                _exportedGraph = _graph;
             }
         }
         catch (Exception ex)
@@ -6605,6 +6613,11 @@ public partial class MainWindow : Window
     /// <summary>Carries the export outcome from the worker back to the status
     /// line, which only the UI thread may touch.</summary>
     private string _lastExportMsg = "";
+
+    /// <summary>The graph the last successful index-time export wrote to disk.
+    /// The boot compares it with <c>_graph</c> so it does not write the same
+    /// ~12 MB snapshot and CLAUDE.md a second time a few seconds later.</summary>
+    private KnowledgeGraph? _exportedGraph;
 
     private void ReportIndexResult()
     {
