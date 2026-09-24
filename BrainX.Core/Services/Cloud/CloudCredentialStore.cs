@@ -177,7 +177,8 @@ public sealed class CloudCredentialStore
         var tmp = FilePath + "." + Environment.ProcessId + ".tmp";
         try
         {
-            File.WriteAllText(tmp, JsonConvert.SerializeObject(r, Formatting.Indented), new UTF8Encoding(false));
+            File.WriteAllText(tmp, JsonConvert.SerializeObject(r, Formatting.Indented,
+                new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore }), new UTF8Encoding(false));
             if (!OperatingSystem.IsWindows()) RestrictToOwner(tmp, dir);
             File.Move(tmp, FilePath, overwrite: true);
         }

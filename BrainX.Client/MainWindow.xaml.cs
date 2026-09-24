@@ -35,12 +35,14 @@ public partial class MainWindow : Window
     private readonly NetworkClient _network = new();
 
     // Two independent endpoints (see RemoteNodeConfig):
-    //  _hubUrl      — the public mesh rendezvous (SignalR /brain-hub) for Join
-    //                 Brain (BitTorrent-style file sharing / discovery).
+    //  _hubUrl      — the mesh rendezvous (SignalR /brain-hub) on BrainX Cloud
+    //                 for Join Brain (file sharing / discovery). FIXED: it was
+    //                 an editable, per-vault setting; the owner decided the app
+    //                 never shows or changes the cloud address.
     //  _localAiBase — this client's OWN brain + AI on localhost. Search is
     //                 local-first; the server that answers here runs SEPARATELY
     //                 (the client never launches or bundles it).
-    private string _hubUrl = RemoteNodeConfig.DefaultHubUrl;
+    private readonly string _hubUrl = RemoteNodeConfig.DefaultHubUrl;
     private string _localAiBase = RemoteNodeConfig.DefaultLocalAiBase;
     private readonly List<ShareRequest> _incomingShares = [];
     private readonly List<string> _shareHistory = [];
@@ -2768,6 +2770,11 @@ public partial class MainWindow : Window
         // thread — starting the watcher first left a window where a single
         // saved note could rewrite the graph mid-serialise.
         StartVaultWatcher();
+
+        // BrainX Cloud card + auto-sync. After the watcher (it feeds auto-sync),
+        // and never blocking: a returning user's card is filled from the cached
+        // account at once, and the refresh and first sync run in the background.
+        InitCloud();
 
         // Wire network events (dispatch to UI thread)
         _network.StatusChanged += s => Dispatcher.Invoke(() => OnNetworkStatus(s));
@@ -8568,6 +8575,10 @@ public partial class MainWindow : Window
         // not the tidiness of the process list.
         try { StopBrokerHost(); } catch (Exception ex) { Debug.WriteLine($"broker teardown: {ex.Message}"); }
 
+        // A BrainX Cloud sync in flight stops now; its finished batches are
+        // already saved and the next launch resumes the rest.
+        try { ShutdownCloud(); } catch { }
+
         // Save any unsaved editor work
         _mdEditor?.Save();
 
@@ -9254,7 +9265,8 @@ public partial class MainWindow : Window
         NetStatusText.Text = online ? "ONLINE" : "OFFLINE";
         NetStatusDot.Fill = new SolidColorBrush(online
             ? Color.FromRgb(0x4A, 0xE3, 0xA7) : Color.FromRgb(0xFF, 0x6B, 0x6B));
-        NetHostText.Text = RemoteNodeConfig.HostLabel(_hubUrl);
+        // A name, not the host: the cloud address is not shown anywhere in the app.
+        NetHostText.Text = RemoteNodeConfig.NeutralLabel;
 
         bool tls = _hubUrl.StartsWith("https", StringComparison.OrdinalIgnoreCase)
                 || _hubUrl.StartsWith("wss",   StringComparison.OrdinalIgnoreCase);
@@ -9432,10 +9444,8 @@ public partial class MainWindow : Window
     /// Auto-join the BrainX mesh on startup so the connection "just works" on
     /// open — no manual "Join Network" click. Background + error-swallowing;
     /// NetworkClient.WithAutomaticReconnect handles drops afterwards. No-ops if
-    /// already connected, no identity, or the hub URL is still the redacted
-    /// placeholder (meaning no real node is configured in settings.json yet).
-    /// The verified working path (server + handshake + identity) is proven —
-    /// this just calls it automatically instead of waiting for a button.
+    /// already connected or there is no identity. The hub is BrainX Cloud,
+    /// fixed in code — there is no longer a placeholder to skip.
     /// </summary>
     private async System.Threading.Tasks.Task AutoJoinMeshAsync()
     {
@@ -9443,11 +9453,7 @@ public partial class MainWindow : Window
         {
             if (_network.IsConnected || _identity == null) return;
 
-            var host = RemoteNodeConfig.HostLabel(_hubUrl);
-            if (string.IsNullOrEmpty(host) || host.Contains("example.com", StringComparison.OrdinalIgnoreCase))
-                return;   // no real node configured — don't dial the placeholder
-
-            await Dispatcher.InvokeAsync(() => { if (StatusText != null) StatusText.Text = $"Auto-joining BrainX mesh ({host})…"; });
+            await Dispatcher.InvokeAsync(() => { if (StatusText != null) StatusText.Text = "Auto-joining the BrainX network…"; });
 
             var myInfo = new PeerInfo
             {
@@ -9503,12 +9509,13 @@ public partial class MainWindow : Window
         {
             JoinNetworkBtn.Content = "\U0001F310 Join BrainX Network";
             JoinNetworkBtn.IsEnabled = true;
-            StatusText.Text = "Failed to connect. Is the server running?";
+            StatusText.Text = "Could not reach the BrainX network — try again in a moment.";
+            // No address and no setting to change: the network is BrainX Cloud,
+            // fixed in the app. What the owner can act on is their connection.
             MessageBox.Show(
-                "Could not connect to the BrainX mesh hub.\n\n" +
-                "The hub is the public bootnode that brokers peers. If it's down, " +
-                "you can point at a local one in Settings → Server URL.\n\n" +
-                $"Hub URL: {_hubUrl}",
+                "Could not connect to the BrainX network right now.\n\n" +
+                "Check this PC's internet connection and try again in a few minutes. " +
+                "Your brain keeps working locally in the meantime — nothing is lost.",
                 "Connection Failed", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }
@@ -10191,6 +10198,8 @@ public partial class MainWindow : Window
     {
         _vaultWatcher = new VaultWatcher(_vaultPath, TimeSpan.FromSeconds(3));
         _vaultWatcher.Triggered += OnVaultChanged;
+        // BrainX Cloud auto-sync rides the same debounced signal (MainWindow.Cloud.cs).
+        _vaultWatcher.Triggered += OnVaultChangedForCloud;
         _vaultWatcher.Start();
         _vaultWatcher.Enabled = true;
     }
@@ -10652,6 +10661,9 @@ public partial class MainWindow : Window
     // ═══════════════════════════════════════
     private void OnNetworkStatus(string status)
     {
+        // Failure statuses relay the SignalR exception text, which names the
+        // host; the app never shows the cloud's address.
+        status = RemoteNodeConfig.HideAddress(status);
         NetworkStatusText.Text = status;
         // Dashboard NETWORK card (replaces SYSTEM LOAD per user spec).
         // Same status text but a shorter/punchier rendering.
@@ -12842,7 +12854,6 @@ public partial class MainWindow : Window
         SettingsBrainName.Text = _identity.DisplayName;
         SettingsBrainAddress.Text = _identity.Address;
         SettingsVaultPath.Text = _vaultPath;
-        SettingsServerUrl.Text = _hubUrl;
         if (SettingsLocalAiBase != null) SettingsLocalAiBase.Text = _localAiBase;
 
         // A regenerated identity has to be explained where the address is
@@ -12962,16 +12973,6 @@ public partial class MainWindow : Window
         }
     }
 
-    private void SaveServerUrl_Click(object s, RoutedEventArgs e)
-    {
-        var url = SettingsServerUrl.Text.Trim();
-        if (string.IsNullOrEmpty(url)) return;
-        // This is the MESH hub (network rendezvous), not the local AI base.
-        _hubUrl = url;
-        SaveSettingsToFile();
-        StatusText.Text = $"Mesh hub URL saved: {url}";
-    }
-
     private string SettingsFilePath => Path.Combine(_vaultPath, ".obsidianx", "settings.json");
 
     private void SaveSettingsToFile()
@@ -12982,7 +12983,9 @@ public partial class MainWindow : Window
             if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
             var settings = new Dictionary<string, object>
             {
-                ["HubUrl"] = _hubUrl,
+                // HubUrl removed: the mesh/cloud address is fixed in the app now.
+                // Not writing it also retires the legacy value (the example.com
+                // placeholder among them) from the vault file on the next save.
                 // BrainName removed: it was written here and read by NOTHING —
                 // the display name lives in identity.json, which SaveBrainName_Click
                 // writes directly. Two copies where one drifted stale.
@@ -13026,13 +13029,12 @@ public partial class MainWindow : Window
             var json = File.ReadAllText(SettingsFilePath);
             var settings = Newtonsoft.Json.JsonConvert.DeserializeObject<Dictionary<string, object>>(json);
             if (settings == null) return;
-            //  • HubUrl — the public mesh rendezvous (Join Brain). Vault-scoped
-            //    on purpose: which mesh a brain belongs to is a property of the
-            //    brain. LocalAiBase is NOT — it is a machine endpoint and lives
-            //    in machine-settings.json now (the legacy "ServerUrl" key is
-            //    migrated there too).
-            if (settings.TryGetValue("HubUrl", out var hu) && hu != null)
-                _hubUrl = hu.ToString() ?? _hubUrl;
+            //  • HubUrl — IGNORED. It used to pick the mesh server per vault; the
+            //    server is BrainX Cloud, fixed in the app, and a stale value
+            //    (e.g. the old example.com placeholder) must not redirect it.
+            //    LocalAiBase is a machine endpoint and lives in
+            //    machine-settings.json (the legacy "ServerUrl" key is migrated
+            //    there too).
             if (settings.TryGetValue("ServerUrl", out var legacy) && legacy != null
                 && _localAiBase == RemoteNodeConfig.DefaultLocalAiBase)
                 _localAiBase = RemoteNodeConfig.RestBase(legacy.ToString() ?? _localAiBase);

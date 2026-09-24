@@ -25,6 +25,7 @@ namespace BrainX.Mcp;
 internal static class CloudSelfTest
 {
     private static int _pass, _fail;
+    private static bool _verbose;
     private static readonly List<string> Failures = new();
 
     private const string Key = "BXC-SELF-TEST-KEY1";
@@ -37,6 +38,7 @@ internal static class CloudSelfTest
         for (var i = 0; i < args.Length; i++)
             if (args[i] == "--dir" && i + 1 < args.Length) dirArg = args[++i];
         var keep = args.Contains("--keep");
+        _verbose = args.Contains("--verbose");
         var root = Path.Combine(dirArg ?? Path.GetTempPath(), "brainx-cloud-selftest-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(root);
 
@@ -57,6 +59,7 @@ internal static class CloudSelfTest
             Section("pull planning"); PullPlanning();
             Section("credential store"); CredentialStore(root);
             Section("end to end against the fake server"); await EndToEndAsync(root);
+            Section("brainx-mcp cloud … commands"); await CliAsync(root);
             if (!args.Contains("--no-mcp"))
             {
                 Section("brainx-mcp --cloud serve mode");
@@ -629,6 +632,81 @@ internal static class CloudSelfTest
         Check("results never carry the token", !r1.ErrorMessage?.Contains(login.Token) ?? true);
     }
 
+    // ── 2b. the CLI, in-process ──────────────────────────────────────
+
+    private static async Task<(int Code, string Out)> Cli(params string[] args)
+    {
+        var oldOut = Console.Out;
+        var oldErr = Console.Error;
+        var sw = new StringWriter();
+        Console.SetOut(sw);
+        Console.SetError(sw);
+        try { return (await Program.CloudCliAsync(args), sw.ToString()); }
+        finally
+        {
+            Console.SetOut(oldOut);
+            Console.SetError(oldErr);
+        }
+    }
+
+    private static async Task CliAsync(string root)
+    {
+        using var fake = new CloudFakeServer();
+        fake.ValidKeys.Add(Key);
+        Environment.SetEnvironmentVariable("BRAINX_CLOUD_URL", fake.BaseUrl);
+        try
+        {
+            var store = new CloudCredentialStore();
+            store.Clear();
+
+            var (bad, badOut) = await Cli("login", "NOT-A-KEY", "--device", "cli-test");
+            Check("cloud login with a wrong key fails with a readable message", bad != 0 && badOut.Contains("not valid"), badOut.Trim());
+
+            var (ok, okOut) = await Cli("login", Key, "--device", "cli-test");
+            var rec = store.Load();
+            Check("cloud login signs in", ok == 0 && rec?.IsSignedIn == true && rec.DeviceName == "cli-test", okOut.Trim());
+            Check("cloud login prints neither the key nor the token",
+                  !okOut.Contains(Key, StringComparison.OrdinalIgnoreCase) && (rec?.Token == null || !okOut.Contains(rec.Token)));
+
+            var (st, stOut) = await Cli("status");
+            Check("cloud status shows the account", st == 0 && stOut.Contains("license:") && stOut.Contains("storage:"), stOut.Trim());
+
+            var vault = Path.Combine(root, "cli-vault");
+            Directory.CreateDirectory(Path.Combine(vault, "Ideas"));
+            File.WriteAllText(Path.Combine(vault, "Ideas", "one.md"), "# one\r\n");
+            File.WriteAllText(Path.Combine(vault, "top.md"), "top");
+            var (push, pushOut) = await Cli("push", "--vault", vault, "--folders", "Ideas,/");
+            var acct = rec!.AccountId!;
+            Check("cloud push uploads the chosen folders", push == 0 && fake.NotesOf(acct).Count == 2, pushOut.Trim());
+
+            var (drop, dropOut) = await Cli("push", "--vault", vault, "--folders", "/");
+            Check("dropping a folder without --remove-deselected keeps its notes in the cloud",
+                  drop == 0 && fake.NotesOf(acct).ContainsKey("Ideas/one.md") && dropOut.Contains("stay in the cloud"), dropOut.Trim());
+
+            var (pull, pullOut) = await Cli("pull");
+            var cache = CloudCredentialStore.CacheDirFor(acct);
+            Check("cloud pull fills and indexes the cache",
+                  pull == 0 && File.Exists(Path.Combine(cache, "Ideas", "one.md"))
+                  && File.Exists(Path.Combine(cache, ".obsidianx", "brain-export.json")), pullOut.Trim());
+
+            var (tc, tcOut) = await Cli("token", "create", "laptop", "--read");
+            Check("cloud token create prints the connect command once", tc == 0 && tcOut.Contains("claude mcp add --transport http brainx"), tcOut.Trim());
+            var (tl, tlOut) = await Cli("token", "list");
+            Check("cloud token list marks this machine", tl == 0 && tlOut.Contains("laptop") && tlOut.Contains("this machine"), tlOut.Trim());
+
+            var (lo, loOut) = await Cli("logout");
+            Check("cloud logout revokes and forgets", lo == 0 && store.Load() == null && loOut.Contains("revoked"), loOut.Trim());
+            var (st2, _) = await Cli("status");
+            Check("cloud status after logout says not signed in", st2 == 1);
+            var (pl2, pl2Out) = await Cli("pull");
+            Check("cloud pull when signed out explains how to sign in", pl2 != 0 && pl2Out.Contains("cloud login"), pl2Out.Trim());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("BRAINX_CLOUD_URL", null);
+        }
+    }
+
     // ── 3. serve mode ────────────────────────────────────────────────
 
     private static async Task ServeModeAsync(string root)
@@ -685,7 +763,19 @@ internal static class CloudSelfTest
             var content = fake.NotesOf(acct).FirstOrDefault(kv => kv.Key.Contains("Cloud selftest")).Value ?? "";
             Check("…with its content", content.Contains("written through the cloud cache"));
 
+            // Written and hung up at once (inside the push debounce): the
+            // shutdown flush must still get it to the cloud.
+            var last = await mcp.CallToolAsync("brain_create_note", new JObject
+            {
+                ["title"] = "Written right before hang-up",
+                ["content"] = "the last push on exit carries this",
+                ["folder"] = "Notes",
+            });
+            Check("a second note is written", !last.StartsWith("ERROR"), Trim(last));
             await mcp.CloseAsync();
+            Check("a note written just before hang-up still reaches the cloud",
+                  fake.NotesOf(acct).Keys.Any(k => k.Contains("Written right before hang-up")),
+                  string.Join(",", fake.NotesOf(acct).Keys));
             Check("the server exits when the client hangs up", mcp.Exited);
             Check("the log never contains the token", !mcp.Stderr.Contains(login.Token), "token found in stderr");
             Check("the log never contains the license key", !mcp.Stderr.Contains(Key, StringComparison.OrdinalIgnoreCase));
@@ -712,8 +802,8 @@ internal static class CloudSelfTest
             Check("offline: brain_stats says offline",
                   stats?["cloud"]?["online"]?.Value<bool>() == false,
                   Trim(stats?["cloud"]?.ToString(Formatting.None) ?? "no stats"));
-            Check("offline: the cache (incl. the note written last session) is served",
-                  stats?["totalNotes"]?.Value<int>() >= 3, stats?["totalNotes"]?.ToString());
+            Check("offline: the cache (incl. the notes written last session) is served",
+                  stats?["totalNotes"]?.Value<int>() >= 4, stats?["totalNotes"]?.ToString());
             var search = await mcp.CallToolAsync("brain_search", new JObject { ["query"] = "cloud first" });
             Check("offline: search still answers from the cache",
                   search.Contains("cloud-first", StringComparison.OrdinalIgnoreCase)
@@ -838,6 +928,13 @@ internal static class CloudSelfTest
                 if (!_p.HasExited) { try { _p.Kill(entireProcessTree: true); } catch { } }
             }
             _p.Dispose();
+            if (_verbose)
+            {
+                Console.WriteLine("  ┌ child log");
+                foreach (var l in Stderr.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+                    Console.WriteLine("  │ " + l.TrimEnd('\r'));
+                Console.WriteLine("  └");
+            }
         }
     }
 }
