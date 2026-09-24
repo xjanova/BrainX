@@ -68,12 +68,42 @@ public sealed class AccountVault
 
     private long _used;
     private int _count;
+    private long _pending;
     public long UsedBytes => Interlocked.Read(ref _used);
     public int NoteCount => Volatile.Read(ref _count);
     internal void SetTotals(long used, int count)
     {
         Interlocked.Exchange(ref _used, used);
         Volatile.Write(ref _count, count);
+    }
+
+    /// <summary>
+    /// Bytes the MCP child may have written since the last scan: the size of
+    /// every write-tool request forwarded to it. Writes through the child do
+    /// not pass the upload API's quota check, and the disk is only re-counted
+    /// by a scan — so the quota guard counts <see cref="UsedBytes"/> + this,
+    /// and a scan (which measures what really landed) clears what it covered.
+    /// </summary>
+    public long PendingBytes => Interlocked.Read(ref _pending);
+
+    public void AddPending(long bytes)
+    {
+        if (bytes > 0) Interlocked.Add(ref _pending, bytes);
+    }
+
+    /// <summary>A scan that started after <paramref name="snapshot"/> pending
+    /// bytes were recorded has counted them from disk: take exactly those off
+    /// (writes forwarded DURING the scan stay pending).</summary>
+    internal void SettlePending(long snapshot)
+    {
+        if (snapshot <= 0) return;
+        long seen, next;
+        do
+        {
+            seen = Interlocked.Read(ref _pending);
+            next = Math.Max(0, seen - snapshot);
+        }
+        while (Interlocked.CompareExchange(ref _pending, next, seen) != seen);
     }
 
     public void MarkDirty() => Dirty = true;
@@ -180,6 +210,9 @@ public sealed class CloudVaults
 
     private void ScanLocked(AccountVault v)
     {
+        // Everything forwarded to the child before this point is on disk (or
+        // never will be) by the time the walk below has read the disk.
+        var pendingBefore = v.PendingBytes;
         var entries = new Dictionary<string, NoteEntry>(CloudPaths.Identity);
         var dirs = new Dictionary<string, string>(CloudPaths.Identity);
         long used = 0;
@@ -237,6 +270,7 @@ public sealed class CloudVaults
         v.Dirs.Clear();
         foreach (var (k, d) in dirs) v.Dirs[k] = d;
         v.SetTotals(used, entries.Count);
+        if (complete) v.SettlePending(pendingBefore);
         v.Scanned = true;
         v.ScannedUtc = _clock.GetUtcNow();
         v.Dirty = !complete;

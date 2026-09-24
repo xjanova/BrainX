@@ -27,6 +27,9 @@ public sealed class CloudOptions
     /// <summary>Restrict CloudRoot to SYSTEM + Administrators (see CloudRootAcl).
     /// On for the real node; off by default so tests never touch ACLs.</summary>
     public bool HardenRootAcl { get; init; }
+    /// <summary>BrainX:CloudLicenseTypes — the xman license types that are a
+    /// BrainX Cloud plan. Anything else (demo, free, ...) is INVALID_LICENSE.</summary>
+    public IReadOnlyCollection<string> AllowedLicenseTypes { get; init; } = CloudLicenses.DefaultLicenseTypes;
 }
 
 /// <summary>An authenticated cloud request: the token and the account it belongs to.</summary>
@@ -43,13 +46,34 @@ public sealed record CloudCaller(TokenRecord Token, AccountRecord Account);
 /// </summary>
 public sealed class CloudService : IMcpTenantHooks, IDisposable
 {
-    private static readonly IReadOnlyDictionary<string, string> CloudChildEnvironment =
+    public static readonly IReadOnlyDictionary<string, string> CloudChildEnvironment =
         new Dictionary<string, string>
         {
             // Nothing outside the account's own vault may be touched by a
             // customer's MCP child: no Claude Code memory rules, no Codex
             // AGENTS.md, no desktop config — those belong to the node's owner.
             ["BRAINX_SANDBOX"] = "1",
+            // Never load bge-m3 in-process. brain_semantic_search and brain_recall
+            // embed the QUERY even when the vault has no vectors (so does
+            // brain_search when keyword covers the question poorly), and with no
+            // Ollama that falls back to OnnxEmbedder. Measured on a 1,000-note
+            // vault: the session's worker went from 96 MB to 1.44 GB after one
+            // brain_search, and stays there until its idle unload — a customer
+            // opening sessions in a loop could exhaust the box. "ollama" is
+            // brainx-mcp's switch that disables every in-process fallback
+            // (OnnxDisabled()). Cloud vaults carry no vectors anyway (nothing
+            // creates .obsidianx/embeddings there), so semantic tools answer in
+            // keyword mode either way.
+            ["BRAINX_EMBED_BACKEND"] = "ollama",
+            // Belt and braces for the same reason: no background embed after a
+            // write tool, even if an embeddings folder ever appeared.
+            ["BRAINX_EMBED_ON_WRITE"] = "0",
+            // brain_search stays keyword-only. Its escalation needs vectors the
+            // vault does not have: with no Ollama every paraphrase-shaped query
+            // paid a refused connection (~2 s on Windows) for nothing, and with
+            // one it spent the owner's Ollama on an embed that could not be
+            // used — and then labelled keyword hits as found "by meaning".
+            ["BRAINX_SEARCH_ESCALATE"] = "0",
         };
 
     private static readonly TimeSpan TouchEvery = TimeSpan.FromMinutes(5);
@@ -76,7 +100,7 @@ public sealed class CloudService : IMcpTenantHooks, IDisposable
         var secrets = CloudSecrets.LoadOrCreate(Path.Combine(root, "cloud.key"));
         Accounts = new CloudAccounts(Store);
         Limiter = new CloudRateLimiter(Clock);
-        Licenses = new CloudLicenses(Accounts, secrets, verifier, Clock, Limiter, _shutdown.Token);
+        Licenses = new CloudLicenses(Accounts, secrets, verifier, Clock, Limiter, _shutdown.Token, options.AllowedLicenseTypes);
         Vaults = new CloudVaults(root, Clock);
         var runner = reindexRunner ?? (options.McpExePath is { } exe ? CloudExport.Runner(exe) : null);
         Reindexer = new CloudReindexer(options.ReindexDebounce, options.MaxConcurrentReindex, runner);
@@ -199,20 +223,29 @@ public sealed class CloudService : IMcpTenantHooks, IDisposable
         return McpCaller.Cloud(scope, account.Id, vault, CloudChildEnvironment);
     }
 
+    /// <summary>
+    /// The quota guard for write TOOLS: counted bytes on disk (last scan) plus
+    /// the bytes of every write request forwarded since — the child writes
+    /// without passing the upload API, so without the pending part an agent
+    /// could write past the quota until something happened to rescan.
+    /// </summary>
     public McpRefusal? RefuseWrite(string accountId)
     {
         var account = Accounts.Get(accountId);
         if (account is null) return new McpRefusal(401, "UNAUTHORIZED", "account not found");
-        var used = Vaults.For(accountId).UsedBytes;
+        var vault = Vaults.For(accountId);
+        var used = vault.UsedBytes + vault.PendingBytes;
         var quota = QuotaFor(account);
         return used >= quota
-            ? new McpRefusal(413, "QUOTA_EXCEEDED", $"QUOTA_EXCEEDED: this account uses {used} of {quota} bytes — delete notes before writing more")
+            ? new McpRefusal(413, "QUOTA_EXCEEDED", $"QUOTA_EXCEEDED: this account uses about {used} of {quota} bytes — delete notes before writing more")
             : null;
     }
 
-    public void AfterWrite(string accountId)
+    public void AfterWrite(string accountId, long requestBytes)
     {
-        Vaults.For(accountId).MarkDirty();
+        var vault = Vaults.For(accountId);
+        vault.AddPending(requestBytes);
+        vault.MarkDirty();
         ScheduleReindex(accountId);
     }
 

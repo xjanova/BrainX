@@ -82,6 +82,10 @@ public enum LoginOutcome { Valid, Expired, Invalid, Unreachable }
 ///   • At most one xman call per account at a time, at most one attempt per
 ///     account per minute, and at most 50 calls a minute for the whole node
 ///     (xman allows 60/min/IP).
+///   • Only the license TYPES of a BrainX Cloud plan count (BrainX:CloudLicenseTypes,
+///     default monthly, yearly, lifetime). A valid key of any other type — a
+///     demo, a free key — is treated exactly like an invalid one: login answers
+///     401 INVALID_LICENSE, and an account whose type changed loses write access.
 /// </summary>
 public sealed class CloudLicenses
 {
@@ -90,6 +94,7 @@ public sealed class CloudLicenses
     public static readonly TimeSpan OutageGrace = TimeSpan.FromHours(72);
     public static readonly TimeSpan MinRetryGap = TimeSpan.FromSeconds(60);
     public const int XmanCallsPerMinute = 50;
+    public static readonly string[] DefaultLicenseTypes = ["monthly", "yearly", "lifetime"];
 
     private readonly CloudAccounts _accounts;
     private readonly CloudSecrets _secrets;
@@ -97,12 +102,14 @@ public sealed class CloudLicenses
     private readonly TimeProvider _clock;
     private readonly CloudRateLimiter _limiter;
     private readonly CancellationToken _shutdown;
+    private readonly HashSet<string> _allowedTypes;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DateTimeOffset> _lastAttempt = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> _warned = new(StringComparer.Ordinal);
 
     public CloudLicenses(CloudAccounts accounts, CloudSecrets secrets, ILicenseVerifier verifier,
-                         TimeProvider clock, CloudRateLimiter limiter, CancellationToken shutdown)
+                         TimeProvider clock, CloudRateLimiter limiter, CancellationToken shutdown,
+                         IEnumerable<string>? allowedLicenseTypes = null)
     {
         _accounts = accounts;
         _secrets = secrets;
@@ -110,9 +117,23 @@ public sealed class CloudLicenses
         _clock = clock;
         _limiter = limiter;
         _shutdown = shutdown;
+        _allowedTypes = new HashSet<string>(
+            (allowedLicenseTypes ?? DefaultLicenseTypes).Select(t => t.Trim()).Where(t => t.Length > 0),
+            StringComparer.OrdinalIgnoreCase);
+        if (_allowedTypes.Count == 0) _allowedTypes.UnionWith(DefaultLicenseTypes);
     }
 
-    public bool IsEffectivelyValid(AccountRecord a) => IsEffectivelyValid(a, _clock.GetUtcNow());
+    public IReadOnlyCollection<string> AllowedTypes => _allowedTypes;
+
+    /// <summary>Is this license type a BrainX Cloud plan? No type at all is not.</summary>
+    public bool IsTypeAllowed(string? licenseType)
+        => !string.IsNullOrWhiteSpace(licenseType) && _allowedTypes.Contains(licenseType.Trim());
+
+    /// <summary>The account may write and use /mcp right now: the time rules of
+    /// <see cref="IsEffectivelyValid(AccountRecord, DateTimeOffset)"/> AND a
+    /// Cloud plan type (so a cached demo key stops working the moment the gate
+    /// exists, not only at its next re-check).</summary>
+    public bool IsEffectivelyValid(AccountRecord a) => IsTypeAllowed(a.LicenseType) && IsEffectivelyValid(a, _clock.GetUtcNow());
 
     /// <summary>The contract's rule: valid while the cached expires_at is in the
     /// future, or while the last successful check is under 72 h old. A
@@ -220,7 +241,7 @@ public sealed class CloudLicenses
         {
             var now = _clock.GetUtcNow();
             var existing = _accounts.Get(accountId);
-            if (existing is { LicenseValid: true } && NeedsRefresh(existing, now) == Need.None && IsEffectivelyValid(existing, now))
+            if (existing is { LicenseValid: true } && NeedsRefresh(existing, now) == Need.None && IsEffectivelyValid(existing))
                 return (LoginOutcome.Valid, EnsureKeyStored(existing, normalizedKey), null);
 
             _lastAttempt[accountId] = now;
@@ -258,8 +279,10 @@ public sealed class CloudLicenses
             // xman could not answer. Cached state decides; no cache → 503.
             if (existing?.CheckedUtc is not null)
             {
-                if (IsEffectivelyValid(existing, now))
+                if (IsEffectivelyValid(existing))
                     return (LoginOutcome.Valid, EnsureKeyStored(existing, normalizedKey), check.Detail);
+                if (!IsTypeAllowed(existing.LicenseType))
+                    return (LoginOutcome.Invalid, existing, check.Detail);
                 var lapsed = existing.LicenseValid || existing.LicenseExpired;
                 return (lapsed ? LoginOutcome.Expired : LoginOutcome.Invalid, existing, check.Detail);
             }
@@ -333,13 +356,26 @@ public sealed class CloudLicenses
         CheckedUtc = now,
     };
 
+    /// <summary>A valid key whose type is not a Cloud plan is, for BrainX Cloud,
+    /// an invalid key — definitive, so it is cached and login says INVALID_LICENSE.</summary>
+    private LicenseCheck GateType(LicenseCheck c)
+    {
+        if (c.Verdict != LicenseVerdict.Valid || IsTypeAllowed(c.LicenseType)) return c;
+        return c with
+        {
+            Verdict = LicenseVerdict.Invalid,
+            Status = "type-not-allowed",
+            Detail = $"license type '{c.LicenseType ?? "(none)"}' is not a BrainX Cloud plan",
+        };
+    }
+
     private async Task<LicenseCheck> CallXmanAsync(string normalizedKey, CancellationToken ct)
     {
         if (!_limiter.TryAcquire("xman", XmanCallsPerMinute, TimeSpan.FromMinutes(1), out _))
             return LicenseCheck.Down("local xman budget exhausted (xman allows 60 calls/min for this server)");
         try
         {
-            return await _verifier.CheckAsync(normalizedKey, ct).ConfigureAwait(false);
+            return GateType(await _verifier.CheckAsync(normalizedKey, ct).ConfigureAwait(false));
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
