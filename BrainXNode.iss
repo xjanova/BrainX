@@ -37,6 +37,7 @@ UninstallDisplayName={#AppName}
 Source: "publish\node\*"; DestDir: "{app}\app"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "BrainX.Server\deploy\Install-Service.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "BrainX.Server\deploy\Setup-Tunnel.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "BrainX.Server\deploy\Update-Node.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
 [Dirs]
 Name: "{app}\vault"
