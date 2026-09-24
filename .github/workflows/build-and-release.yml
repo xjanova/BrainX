@@ -143,6 +143,11 @@ jobs:
           dotnet publish BrainX.Server/BrainX.Server.csproj `
             -c Release -r win-x64 --self-contained true `
             -p:PublishSingleFile=false -o publish/node-win-x64
+          # brainx-mcp in <app>\mcp\ — where the node's ResolveMcpExe looks. /mcp and
+          # the BrainX Cloud re-index both run it; without it they stay off.
+          dotnet publish BrainX.Mcp/BrainX.Mcp.csproj `
+            -c Release -r win-x64 --self-contained true `
+            -p:PublishSingleFile=false -o publish/node-win-x64/mcp
           Compress-Archive -Path publish/node-win-x64/* -DestinationPath brainx-node-win-x64.zip -Force
 
       - name: Upload build artifact

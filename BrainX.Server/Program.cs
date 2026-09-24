@@ -1,6 +1,8 @@
 using System.Text;
+using BrainX.Server.Cloud;
 using BrainX.Server.Hubs;
 using BrainX.Server.Mcp;
+using BrainX.Server.Services;
 using BrainX.Core.Services;
 using BrainX.Core.Models;
 
@@ -92,12 +94,12 @@ if (!NodeConfig.EmbeddedMode && (!NodeConfig.RequireAuth || string.IsNullOrEmpty
     Console.ResetColor();
 }
 
-// Bearer-token gate for write endpoints. Only enforced when RequireAuth=true
-// (standalone/remote). Embedded localhost stays friction-free. Read endpoints
-// are never gated here — the sensitive surface is the two writers below.
+// Owner bearer-token gate. Only enforced when RequireAuth=true (standalone /
+// remote); embedded localhost stays friction-free. What it covers — and the
+// three exemptions (/health, /mcp, /api/cloud) — lives in OwnerGate.
 app.Use(async (ctx, next) =>
 {
-    if (NodeConfig.RequireAuth && IsProtected(ctx.Request) && !BearerOk(ctx.Request))
+    if (NodeConfig.RequireAuth && OwnerGate.IsProtected(ctx.Request.Path) && !BearerOk(ctx.Request))
     {
         ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
         await ctx.Response.WriteAsJsonAsync(new { error = "unauthorized — bearer token required" });
@@ -106,19 +108,62 @@ app.Use(async (ctx, next) =>
     await next();
 });
 
+var mcpExe = ResolveMcpExe();
+
+// ── BrainX Cloud (/api/cloud/*) ──
+// Paying users' own spaces on this node: one vault per license, bxc_ tokens,
+// license checks against xman. ON by default on a standalone node, off when
+// embedded with the desktop client (BrainX__CloudEnabled overrides both).
+// Everything lives under Cloud/ — CloudService's remarks are the map.
+CloudService? cloud = null;
+if (NodeConfig.CloudEnabled)
+{
+    XmanLicenseVerifier? verifier = null;
+    try
+    {
+        var ver = new XmanLicenseVerifier(NodeConfig.LicenseApiBase);
+        verifier = ver;
+        var svc = new CloudService(new CloudOptions
+        {
+            Root = NodeConfig.CloudRoot,
+            QuotaBytes = NodeConfig.CloudQuotaBytes,
+            McpExePath = mcpExe,
+        }, ver);
+        cloud = svc;
+        app.MapBrainCloud(svc);
+        app.Lifetime.ApplicationStopping.Register(() => { svc.Dispose(); ver.Dispose(); });
+        Console.WriteLine($"[cloud] BrainX Cloud ENABLED at /api/cloud · root={svc.RootDir}"
+                          + $" · quota {NodeConfig.CloudQuotaBytes / (1024 * 1024)} MB/account"
+                          + $" · reindex {(svc.Reindexer.Available ? "on" : "OFF (brainx-mcp not found)")}");
+    }
+    catch (Exception ex)
+    {
+        verifier?.Dispose();
+        cloud = null;
+        Console.ForegroundColor = ConsoleColor.Red;
+        Console.WriteLine($"  [WARN] BrainX Cloud failed to start ({ex.GetType().Name}: {ex.Message}) — /api/cloud disabled.");
+        Console.ResetColor();
+    }
+}
+
 // ── Remote MCP endpoint (/mcp) ──
-// Opt-in (BrainX__McpEnabled=true). This is what makes the brain reachable from
-// clients that cannot spawn a local process — claude.ai / ChatGPT connectors and
-// `codex mcp add --url`. Everything dangerous is fenced in McpRemotePolicy;
-// read that file before changing anything here.
+// This is what makes the brain reachable from clients that cannot spawn a
+// local process — claude.ai / ChatGPT connectors and `codex mcp add --url`.
+// Two kinds of caller share it:
+//   • the node OWNER (McpWriteToken / McpReadToken → the node's VaultPath).
+//     Opt-in with BrainX__McpEnabled=true, exactly as before.
+//   • BrainX Cloud accounts (bxc_ tokens → that account's vault). On whenever
+//     cloud is on and brainx-mcp is present, even with McpEnabled=false.
+// Everything dangerous is fenced in McpRemotePolicy; read that file before
+// changing anything here.
 McpSessionManager? mcpSessions = null;
+var ownerMcp = false;
 if (NodeConfig.McpEnabled)
 {
-    var mcpExe = ResolveMcpExe();
     if (mcpExe == null)
     {
         Console.ForegroundColor = ConsoleColor.Red;
-        Console.WriteLine("  [WARN] BrainX__McpEnabled=true but brainx-mcp was not found — /mcp disabled.");
+        Console.WriteLine("  [WARN] BrainX__McpEnabled=true but brainx-mcp was not found — /mcp disabled for owner tokens.");
         Console.WriteLine("         Set BrainX__McpExePath, or place brainx-mcp next to the node binary.");
         Console.ResetColor();
     }
@@ -127,26 +172,45 @@ if (NodeConfig.McpEnabled)
         // Fail closed rather than publish the brain. A remote node with /mcp on
         // and no token would be an open write endpoint on the public internet.
         Console.ForegroundColor = ConsoleColor.Red;
-        Console.WriteLine("  [WARN] /mcp requested on a STANDALONE node with no token — refusing to enable.");
+        Console.WriteLine("  [WARN] /mcp requested on a STANDALONE node with no token — refusing to enable it for the owner.");
         Console.WriteLine("         Set BrainX__McpWriteToken (and/or BrainX__McpReadToken) first.");
         Console.ResetColor();
     }
-    else
-    {
-        mcpSessions = new McpSessionManager(
-            mcpExe, NodeConfig.VaultPath,
-            NodeConfig.McpMaxSessions, TimeSpan.FromMinutes(NodeConfig.McpIdleMinutes));
+    else ownerMcp = true;
+}
+var cloudMcp = cloud != null && mcpExe != null;
+if (ownerMcp || cloudMcp)
+{
+    mcpSessions = new McpSessionManager(
+        mcpExe!, NodeConfig.VaultPath,
+        NodeConfig.McpMaxSessions, TimeSpan.FromMinutes(NodeConfig.McpIdleMinutes),
+        maxCloudSessions: NodeConfig.CloudMcpMaxSessions,
+        maxSessionsPerAccount: NodeConfig.CloudMcpSessionsPerAccount);
+    var resolver = new McpCallerResolver(
+        NodeConfig.EmbeddedMode, NodeConfig.McpWriteToken, NodeConfig.McpReadToken,
+        ownerEnabled: ownerMcp, cloud: cloudMcp ? cloud : null);
 
-        app.MapBrainMcp(mcpSessions, ResolveMcpScope);
+    app.MapBrainMcp(mcpSessions, resolver.ResolveAsync, callTimeout: null, tenantHooks: cloudMcp ? cloud : null);
 
-        app.Lifetime.ApplicationStopping.Register(() => mcpSessions.DisposeAsync().AsTask().Wait(5000));
+    var sessionsToClose = mcpSessions;
+    app.Lifetime.ApplicationStopping.Register(() => sessionsToClose.DisposeAsync().AsTask().Wait(5000));
 
-        Console.WriteLine($"[mcp] remote endpoint ENABLED at /mcp · exe={mcpExe}");
-        Console.WriteLine($"[mcp]   scopes: write={(string.IsNullOrEmpty(NodeConfig.McpWriteToken) ? "-" : "set")}"
+    Console.WriteLine($"[mcp] remote endpoint ENABLED at /mcp · exe={mcpExe}");
+    if (ownerMcp)
+        Console.WriteLine($"[mcp]   owner scopes: write={(string.IsNullOrEmpty(NodeConfig.McpWriteToken) ? "-" : "set")}"
                           + $" read={(string.IsNullOrEmpty(NodeConfig.McpReadToken) ? "-" : "set")}"
                           + $" · max {NodeConfig.McpMaxSessions} sessions · idle {NodeConfig.McpIdleMinutes}m");
-        Console.WriteLine("[mcp]   ssh_run / ssh_tail / ssh_profiles_list / brain_import_path / brain_apply_audit_fix are PERMANENTLY blocked here.");
-    }
+    else
+        Console.WriteLine("[mcp]   owner tokens: OFF (BrainX__McpEnabled is not true)");
+    if (cloudMcp)
+        Console.WriteLine($"[mcp]   cloud tokens: ON · max {NodeConfig.CloudMcpMaxSessions} sessions · {NodeConfig.CloudMcpSessionsPerAccount} per account");
+    Console.WriteLine("[mcp]   ssh_run / ssh_tail / ssh_profiles_list / brain_import_path / brain_apply_audit_fix are PERMANENTLY blocked here.");
+}
+else if (cloud != null)
+{
+    Console.ForegroundColor = ConsoleColor.Yellow;
+    Console.WriteLine("  [WARN] brainx-mcp was not found next to the node — cloud /mcp and re-index are OFF.");
+    Console.ResetColor();
 }
 
 app.UseDefaultFiles();
@@ -212,6 +276,8 @@ app.MapGet("/api/health", () => new
 // Liveness probe for container orchestration — never touches the vault, so it
 // answers even when the node is misconfigured. Surfaces config state so a bad
 // deploy is visible (vaultConfigured=false) instead of failing silently.
+// `cloud` says only whether BrainX Cloud is serving — never how many accounts,
+// notes or bytes: this endpoint is public.
 app.MapGet("/health", () => Results.Ok(new
 {
     status = "ok",
@@ -219,6 +285,7 @@ app.MapGet("/health", () => Results.Ok(new
     vaultConfigured = !string.IsNullOrWhiteSpace(NodeConfig.VaultPath),
     authRequired = NodeConfig.RequireAuth,
     storage = storage?.ProviderName ?? "none",
+    cloud = cloud != null,
     uptimeSec = Environment.TickCount64 / 1000
 }));
 
@@ -343,7 +410,11 @@ static void PopulateStorageFromExport(IBrainStorage store)
 // Map the export snapshot (NodeSummary) onto the graph shape UpsertGraph expects.
 static KnowledgeGraph ExportToGraph(BrainExport e)
 {
-    var vault = !string.IsNullOrWhiteSpace(e.VaultPath) ? e.VaultPath : ResolveVaultPath();
+    // The node's own vault — never e.VaultPath (the generating workstation's
+    // path) and never a rooted RelativePath: storage reads FilePath to build
+    // search previews, so an export naming C:\anything would have indexed that
+    // file's first 500 chars into search. Outside the vault → no file at all.
+    var vault = ResolveVaultPath();
     var g = new KnowledgeGraph();
     foreach (var n in e.Nodes)
     {
@@ -352,7 +423,7 @@ static KnowledgeGraph ExportToGraph(BrainExport e)
         {
             Id = n.Id,
             Title = n.Title,
-            FilePath = Path.IsPathRooted(n.RelativePath) ? n.RelativePath : Path.Combine(vault, n.RelativePath),
+            FilePath = VaultPathGuard.Resolve(vault, n.RelativePath) ?? "",
             PrimaryCategory = cat,
             Tags = n.Tags ?? [],
             WordCount = n.WordCount,
@@ -516,8 +587,12 @@ app.MapGet("/api/brain/note/{id}", (string id) =>
     var node = export.Nodes.FirstOrDefault(n => n.Id == id);
     if (node is null) return Results.NotFound(new { error = "node not found" });
 
-    var full = Path.Combine(export.VaultPath, node.RelativePath);
-    var content = File.Exists(full) ? File.ReadAllText(full) : node.Preview;
+    // Resolve against THIS node's vault, never export.VaultPath: that is the
+    // path on the workstation that generated the export, and joining it with a
+    // RelativePath the export also supplies let the file named by the export —
+    // rooted, or climbing out with ".." — be read from the server's disk.
+    var full = VaultPathGuard.Resolve(ResolveVaultPath(), node.RelativePath);
+    var content = full != null && File.Exists(full) ? File.ReadAllText(full) : node.Preview;
 
     return Results.Ok(new
     {
@@ -992,59 +1067,8 @@ app.MapPost("/api/ai/keys", async (HttpContext ctx) =>
 app.MapGet("/api/ai/stats/router", () => Results.Ok(RouterStats.Snapshot()));
 app.MapPost("/api/ai/stats/router/reset", () => { RouterStats.Reset(); return Results.Ok(); });
 
-// Default-deny gate: when RequireAuth is on, EVERY /api + /v1 request (reads
-// included — brain data, AI hub, stats, config) needs the bearer token. Only
-// liveness (/health, /api/health) stays open for monitoring; static dashboard
-// files and the SignalR /brain-hub aren't under /api so they pass (the hub has
-// its own challenge-response auth; the dashboard's own fetches carry the token).
-static bool IsProtected(HttpRequest r)
-{
-    var p = r.Path;
-    if (p.StartsWithSegments("/health") || p.StartsWithSegments("/api/health")) return false;
-    // /mcp deliberately does NOT ride this gate: it needs scope resolution
-    // (read vs read-write), and it must demand a token even when
-    // RequireAuth=false. ResolveMcpScope owns it and fails closed.
-    if (p.StartsWithSegments("/mcp")) return false;
-    return p.StartsWithSegments("/api") || p.StartsWithSegments("/v1");
-}
-
-/// <summary>
-/// Decide what a /mcp caller may do. The security decision for the whole remote
-/// surface, so it fails closed at every step.
-///
-/// Unlike the /api gate this ignores RequireAuth: /mcp reaches brain WRITE
-/// tools, so a standalone node ALWAYS demands a token. Only an embedded node
-/// with no tokens configured is trusted, and only because that is a localhost
-/// process bundled with the client — the same trust boundary stdio already has.
-/// </summary>
-static McpScope ResolveMcpScope(HttpRequest r)
-{
-    var write = NodeConfig.McpWriteToken;
-    var read = NodeConfig.McpReadToken;
-
-    // Embedded + no tokens = localhost dev alongside the client. Anything else
-    // must present a credential.
-    if (NodeConfig.EmbeddedMode && string.IsNullOrEmpty(write) && string.IsNullOrEmpty(read))
-        return McpScope.ReadWrite;
-
-    var hdr = r.Headers.Authorization.ToString();
-    const string prefix = "Bearer ";
-    if (!hdr.StartsWith(prefix, StringComparison.Ordinal)) return McpScope.None;
-    var presented = hdr[prefix.Length..];
-    if (presented.Length == 0) return McpScope.None;
-
-    // Constant-time compares — a plain == leaks token length and prefix via
-    // timing, and this token is the only thing between the internet and the
-    // owner's brain. Check write first so a node that reuses one token for both
-    // resolves to the stronger scope.
-    if (!string.IsNullOrEmpty(write) && FixedTimeEquals(presented, write!)) return McpScope.ReadWrite;
-    if (!string.IsNullOrEmpty(read) && FixedTimeEquals(presented, read!)) return McpScope.Read;
-    return McpScope.None;
-}
-
-static bool FixedTimeEquals(string a, string b)
-    => System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
-        System.Text.Encoding.UTF8.GetBytes(a), System.Text.Encoding.UTF8.GetBytes(b));
+// The owner gate's coverage lives in OwnerGate (Services/OwnerGate.cs); the
+// /mcp scope decision in McpCallerResolver (Mcp/McpCaller.cs).
 
 /// <summary>
 /// Find the brainx-mcp binary this node should drive. Explicit config wins;
@@ -1146,6 +1170,21 @@ public static class NodeConfig
     /// <summary>Idle minutes before a /mcp session's child is reaped.</summary>
     public static int McpIdleMinutes { get; private set; } = 30;
 
+    // ── BrainX Cloud (/api/cloud/*, and /mcp for bxc_ tokens) ──
+    /// <summary>Serve BrainX Cloud. Default: ON for a standalone node, OFF when embedded.</summary>
+    public static bool CloudEnabled { get; private set; }
+    /// <summary>cloud.db, cloud.key and one folder per account.
+    /// Default C:\brainx\cloud on Windows, &lt;ContentRoot&gt;/cloud elsewhere.</summary>
+    public static string CloudRoot { get; private set; } = "";
+    /// <summary>Default per-account quota (BrainX:CloudQuotaMb, default 1024).</summary>
+    public static long CloudQuotaBytes { get; private set; } = 1024L * 1024 * 1024;
+    /// <summary>xman studio base URL for license checks (tests point it at a fake).</summary>
+    public static string LicenseApiBase { get; private set; } = XmanLicenseVerifier.DefaultApiBase;
+    /// <summary>Live /mcp sessions per cloud account.</summary>
+    public static int CloudMcpSessionsPerAccount { get; private set; } = 3;
+    /// <summary>Live /mcp sessions across all cloud accounts (owner sessions are capped separately).</summary>
+    public static int CloudMcpMaxSessions { get; private set; } = 16;
+
     /// <summary>Opt-in self-update: poll GitHub Releases and apply newer node builds.</summary>
     public static bool AutoUpdate { get; private set; }
     /// <summary>GitHub "owner/repo" the self-updater pulls releases from.</summary>
@@ -1178,6 +1217,14 @@ public static class NodeConfig
         McpReadToken = FirstNonEmpty(b["McpReadToken"]);
         McpMaxSessions = ParseInt(b["McpMaxSessions"], 8);
         McpIdleMinutes = ParseInt(b["McpIdleMinutes"], 30);
+
+        CloudEnabled = ParseBool(b["CloudEnabled"], defaultValue: !EmbeddedMode);
+        CloudRoot = FirstNonEmpty(b["CloudRoot"])
+                    ?? (OperatingSystem.IsWindows() ? @"C:\brainx\cloud" : Path.Combine(AppContext.BaseDirectory, "cloud"));
+        CloudQuotaBytes = ParseInt(b["CloudQuotaMb"], 1024) * 1024L * 1024;
+        LicenseApiBase = FirstNonEmpty(b["LicenseApiBase"]) ?? XmanLicenseVerifier.DefaultApiBase;
+        CloudMcpSessionsPerAccount = ParseInt(b["CloudMcpSessionsPerAccount"], 3);
+        CloudMcpMaxSessions = ParseInt(b["CloudMcpMaxSessions"], 16);
     }
 
     static int ParseInt(string? s, int defaultValue)

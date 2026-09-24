@@ -132,6 +132,10 @@ public static class McpRemotePolicy
 
     public static bool IsHardBlocked(string tool) => HardBlocked.Contains(tool);
 
+    /// <summary>A tool that mutates the vault — for a cloud session this is what
+    /// the quota guard and the re-index hook key on.</summary>
+    public static bool IsWriteTool(string tool) => WriteTools.Contains(tool);
+
     /// <summary>
     /// Why a call's ARGUMENTS are refused remotely even though the tool itself
     /// is allowed, or null. The allowlist above decides by name only, and one

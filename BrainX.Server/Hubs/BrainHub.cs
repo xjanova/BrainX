@@ -323,6 +323,21 @@ public class BrainHub : Hub
         if (request == null || string.IsNullOrWhiteSpace(request.RequesterAddress))
             throw new HubException("Invalid match request");
 
+        // The requester is whoever this connection registered as — never what
+        // the payload claims. Without this, an unregistered connection could
+        // enumerate the network's experts, and anyone could run searches that
+        // log (and exclude) someone else's address as the requester.
+        var caller = CallerBrainAddress();
+        if (string.IsNullOrEmpty(caller))
+            throw new HubException("RegisterBrain first — caller has no identity");
+        if (!string.Equals(caller, request.RequesterAddress, StringComparison.Ordinal))
+            throw new HubException("request.RequesterAddress must match the caller's registered brain address");
+        if (!RateLimiter.TryConsume(Context.ConnectionId, "FindExperts", 30, TimeSpan.FromMinutes(1)))
+        {
+            AuditLog.Record("rate.limit", caller, "method=FindExperts");
+            throw new HubException("rate limited — slow down");
+        }
+
         request.Keywords ??= [];
         if (request.Keywords.Count > MaxKeywords)
             request.Keywords = request.Keywords.Take(MaxKeywords).ToList();
@@ -641,17 +656,36 @@ public class BrainHub : Hub
     {
         if (string.IsNullOrWhiteSpace(fromAddress)) return;
 
+        // Only the brain the request was addressed to may answer it. Before
+        // this check ANY connection — registered or not — could accept or
+        // reject a stranger's pending request and push a forged ShareResponse
+        // to the requester. The caller's address comes from the verified
+        // registration, and requests addressed to anyone else simply do not
+        // match (no hint that they exist).
+        var caller = CallerBrainAddress();
+        if (string.IsNullOrEmpty(caller))
+            throw new HubException("RegisterBrain first — caller has no identity");
+        if (!RateLimiter.TryConsume(Context.ConnectionId, "RespondToShare", 60, TimeSpan.FromMinutes(1)))
+        {
+            AuditLog.Record("rate.limit", caller, "method=RespondToShare");
+            throw new HubException("rate limited — slow down");
+        }
+
         ShareRequest? request;
         lock (PendingRequests)
         {
             request = PendingRequests.FirstOrDefault(r =>
-                r.FromAddress == fromAddress && r.Status == ShareStatus.Pending);
+                r.FromAddress == fromAddress
+                && string.Equals(r.ToAddress, caller, StringComparison.Ordinal)
+                && r.Status == ShareStatus.Pending);
             if (request != null)
                 request.Status = accepted ? ShareStatus.Accepted : ShareStatus.Rejected;
         }
 
         if (request != null)
         {
+            AuditLog.Record(accepted ? "share.accept" : "share.reject", caller,
+                $"from={request.FromAddress} nodeId={request.NodeId}");
             PeerInfo? requester;
             lock (ConnectedPeers)
             {
