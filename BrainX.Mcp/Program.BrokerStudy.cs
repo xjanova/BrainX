@@ -154,15 +154,15 @@ internal static partial class Program
                 continue;
             }
 
-            SpawnRunner(cfg, agent, new RunnerSpec
-            {
-                Exe = runner.Exe,
-                ExeFallbacks = runner.ExeFallbacks,
-                Args = runner.Args,
-                Cwd = runner.Cwd,
-                OnCall = runner.OnCall,
-            }, new WaitingWork(0, 0, new List<string>(), 0, Room: 1), live, rs);
-            started++;
+            if (SpawnRunner(cfg, agent, new RunnerSpec
+                {
+                    Exe = runner.Exe,
+                    ExeFallbacks = runner.ExeFallbacks,
+                    Args = runner.Args,
+                    Cwd = runner.Cwd,
+                    OnCall = runner.OnCall,
+                }, new WaitingWork(0, 0, new List<string>(), 0, Room: 1), live, rs, reportToRoom: false))
+                started++;
         }
 
         try

@@ -129,6 +129,9 @@ public partial class MainWindow
                 ["agents"] = CoworkAgents(),
                 ["messages"] = CoworkMessages(),
                 ["decisions"] = CoworkDecisions(),
+                // Who is doing what. Built from the task files the agents
+                // write with cowork_task, never parsed out of the chat.
+                ["tasks"] = CoworkTasks(),
                 ["roomOpen"] = CoworkRoomIsOpen(),
             };
             CoworkWebView.CoreWebView2?.PostWebMessageAsJson(
@@ -526,8 +529,109 @@ public partial class MainWindow
         // here and never passes through it — so without this the boss would
         // type into a dark room and nothing would carry it.
         CoworkSetRoomLight(true, "owner");
-        CoworkWriteRoomLine("owner", text, "owner-order");
+
+        // "@codex ทำรูปปก" is an order to codex. Before this every owner line
+        // went out unaddressed (7 of 7 in the audit), so every order called and
+        // interrupted everyone, and the whole "addressed to you / to somebody
+        // else" machinery in brainx-mcp never saw a single owner line.
+        var (to, unclear) = BrainX.Core.Services.CoworkAddressing.Parse(text, CoworkMentionables());
+        CoworkWriteRoomLine("owner", text, "owner-order", to);
+
+        // A name the room could not place is said out loud rather than
+        // silently widened: the owner meant somebody, and should know the
+        // order went to more people than that.
+        if (unclear.Count > 0)
+            CoworkWriteRoomLine("broker",
+                $"ไม่รู้จัก {string.Join(", ", unclear)} ในห้องนี้ — คำสั่งนี้ส่งถึง "
+                + (to == null ? "ทุกคนในห้องแทน" : to.Replace(",", ", ") + " เท่านั้น")
+                + " (กดชื่อเหนือช่องพิมพ์เพื่อเลือกคนได้)", "room");
         PostCowork();
+    }
+
+    /// <summary>
+    /// The agents a line can be addressed to: everyone with a desk in the last
+    /// fortnight, everyone the owner listed in skills.json, and everyone seated.
+    /// </summary>
+    private List<string> CoworkMentionables()
+    {
+        var names = new List<string>();
+        void Add(string? n)
+        {
+            if (string.IsNullOrWhiteSpace(n)) return;
+            n = n.Trim().ToLowerInvariant();
+            if (n is "owner" or "broker" || n.StartsWith('_') || n.StartsWith("//")) return;
+            if (!names.Contains(n)) names.Add(n);
+        }
+
+        try
+        {
+            var presence = Path.Combine(CoworkBusRoot, "presence");
+            if (Directory.Exists(presence))
+                foreach (var f in Directory.GetFiles(presence, "*.json"))
+                    if ((DateTime.UtcNow - File.GetLastWriteTimeUtc(f)).TotalDays <= 14)
+                        Add(Path.GetFileNameWithoutExtension(f));
+
+            var skills = Path.Combine(CoworkBusRoot, "cowork", "skills.json");
+            if (File.Exists(skills))
+                foreach (var (k, _) in JObject.Parse(File.ReadAllText(skills)))
+                    Add(k);
+
+            var members = Path.Combine(CoworkBusRoot, "cowork", "members");
+            if (Directory.Exists(members))
+                foreach (var f in Directory.GetFiles(members, "*.json"))
+                    Add(Path.GetFileNameWithoutExtension(f));
+        }
+        catch { /* a mention that cannot be resolved just goes to the room */ }
+        return names;
+    }
+
+    /// <summary>
+    /// The board: every task still open or in progress, and what closed in the
+    /// last day. Read straight from cowork/tasks/ — the agents write those files
+    /// through cowork_task, and this window only draws them.
+    /// </summary>
+    private JArray CoworkTasks()
+    {
+        var arr = new JArray();
+        var dir = Path.Combine(CoworkBusRoot, "cowork", "tasks");
+        if (!Directory.Exists(dir)) return arr;
+
+        var rows = new List<(int Order, DateTime Created, JObject Row)>();
+        var order = new[] { "blocked", "assigned", "open", "doing", "done", "dropped" };
+        foreach (var f in Directory.GetFiles(dir, "*.json"))
+        {
+            JObject o;
+            try { o = JObject.Parse(File.ReadAllText(f)); } catch { continue; }
+
+            var status = o["status"]?.ToString() ?? "open";
+            var updated = CoworkUtc(o["updatedUtc"]) ?? File.GetLastWriteTimeUtc(f);
+            var finished = status is "done" or "dropped";
+            if (finished && (DateTime.UtcNow - updated).TotalHours > 24) continue;
+
+            rows.Add((Array.IndexOf(order, status), CoworkUtc(o["createdUtc"]) ?? updated, new JObject
+            {
+                ["id"] = o["id"]?.ToString() ?? Path.GetFileNameWithoutExtension(f),
+                ["title"] = Trim(o["title"]?.ToString() ?? "", 200),
+                ["status"] = status,
+                ["assignee"] = o["assignee"]?.Type == JTokenType.String ? o["assignee"]!.ToString() : "",
+                ["createdBy"] = o["createdBy"]?.ToString() ?? "",
+                ["note"] = Trim(o["note"]?.ToString() ?? "", 300),
+                ["at"] = new DateTimeOffset(DateTime.SpecifyKind(updated, DateTimeKind.Utc)).ToUnixTimeMilliseconds(),
+            }));
+        }
+        foreach (var r in rows.OrderBy(r => r.Order).ThenBy(r => r.Created)) arr.Add(r.Row);
+        return arr;
+    }
+
+    /// <summary>A timestamp from one of the room's files, as UTC — type first,
+    /// because a Date token's ToString() is rendered in the Thai calendar.</summary>
+    private static DateTime? CoworkUtc(JToken? t)
+    {
+        if (t == null || t.Type == JTokenType.Null) return null;
+        if (t.Type == JTokenType.Date) return t.ToObject<DateTime>().ToUniversalTime();
+        return DateTime.TryParse(t.ToString(), System.Globalization.CultureInfo.InvariantCulture,
+                   System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                   out var d) ? d : null;
     }
 
     /// <summary>
@@ -593,7 +697,7 @@ public partial class MainWindow
         catch { return true; }
     }
 
-    private void CoworkWriteRoomLine(string from, string body, string topic)
+    private void CoworkWriteRoomLine(string from, string body, string topic, string? to = null)
     {
         var dir = Path.Combine(CoworkBusRoot, "cowork", "messages");
         Directory.CreateDirectory(dir);
@@ -606,6 +710,9 @@ public partial class MainWindow
             ["topic"] = topic,
             ["body"] = body,
         };
+        // Before the seal, never after: the seal covers `to`, so an order
+        // cannot be readdressed on disk without breaking it.
+        if (!string.IsNullOrEmpty(to)) payload["to"] = to;
 
         // The owner's words carry the owner's seal — without it the MCP treats
         // a line as a peer's, whatever its `from` says (see BusSeal).

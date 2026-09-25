@@ -186,6 +186,8 @@ function label(name) {
 let AGENTS = [];        // [{id,label,state,lastTool,pending,spawned}]
 let MESSAGES = [];      // newest last
 let DECISIONS = [];
+let TASKS = [];         // the board: [{id,title,status,assignee,createdBy,note,at}]
+let ROSTER = [];        // everyone with a desk, lit room or not — who a line can be for
 let BROKER = null;      // {state,tail} — the boss: running / adopted / stopped / failed
 const DESKS = new Map();  // agent id → {gx,gy,seat:{x,y},screen:{x,y}}
 const SEEN = new Set();   // message ids already shown as bubbles
@@ -2469,9 +2471,11 @@ function renderLog() {
         if (m.pending) li.classList.add('pending');
         if (m.from === 'owner') li.classList.add('boss');
         li.style.setProperty('--lc', agentColor(m.from));
+        // "claude,codex" when the boss named two: each name, not one long one.
+        const to = (m.to || '').split(',').filter(Boolean).map(label).join(', ') || 'ทุกคน';
         li.innerHTML =
             `<div class="lh"><span class="from">${esc(label(m.from))}</span>` +
-            `<span>→ ${esc(label(m.to))}</span>` +
+            `<span>→ ${esc(to)}</span>` +
             (m.topic ? `<span>· ${esc(m.topic)}</span>` : '') +
             `<span class="t">${esc(m.ts || '')}</span></div>` +
             `<div class="lb">${esc(m.body || '')}</div>` +
@@ -2514,6 +2518,156 @@ function renderDecisions() {
     }
 }
 
+// ── the board: who is doing what ────────────────────────────────────
+//
+// Owner (2026-09-25): "ถ้าบอสแบ่งหน้าที่ต้องรู้ว่าใครทำอะไร". Every row is a
+// task file an agent wrote with cowork_task. The page draws them and, for a
+// piece waiting on somebody who is not here, offers to call them in — which
+// is an ordinary owner line ("@codex …") sent through the host, sealed there.
+
+const TASK_STATE = {
+    blocked: { ico: '⛔', th: 'ติดอยู่' },
+    assigned: { ico: '📌', th: 'รอคนรับ' },
+    open: { ico: '○', th: 'ยังไม่มีเจ้าของ' },
+    doing: { ico: '▶', th: 'กำลังทำ' },
+    done: { ico: '✓', th: 'เสร็จ' },
+    dropped: { ico: '✕', th: 'ยกเลิก' },
+};
+let BOARD_SHOW_DONE = false;
+/** task id → when the owner last pressed "call" for it. The board is rebuilt
+ *  every poll, and a button that comes back pressable two seconds later gets
+ *  pressed twice — two sealed orders, two spawns for one piece of work. */
+const CALLED = new Map();
+const CALL_HOLD_MS = 120e3;
+
+/** Is this agent here to pick it up: process alive AND seated in the room. */
+function presentInRoom(id) {
+    const a = AGENTS.find(x => x.id === id);
+    return !!(a && a.state !== 'offline' && a.inRoom);
+}
+
+function ago(ms) {
+    const s = Math.max(0, (Date.now() - ms) / 1000);
+    if (s < 90) return 'เมื่อกี้';
+    if (s < 3600) return Math.round(s / 60) + ' นาที';
+    if (s < 86400) return Math.round(s / 3600) + ' ชม.';
+    return Math.round(s / 86400) + ' วัน';
+}
+
+function renderBoard() {
+    const box = document.getElementById('board');
+    const list = document.getElementById('board-list');
+    if (!box || !list) return;
+
+    const active = TASKS.filter(t => !['done', 'dropped'].includes(t.status));
+    const closed = TASKS.filter(t => ['done', 'dropped'].includes(t.status));
+    box.hidden = TASKS.length === 0;
+    if (!TASKS.length) return;
+
+    const n = s => active.filter(t => t.status === s).length;
+    const parts = [];
+    if (n('doing')) parts.push(`กำลังทำ ${n('doing')}`);
+    if (n('assigned') + n('open')) parts.push(`รอคนรับ ${n('assigned') + n('open')}`);
+    if (n('blocked')) parts.push(`ติด ${n('blocked')}`);
+    document.getElementById('board-sum').textContent = parts.join(' · ') || 'ไม่มีงานค้าง';
+
+    const row = t => {
+        const st = TASK_STATE[t.status] || TASK_STATE.open;
+        const who = t.assignee || '';
+        // A piece that is waiting on somebody who is not in the room gets a way
+        // to bring them in. Without it the board could only say "stuck".
+        const calledAt = CALLED.get(t.id) || 0;
+        const held = Date.now() - calledAt < CALL_HOLD_MS;
+        const call = who && ['assigned', 'blocked', 'doing'].includes(t.status) && !presentInRoom(who)
+            ? `<button class="call" data-agent="${esc(who)}" data-id="${esc(t.id)}" data-title="${esc(t.title)}"`
+              + (held ? ' disabled' : '')
+              + ` title="${esc(who)} ไม่อยู่ในห้อง — ส่งคำสั่งเรียกเข้ามารับงานนี้">${held ? 'เรียกแล้ว' : 'เรียก'}</button>`
+            : '';
+        return `<li class="task st-${esc(t.status)}" title="${esc(t.id)} · ${esc(st.th)} · สร้างโดย ${esc(t.createdBy || '?')}">`
+            + `<span class="ico">${st.ico}</span>`
+            + `<span class="tt">${esc(t.title)}${t.note ? `<em>${esc(t.note)}</em>` : ''}</span>`
+            + `<span class="who" style="--pc:${who ? agentColor(who) : 'var(--ink-faint)'}">${esc(who ? label(who) : 'ว่าง')}</span>`
+            + `<span class="age">${esc(ago(t.at))}</span>`
+            + call
+            + `</li>`;
+    };
+
+    list.innerHTML = active.map(row).join('')
+        + (closed.length
+            ? `<li class="done-toggle" role="button">${BOARD_SHOW_DONE ? '▾' : '▸'} เสร็จ/ยกเลิกใน 24 ชม. (${closed.length})</li>`
+              + (BOARD_SHOW_DONE ? closed.map(row).join('') : '')
+            : '');
+}
+
+document.getElementById('board-list')?.addEventListener('click', (e) => {
+    const b = e.target.closest('button.call');
+    if (b) {
+        if (b.disabled || Date.now() - (CALLED.get(b.dataset.id) || 0) < CALL_HOLD_MS) return;
+        CALLED.set(b.dataset.id, Date.now());
+        post({ type: 'officeSay', text: `@${b.dataset.agent} มีงานรอคุณบนบอร์ด [${b.dataset.id}] ${b.dataset.title}` });
+        renderBoard();
+        return;
+    }
+    if (e.target.closest('.done-toggle')) { BOARD_SHOW_DONE = !BOARD_SHOW_DONE; renderBoard(); }
+});
+
+// ── who the next line is for ────────────────────────────────────────
+
+let CHIP_IDS = '';
+
+/** One chip per agent with a desk, plus "everyone". Rebuilt only when the
+ *  line-up changes — this runs on every two-second poll. From the ROSTER, not
+ *  the drawn room: in a dark room nobody is drawn, but speaking is exactly how
+ *  the owner turns the light back on, and they should still be able to say
+ *  who it is for. */
+function renderChips() {
+    const el = document.getElementById('say-to');
+    if (!el) return;
+    const people = ROSTER.filter(a => !a.bridge).map(a => a.id);
+    const key = people.join('|');
+    if (key !== CHIP_IDS) {
+        CHIP_IDS = key;
+        el.innerHTML = people.map(id =>
+            `<button type="button" data-id="${esc(id)}" style="--pc:${agentColor(id)}">@${esc(label(id))}</button>`).join('')
+            + (people.length ? `<button type="button" data-id="" class="all">ทุกคน</button>` : '');
+    }
+    markChips();
+}
+
+function mentionRe(id) { return new RegExp('(^|\\s)@' + id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?=\\s|$)', 'i'); }
+
+/** Light up the chips whose names are in the line being typed. */
+function markChips() {
+    const text = document.getElementById('say-text').value;
+    let any = false;
+    for (const b of document.querySelectorAll('#say-to button[data-id]')) {
+        const on = b.dataset.id ? mentionRe(b.dataset.id).test(text) : false;
+        if (on) any = true;
+        b.classList.toggle('on', on);
+        b.classList.toggle('away', !!b.dataset.id && !presentInRoom(b.dataset.id));
+    }
+    document.querySelector('#say-to button.all')?.classList.toggle('on', !any);
+}
+
+document.getElementById('say-to')?.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-id]');
+    if (!b) return;
+    const box = document.getElementById('say-text');
+    let text = box.value;
+    if (!b.dataset.id) {
+        // Everyone: take every mention out, so the line goes to the room.
+        text = text.replace(/(^|\s)@[\p{L}\p{N}_-]+/gu, '$1').replace(/\s{2,}/g, ' ').trimStart();
+    } else if (mentionRe(b.dataset.id).test(text)) {
+        text = text.replace(mentionRe(b.dataset.id), '$1').replace(/\s{2,}/g, ' ').trimStart();
+    } else {
+        text = `@${b.dataset.id} ` + text;
+    }
+    box.value = text;
+    box.focus();
+    markChips();
+});
+document.getElementById('say-text')?.addEventListener('input', markChips);
+
 // ── talking to the host ─────────────────────────────────────────────
 
 function post(msg) { try { window.chrome?.webview?.postMessage(msg); } catch { /* not hosted */ } }
@@ -2547,11 +2701,13 @@ function apply(p) {
     // presence only says an MCP process is alive somewhere, which is not the
     // same as being HERE, and drawing them at desks would say the room is
     // still in session.
-    AGENTS = ROOM_OPEN ? (p.agents || []).slice().sort((a, b) => a.id.localeCompare(b.id)) : [];
+    ROSTER = (p.agents || []).slice().sort((a, b) => a.id.localeCompare(b.id));
+    AGENTS = ROOM_OPEN ? ROSTER : [];
     if (AGENTS.length !== hadAgents) layoutDesks();
 
     MESSAGES = p.messages || [];
     DECISIONS = p.decisions || [];
+    TASKS = p.tasks || [];
     if (typeof p.roomOpen === 'boolean') {
         ROOM_OPEN = p.roomOpen;
         const lb = document.getElementById('room-light');
@@ -2643,6 +2799,8 @@ function apply(p) {
 
     renderLog();
     renderDecisions();
+    renderBoard();
+    renderChips();
 }
 
 function firstLine(s) {
@@ -2667,6 +2825,7 @@ document.getElementById('say').addEventListener('submit', (e) => {
     // owner controls, not from a document.
     post({ type: 'officeSay', text });
     box.value = '';
+    markChips();
     // Show the boss immediately rather than waiting for the next poll. The
     // round trip is under two seconds, but a send that looks like nothing
     // happened gets sent twice.
@@ -2895,7 +3054,20 @@ function demo() {
         question: 'imagegen ส่งขนาดไม่ตรงสเปก จะวาดด้วยโค้ดเหมือนชุดแรก หรือใช้ imagegen แล้ว normalize?',
         options: ['วาดด้วยโค้ด', 'imagegen + normalize'],
     }];
-    apply({ agents, messages, decisions });
+    // The board, in every state it can be in. gemini is offline, so the piece
+    // waiting on it shows the button that calls it in.
+    for (const a of agents) if (['claude', 'codex', 'cluadex'].includes(a.id)) a.inRoom = true;
+    const tasks = [
+        { id: 't-9d3310', title: 'ต่อ payout wallet', status: 'blocked', assignee: 'claude', createdBy: 'claude',
+          note: 'รอบอสยืนยัน address กระเป๋า', at: now - 50 * 60e3 },
+        { id: 't-c47d19', title: 'แปลหน้า pricing เป็นอังกฤษ', status: 'assigned', assignee: 'gemini', createdBy: 'claude', at: now - 3 * 3600e3 },
+        { id: 't-5e0a77', title: 'รีวิว PR ของ broker', status: 'open', assignee: '', createdBy: 'codex', at: now - 5 * 60e3 },
+        { id: 't-3f9a1c', title: 'ทำรูปปกหน้าขาย TPIX 3 แบบ', status: 'doing', assignee: 'codex', createdBy: 'claude', at: now - 12 * 60e3 },
+        { id: 't-81b2e0', title: 'ตรวจตาราง phase บน prod ว่าตรงกับหน้าเว็บ', status: 'doing', assignee: 'claude', createdBy: 'claude', at: now - 30 * 60e3 },
+        { id: 't-12aa04', title: 'ตั้งชื่อ workstream ใหม่', status: 'done', assignee: 'codex', createdBy: 'claude',
+          note: 'ใช้ tpix-market', at: now - 2 * 3600e3 },
+    ];
+    apply({ agents, messages, decisions, tasks });
 
     // A message every few seconds, so the bubbles and the packets can be seen
     // doing what they do on a live vault.
@@ -2905,7 +3077,7 @@ function demo() {
         const to = ['codex', 'claude', 'claude'][i % 3];
         messages.push(mk(i, from, to, 'ทดสอบห้อง — ข้อความที่ ' + i, { topic: 'demo' }));
         if (messages.length > 40) messages.shift();
-        apply({ agents, messages: messages.slice(), decisions });
+        apply({ agents, messages: messages.slice(), decisions, tasks });
         i++;
     }, 4200);
 }

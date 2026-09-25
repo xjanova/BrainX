@@ -218,7 +218,14 @@ internal static partial class Program
             // called cowork_leave stays out (CoworkAutoJoin honours that), and
             // the notice still only fires when something is actually said.
             try { CoworkAutoJoin(); } catch { /* the room is not worth failing a handshake over */ }
-            _presenceTimer = new Timer(_ => { try { WritePresence(); } catch { } },
+            // And again on every beat: closing the room takes the seats away,
+            // and a session must be back in its chair when the light comes on
+            // without waiting to be restarted.
+            _presenceTimer = new Timer(_ =>
+                {
+                    try { WritePresence(); } catch { }
+                    try { CoworkAutoJoin(); } catch { }
+                },
                 null, TimeSpan.FromSeconds(HeartbeatSeconds), TimeSpan.FromSeconds(HeartbeatSeconds));
         }
     }

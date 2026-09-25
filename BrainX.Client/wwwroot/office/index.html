@@ -80,11 +80,22 @@
          be something the owner has to scroll back to find. -->
     <ol id="decisions" aria-label="Waiting on you"></ol>
 
+    <!-- The board: who is doing what. Built from the task files the agents
+         write with cowork_task, so an assignment is something the owner can
+         look at, not a sentence to find in the transcript. -->
+    <section id="board" hidden aria-label="Who is doing what">
+      <header id="board-head"><strong>บอร์ดงาน</strong><span id="board-sum"></span></header>
+      <ol id="board-list"></ol>
+    </section>
+
     <ol id="log" aria-label="What the agents said"></ol>
 
+    <!-- Who the next line is for. A chip adds "@name" to the line; no chip
+         means the whole room. -->
+    <div id="say-to" aria-label="ส่งถึงใคร"></div>
     <form id="say" autocomplete="off">
       <input id="say-text" type="text" maxlength="4000"
-             placeholder="พิมพ์สั่งงานที่นี่ — ทุกตัวที่อยู่ในห้องจะได้ยิน">
+             placeholder="สั่งงาน — ใส่ @ชื่อ เพื่อสั่งเจาะจงคน ไม่ใส่ = ทุกคนในห้อง">
       <button type="submit" id="say-send" title="ส่งเข้าห้อง">ส่ง</button>
     </form>
   </aside>

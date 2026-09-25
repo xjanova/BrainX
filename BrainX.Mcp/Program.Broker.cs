@@ -705,13 +705,20 @@ internal static partial class Program
 
                     if (spawnReason != null) BrokerLog($"{agent}: {spawnReason}");
                     if (dryRun) { BrokerLog($"{agent}: would spawn {runner.Exe} in {WorkDirFor(cfg, runner, work)} ({Describe(work)})"); continue; }
-                    SpawnRunner(cfg, agent, runner, work, live, state);
-                    if (work.Room > 0)
+                    var started = SpawnRunner(cfg, agent, runner, work, live, state);
+                    if (started && work.Room > 0)
                     {
                         // Say it IN THE ROOM. The owner is looking at the room
                         // — that is where they typed — so "somebody is coming"
                         // belongs there and not only in the broker's log.
-                        CoworkSystemLine($"เรียก {agent} เข้ามาทำงานให้แล้ว (ยังไม่มีใครอยู่ในห้องตอนที่สั่ง)");
+                        //
+                        // "Calling", not "called". The old line said the agent
+                        // had been brought in the instant a process started,
+                        // and four times on 2026-09-20 that process died eleven
+                        // seconds later on a login error: the room announced
+                        // claude, and claude never came. How the run ENDS is
+                        // reported by ReapFinishedRuns.
+                        CoworkSystemLine($"กำลังเรียก {agent} เข้าห้อง — ถ้าเปิดไม่ขึ้นจะแจ้งตรงนี้");
                         coworkHandled = true;
                     }
                     continue;
@@ -743,7 +750,11 @@ internal static partial class Program
                 if (coming.Count > 0 && missing.Count == 0)
                     CoworkSystemLine($"{string.Join(", ", coming)} กำลังเข้ามา (เพิ่งเรียก รอสักครู่)");
                 else if (missing.Count > 0)
-                    CoworkSystemLine($"ยังเรียก {string.Join(", ", missing)} เข้ามาไม่ได้ (session กำลังทำงานอยู่ หรือชนเพดานงบ) — ดู broker log");
+                    // The reason, per agent. "busy or over budget — see the log"
+                    // sent the owner to a file they do not read, for a cause
+                    // that was usually one they could fix in a minute.
+                    CoworkSystemLine("ยังเรียกเข้าห้องไม่ได้ — "
+                        + string.Join(" · ", missing.Select(a => $"{a}: {CoworkWhyNotCalledTh(cfg, a)}")));
                 else if (seated.Count == 0)
                     CoworkSystemLine("ไม่มีใครอยู่ในห้อง และไม่มี runner ที่ตั้ง onCall ไว้ใน runners.json — คำสั่งนี้ยังไม่มีใครรับ");
                 // else: everyone called is already seated. Silence is correct.
@@ -900,6 +911,9 @@ internal static partial class Program
         public required DateTime StartedUtc { get; init; }
         /// <summary>Where this run's output went, so a failure can quote it.</summary>
         public required string LogPath { get; init; }
+        /// <summary>Started because somebody was called into the cowork room —
+        /// so how it ends is owed to the room, where the owner is watching.</summary>
+        public bool ForRoom { get; init; }
     }
 
     /// <summary>
@@ -950,14 +964,19 @@ internal static partial class Program
         return null;
     }
 
-    private static void SpawnRunner(BrokerConfig cfg, string agent, RunnerSpec runner,
-                                    WaitingWork work, Dictionary<string, BrokerRun> live, RunnerState state)
+    /// <summary>Start a headless run. True when a process actually started —
+    /// the room is only told somebody is coming when somebody is.</summary>
+    /// <param name="reportToRoom">False for an idle study: refusing or losing
+    /// one is not news, and must not reach the owner's room as if it were.</param>
+    private static bool SpawnRunner(BrokerConfig cfg, string agent, RunnerSpec runner,
+                                    WaitingWork work, Dictionary<string, BrokerRun> live, RunnerState state,
+                                    bool reportToRoom = true)
     {
         var exe = ResolveRunnerExe(runner);
         if (exe == null)
         {
             BrokerLog($"{agent}: runner '{runner.Exe}' not found on PATH or in its fallbacks — cannot spawn");
-            return;
+            return false;
         }
 
         var psi = new ProcessStartInfo
@@ -1008,10 +1027,29 @@ internal static partial class Program
         foreach (var marker in new[] { "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT" })
             psi.Environment.Remove(marker);
 
+        // Which account a headless `claude -p` bills to. On this machine the
+        // CLI still held an old Console API key with no credit on it, so every
+        // run the room asked for died in eleven seconds on "Credit balance is
+        // too low" while the owner's subscription sat unused (2026-09-25). The
+        // documented way to point a headless run at the subscription is a
+        // `claude setup-token` token in CLAUDE_CODE_OAUTH_TOKEN. Read from the
+        // owner's USER environment at spawn time rather than inherited, so
+        // setting it once takes effect without restarting the app that hosts
+        // this broker. Never logged.
+        if (!psi.Environment.ContainsKey("CLAUDE_CODE_OAUTH_TOKEN"))
+        {
+            try
+            {
+                var token = Environment.GetEnvironmentVariable("CLAUDE_CODE_OAUTH_TOKEN", EnvironmentVariableTarget.User);
+                if (!string.IsNullOrWhiteSpace(token)) psi.Environment["CLAUDE_CODE_OAUTH_TOKEN"] = token;
+            }
+            catch { /* no user environment to read (service account) */ }
+        }
+
         try
         {
             var p = Process.Start(psi);
-            if (p == null) { BrokerLog($"{agent}: spawn returned no process"); return; }
+            if (p == null) { BrokerLog($"{agent}: spawn returned no process"); return false; }
 
             // Drain both pipes. A child whose stdout fills its buffer blocks
             // forever, which would look exactly like a hung agent — and the
@@ -1028,7 +1066,7 @@ internal static partial class Program
             p.BeginErrorReadLine();
 
             var startedUtc = DateTime.UtcNow;
-            live[agent] = new BrokerRun { Process = p, Agent = agent, StartedUtc = startedUtc, LogPath = log };
+            live[agent] = new BrokerRun { Process = p, Agent = agent, StartedUtc = startedUtc, LogPath = log, ForRoom = reportToRoom && work.Room > 0 };
             state.Spawns.Add(startedUtc);
             state.Hops++;
             state.RunPid = p.Id;
@@ -1036,8 +1074,9 @@ internal static partial class Program
             SaveRunnerState(agent, state);
 
             BrokerLog($"{agent}: spawned {Path.GetFileName(exe)} pid {p.Id} for {Describe(work)} · log {Path.GetFileName(log)}");
+            return true;
         }
-        catch (Exception ex) { BrokerLog($"{agent}: spawn failed — {Redact(ex.Message)}"); }
+        catch (Exception ex) { BrokerLog($"{agent}: spawn failed — {Redact(ex.Message)}"); return false; }
     }
 
     /// <summary>
@@ -1170,11 +1209,13 @@ internal static partial class Program
     {
         foreach (var (agent, run) in live.ToList())
         {
+            var killed = false;
             if (!run.Process.HasExited)
             {
                 if ((DateTime.UtcNow - run.StartedUtc).TotalSeconds < cfg.MaxRunSeconds) continue;
                 BrokerLog($"{agent}: run exceeded {cfg.MaxRunSeconds}s — killing pid {run.Process.Id}");
                 TryKill(run.Process);
+                killed = true;
             }
 
             var code = run.Process.HasExited ? run.Process.ExitCode : -1;
@@ -1189,7 +1230,8 @@ internal static partial class Program
             // difference between "a budget was hit" and "there is no credit".
             var st = ReadRunnerState(agent);
             var fatal = code != 0 ? FatalComplaint(run.LogPath) : null;
-            if (fatal != null || (code != 0 && elapsed < RunTooFastToBeReal))
+            var failed = fatal != null || (code != 0 && elapsed < RunTooFastToBeReal);
+            if (failed)
             {
                 st.ConsecutiveFailures++;
                 // The runner's own words beat both the timing and the exit
@@ -1208,7 +1250,69 @@ internal static partial class Program
             st.RunPid = null;
             st.RunStartedUtc = null;
             SaveRunnerState(agent, st);
+
+            if (run.ForRoom) CoworkReportRun(cfg, agent, run, failed, killed, st.LastFailure);
         }
+    }
+
+    /// <summary>
+    /// How a run the room asked for ended, said in the room.
+    ///
+    /// The room used to hear "called claude" and then nothing: on 2026-09-20
+    /// four runs died on a login error eleven seconds after starting, and only
+    /// the broker log knew. The owner reads the room, not the log.
+    /// </summary>
+    private static void CoworkReportRun(BrokerConfig cfg, string agent, BrokerRun run, bool failed, bool killed, string? failure)
+    {
+        if (failed)
+            CoworkSystemLine($"เรียก {agent} เข้าห้องไม่สำเร็จ — {RunnerTroubleTh(agent, failure ?? "exit")}");
+        else if (killed)
+            CoworkSystemLine($"{agent} ทำงานเกิน {cfg.MaxRunSeconds / 60} นาทีที่ตั้งไว้ จึงถูกหยุด — ดูบนบอร์ดว่างานค้างอยู่ตรงไหน");
+        else if (!CoworkSpokeSince(agent, run.StartedUtc))
+            // It ran and left, and never said a word in the room it was
+            // called into. From the owner's chair that is the same silence as
+            // a run that never started, so it gets the same honesty.
+            CoworkSystemLine($"{agent} เปิดขึ้นแล้วแต่ออกไปโดยไม่ได้พูดอะไรในห้อง — ถ้างานยังไม่มีใครรับ สั่งซ้ำโดยใส่ @{agent}");
+    }
+
+    /// <summary>
+    /// Why an agent the room asked for is not coming, in words the owner can
+    /// act on. Read-only: it reports the gates, it does not move them.
+    /// </summary>
+    private static string CoworkWhyNotCalledTh(BrokerConfig cfg, string agent)
+    {
+        if (!cfg.Runners.ContainsKey(agent)) return "ไม่มี runner ของมันใน runners.json จึงเปิด session ให้ไม่ได้";
+        var st = ReadRunnerState(agent);
+        if (st.LastFailure is { } lf) return RunnerTroubleTh(agent, lf);
+        var hourAgo = DateTime.UtcNow.AddHours(-1);
+        var recent = st.Spawns.Count(s => s >= hourAgo);
+        if (recent >= cfg.MaxSpawnsPerHour) return $"เรียกไปแล้ว {recent} ครั้งในชั่วโมงนี้ ชนเพดาน {cfg.MaxSpawnsPerHour} ครั้ง";
+        if (st.Hops >= cfg.MaxHopsPerWork) return $"งานวนไปมา {st.Hops} รอบแล้วยังไม่จบ ชนเพดาน {cfg.MaxHopsPerWork} รอบ";
+        var (allBlocked, blocked) = OpenDecisionScope(agent);
+        if (allBlocked || blocked.Count > 0) return "รอบอสตอบคำถามที่ค้างอยู่ก่อน (กล่องคำถามด้านบนของห้อง)";
+        return "รอบนี้ยังเปิด session ให้ไม่ได้ — รายละเอียดอยู่ใน broker log";
+    }
+
+    /// <summary>A runner's own complaint, turned into what the owner can do about it.</summary>
+    internal static string RunnerTroubleTh(string agent, string failure)
+    {
+        var low = failure.ToLowerInvariant();
+        var clip = failure.Length > 160 ? failure[..160] + "…" : failure;
+        if (low.Contains("credit balance"))
+            return agent.Equals("claude", StringComparison.OrdinalIgnoreCase)
+                ? "Claude CLI บนเครื่องนี้คิดเงินกับ API key ของ Console ที่เครดิตหมด ไม่ได้ใช้ subscription — "
+                + "รัน `claude setup-token` แล้วตั้ง token ที่ได้เป็นตัวแปรผู้ใช้ CLAUDE_CODE_OAUTH_TOKEN "
+                + "(หรือเปิด `claude` แล้ว /login ด้วยบัญชี subscription)"
+                : $"บัญชีที่ {agent} ใช้เครดิตหมด ({clip})";
+        if (low.Contains("usage limit") || low.Contains("quota") || low.Contains("rate limit"))
+            return $"{agent} ชนโควตาการใช้งาน รอรีเซ็ตแล้วจะลองใหม่เอง ({clip})";
+        if (low.Contains("inside another claude code session"))
+            return "broker ถูกเปิดจากข้างใน session ของ Claude — ปิดแล้วเปิดแอป BrainX ใหม่จากเมนู Start";
+        if (low.Contains("not logged in") || low.Contains("please log in") || low.Contains("authentication") || low.Contains("unauthorized"))
+            return $"{agent} ยังไม่ได้ล็อกอินบนเครื่องนี้ — เปิดโปรแกรมของมันแล้วล็อกอินหนึ่งครั้ง ({clip})";
+        if (low.Contains("is not recognized") || low.Contains("command not found") || low.Contains("no such file"))
+            return $"หาโปรแกรมของ {agent} ไม่เจอ — ดู exe ใน runners.json";
+        return $"เปิดแล้วดับทันที: {clip}";
     }
 
     /// <summary>
@@ -1916,9 +2020,10 @@ internal static partial class Program
       "cwd": "D:\\BrainX"
     },
     "claude": {
+      "//": "--allowedTools is REQUIRED for the same reason as codex's flag: a headless `claude -p` cannot answer a permission prompt, so without it every brain tool - cowork_join first of all - is denied and the run leaves without ever entering the room. It allows the brain's tools only; widen it here if you want spawned sessions to edit code too.",
       "exe": "claude",
       "exeFallbacks": [],
-      "args": ["-p", "{prompt}"],
+      "args": ["-p", "{prompt}", "--allowedTools", "mcp__brainx-brain"],
       "cwd": "D:\\BrainX"
     }
   }

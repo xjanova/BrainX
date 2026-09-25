@@ -1034,6 +1034,33 @@ internal static partial class Program
                         ["scan"] = new JObject { ["type"] = "integer", ["default"] = 40, ["description"] = "how many top-ranked notes to attribute (5-120)" }
                     }
                 }),
+            Tool("cowork_task",
+                "THE BOARD in the cowork room — who is doing what. The owner watches it to see which agent took " +
+                "which part of their order, so every piece of work you take or hand over belongs on it, not only " +
+                "in the chat. action:'list' shows it. action:'add' {title, assignee?, detail?, skill?} puts a piece " +
+                "on it: assignee 'me' = you are taking it; another agent's name = you are handing it to them (they " +
+                "are told by name — use this when the piece needs a skill you do not have); no assignee = open for " +
+                "whoever fits best. action:'claim' {id} takes an open piece — first one wins, and a piece somebody " +
+                "already holds is refused, so two agents never start the same job. action:'update' {id, status?, " +
+                "assignee?, note?} moves it: 'doing', 'blocked' (note = what it is waiting on), 'done' (note = " +
+                "one-line result), 'open' (let it go), 'dropped'; a new assignee hands it over. Every change is " +
+                "also said in the room.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["action"] = new JObject { ["type"] = "string", ["description"] = "list | add | claim | update (default list)" },
+                        ["id"] = new JObject { ["type"] = "string", ["description"] = "claim/update: the task id from the board, e.g. 't-3f9a1c'" },
+                        ["title"] = new JObject { ["type"] = "string", ["description"] = "add: one line saying what the piece of work is" },
+                        ["detail"] = new JObject { ["type"] = "string", ["description"] = "add: what done looks like, links, anything the assignee needs (≤4000 chars)" },
+                        ["assignee"] = new JObject { ["type"] = "string", ["description"] = "add/update: 'me', or the agent it goes to ('codex'). Omit on add to leave it open." },
+                        ["skill"] = new JObject { ["type"] = "string", ["description"] = "add: what the piece needs, e.g. 'image generation' — helps the right agent claim it" },
+                        ["status"] = new JObject { ["type"] = "string", ["description"] = "update: open | assigned | doing | blocked | done | dropped" },
+                        ["note"] = new JObject { ["type"] = "string", ["description"] = "update: the result when done, the reason when blocked, or a progress line" },
+                        ["work"] = new JObject { ["type"] = "string", ["description"] = "add: which job/workstream this belongs to" }
+                    }
+                }),
             Tool("cowork_say",
                 "SAY something in the cowork room — the owner sees it in their office window, and so does " +
                 "every other agent in the room. This is how you report progress, ask the room a question, " +
@@ -1046,7 +1073,7 @@ internal static partial class Program
                     ["properties"] = new JObject
                     {
                         ["message"] = new JObject { ["type"] = "string", ["description"] = "what the room hears (markdown ok, ≤64KB)" },
-                        ["to"] = new JObject { ["type"] = "string", ["description"] = "optional: who this line is aimed at ('codex', 'owner'). Everyone still sees it — this only says who should act." },
+                        ["to"] = new JObject { ["type"] = "string", ["description"] = "optional: who this line is aimed at ('codex', 'owner', or several: 'claude,codex'). Everyone still sees it — this only says who should act." },
                         ["attachments"] = new JObject { ["type"] = "array", ["items"] = new JObject { ["type"] = "string" }, ["description"] = "absolute paths of files to hand over, from the vault or from the bus outbox (.obsidianx/agent-bus/outbox — copy a screenshot or log there first). Key/credential files and dot-folders are refused. They are COPIED into the room, so they survive your temp directory." },
                         ["topic"] = new JObject { ["type"] = "string", ["description"] = "optional short thread label" },
                         ["work"] = new JObject { ["type"] = "string", ["description"] = "which job this belongs to" }
@@ -1712,6 +1739,7 @@ internal static partial class Program
                 "cowork_join"               => CoworkJoin(args),
                 "cowork_read"               => CoworkRead(args),
                 "cowork_who"                => CoworkWho(args),
+                "cowork_task"               => CoworkTask(args),
                 "cowork_say"                => CoworkSay(args),
                 "cowork_leave"              => CoworkLeave(),
                 "bridge_status"             => McpBridgeHub.StatusJson(),

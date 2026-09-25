@@ -358,6 +358,78 @@ body {
     border: 1px solid rgba(255, 184, 108, 0.5);
 }
 
+/* The board. Capped like the decisions above it, so a long list of work never
+   pushes the transcript out of the column; it scrolls inside its own cap. */
+#board {
+    flex: none;
+    max-height: 34%;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-height: 0;
+}
+#board[hidden] { display: none; }
+#board-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    color: var(--ink-dim);
+}
+#board-head strong { color: var(--ink); }
+#board-sum { margin-left: auto; color: var(--ink-faint); }
+#board-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    overflow-y: auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+#board-list .task {
+    display: grid;
+    grid-template-columns: 14px minmax(0, 1fr) auto auto auto;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 6px;
+    border-radius: 5px;
+    background: rgba(10, 12, 26, 0.55);
+    border-left: 2px solid var(--stroke);
+    font-size: 10.5px;
+}
+#board-list .ico { text-align: center; color: var(--ink-dim); }
+#board-list .tt { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#board-list .tt em { display: block; font-style: normal; font-size: 9.5px; color: var(--ink-faint); overflow: hidden; text-overflow: ellipsis; }
+#board-list .who { font-weight: 600; color: var(--pc, var(--ink)); font-size: 10px; }
+#board-list .age { color: var(--ink-faint); font-size: 9px; }
+#board-list .st-doing { border-left-color: var(--accent); }
+#board-list .st-assigned, #board-list .st-open { border-left-color: rgba(242, 239, 230, 0.35); }
+#board-list .st-blocked { border-left-color: var(--bad); background: rgba(48, 16, 14, 0.55); }
+#board-list .st-blocked .ico { color: var(--bad); }
+#board-list .st-done, #board-list .st-dropped { opacity: 0.6; }
+#board-list .st-done .ico { color: #8fcf8a; }
+#board-list .call {
+    font: inherit;
+    font-size: 9.5px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    cursor: pointer;
+    color: #1a1204;
+    background: var(--warn);
+    border: none;
+}
+#board-list .call:disabled { opacity: .5; cursor: default; }
+#board-list .done-toggle {
+    font-size: 9.5px;
+    color: var(--ink-faint);
+    cursor: pointer;
+    padding: 2px 6px;
+}
+#board-list .done-toggle:hover { color: var(--ink-dim); }
+
 /* The transcript. THE scrolling box in this column — min-height:0 is what
    lets a flex child shrink below its content and actually scroll. */
 #log {
@@ -435,6 +507,25 @@ body {
 .atts .file.bad { color: var(--bad); border-color: rgba(232, 108, 90, .5); cursor: default; }
 
 /* ── the owner's line ─────────────────────────────────────────────── */
+
+/* Who the next line is for. Lit = named in the line; dim = not in the room
+   right now (the order still goes, and the broker calls them in). */
+#say-to { display: flex; flex-wrap: wrap; gap: 4px; flex: none; }
+#say-to:empty { display: none; }
+#say-to button {
+    font: inherit;
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    cursor: pointer;
+    color: var(--pc, var(--ink-dim));
+    background: transparent;
+    border: 1px solid var(--stroke);
+}
+#say-to button:hover { border-color: var(--pc, var(--accent)); }
+#say-to button.on { background: rgba(216, 185, 120, 0.16); border-color: var(--pc, var(--accent)); color: var(--ink); }
+#say-to button.away:not(.on) { opacity: 0.55; }
+#say-to button.all { color: var(--ink-dim); }
 
 #say { display: flex; gap: 6px; flex: none; }
 #say-text {
