@@ -6,7 +6,10 @@ namespace BrainX.Core.Services;
 /// </summary>
 public static class BrainStorageFactory
 {
-    public static IBrainStorage Create(string provider, string vaultPath, string? mySqlConnString = null)
+    /// <param name="onFallback">Told why, when the preferred backend failed to
+    /// initialise and SQLite was used instead (the node logs it).</param>
+    public static IBrainStorage Create(string provider, string vaultPath, string? mySqlConnString = null,
+                                       Action<Exception>? onFallback = null)
     {
         IBrainStorage storage = provider?.ToLowerInvariant() switch
         {
@@ -17,8 +20,9 @@ public static class BrainStorageFactory
         };
 
         try { storage.Initialize(); }
-        catch
+        catch (Exception ex)
         {
+            onFallback?.Invoke(ex);
             // If the preferred backend fails to init (bad MySQL conn etc.),
             // fall back to SQLite so the app keeps working.
             storage.Dispose();

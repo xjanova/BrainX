@@ -117,7 +117,12 @@ internal static partial class Program
             var clock = new ManualClock(DateTimeOffset.UtcNow);
             var xman = new FakeXman();
             var cloud = new CloudService(
-                new CloudOptions { Root = root, QuotaBytes = quotaBytes, ReindexDebounce = reindexDebounce ?? TimeSpan.FromMilliseconds(150) },
+                new CloudOptions
+                {
+                    Root = root, QuotaBytes = quotaBytes, ReindexDebounce = reindexDebounce ?? TimeSpan.FromMilliseconds(150),
+                    // The second, MySQL pass (BRAINX_TEST_MYSQL): each node gets its own database.
+                    MySqlConnString = MySqlTestDb.CloudNodesUseMySql ? MySqlTestDb.NewDatabase() : null,
+                },
                 xman, clock,
                 reindexRunner ?? ((_, _, _, _) => Task.FromResult<ReindexOutcome>(true)));
 
@@ -299,8 +304,11 @@ internal static partial class Program
             await fs.CopyToAsync(ms);
             raw.Append(Encoding.Latin1.GetString(ms.ToArray()));
         }
-        Check("…not in the raw database or WAL bytes either",
-              raw.Length > 0 && !raw.ToString().Contains(key) && !raw.ToString().Contains(token));
+        if (node.Cloud.Store.ProviderName == "MySql")
+            Console.WriteLine("  [SKIP] raw file bytes — on MySQL there is no cloud.db (the stored values were checked above)");
+        else
+            Check("…not in the raw database or WAL bytes either",
+                  raw.Length > 0 && !raw.ToString().Contains(key) && !raw.ToString().Contains(token));
     }
 
     // ───────────────────────── paths ─────────────────────────
@@ -683,7 +691,8 @@ internal static partial class Program
         Check("fetch of 201 paths → 413 TOO_LARGE", fetchTooMany.Status == HttpStatusCode.RequestEntityTooLarge, fetchTooMany.ToString());
         var badDelete = await node.Post("/api/cloud/notes/delete", new { paths = new[] { "../../cloud.db" } }, token);
         Check("delete of a traversal path → 400 BAD_PATH, cloud.db untouched",
-              badDelete.Status == HttpStatusCode.BadRequest && File.Exists(Path.Combine(node.Root, "cloud.db")), badDelete.ToString());
+              badDelete.Status == HttpStatusCode.BadRequest
+              && (node.Cloud.Store.ProviderName == "MySql" || File.Exists(Path.Combine(node.Root, "cloud.db"))), badDelete.ToString());
     }
 
     private static async Task CloudConcurrencyChecks()

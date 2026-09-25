@@ -70,7 +70,24 @@ internal static partial class Program
         RegisterCloudChecks(sshChecks);
         RegisterCloudFollowupChecks(sshChecks);
         RegisterHardeningChecks(sshChecks);
+        RegisterMySqlChecks(sshChecks);
         foreach (var (name, check) in sshChecks) await Run(name, check);
+
+        // BRAINX_TEST_MYSQL set: the whole cloud surface again, with every test
+        // node's accounts and tokens in MySQL instead of cloud.db.
+        if (MySqlTestDb.Enabled)
+        {
+            MySqlTestDb.CloudNodesUseMySql = true;
+            var onMySql = new List<(string Name, Func<Task> Check)>();
+            RegisterCloudChecks(onMySql);
+            RegisterCloudFollowupChecks(onMySql);
+            try { foreach (var (name, check) in onMySql) await Run("[mysql] " + name, check); }
+            finally
+            {
+                MySqlTestDb.CloudNodesUseMySql = false;
+                MySqlTestDb.DropAll();
+            }
+        }
 
         Console.WriteLine();
         Console.WriteLine(_failed == 0 ? "ALL CHECKS PASSED" : $"{_failed} CHECK(S) FAILED");

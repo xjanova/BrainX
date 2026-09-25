@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -30,6 +31,10 @@ public sealed class CloudOptions
     /// <summary>BrainX:CloudLicenseTypes — the xman license types that are a
     /// BrainX Cloud plan. Anything else (demo, free, ...) is INVALID_LICENSE.</summary>
     public IReadOnlyCollection<string> AllowedLicenseTypes { get; init; } = CloudLicenses.DefaultLicenseTypes;
+    /// <summary>Accounts and tokens in MySQL instead of &lt;Root&gt;/cloud.db. Null or
+    /// empty = SQLite. On the first start with it, an existing cloud.db is
+    /// moved in (see <see cref="CloudService"/>'s MigrateLegacyStore).</summary>
+    public string? MySqlConnString { get; init; }
 }
 
 /// <summary>An authenticated cloud request: the token and the account it belongs to.</summary>
@@ -96,7 +101,16 @@ public sealed class CloudService : IMcpTenantHooks, IDisposable
         RootAcl = aclOutcome;
         if (aclOutcome != CloudRootAcl.Outcome.SkippedDisabled) Console.WriteLine($"[cloud] {aclMessage}");
 
-        Store = new CloudStore(Path.Combine(root, "cloud.db"));
+        var sqlitePath = Path.Combine(root, "cloud.db");
+        if (!string.IsNullOrWhiteSpace(options.MySqlConnString))
+        {
+            Store = CloudStore.ForMySql(options.MySqlConnString);
+            MigrateLegacyStore(sqlitePath);
+        }
+        else
+        {
+            Store = new CloudStore(sqlitePath);
+        }
         var secrets = CloudSecrets.LoadOrCreate(Path.Combine(root, "cloud.key"));
         Accounts = new CloudAccounts(Store);
         Limiter = new CloudRateLimiter(Clock);
@@ -104,6 +118,32 @@ public sealed class CloudService : IMcpTenantHooks, IDisposable
         Vaults = new CloudVaults(root, Clock);
         var runner = reindexRunner ?? (options.McpExePath is { } exe ? CloudExport.Runner(exe) : null);
         Reindexer = new CloudReindexer(options.ReindexDebounce, options.MaxConcurrentReindex, runner);
+    }
+
+    /// <summary>
+    /// First start on MySQL: the accounts and tokens in the old cloud.db move
+    /// over in one transaction, then cloud.db is renamed so nothing reads it
+    /// again. When MySQL already has accounts, cloud.db stays exactly where it
+    /// is and the log says so — two histories are never merged. Any failure
+    /// throws before the rename, so the node starts without cloud rather than
+    /// with half of it.
+    /// </summary>
+    private void MigrateLegacyStore(string sqlitePath)
+    {
+        if (!File.Exists(sqlitePath)) return;
+        var (haveAccounts, haveTokens) = Store.Count();
+        if (haveAccounts > 0 || haveTokens > 0)
+        {
+            Console.WriteLine($"[cloud] {sqlitePath} left in place: the MySQL store already has {haveAccounts} account(s) — nothing merged");
+            return;
+        }
+        var (accounts, tokens) = Store.ImportFrom(new CloudStore(sqlitePath));
+        SqliteConnection.ClearAllPools();   // the legacy file is open in the pool until now
+        var stamp = Clock.GetUtcNow().ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
+        foreach (var suffix in new[] { "", "-wal", "-shm" })
+            if (File.Exists(sqlitePath + suffix))
+                File.Move(sqlitePath + suffix, $"{sqlitePath}.migrated-{stamp}{suffix}");
+        Console.WriteLine($"[cloud] moved {accounts} account(s) and {tokens} token(s) from cloud.db to MySQL · old file: cloud.db.migrated-{stamp}");
     }
 
     public CloudOptions Options { get; }
@@ -172,7 +212,7 @@ public sealed class CloudService : IMcpTenantHooks, IDisposable
                 if (!Store.TryInsertToken(rec, evictWhenFull, now, out var evicted)) return null;
                 return new IssuedToken(token, rec, evicted);
             }
-            catch (SqliteException ex) when (ex.SqliteErrorCode == 19)   // SQLITE_CONSTRAINT: id collision
+            catch (Exception ex) when (CloudStore.IsUniqueViolation(ex))   // id collision: draw another
             {
             }
         }

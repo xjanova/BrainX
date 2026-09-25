@@ -119,9 +119,21 @@ try
     var storageDir = !string.IsNullOrWhiteSpace(NodeConfig.VaultPath)
         ? NodeConfig.VaultPath!
         : Path.Combine(AppContext.BaseDirectory, "data");
-    storage = BrainStorageFactory.Create(NodeConfig.StorageProvider, storageDir, NodeConfig.MySqlConnString);
+    storage = BrainStorageFactory.Create(NodeConfig.StorageProvider, storageDir, NodeConfig.MySqlConnString,
+        onFallback: ex => Console.WriteLine($"[storage] MySQL init failed ({ex.GetType().Name}: {ex.Message})"));
     BrainHub.Store = storage;
     Console.WriteLine($"[storage] {storage.ProviderName} ready ({NodeConfig.StorageProvider})");
+    if (NodeConfig.StorageProvider == "mysql" && storage.ProviderName != "MySql")
+    {
+        // The factory keeps the node up on SQLite — but scopes written now land
+        // in a file MySQL will never see. /health shows "storage":"Sqlite".
+        Console.ForegroundColor = ConsoleColor.Red;
+        Console.WriteLine("  [WARN] StorageProvider=mysql but MySQL is not in use — running on SQLite. "
+                          + (NodeConfig.MySqlConnString is null
+                              ? "No connection string (BrainX__MySqlConnString / BrainX__MySqlConnStringFile)."
+                              : "See the MySQL error above."));
+        Console.ResetColor();
+    }
     // Seed the search index from the current brain export (best-effort).
     PopulateStorageFromExport(storage);
 }
@@ -178,11 +190,18 @@ if (NodeConfig.CloudEnabled)
             McpExePath = mcpExe,
             HardenRootAcl = true,   // SYSTEM + Administrators; guarded inside (Windows, identity, probe)
             AllowedLicenseTypes = NodeConfig.CloudLicenseTypes,
+            // MySQL, or nothing: a node told to keep accounts in MySQL that
+            // cannot reach it starts without cloud (the catch below) rather than
+            // opening a second, SQLite history of the same accounts.
+            MySqlConnString = NodeConfig.CloudStoreProvider == "mysql"
+                ? NodeConfig.MySqlConnString ?? throw new InvalidOperationException(
+                      "CloudStoreProvider=mysql but there is no MySQL connection string (BrainX__MySqlConnString / BrainX__MySqlConnStringFile)")
+                : null,
         }, ver);
         cloud = svc;
         app.MapBrainCloud(svc);
         app.Lifetime.ApplicationStopping.Register(() => { svc.Dispose(); ver.Dispose(); });
-        Console.WriteLine($"[cloud] BrainX Cloud ENABLED at /api/cloud · root={svc.RootDir}"
+        Console.WriteLine($"[cloud] BrainX Cloud ENABLED at /api/cloud · root={svc.RootDir} · store={svc.Store.ProviderName}"
                           + $" · quota {NodeConfig.CloudQuotaBytes / (1024 * 1024)} MB/account"
                           + $" · reindex {(svc.Reindexer.Available ? "on" : "OFF (brainx-mcp not found)")}");
     }
@@ -354,6 +373,7 @@ app.MapGet("/health", () => Results.Ok(new
     authRequired = NodeConfig.RequireAuth,
     storage = storage?.ProviderName ?? "none",
     cloud = cloud != null,
+    cloudStore = cloud?.Store.ProviderName,
     uptimeSec = NodeInfo.UptimeSeconds
 }));
 
@@ -1228,8 +1248,16 @@ public static class NodeConfig
 
     /// <summary>"sqlite" (default) or "mysql". Picks the IBrainStorage backend.</summary>
     public static string StorageProvider { get; private set; } = "sqlite";
-    /// <summary>MySQL connection string — required when StorageProvider=mysql.</summary>
+    /// <summary>MySQL connection string — required when StorageProvider=mysql.
+    /// From BrainX:MySqlConnString, else read from BrainX:MySqlConnStringFile.</summary>
     public static string? MySqlConnString { get; private set; }
+    /// <summary>A file holding the MySQL connection string. Keeps the password
+    /// out of the service's registry environment, which far more accounts can
+    /// read than an admin-only file (the owner token moved out for the same reason).</summary>
+    public static string? MySqlConnStringFile { get; private set; }
+    /// <summary>"sqlite" or "mysql": where BrainX Cloud keeps accounts and
+    /// tokens. Defaults to StorageProvider, so one setting moves the node.</summary>
+    public static string CloudStoreProvider { get; private set; } = "sqlite";
 
     // ── Remote MCP endpoint (/mcp) ──
     // Off by default: this is the one surface that hands brain WRITE tools to
@@ -1310,7 +1338,9 @@ public static class NodeConfig
         AllowedOrigins = (b["AllowedOrigins"] ?? "")
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         StorageProvider = (FirstNonEmpty(b["StorageProvider"]) ?? "sqlite").ToLowerInvariant();
-        MySqlConnString = FirstNonEmpty(b["MySqlConnString"]);
+        MySqlConnStringFile = FirstNonEmpty(b["MySqlConnStringFile"]);
+        MySqlConnString = FirstNonEmpty(b["MySqlConnString"]) ?? ReadConnStringFile(MySqlConnStringFile);
+        CloudStoreProvider = (FirstNonEmpty(b["CloudStoreProvider"]) ?? StorageProvider).ToLowerInvariant();
         AutoUpdate = ParseBool(b["AutoUpdate"], defaultValue: false);
         UpdateRepo = FirstNonEmpty(b["UpdateRepo"]) ?? "xjanova/BrainX";
         UpdateServiceName = FirstNonEmpty(b["UpdateServiceName"]);
@@ -1348,6 +1378,24 @@ public static class NodeConfig
 
     static string? FirstNonEmpty(params string?[] vals)
         => vals.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
+
+    /// <summary>The first non-empty line of <paramref name="path"/>, or null (with
+    /// a warning) when it is missing, unreadable or empty. Never logs the value.</summary>
+    static string? ReadConnStringFile(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return null;
+        try
+        {
+            var value = File.ReadLines(path).Select(l => l.Trim()).FirstOrDefault(l => l.Length > 0);
+            if (value is null) Console.WriteLine($"[config] {path} is empty — no MySQL connection string");
+            return value;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[config] cannot read {path} ({ex.GetType().Name}) — no MySQL connection string");
+            return null;
+        }
+    }
 
     static bool ParseBool(string? s, bool defaultValue)
         => bool.TryParse(s, out var v) ? v : defaultValue;
