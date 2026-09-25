@@ -16,7 +16,8 @@
     1. find the BrainXNode service and the folder its exe runs from
     2. ask GitHub for the release (the latest by default) and its full node
        package: the server, mcp\ and manager\
-    3. download it and check its SHA-256
+    3. download it (the size so far is printed every 10 s) and check its
+       SHA-256
     4. unpack it beside the app folder and check the files a node needs
     5. back up the app folder (the node keeps running meanwhile)
     6. stop the service, copy the new build over the app folder, start it.
@@ -177,13 +178,37 @@ function Get-FolderBytes([string]$path) {
     return [double]0
 }
 
-# curl.exe (part of Windows since 1803 / Server 2019) has no deadline and
-# retries; Invoke-WebRequest is the fallback.
-function Save-Url([string]$url, [string]$outFile) {
+# curl.exe (part of Windows since 1803 / Server 2019) has no overall deadline,
+# because a slow link is why this script exists. It retries, and it gives up
+# on a transfer that stays below 1 KB/s for 2 minutes instead of hanging. It
+# runs as its own process so that the size so far can be printed every 10 s:
+# a silent download of 150 MB on a slow link looks exactly like a hang.
+# Invoke-WebRequest is the fallback, without progress.
+function Save-Url([string]$url, [string]$outFile, [double]$totalBytes = 0) {
     $curl = Join-Path $env:SystemRoot "System32\curl.exe"
     if (Test-Path -LiteralPath $curl) {
-        & $curl -L --fail --silent --show-error --retry 3 --connect-timeout 30 -A $UserAgent -o $outFile $url
-        if ($LASTEXITCODE -ne 0) { throw "the download failed (curl.exe exit $LASTEXITCODE)" }
+        if (Test-Path -LiteralPath $outFile) { Remove-Item -LiteralPath $outFile -Force }
+        $curlArgs = "-L --fail --silent --show-error --retry 3 --connect-timeout 30 --speed-limit 1024 --speed-time 120 " +
+                    "-A $UserAgent -o `"$outFile`" `"$url`""
+        $proc = Start-Process -FilePath $curl -ArgumentList $curlArgs -NoNewWindow -PassThru
+        $null = $proc.Handle   # keeps ExitCode readable once the process has ended
+        $started = Get-Date
+        while (-not $proc.WaitForExit(10000)) {
+            $secs = ((Get-Date) - $started).TotalSeconds
+            $have = [double]0
+            if (Test-Path -LiteralPath $outFile) { $have = [double](Get-Item -LiteralPath $outFile).Length }
+            if ($have -le 0) {
+                Write-Host ("  {0:N0} s  connecting - nothing received yet" -f $secs)
+                continue
+            }
+            $rate = $have / $secs
+            $line = "  {0:N0} s  {1}" -f $secs, (Format-MB $have)
+            if ($totalBytes -gt 0) { $line += " of {0} ({1:N0}%)" -f (Format-MB $totalBytes), (100 * $have / $totalBytes) }
+            $line += ", {0}/s" -f (Format-MB $rate)
+            if ($totalBytes -gt $have) { $line += ", about {0:N0} s left" -f (($totalBytes - $have) / $rate) }
+            Write-Host $line
+        }
+        if ($proc.ExitCode -ne 0) { throw "the download failed (curl.exe exit $($proc.ExitCode))" }
         return
     }
     $saved = $ProgressPreference
@@ -349,7 +374,7 @@ try {
 
     Write-Step "3/7 Download and check"
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    Save-Url $asset.browser_download_url $zip
+    Save-Url $asset.browser_download_url $zip ([double]$asset.size)
     $sw.Stop()
     $bytes = [double](Get-Item -LiteralPath $zip).Length
     $secs = [Math]::Max($sw.Elapsed.TotalSeconds, 0.1)
