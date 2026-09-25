@@ -260,12 +260,28 @@ internal static partial class Program
 
                 var agent = o["agent"]?.ToString() ?? "";
                 var question = o["question"]?.ToString() ?? "";
+                var id = o["id"]?.ToString() ?? Path.GetFileNameWithoutExtension(f);
+                var work = o["work"]?.ToString();
+
+                // A folder question is answered for good (see WorkDirHold):
+                // kept per label, so the next tick does not find the same
+                // label with no folder and ask all over again.
+                string? workdirMode = null;
+                if (id.StartsWith("workdir-", StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(work) && !string.IsNullOrWhiteSpace(agent))
+                    workdirMode = RecordWorkDirAnswer(agent, work!, answer);
+
                 // Only into a box something can actually open. Delivering an
                 // answer to an agent with no runner and no session grows the
                 // very queue depth the broker reports back to the owner —
                 // the loop feeding its own trigger. The decision still closes;
                 // it just does not leave litter behind.
-                var deliverable = cfg.Runners.ContainsKey(agent) || IsOnline(PresenceAgeSeconds(agent));
+                //
+                // Nor for work the owner has just put on hold: that answer is
+                // "nobody start on this", and mailing it to the agent under the
+                // same label is one more message in the queue that raised the
+                // question — which is how 8 waiting became 9 on 2026-09-25.
+                var deliverable = (cfg.Runners.ContainsKey(agent) || IsOnline(PresenceAgeSeconds(agent)))
+                                  && workdirMode is null or "use";
                 if (!string.IsNullOrWhiteSpace(agent) && deliverable)
                 {
                     DeliverBusMessage("broker", agent,
@@ -278,6 +294,12 @@ internal static partial class Program
                 o["status"] = "answered";
                 o["answeredUtc"] = DateTime.UtcNow.ToString("o");
                 AtomicWriteJson(f, o);
+
+                // The quiet period starts from the ANSWER. It used to run only
+                // from when the question was asked, so an answer given two days
+                // later found the stamp long expired and the same card came
+                // straight back on the next tick.
+                StampWake("decision-" + SanitizeAgentSlug(id));
 
                 // The hop counter is what the budget gate reads. An answered
                 // question means the owner wants this to continue, so the
@@ -294,8 +316,10 @@ internal static partial class Program
                 SaveRunnerState(agent, st);
 
                 BrokerLog($"decision [{o["id"]}] answered: {answer}"
-                          + (deliverable ? $" — handed to {agent}"
-                                         : $" — noted; '{agent}' has no runner and no session, so nothing was queued for it"));
+                          + (workdirMode is "hold" or "later"
+                                ? $" — '{work}' is on hold ({workdirMode}); not asking again, nothing queued for {agent}"
+                             : deliverable ? $" — handed to {agent}"
+                                           : $" — noted; '{agent}' has no runner and no session, so nothing was queued for it"));
             }
             catch (Exception ex) { BrokerLog("decision pump — " + Redact(ex.Message)); }
         }

@@ -490,6 +490,21 @@ internal static partial class Program
                 BrokerSay(agent, $"{agent}: {string.Join(", ", blockedWorks)} parked on the owner; carrying on with {Describe(work)}");
             }
 
+            // Work the owner has put on hold by answering its folder question
+            // with "not now". Neither asked about again nor started, and the
+            // agent's other work carries on.
+            var held = work.Works.Where(w => WorkDirHold(w) != null).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (held.Count > 0)
+            {
+                work = WithoutBlockedWork(work, held);
+                if (work.Mail == 0 && work.Tasks == 0 && work.Room == 0)
+                {
+                    BrokerSay(agent, $"{agent}: {string.Join(", ", held)} on hold by the owner — not asking again, not spawning");
+                    continue;
+                }
+                BrokerSay(agent, $"{agent}: {string.Join(", ", held)} on hold by the owner; carrying on with {Describe(work)}");
+            }
+
             var state = ReadRunnerState(agent);
             var verdict = ClassifySession(agent, state, cfg);
             SaveRunnerState(agent, state);
@@ -1110,6 +1125,9 @@ internal static partial class Program
     {
         if (cfg.WorkDirs.TryGetValue(work, out var mapped) && Directory.Exists(mapped)) return mapped;
 
+        // The owner answered the folder question with a folder.
+        if (ReadWorkDirAnswer(work) is { Mode: "use", Path: { } answered } && Directory.Exists(answered)) return answered;
+
         var roots = cfg.WorkRoots.Where(Directory.Exists).ToList();
         if (roots.Count == 0) return null;
 
@@ -1130,6 +1148,92 @@ internal static partial class Program
             candidate = candidate[..cut];
         }
         return null;
+    }
+
+    // ───────────── the owner's answer to "which folder?" ─────────────
+
+    /* Owner (2026-09-25), with the card on screen: "ป้ายนี้ทำไมเด้งมาเรื่อยๆ
+     * ทั้งๆที่ตอบไปแล้ว". They had answered the office-avatars folder question
+     * SEVEN times since 2026-09-20 — "use D:\BrainX anyway", "เดี๋ยวฉันเพิ่มใน
+     * runners.json เอง" four times, "ใช้ D:\BrainX ไปก่อน", "ยกเลิกไปก่อน" —
+     * and every time it came back within a minute.
+     *
+     * Nothing kept the answer. ResolveWorkDir only knew runners.json, so the
+     * next tick found the same label with no folder and asked again. The
+     * two-hour stamp that is meant to stop that counts from when the question
+     * was ASKED, and an answer given days later lands long after it expired.
+     * And delivering the answer as mail under the same label added one more
+     * message to the queue that raised the question: 8 became 9.
+     *
+     * So an answer is now a record, per label:
+     *   use   — it named a folder that exists: that is where the work runs;
+     *   later — "I'll add it to runners.json myself": say nothing until
+     *           runners.json changes;
+     *   hold  — anything else ("ยกเลิกไปก่อน"): leave that work alone.
+     * A hold lasts a week, then the question is fair again. The owner can still
+     * retire the work outright with `broker --clear <label>`.
+     */
+
+    private static string WorkDirAnswersPath => Path.Combine(BrokerDir, "workdir-answers.json");
+
+    /// <summary>A week of quiet for "not now". Long enough to never feel like
+    /// nagging, short enough that parked work is not forgotten for good.</summary>
+    private static readonly TimeSpan WorkDirHoldFor = TimeSpan.FromDays(7);
+
+    private sealed record WorkDirAnswer(string Mode, string? Path, string Answer, DateTime AtUtc);
+
+    private static WorkDirAnswer? ReadWorkDirAnswer(string work)
+    {
+        if (ReadJsonOrNull(WorkDirAnswersPath)?[work] is not JObject o) return null;
+        return new WorkDirAnswer(
+            o["mode"]?.ToString() ?? "hold",
+            o["path"]?.Type == JTokenType.String ? o["path"]!.ToString() : null,
+            o["answer"]?.ToString() ?? "",
+            CoworkUtc(o["atUtc"]) ?? DateTime.MinValue);
+    }
+
+    /// <summary>The owner's hold on this label, or null when the broker may ask
+    /// about it and run it again.</summary>
+    private static WorkDirAnswer? WorkDirHold(string work)
+    {
+        var a = ReadWorkDirAnswer(work);
+        if (a == null || a.Mode == "use") return null;
+        if (DateTime.UtcNow - a.AtUtc > WorkDirHoldFor) return null;
+        // "I'll add it myself" is kept until they have touched the file.
+        if (a.Mode == "later" && File.Exists(BrokerConfigPath)
+            && File.GetLastWriteTimeUtc(BrokerConfigPath) > a.AtUtc) return null;
+        return a;
+    }
+
+    /// <summary>Keep the owner's answer to a folder question, and say what it
+    /// means: use, later or hold.</summary>
+    private static string RecordWorkDirAnswer(string agent, string work, string answer)
+    {
+        // A folder named in the answer, if it exists — both of the card's own
+        // "use <cwd>" options, and anything the owner typed that is a path.
+        string? dir = null;
+        foreach (System.Text.RegularExpressions.Match m in
+                 System.Text.RegularExpressions.Regex.Matches(answer, @"[A-Za-z]:\\[^\s""'<>|?*]*"))
+        {
+            var p = m.Value.TrimEnd('.', ',', ')', ';');
+            if (p.Length > 3 && Directory.Exists(p)) { dir = p; break; }
+        }
+        var mode = dir != null ? "use"
+                 : answer.Contains("runners.json", StringComparison.OrdinalIgnoreCase) ? "later"
+                 : "hold";
+
+        var all = ReadJsonOrNull(WorkDirAnswersPath) ?? new JObject();
+        all[work] = new JObject
+        {
+            ["mode"] = mode,
+            ["path"] = dir,
+            ["answer"] = answer,
+            ["agent"] = agent,
+            ["atUtc"] = DateTime.UtcNow.ToString("o"),
+        };
+        Directory.CreateDirectory(BrokerDir);
+        AtomicWriteJson(WorkDirAnswersPath, all);
+        return mode;
     }
 
     /// <summary>

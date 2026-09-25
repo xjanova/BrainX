@@ -20,6 +20,120 @@ internal static partial class Program
         checks.Add(("cowork room: the owner's @names become who the order is for", CoworkAddressingChecks));
         checks.Add(("cowork room: the light re-seats, @names route, the board holds who is doing what", CoworkRoomEndToEnd));
         checks.Add(("cowork broker: a call that dies is reported in the room, with the reason", CoworkBrokerReportsFailedCall));
+        checks.Add(("broker decisions: a folder question answered once stays answered", BrokerKeepsFolderAnswers));
+    }
+
+    /// <summary>
+    /// The card the owner answered seven times (2026-09-20 → 25): "which folder
+    /// does office-avatars run in?". "Not now" must hold, and a folder must be used.
+    /// </summary>
+    private static async Task BrokerKeepsFolderAnswers()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the check", false); return; }
+
+        var root = Path.Combine(Path.GetTempPath(), "brainx-workdir-e2e-" + Guid.NewGuid().ToString("N"));
+        var vault = Path.Combine(root, "vault");
+        var bus = Path.Combine(vault, ".obsidianx", "agent-bus");
+        var inbox = Path.Combine(bus, "inbox", "codex");
+        var decisions = Path.Combine(bus, "broker", "decisions");
+        var work = Path.Combine(root, "work-here");
+        Directory.CreateDirectory(inbox);
+        Directory.CreateDirectory(work);
+        Directory.CreateDirectory(Path.Combine(vault, "Notes"));
+        File.WriteAllText(Path.Combine(bus, "runners.json"), new JObject
+        {
+            ["pollSeconds"] = 5,
+            ["idleStudy"] = false,
+            ["workRoots"] = new JArray(),
+            ["escalation"] = new JObject { ["toast"] = false, ["chatCard"] = false, ["telegram"] = new JObject { ["botToken"] = "", ["chatId"] = "" } },
+            ["runners"] = new JObject
+            {
+                ["codex"] = new JObject { ["exe"] = "cmd", ["args"] = new JArray("/c", "exit /b 0"), ["cwd"] = root },
+            },
+        }.ToString(), new UTF8Encoding(false));
+
+        void Mail(string label)
+        {
+            var name = $"{DateTime.UtcNow.Ticks:D19}-claude-{Guid.NewGuid().ToString("N")[..4]}.json";
+            File.WriteAllText(Path.Combine(inbox, name), new JObject
+            {
+                ["id"] = "m-" + Guid.NewGuid().ToString("N")[..8], ["ts"] = DateTime.UtcNow.ToString("o"),
+                ["from"] = "claude", ["to"] = "codex", ["body"] = "please do " + label, ["work"] = label,
+            }.ToString(), new UTF8Encoding(false));
+            Thread.Sleep(5);
+        }
+        async Task<string> Tick()
+        {
+            var psi = new ProcessStartInfo(exe, $"broker --vault \"{vault}\" --once")
+            {
+                RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false,
+                StandardOutputEncoding = new UTF8Encoding(false),
+            };
+            psi.Environment["BRAINX_SANDBOX"] = "1";
+            psi.Environment.Remove(StubMcpServer.EnvFlag);
+            using var p = Process.Start(psi)!;
+            var outTask = p.StandardOutput.ReadToEndAsync();
+            _ = p.StandardError.ReadToEndAsync();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+            await p.WaitForExitAsync(cts.Token);
+            return await outTask;
+        }
+        JObject? Decision(string label)
+        {
+            var f = Path.Combine(decisions, "workdir-" + label + ".json");
+            return File.Exists(f) ? JObject.Parse(File.ReadAllText(f)) : null;
+        }
+        void Answer(string label, string answer)
+        {
+            var d = Decision(label)!;
+            d["answer"] = answer;   // exactly what the room's buttons write
+            d["answeredVia"] = "cowork";
+            File.WriteAllText(Path.Combine(decisions, "workdir-" + label + ".json"), d.ToString(), new UTF8Encoding(false));
+        }
+        int Waiting() => Directory.GetFiles(inbox, "*.json").Length;
+
+        try
+        {
+            // ── "not now" ──
+            Mail("office-avatars");
+            await Tick();
+            Check("unmapped work raises the folder question", Decision("office-avatars")?["status"]?.ToString() == "open", Decision("office-avatars")?.ToString());
+
+            // The owner answered days after being asked, so the two-hour
+            // quiet period that dates from the question had long run out.
+            // Without this the test passes on the broken code too.
+            foreach (var stamp in Directory.GetFiles(Path.Combine(bus, "wake"), "decision-*.stamp"))
+                File.SetLastWriteTimeUtc(stamp, DateTime.UtcNow.AddDays(-3));
+
+            Answer("office-avatars", "ยกเลิกไปก่อน");
+            var t2 = await Tick();
+            Check("the answer closes it", Decision("office-avatars")?["status"]?.ToString() == "answered", t2);
+            Check("…and is not mailed back into the queue that asked (8 → 9)", Waiting() == 1, $"{Waiting()} waiting");
+
+            var t3 = await Tick();
+            var t4 = await Tick();
+            Check("the same card does not come back on the next ticks",
+                  Decision("office-avatars")?["status"]?.ToString() == "answered", Decision("office-avatars")?.ToString());
+            Check("…the work is held, and says so", (t3 + t4).Contains("on hold by the owner"), t3 + t4);
+            Check("…and nothing is started for it", !(t3 + t4).Contains("spawned"), t3 + t4);
+
+            // ── a folder ──
+            Mail("brand-art");
+            await Tick();
+            Check("a second label gets its own question", Decision("brand-art")?["status"]?.ToString() == "open", Decision("brand-art")?.ToString());
+            foreach (var stamp in Directory.GetFiles(Path.Combine(bus, "wake"), "decision-*.stamp"))
+                File.SetLastWriteTimeUtc(stamp, DateTime.UtcNow.AddDays(-3));
+            Answer("brand-art", $"ใช้ {work} ไปก่อน");
+            await Tick();
+            var ran = await Tick();
+            Check("a folder in the answer is where the work runs", ran.Contains("spawned") && ran.Contains("brand-art"), ran);
+            Check("…and the question stays closed", Decision("brand-art")?["status"]?.ToString() == "answered", Decision("brand-art")?.ToString());
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
     }
 
     // ───────────── the cowork room (audit 2026-09-25) ─────────────
