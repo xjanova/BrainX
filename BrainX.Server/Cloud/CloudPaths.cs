@@ -10,7 +10,8 @@ namespace BrainX.Server.Cloud;
 ///
 /// Two layers, deliberately redundant:
 ///   1. <see cref="Validate"/> — the lexical rules (relative, forward slashes,
-///      .md only, no dot segments, no reserved device names, no characters
+///      .md only, no '.'/'..' segments, no dot entry at the root and no
+///      system dot folder anywhere, no reserved device names, no characters
 ///      Windows cannot store, length caps).
 ///   2. <see cref="ResolveInside"/> — after Path.GetFullPath the target must
 ///      still be under the account's vault root. Layer 1 should make this
@@ -93,11 +94,19 @@ public static class CloudPaths
 
         if (!path.EndsWith(".md", StringComparison.OrdinalIgnoreCase)) return "only .md files are accepted";
 
-        foreach (var seg in path.Split('/'))
+        var segments = path.Split('/');
+        for (var i = 0; i < segments.Length; i++)
         {
+            var seg = segments[i];
             if (seg.Length == 0) return "empty path segment";
-            // Covers "..", ".", ".obsidianx", ".git", ".trash" and any hidden file.
-            if (seg[0] == '.') return "path segments may not start with '.'";
+            if (seg is "." or "..") return "'.' and '..' segments are not allowed";
+            // The vault root's dot entries (.obsidianx: index, journal, agent
+            // bus) are the server's own state. Deeper down a dot name is the
+            // owner's — Imported/.claude holds real notes, and ".NET x.md" is a
+            // title — and the brain indexes them, so the cloud must carry them.
+            if (seg[0] == '.' && (i == 0 || IsSystemFolderName(seg)))
+                return i == 0 ? "a path may not start with '.'" : $"'{seg}' is a system folder";
+            if (i == segments.Length - 1 && seg.Length <= 3) return "a note needs a name before .md";
             if (seg.Length > MaxSegmentLength) return $"a path segment is longer than {MaxSegmentLength} characters";
             // Win32 silently strips trailing dots and spaces, so "a./x.md",
             // "a /x.md" and "a/x.md" would be three names for one folder.
@@ -107,6 +116,20 @@ public static class CloudPaths
         }
         return null;
     }
+
+    /// <summary>
+    /// Dot folders that hold a tool's state, never notes: Obsidian's and the
+    /// brain's own (.obsidian, .obsidianx), the trash, and git. Refused at any
+    /// depth — a vault imported into a subfolder brings its own.
+    /// </summary>
+    public static bool IsSystemFolderName(string segment) =>
+        segment.StartsWith(".obsidian", StringComparison.OrdinalIgnoreCase)
+        || segment.Equals(".trash", StringComparison.OrdinalIgnoreCase)
+        || segment.Equals(".git", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Would the manifest walk descend into this folder?</summary>
+    public static bool MayEnterFolder(string name, bool topLevel) =>
+        name.Length > 0 && (name[0] != '.' || (!topLevel && name is not ("." or "..") && !IsSystemFolderName(name)));
 
     /// <summary>"con.md", "CON .backup.md", "lpt1" — the part before the first
     /// dot, trailing spaces ignored, compared case-insensitively.</summary>

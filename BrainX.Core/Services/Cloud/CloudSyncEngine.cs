@@ -377,7 +377,8 @@ public sealed class CloudSyncEngine
     /// <summary>
     /// Mirror the account into <paramref name="cacheDir"/>: fetch what changed,
     /// remove what the server no longer has — only inside the cache, never a
-    /// dot-folder, and never a note with local changes not yet pushed.
+    /// root dot-folder or system folder, and never a note with local changes
+    /// not yet pushed.
     /// </summary>
     public async Task<CloudPullResult> PullAsync(string cacheDir, CloudPullOptions? options = null,
         IProgress<CloudSyncProgress>? progress = null, CancellationToken ct = default)
@@ -696,8 +697,10 @@ public sealed class CloudSyncEngine
 
     /// <summary>
     /// Every note under the selected folders (null = everything), hashed.
-    /// Dot-folders and junctions/symlinks are not entered: the first can never
-    /// upload anyway, and the second can lead outside the vault or in circles.
+    /// Dot-folders at the root, system folders (.git, .obsidian*, .trash) and
+    /// junctions/symlinks are not entered: the first two can never upload, and
+    /// the last can lead outside the vault or in circles. A dot folder deeper
+    /// down (Imported/.claude) is notes like any other, as the indexer sees it.
     /// </summary>
     public LocalScan ScanLocal(string root, IReadOnlyCollection<string>? folders, bool honourIgnoreFile,
                                object? fileLock = null, CancellationToken ct = default)
@@ -727,7 +730,7 @@ public sealed class CloudSyncEngine
 
         foreach (var (dir, recursive) in sources)
         {
-            foreach (var file in EnumerateMarkdown(dir, recursive))
+            foreach (var file in EnumerateMarkdown(rootFull, dir, recursive))
             {
                 ct.ThrowIfCancellationRequested();
                 var rel = CloudPathRules.ToCloudPath(rootFull, file);
@@ -759,7 +762,7 @@ public sealed class CloudSyncEngine
             var dir = isRoot ? rootFull : Path.Combine(rootFull, topFolder);
             if (!Directory.Exists(dir)) return 0;
             var n = 0;
-            foreach (var f in EnumerateMarkdown(dir, recursive: !isRoot))
+            foreach (var f in EnumerateMarkdown(rootFull, dir, recursive: !isRoot))
             {
                 var rel = CloudPathRules.ToCloudPath(rootFull, f);
                 if (rel != null && !CloudPathRules.IsMachineManaged(rel) && CloudPathRules.IsValid(rel)) n++;
@@ -788,8 +791,9 @@ public sealed class CloudSyncEngine
         return list;
     }
 
-    private static IEnumerable<string> EnumerateMarkdown(string start, bool recursive)
+    private static IEnumerable<string> EnumerateMarkdown(string rootFull, string start, bool recursive)
     {
+        rootFull = Path.TrimEndingDirectorySeparator(rootFull);
         var opts = new EnumerationOptions
         {
             IgnoreInaccessible = true,
@@ -812,10 +816,10 @@ public sealed class CloudSyncEngine
             string[] subs;
             try { subs = Directory.GetDirectories(dir, "*", opts); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { continue; }
+            var topLevel = string.Equals(Path.TrimEndingDirectorySeparator(dir), rootFull, StringComparison.OrdinalIgnoreCase);
             foreach (var sub in subs)
             {
-                var name = Path.GetFileName(sub);
-                if (name.StartsWith('.')) continue;
+                if (!CloudPathRules.MayEnterFolder(Path.GetFileName(sub), topLevel)) continue;
                 try
                 {
                     if ((File.GetAttributes(sub) & FileAttributes.ReparsePoint) != 0) continue;

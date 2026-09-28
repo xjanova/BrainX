@@ -87,11 +87,17 @@ public static class CloudPathRules
         if (!path.EndsWith(".md", StringComparison.OrdinalIgnoreCase)) return "not a .md file";
 
         var segments = path.Split('/');
-        foreach (var seg in segments)
+        for (var i = 0; i < segments.Length; i++)
         {
+            var seg = segments[i];
             if (seg.Length == 0) return "empty path segment";
-            if (seg == "..") return "'..' segment";
-            if (seg[0] == '.') return "segment starts with '.'";
+            if (seg is "." or "..") return "'.' or '..' segment";
+            // The server's rule: a dot entry at the vault root is its own state
+            // (.obsidianx); deeper, a dot name is the owner's note or folder
+            // (Imported/.claude, ".NET x.md") — unless it is a system folder.
+            if (seg[0] == '.' && (i == 0 || IsSystemFolderName(seg)))
+                return i == 0 ? "path starts with '.'" : "system folder";
+            if (i == segments.Length - 1 && seg.Length <= 3) return "no name before .md";
             if (seg.Length > MaxSegmentLength) return "segment longer than 200 characters";
             // Windows silently drops a trailing dot or space, so "notes." and
             // "notes" are the same folder there and different ones elsewhere —
@@ -105,6 +111,23 @@ public static class CloudPathRules
         }
         return null;
     }
+
+    /// <summary>
+    /// Dot folders that hold a tool's state, never notes (the server's set):
+    /// .obsidian, .obsidianx, .trash, .git — refused at any depth.
+    /// </summary>
+    public static bool IsSystemFolderName(string segment) =>
+        segment.StartsWith(".obsidian", StringComparison.OrdinalIgnoreCase)
+        || segment.Equals(".trash", StringComparison.OrdinalIgnoreCase)
+        || segment.Equals(".git", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Does a sync walk descend into this folder? Not into a dot folder at the
+    /// root (the brain's own .obsidianx, a tool's .claude settings), nor a
+    /// system folder anywhere; any other folder, dot-named or not, holds notes.
+    /// </summary>
+    public static bool MayEnterFolder(string name, bool topLevel) =>
+        name.Length > 0 && (name[0] != '.' || (!topLevel && name is not ("." or "..") && !IsSystemFolderName(name)));
 
     /// <summary>Root-level files BrainX rewrites itself — never pushed, pulled or deleted by sync.</summary>
     public static bool IsMachineManaged(string path) =>

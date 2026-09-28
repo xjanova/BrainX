@@ -319,6 +319,8 @@ internal static partial class Program
         [
             "Programming/foo.md", "x.md", "โน้ต/บันทึก ภาษาไทย.md", "a b/c-d_e (1).md", "UPPER.MD",
             new string('a', 197) + ".md", "Deep/a/b/c/d/e.md", "Imported/claude-notes.md",
+            // Dot names below the root are the owner's notes: the brain indexes them.
+            "Imported/.claude/CODING_STANDARDS.md", "Programming/.NET HttpClient.md", "Imported/.retired/m/x.md",
         ];
         foreach (var p in good)
             Check($"accepted: {Trim(p)}", CloudPaths.Validate(p) is null, CloudPaths.Validate(p));
@@ -332,6 +334,7 @@ internal static partial class Program
             new string('a', 201) + ".md",
             string.Join('/', Enumerable.Repeat(new string('b', 150), 3)) + ".md",
             "\uD800.md",
+            ".claude/x.md", ".NET.md", "a/.obsidian/x.md", "a/.OBSIDIANX/x.md", "a/.trash/x.md", "a/.Git/x.md", "a/../b.md",
         ];
         foreach (var p in bad)
             Check($"refused: {Trim(p.Replace("\0", "\\0").Replace("\t", "\\t"))}", CloudPaths.Validate(p) is not null);

@@ -137,6 +137,7 @@ internal static class CloudSelfTest
         string[] good =
         {
             "Programming/foo.md", "root.md", "โน้ต/ภาษาไทย.md", "a b/c d.md", "A/B/C/D.MD", "x/y-z_1 (2).md",
+            "Imported/.claude/x.md", "Programming/.NET HttpClient.md", "a/.retired/b/c.md",
         };
         foreach (var p in good) Check($"valid: {p}", CloudPathRules.IsValid(p), CloudPathRules.Validate(p));
 
@@ -151,6 +152,8 @@ internal static class CloudSelfTest
             // The server's full device-name set, and text that is not Unicode.
             "CONIN$.md", "a/CLOCK$.md", "COM0.md", "LPT0.md", "COM¹.md", "a/b\u0085.md",
             "a/b\uD800.md", "a/\uDC00b.md",
+            // Dot names: the root's are the brain's state, system folders anywhere.
+            ".claude/x.md", ".md", "a/.md", "a/./b.md", "a/.obsidian/x.md", "a/.OBSIDIANX/x.md", "a/.trash/x.md", "a/.Git/x.md",
         };
         foreach (var p in bad) Check($"rejected: {Printable(p)}", !CloudPathRules.IsValid(p));
 
@@ -407,7 +410,7 @@ internal static class CloudSelfTest
         Write("root-note.md", "root");
         Write("CLAUDE.md", "machine managed");
         Write(".obsidianx/hidden.md", "never");
-        Write("Programming/.hidden/x.md", "never");
+        Write("Programming/.git/x.md", "never");
 
         var engine = new CloudSyncEngine(api);
         var state = CloudSyncState.Load(vault);
@@ -426,8 +429,8 @@ internal static class CloudSelfTest
         Check("CRLF survives the upload byte for byte", cloud.GetValueOrDefault("Programming/crlf.md") == "# CRLF\r\nline\r\n");
         Check("Thai file name and text survive", cloud.GetValueOrDefault("Programming/โน้ตภาษาไทย.md") == "# ไทย\r\nเนื้อหา ✓\n");
         Check("a note over 2 MB is skipped with a reason", r1.Skipped.Any(s => s.Path == "Programming/big.md"));
-        Check("CLAUDE.md, dot-folders and unticked folders stay home",
-              !cloud.ContainsKey("CLAUDE.md") && !cloud.Keys.Any(k => k.Contains(".obsidianx") || k.Contains(".hidden") || k.StartsWith("Notes/")));
+        Check("CLAUDE.md, system folders and unticked folders stay home",
+              !cloud.ContainsKey("CLAUDE.md") && !cloud.Keys.Any(k => k.Contains(".obsidianx") || k.Contains(".git") || k.StartsWith("Notes/")));
         Check("state saved with the 5 uploads", CloudSyncState.Load(vault).Uploaded.Count == 5);
 
         var r2 = await engine.PushAsync(vault, state.Folders, state, opts);
@@ -518,6 +521,24 @@ internal static class CloudSelfTest
         Check("a server-refused note is skipped, its batch-mates still upload",
               r11.Ok && r11.Skipped.Any(s => s.Path == "Programming/reject-me.md") && fake.NotesOf(acct).ContainsKey("Programming/ok-too.md"),
               $"{r11.ErrorCode} uploaded={r11.Uploaded}");
+
+        // Dot names below the root are notes the brain indexes (an imported
+        // repo's .claude folder, a title like ".NET ..."), so another machine
+        // must get them; the root's dot folders and system folders never go.
+        Write("Imported/.claude/CODING_STANDARDS.md", "rules");
+        Write("Imported/.NET HttpClient.md", "a title that starts with a dot");
+        Write("Imported/.obsidian/workspace.md", "never");
+        Write("Imported/repo/.git/HEAD.md", "never");
+        Write(".claude/commands/x.md", "never");
+        state.Folders.Add("Imported");
+        var rDot = await engine.PushAsync(vault, state.Folders, state, opts);
+        var cloud12 = fake.NotesOf(acct);
+        Check("an imported dot folder and a dot-titled note reach the cloud",
+              rDot.Ok && cloud12.ContainsKey("Imported/.claude/CODING_STANDARDS.md") && cloud12.ContainsKey("Imported/.NET HttpClient.md")
+              && state.Uploaded.Keys.Count(k => k.StartsWith("Imported/")) == 2, $"{rDot.ErrorCode} uploaded={rDot.Uploaded}");
+        Check("…while .obsidian, .git and the root's .claude stay home",
+              !cloud12.Keys.Any(k => k.Contains(".obsidian") || k.Contains(".git") || k.StartsWith(".claude")),
+              string.Join(",", cloud12.Keys.Where(k => k.Contains('.') && k.IndexOf('.') < k.Length - 3)));
 
         // Mass deletion: 300 of 450 Bulk notes vanish.
         for (var i = 0; i < 300; i++) File.Delete(Path.Combine(vault, "Bulk", $"n{i:000}.md"));

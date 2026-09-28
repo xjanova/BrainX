@@ -234,8 +234,10 @@ public sealed class CloudVaults
                 ShouldIncludePredicate = (ref FileSystemEntry e) =>
                     !e.IsDirectory && e.FileName.EndsWith(".md", StringComparison.OrdinalIgnoreCase),
                 // .obsidianx (index, journal, agent bus) and every other dot
-                // folder is server-side state, never a note.
-                ShouldRecursePredicate = (ref FileSystemEntry e) => e.FileName.Length > 0 && e.FileName[0] != '.',
+                // folder at the vault root is server-side state, never a note;
+                // deeper dot folders (Imported/.claude) are the owner's notes.
+                ShouldRecursePredicate = (ref FileSystemEntry e) =>
+                    CloudPaths.MayEnterFolder(e.FileName.ToString(), topLevel: e.Directory.Length <= e.RootDirectory.Length),
             };
 
             try
@@ -346,7 +348,8 @@ public sealed class CloudVaults
                 new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.System })
             {
                 ShouldIncludePredicate = (ref FileSystemEntry e) => !e.IsDirectory && e.FileName.EndsWith(".md", StringComparison.OrdinalIgnoreCase),
-                ShouldRecursePredicate = (ref FileSystemEntry e) => e.FileName.Length > 0 && e.FileName[0] != '.',
+                ShouldRecursePredicate = (ref FileSystemEntry e) =>
+                    CloudPaths.MayEnterFolder(e.FileName.ToString(), topLevel: e.Directory.Length <= e.RootDirectory.Length),
             };
             foreach (var size in walk) { used += size; count++; }
         }

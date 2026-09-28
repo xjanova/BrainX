@@ -263,11 +263,16 @@ internal static partial class Program
         Plant(".trash/old.md");
         Plant("notes.txt");
         Plant("ok/.hidden.md");
+        Plant("ok/.claude/rules.md");
+        Plant("ok/.git/HEAD.md");
+        Plant("ok/.obsidian/app.md");
+        Plant(".claude/settings.md");
         Plant("ok/" + new string('n', 201) + ".md");
         node.Cloud.Vaults.For(CloudIds.AccountIdFor(key)).MarkDirty();
-        var listed = ManifestFiles(await node.Get("/api/cloud/manifest", device)).Select(f => f["path"]!.ToString()).ToList();
-        Check("the manifest lists only valid note paths (no dot folders, dot files, non-.md, over-long names)",
-              listed.SequenceEqual(["ok/fine.md"]), string.Join(", ", listed));
+        var listed = ManifestFiles(await node.Get("/api/cloud/manifest", device)).Select(f => f["path"]!.ToString())
+            .OrderBy(p => p, StringComparer.Ordinal).ToList();
+        Check("the manifest lists only valid note paths (no root dot entries, system folders, non-.md, over-long names)",
+              listed.SequenceEqual(["ok/.claude/rules.md", "ok/.hidden.md", "ok/fine.md"]), string.Join(", ", listed));
     }
 
     // ───────────────────────── CloudRoot ACL ─────────────────────────
