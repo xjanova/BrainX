@@ -77,6 +77,8 @@ internal static partial class Program
               && o["cloud"]?["diskFreeBytes"] != null && o["mcp"]?["exeFound"]?.ToObject<bool>() == true
               && o["mcp"]?["sessionsByAccount"] is JObject && o["update"]?["enabled"] != null && o["storage"]?.ToString() == "test",
               ok.ToString());
+        Check("with no check running, overview.update.progress is empty (the manager hides its bar)",
+              o["update"]?["progress"] is null or { Type: JTokenType.Null }, o["update"]?.ToString());
     }
 
     private static async Task AdminAccountChecks()

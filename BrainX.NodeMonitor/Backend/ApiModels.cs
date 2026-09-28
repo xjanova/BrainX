@@ -69,6 +69,8 @@ public sealed class AdminOverview
     public DateTime? UpdateLastCheckUtc { get; init; }
     public string? UpdateLatest { get; init; }
     public string? UpdateLastResult { get; init; }
+    /// <summary>A check in flight (null when none, or on a node too old to say).</summary>
+    public UpdateProgressInfo? UpdateProgress { get; init; }
 
     public static AdminOverview Parse(JsonElement r)
     {
@@ -102,8 +104,21 @@ public sealed class AdminOverview
             UpdateLastCheckUtc = upd?.Date("lastCheckUtc"),
             UpdateLatest = upd?.Str("latestVersion"),
             UpdateLastResult = upd?.Flat("lastResult"),
+            UpdateProgress = upd?.Prop("progress") is { ValueKind: JsonValueKind.Object } prog ? UpdateProgressInfo.Parse(prog) : null,
         };
     }
+}
+
+/// <summary>
+/// The node's update in flight. Phase: checking · downloading · extracting ·
+/// verifying · restarting. Byte counts are only meaningful while downloading.
+/// </summary>
+public sealed record UpdateProgressInfo(string Phase, string? Target, long DoneBytes, long TotalBytes, DateTime? StartedUtc)
+{
+    public double? Ratio => Phase == "downloading" && TotalBytes > 0 ? Math.Clamp((double)DoneBytes / TotalBytes, 0, 1) : null;
+
+    public static UpdateProgressInfo Parse(JsonElement p)
+        => new(p.Str("phase") ?? "", p.Str("target"), p.Long("doneBytes") ?? 0, p.Long("totalBytes") ?? 0, p.Date("startedUtc"));
 }
 
 public class CloudAccount

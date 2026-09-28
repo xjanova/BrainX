@@ -3,7 +3,7 @@ using BrainX.ServerManager.Infrastructure;
 
 namespace BrainX.ServerManager.Backend;
 
-public enum DemoScenario { Normal, Empty, Stopped, OldNode, TunnelDown, ReadOnly, Pending, NoToken, LegacyEnv }
+public enum DemoScenario { Normal, Empty, Stopped, OldNode, TunnelDown, ReadOnly, Pending, NoToken, LegacyEnv, Updating }
 
 /// <summary>
 /// Sample data behind the real service-mode UI: <c>--demo[=scenario]</c> and the
@@ -31,6 +31,9 @@ internal sealed class DemoServerBackend : IServerBackend
     private DateTime _startedUtc = DateTime.UtcNow.AddDays(-3).AddHours(-4).AddMinutes(-12);
     private bool _shortcut = true, _task;
     private readonly Random _rng = new(42);
+    private volatile string _version = "2.0.412+3f9c2ab";
+    private volatile UpdateProgressInfo? _progress;
+    private readonly bool _fast;
 
     public static DemoScenario ParseScenario(string? s) => s?.Trim().ToLowerInvariant() switch
     {
@@ -42,13 +45,17 @@ internal sealed class DemoServerBackend : IServerBackend
         "pending" => DemoScenario.Pending,
         "notoken" => DemoScenario.NoToken,
         "legacyenv" or "legacy" => DemoScenario.LegacyEnv,
+        "updating" or "update" => DemoScenario.Updating,
         _ => DemoScenario.Normal,
     };
 
     public DemoServerBackend(DemoScenario scenario, bool fast)
     {
         _scenario = scenario;
+        _fast = fast;
         _opDelayMs = fast ? 0 : 900;
+        if (scenario == DemoScenario.Updating)
+            _progress = new UpdateProgressInfo("downloading", "2.0.415", 68L * 1024 * 1024, 151L * 1024 * 1024, DateTime.UtcNow.AddSeconds(-50));
         _nodeReadsFile = scenario is not (DemoScenario.LegacyEnv or DemoScenario.OldNode);
         _svc[NodeServiceName] = scenario switch
         {
@@ -158,7 +165,7 @@ internal sealed class DemoServerBackend : IServerBackend
         var sessions = _accounts.Where(a => a.ActiveSessions > 0).ToDictionary(a => a.Id, a => a.ActiveSessions);
         return Task.FromResult(ApiResult<AdminOverview>.Success(new AdminOverview
         {
-            Version = "2.0.412+3f9c2ab",
+            Version = _version,
             StartedUtc = _startedUtc,
             UptimeSec = (long)(DateTime.UtcNow - _startedUtc).TotalSeconds,
             VaultPath = @"C:\brainx\vault",
@@ -178,6 +185,7 @@ internal sealed class DemoServerBackend : IServerBackend
             UpdateLastCheckUtc = DateTime.UtcNow.AddHours(-2).AddMinutes(-7),
             UpdateLatest = "2.0.415",
             UpdateLastResult = "newer release found: 2.0.415",
+            UpdateProgress = _progress,
         }, 200, 4));
     }
 
@@ -255,8 +263,42 @@ internal sealed class DemoServerBackend : IServerBackend
     public async Task<ApiResult<UpdateCheckResult>> CheckUpdateAsync(CancellationToken ct)
     {
         if (Gate<UpdateCheckResult>(true) is { } fail) return fail;
-        await Delay(ct, 1500);
-        return ApiResult<UpdateCheckResult>.Success(new UpdateCheckResult("2.0.412", "2.0.415", true, "downloading 2.0.415 — the node restarts when the files are swapped"));
+        if (_fast)
+            return ApiResult<UpdateCheckResult>.Success(new UpdateCheckResult("2.0.412", "2.0.415", true, "updating to v2.0.415 — the node restarts in a few seconds"));
+
+        // Plays the real node's phases, so the progress bar can be watched:
+        // check → a 151 MB download in ~12 s → extract → verify → restart.
+        var started = DateTime.UtcNow;
+        _progress = new UpdateProgressInfo("checking", null, 0, 0, started);
+        await Task.Delay(1200, ct);
+        const long total = 151L * 1024 * 1024;
+        for (long done = 0; done < total; done += total / 48)
+        {
+            _progress = new UpdateProgressInfo("downloading", "2.0.415", done, total, started);
+            await Task.Delay(250 + _rng.Next(0, 120), ct);
+        }
+        _progress = new UpdateProgressInfo("downloading", "2.0.415", total, total, started);
+        await Task.Delay(400, ct);
+        _progress = new UpdateProgressInfo("extracting", "2.0.415", 0, 0, started);
+        await Task.Delay(1500, ct);
+        _progress = new UpdateProgressInfo("verifying", "2.0.415", 0, 0, started);
+        await Task.Delay(1500, ct);
+        _progress = new UpdateProgressInfo("restarting", "2.0.415", 0, 0, started);
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(1000);
+            _svc[NodeServiceName] = SvcState.StopPending;
+            await Task.Delay(1500);
+            _svc[NodeServiceName] = SvcState.Stopped;
+            _progress = null;
+            await Task.Delay(3000);
+            _svc[NodeServiceName] = SvcState.StartPending;
+            await Task.Delay(1500);
+            _version = "2.0.415+a1b2c3d";
+            OnNodeStarted();
+            _svc[NodeServiceName] = SvcState.Running;
+        });
+        return ApiResult<UpdateCheckResult>.Success(new UpdateCheckResult("2.0.412", "2.0.415", true, "updating to v2.0.415 — the node restarts in a few seconds"));
     }
 
     public Task<ApiResult<LogTail>> GetNodeLogAsync(int lines, CancellationToken ct)

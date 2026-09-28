@@ -206,6 +206,7 @@ public static class AdminRoutes
         }
 
         var status = admin.Updater?.Status ?? new UpdateStatus(NodeConfig.AutoUpdate, null, null, null);
+        var progress = admin.Updater?.Progress;
         return Task.FromResult(Ok(new
         {
             version = NodeInfo.Version,
@@ -227,6 +228,16 @@ public static class AdminRoutes
                 lastCheckUtc = status.LastCheckUtc,
                 latestVersion = status.LatestVersion,
                 lastResult = status.LastResult,
+                // Inside the overview, not a route of its own: a manager newer
+                // than its node would read a missing route as "no admin API".
+                progress = progress is null ? null : new
+                {
+                    phase = progress.Phase,
+                    target = progress.Target,
+                    doneBytes = progress.DoneBytes,
+                    totalBytes = progress.TotalBytes,
+                    startedUtc = progress.StartedUtc,
+                },
             },
             storage = admin.StorageName,
         }));

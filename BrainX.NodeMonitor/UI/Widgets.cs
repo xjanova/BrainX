@@ -187,6 +187,85 @@ internal sealed class StatusDot : Control
     }
 }
 
+/// <summary>
+/// A thin progress bar in the card's colours: <see cref="Value"/> 0–1 fills it,
+/// null runs a sliding segment for phases with no measurable end (checking,
+/// extracting, the restart). The animation timer runs only while visible.
+/// </summary>
+internal sealed class ProgressStrip : Control
+{
+    private double? _value;
+    private int _phase;
+    private readonly System.Windows.Forms.Timer _anim = new() { Interval = 40 };
+
+    [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public double? Value
+    {
+        get => _value;
+        set
+        {
+            var v = value is { } d ? Math.Clamp(d, 0, 1) : (double?)null;
+            if (_value == v) return;
+            _value = v;
+            SyncTimer();
+            Invalidate();
+        }
+    }
+
+    [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public Color BarColor { get; set; } = Theme.Accent;
+
+    public ProgressStrip()
+    {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        Height = 8;
+        Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
+        Margin = new Padding(0, 4, 0, 6);
+        TabStop = false;
+        _anim.Tick += (_, _) => { _phase = (_phase + 2) % 200; Invalidate(); };
+    }
+
+    private void SyncTimer() => _anim.Enabled = _value == null && Visible && !IsDisposed;
+
+    protected override void OnVisibleChanged(EventArgs e) { base.OnVisibleChanged(e); SyncTimer(); }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(Parent?.BackColor is { A: 255 } pb ? pb : Theme.Card);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        var track = new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f);
+        var radius = Math.Max(1, track.Height / 2f);
+        using (var path = FlatButton.Rounded(track, radius))
+        using (var b = new SolidBrush(Theme.Input))
+            g.FillPath(b, path);
+
+        RectangleF fill;
+        if (_value is { } v)
+        {
+            if (v <= 0) return;
+            fill = new RectangleF(track.X, track.Y, Math.Max(track.Height, track.Width * (float)v), track.Height);
+        }
+        else
+        {
+            // a third of the track, sliding in from the left and out to the right
+            var w = track.Width / 3f;
+            var x = track.X - w + (track.Width + w) * (_phase / 200f);
+            fill = RectangleF.Intersect(new RectangleF(x, track.Y, w, track.Height), track);
+            if (fill.Width < 1) return;
+        }
+        using (var path = FlatButton.Rounded(fill, Math.Min(radius, fill.Width / 2f)))
+        using (var b = new SolidBrush(BarColor))
+            g.FillPath(b, path);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _anim.Dispose();
+        base.Dispose(disposing);
+    }
+}
+
 /// <summary>A rounded status badge.</summary>
 internal sealed class Pill : Control
 {

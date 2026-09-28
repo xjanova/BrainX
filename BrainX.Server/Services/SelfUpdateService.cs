@@ -14,6 +14,13 @@ public sealed record UpdateStatus(bool Enabled, DateTime? LastCheckUtc, string? 
 public sealed record UpdateCheckResult(string Current, string? Latest, bool UpdateStarted, string Message);
 
 /// <summary>
+/// Where a running check is, for the Server Manager's progress bar — null when
+/// no check runs. Phase: checking · downloading · extracting · verifying ·
+/// restarting (the last one lasts until this process exits).
+/// </summary>
+public sealed record UpdateProgress(string Phase, string? Target, long DoneBytes, long TotalBytes, DateTime StartedUtc);
+
+/// <summary>
 /// Opt-in self-updater for the standalone node (<c>BrainX__AutoUpdate=true</c>).
 ///
 /// Every check (2 minutes after start, then every 6 hours, or the owner's
@@ -39,6 +46,8 @@ public sealed class SelfUpdateService : BackgroundService
     private static readonly TimeSpan DownloadTimeout = TimeSpan.FromMinutes(30);
     private readonly SemaphoreSlim _checkGate = new(1, 1);
     private volatile UpdateStatus _status;
+    private volatile UpdateProgress? _progress;
+    private DateTime _progressStartedUtc;
 
     public SelfUpdateService(IHostApplicationLifetime life)
     {
@@ -47,6 +56,11 @@ public sealed class SelfUpdateService : BackgroundService
     }
 
     public UpdateStatus Status => _status;
+
+    public UpdateProgress? Progress => _progress;
+
+    private void SetProgress(string phase, string? target, long done = 0, long total = 0)
+        => _progress = new UpdateProgress(phase, target, done, total, _progressStartedUtc);
 
     /// <summary>The version this node runs, as CI stamped it.</summary>
     public static string CurrentVersion =>
@@ -81,6 +95,8 @@ public sealed class SelfUpdateService : BackgroundService
         var current = CurrentVersion;
         if (!await _checkGate.WaitAsync(0, ct))
             return new UpdateCheckResult(current, _status.LatestVersion, false, "a check is already running");
+        _progressStartedUtc = DateTime.UtcNow;
+        SetProgress("checking", null);
         try
         {
             var appDir = AppContext.BaseDirectory.TrimEnd('\\', '/');
@@ -121,6 +137,9 @@ public sealed class SelfUpdateService : BackgroundService
         }
         finally
         {
+            // "restarting" stays up until this process exits: the manager shows
+            // it while the updater script swaps the files.
+            if (_progress?.Phase != "restarting") _progress = null;
             _checkGate.Release();
         }
     }
@@ -164,8 +183,33 @@ public sealed class SelfUpdateService : BackgroundService
             dl.DefaultRequestHeaders.UserAgent.ParseAdd("brainx-node-selfupdate");
             using var res = await dl.GetAsync(asset.Url, HttpCompletionOption.ResponseHeadersRead, ct);
             res.EnsureSuccessStatusCode();
+            var total = res.Content.Headers.ContentLength ?? asset.Size;
+            SetProgress("downloading", release.Version, 0, total);
+            await using var body = await res.Content.ReadAsStreamAsync(ct);
             await using var fs = new FileStream(zipPath, FileMode.Create, FileAccess.Write, FileShare.None);
-            await res.Content.CopyToAsync(fs, ct);
+            // By hand rather than CopyToAsync, so the owner can see it move: the
+            // manager polls Progress, and the log gets a line every 10 %.
+            var buffer = new byte[128 * 1024];
+            long done = 0, lastSetMs = 0;
+            var nextLogPct = 10;
+            int n;
+            while ((n = await body.ReadAsync(buffer, ct)) > 0)
+            {
+                await fs.WriteAsync(buffer.AsMemory(0, n), ct);
+                done += n;
+                if (sw.ElapsedMilliseconds - lastSetMs >= 250)
+                {
+                    lastSetMs = sw.ElapsedMilliseconds;
+                    SetProgress("downloading", release.Version, done, total);
+                }
+                if (total > 0 && nextLogPct < 100 && done * 100 / total >= nextLogPct)
+                {
+                    var pct = (int)(done * 100 / total);
+                    Console.WriteLine($"[selfupdate] downloaded {pct}% ({Mb(done)} of {Mb(total)})");
+                    nextLogPct = pct / 10 * 10 + 10;
+                }
+            }
+            SetProgress("downloading", release.Version, done, total);
         }
         catch
         {
@@ -174,6 +218,7 @@ public sealed class SelfUpdateService : BackgroundService
         }
         Console.WriteLine($"[selfupdate] downloaded {Mb(new FileInfo(zipPath).Length)} in {sw.Elapsed.TotalSeconds.ToString("0", CultureInfo.InvariantCulture)} s");
 
+        SetProgress("extracting", release.Version);
         if (Directory.Exists(staging)) Directory.Delete(staging, true);
         Directory.CreateDirectory(staging);
         // Staging is private (SYSTEM + Administrators) before a single file
@@ -184,6 +229,7 @@ public sealed class SelfUpdateService : BackgroundService
         Console.WriteLine($"[selfupdate] extracted to {staging}");
 
         var now = DateTimeOffset.UtcNow;
+        SetProgress("verifying", release.Version);
         var refusal = CheckPackage(plan, staging, current);
         if (refusal != null)
         {
@@ -248,6 +294,7 @@ public sealed class SelfUpdateService : BackgroundService
             CreateNoWindow = true,
             WindowStyle = ProcessWindowStyle.Hidden,
         });
+        SetProgress("restarting", release.Version);
         var message = plan.Kind == UpdateKind.Repair
             ? $"repairing the install from {release.Tag} — the node restarts in a few seconds"
             : $"updating to {release.Tag} — the node restarts in a few seconds";

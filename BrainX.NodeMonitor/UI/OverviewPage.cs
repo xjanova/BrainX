@@ -30,6 +30,16 @@ internal sealed class OverviewPage : UserControl, IManagerPage
     // update
     private readonly Label _uCurrent, _uLatest, _uLast, _uAuto, _uNote;
     private readonly FlatButton _btnUpdate;
+    private readonly ProgressStrip _uBar;
+    private UpdateProgressInfo? _upLast;       // the last phase the node reported
+    private string? _upTarget;                 // the version being installed once the node hands over
+    private long _upHandoverMs;                // when it handed over (TickCount64); 0 = not waiting on a restart
+    private long _upSampleMs, _upSampleBytes;  // previous download sample, for the speed
+    private double _upRate;                    // bytes per second, smoothed
+    private long _noteUntilMs, _lastFastPollMs;
+
+    /// <summary>An update is being asked for, downloading, or restarting — poll every second.</summary>
+    private bool UpdateActive => _updateBusy || _upHandoverMs != 0 || _upLast != null;
     // shortcuts
     private readonly Label _tokenAdvice;
 
@@ -111,6 +121,7 @@ internal sealed class OverviewPage : UserControl, IManagerPage
         _uLatest = ukv.Add("ล่าสุดบน GitHub");
         _uLast = ukv.Add("ตรวจล่าสุด");
         _uAuto = ukv.Add("AutoUpdate");
+        _uBar = update.Add(new ProgressStrip { Visible = false });
         _uNote = update.Add(Theme.Text("", Theme.Small, Theme.Muted, wrap: true));
         _btnUpdate = Theme.Button("อัปเดตตอนนี้", Theme.BtnAmber, async (_, _) => await UpdateNowAsync());
         update.Add(Theme.Row(_btnUpdate));
@@ -141,7 +152,16 @@ internal sealed class OverviewPage : UserControl, IManagerPage
     }
 
     public Task OnShownAsync() => Task.CompletedTask;
-    public void OnTick(long nowMs) { }
+
+    public void OnTick(long nowMs)
+    {
+        // The shell polls every 3 s; a moving bar wants every second.
+        if (UpdateActive && nowMs - _lastFastPollMs >= 1000)
+        {
+            _lastFastPollMs = nowMs;
+            _ctx.RequestPoll();
+        }
+    }
     public bool CanLeave() => true;
     public Task PrepareScreenshotAsync() => Task.CompletedTask;
 
@@ -247,8 +267,7 @@ internal sealed class OverviewPage : UserControl, IManagerPage
         _tNote.Text = _ctx.Services.IsBusy(b.TunnelServiceName) ? "กำลังดำเนินการ…" : b.PublicHealthUrl.ToString();
 
         // ── update ──
-        if (_updateBusy) { /* keep the in-progress text */ }
-        else if (ov is { Ok: true, Value: { } u })
+        if (ov is { Ok: true, Value: { } u })
         {
             _uCurrent.Text = Fmt.Version(u.Version);
             var newer = u.UpdateLatest != null && Fmt.CompareVersions(u.UpdateLatest, u.Version) > 0;
@@ -256,22 +275,141 @@ internal sealed class OverviewPage : UserControl, IManagerPage
             _uLatest.ForeColor = newer ? Theme.Warn : Theme.Fg;
             _uLast.Text = Fmt.DateTimeLocal(u.UpdateLastCheckUtc) + (string.IsNullOrEmpty(u.UpdateLastResult) ? "" : " · " + u.UpdateLastResult);
             _uAuto.Text = Fmt.Bool(u.UpdateEnabled, "เปิด (ตรวจทุก 6 ชม.)", "ปิด — node จะไม่อัปเดตเอง");
-            _uNote.Text = "";
             _btnUpdate.Text = "อัปเดตตอนนี้";
         }
-        else if (s.AdminMissing)
+        else if (s.AdminMissing && !UpdateActive)
         {
             _uCurrent.Text = _uLatest.Text = _uLast.Text = _uAuto.Text = "—";
             _uNote.Text = "node รุ่นนี้ยังไม่มี admin API — กด Restart แล้ว node จะตรวจอัปเดตเองภายใน ~2 นาที (ถ้า AutoUpdate=true)";
             _uNote.ForeColor = Theme.Warn;
             _btnUpdate.Text = "Restart node เพื่อตรวจอัปเดต";
         }
-        else if (s.Loaded)
+        else if (s.Loaded && !UpdateActive)
         {
             _uCurrent.Text = _uLatest.Text = _uLast.Text = _uAuto.Text = "—";
-            _uNote.Text = "";
         }
+        RenderUpdateProgress(s);
         RenderButtons(s);
+    }
+
+    // ───────────────────────── update progress ─────────────────────────
+
+    /// <summary>
+    /// The bar and the line under it. The node reports its phase inside the
+    /// overview (also for the 6-hourly check nobody asked for); once it hands
+    /// over to the updater script it goes quiet, and the restart is followed
+    /// here until the node answers with the new version.
+    /// </summary>
+    private void RenderUpdateProgress(StatusModel s)
+    {
+        var now = Environment.TickCount64;
+        var ov = s.Overview is { Ok: true, Value: { } o } ? o : null;
+        var p = ov?.UpdateProgress;
+
+        if (p != null && _upHandoverMs == 0)
+        {
+            _upLast = p;
+            if (p.Phase == "restarting") BeginRestartWait(p.Target);
+            else { ShowPhase(p, now); return; }
+        }
+
+        if (_upHandoverMs != 0)
+        {
+            if (ov?.Version is { } running && _upTarget != null && Fmt.CompareVersions(running, _upTarget) >= 0)
+                EndProgress($"✓ อัปเดตเป็น {Fmt.Version(running)} เรียบร้อยแล้ว", Theme.Ok, notify: true);
+            else if (now - _upHandoverMs > 5 * 60_000)
+                EndProgress($"node ยังไม่กลับมาเป็นเวอร์ชันใหม่ภายใน 5 นาที — ดูสาเหตุใน {Path.Combine(_ctx.Backend.Paths.Root, "logs", "selfupdate.log")}",
+                            Theme.Warn, notify: true);
+            else
+            {
+                SetBar(null);
+                _uNote.Text = $"กำลังสลับไฟล์และรีสตาร์ท node{(_upTarget != null ? " เป็น " + _upTarget : "")}… ลูกค้าที่เชื่อมอยู่จะหลุดราว 10–30 วินาที";
+                _uNote.ForeColor = Theme.Accent;
+            }
+            return;
+        }
+
+        if (_updateBusy)
+        {
+            // Asked, but no phase back yet (or a node too old to report one):
+            // keep the line UpdateNowAsync wrote, and show that something runs.
+            SetBar(null);
+            return;
+        }
+
+        if (_upLast != null && p == null && ov != null)
+            // The check ended without handing over (up to date, or refused).
+            EndProgress(ov.UpdateLastResult is { Length: > 0 } why ? "การตรวจอัปเดตจบแล้ว — " + why : "การตรวจอัปเดตจบแล้ว", Theme.Fg, notify: false);
+        _uBar.Visible = false;
+        if (ov != null && now > _noteUntilMs && !s.AdminMissing) _uNote.Text = "";
+    }
+
+    private void ShowPhase(UpdateProgressInfo p, long now)
+    {
+        var target = p.Target is { Length: > 0 } t ? " " + t : "";
+        if (p.Ratio is { } ratio)
+        {
+            if (_upSampleMs != 0 && p.DoneBytes >= _upSampleBytes && now > _upSampleMs)
+            {
+                var inst = (p.DoneBytes - _upSampleBytes) * 1000.0 / (now - _upSampleMs);
+                _upRate = _upRate <= 0 ? inst : _upRate * 0.7 + inst * 0.3;
+            }
+            _upSampleMs = now;
+            _upSampleBytes = p.DoneBytes;
+
+            var text = $"กำลังดาวน์โหลด{target} — {Fmt.Bytes(p.DoneBytes)} / {Fmt.Bytes(p.TotalBytes)} ({ratio * 100:0}%)";
+            if (_upRate >= 1024)
+            {
+                text += $" · {Fmt.Bytes((long)_upRate)}/วินาที";
+                var left = (p.TotalBytes - p.DoneBytes) / _upRate;
+                if (left >= 1) text += $" · เหลืออีกราว {Fmt.Duration(TimeSpan.FromSeconds(left))}";
+            }
+            SetBar(ratio);
+            _uNote.Text = text;
+        }
+        else
+        {
+            _upSampleMs = 0;
+            _upRate = 0;
+            SetBar(null);
+            _uNote.Text = p.Phase switch
+            {
+                "checking" => "กำลังถาม GitHub ว่ามีเวอร์ชันใหม่ไหม…",
+                "downloading" => $"กำลังดาวน์โหลด{target}…",
+                "extracting" => $"ดาวน์โหลดครบแล้ว — กำลังแตกไฟล์{target}…",
+                "verifying" => $"กำลังตรวจลายเซ็นและทุกไฟล์ของ{target}…",
+                _ => $"กำลังอัปเดต ({p.Phase})…",
+            };
+        }
+        _uNote.ForeColor = Theme.Accent;
+    }
+
+    private void SetBar(double? value)
+    {
+        _uBar.Value = value;
+        _uBar.Visible = true;
+    }
+
+    private void BeginRestartWait(string? target)
+    {
+        if (_upHandoverMs == 0) _upHandoverMs = Environment.TickCount64;
+        _upTarget ??= target;
+        _upSampleMs = 0;
+        _upRate = 0;
+    }
+
+    private void EndProgress(string message, Color color, bool notify)
+    {
+        _upHandoverMs = 0;
+        _upTarget = null;
+        _upLast = null;
+        _upSampleMs = 0;
+        _upRate = 0;
+        _uBar.Visible = false;
+        _uNote.Text = message;
+        _uNote.ForeColor = color;
+        _noteUntilMs = Environment.TickCount64 + 60_000;
+        if (notify) _ctx.Notify(message, color == Theme.Warn || color == Theme.Bad);
     }
 
     private void RenderButtons(StatusModel? s)
@@ -292,7 +430,7 @@ internal sealed class OverviewPage : UserControl, IManagerPage
         _btnTunStop.Enabled = tunCan && t!.State == SvcState.Running;
 
         bool adminMissing = s?.AdminMissing == true;
-        _btnUpdate.Enabled = admin && !_updateBusy && s?.NodeRunning == true && !nodeBusy
+        _btnUpdate.Enabled = admin && !UpdateActive && s?.NodeRunning == true && !nodeBusy
                              && (adminMissing || s?.Overview is { Ok: true });
     }
 
@@ -306,13 +444,19 @@ internal sealed class OverviewPage : UserControl, IManagerPage
             return;
         }
         if (!ConfirmDialog.Ask(_ctx.Owner, "อัปเดต node ตอนนี้?", "node จะตรวจ GitHub Releases ทันที:", "ตรวจและอัปเดต", danger: true,
-                detail: "• ถ้ามีเวอร์ชันใหม่ node จะดาวน์โหลด สลับไฟล์ แล้วรีสตาร์ทตัวเอง\n• ลูกค้าที่เชื่อมต่ออยู่จะหลุดประมาณ 10–30 วินาที\n• Server Manager ตัวใหม่มาพร้อมกัน — จะมีป้ายให้กดเปิดใหม่"))
+                detail: "• ถ้ามีเวอร์ชันใหม่ node จะดาวน์โหลด สลับไฟล์ แล้วรีสตาร์ทตัวเอง — ดูความคืบหน้าได้จากแถบในการ์ดนี้\n• ลูกค้าที่เชื่อมต่ออยู่จะหลุดประมาณ 10–30 วินาที\n• Server Manager ตัวใหม่มาพร้อมกัน — จะมีป้ายให้กดเปิดใหม่"))
             return;
 
         _updateBusy = true;
+        _upHandoverMs = 0;
+        _upTarget = null;
+        _upSampleMs = 0;
+        _upRate = 0;
         RenderButtons(_last);
-        _uNote.Text = "กำลังตรวจอัปเดต… (ถ้ามีการดาวน์โหลดอาจใช้เวลาถึง 3 นาที)";
+        SetBar(null);
+        _uNote.Text = "กำลังถาม GitHub ว่ามีเวอร์ชันใหม่ไหม…";
         _uNote.ForeColor = Theme.Accent;
+        _ctx.RequestPoll();
         ApiResult<UpdateCheckResult> r;
         try { r = await b.CheckUpdateAsync(_ctx.Life); }
         finally { _updateBusy = false; }
@@ -320,19 +464,28 @@ internal sealed class OverviewPage : UserControl, IManagerPage
 
         if (r is { Ok: true, Value: { } u })
         {
-            _uNote.Text = u.UpdateStarted
-                ? $"เริ่มอัปเดตเป็น {u.Latest} แล้ว — node จะรีสตาร์ทเองในไม่ช้า"
-                : Fmt.CompareVersions(u.Latest, u.Current) <= 0
-                    ? $"เป็นเวอร์ชันล่าสุดแล้ว ({u.Current})"
-                    : $"ยังไม่ได้อัปเดต — node ตอบว่า: {u.Message}";
-            _uNote.ForeColor = u.UpdateStarted ? Theme.Ok : Theme.Fg;
-            _ctx.Notify(_uNote.Text, false);
+            if (u.UpdateStarted)
+            {
+                BeginRestartWait(u.Latest);
+                _ctx.Notify($"ดาวน์โหลด {u.Latest} ครบแล้ว — node กำลังสลับไฟล์และรีสตาร์ท", false);
+            }
+            else
+                EndProgress(Fmt.CompareVersions(u.Latest, u.Current) <= 0
+                        ? $"เป็นเวอร์ชันล่าสุดแล้ว ({u.Current})"
+                        : $"ยังไม่ได้อัปเดต — node ตอบว่า: {u.Message}",
+                    Theme.Fg, notify: true);
         }
         else if (r.Failure != ApiFailure.Cancelled)
         {
-            _uNote.Text = r.Message;
-            _uNote.ForeColor = Theme.Bad;
-            _ctx.ShowError("อัปเดตไม่สำเร็จ", r.Message);
+            // The node shuts down right after handing over, and may drop this
+            // very request on the way out: that is the restart, not a failure.
+            if (_upLast?.Phase is "verifying" or "restarting")
+                BeginRestartWait(_upLast.Target);
+            else
+            {
+                EndProgress(r.Message, Theme.Bad, notify: false);
+                _ctx.ShowError("อัปเดตไม่สำเร็จ", r.Message);
+            }
         }
         RenderButtons(_last);
         _ctx.RequestPoll();

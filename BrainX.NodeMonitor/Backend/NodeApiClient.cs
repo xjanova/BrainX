@@ -86,9 +86,13 @@ internal sealed class NodeApiClient : IDisposable
     public Task<ApiResult<bool>> DeleteAccountAsync(string id, string confirm, CancellationToken ct)
         => Admin(HttpMethod.Delete, AccountPath(id), new { confirm }, r => r.Bool("ok") ?? true, TimeSpan.FromSeconds(60), ct);
 
-    /// <summary>May download the release before answering: generous timeout.</summary>
+    /// <summary>
+    /// Answers only after the release is downloaded, which on the node's uplink
+    /// has taken 3–9 minutes — the node's own download deadline is 30. The
+    /// progress bar follows the overview meanwhile, so waiting costs nothing.
+    /// </summary>
     public Task<ApiResult<UpdateCheckResult>> UpdateCheckAsync(CancellationToken ct)
-        => Admin(HttpMethod.Post, "/api/admin/update/check", null, UpdateCheckResult.Parse, TimeSpan.FromSeconds(180), ct);
+        => Admin(HttpMethod.Post, "/api/admin/update/check", null, UpdateCheckResult.Parse, TimeSpan.FromMinutes(35), ct);
 
     public Task<ApiResult<LogTail>> LogsAsync(int lines, CancellationToken ct)
         => Admin(HttpMethod.Get, $"/api/admin/logs?lines={Math.Clamp(lines, 1, 2000)}", null, LogTail.Parse, TimeSpan.FromSeconds(8), ct);
