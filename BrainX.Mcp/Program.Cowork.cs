@@ -32,12 +32,17 @@ namespace BrainX.Mcp;
 //    else's, so two sessions in the room both hear the boss.
 //  - There is one transcript, not a box per recipient. That is what makes it
 //    a room rather than a group mailing.
-//  - Only MEMBERS are told, and every connected session is a member by
-//    default (CoworkAutoJoin, from the presence handshake). Owner
-//    (2026-09-20): "ทำไม เอเจน ที่ออนไลน์ไม่อยู่ฟังในห้องต้องเรียกทุกครั้งเองเหรอ"
-//    — being at work is being in the room, and opt-in meant every order cost
-//    a spawn to reach a session that was already running. cowork_leave opts
-//    out and STAYS out; what still never happens is mail.
+//  - Only sessions that JOINED are told — by cowork_join, in that process.
+//    Every connected session used to be seated on connect (owner,
+//    2026-09-20: "ทำไม เอเจน ที่ออนไลน์ไม่อยู่ฟังในห้องต้องเรียกทุกครั้งเองเหรอ"),
+//    and that is how the room reached chats working on other projects: the
+//    Thaiprompt, POS and Bass Build windows each heard the boss's game order
+//    and answered "not mine". Owner (2026-10-04): "การทำงานในห้อง cowork อย่าไป
+//    รบกวน แชทเซสชั่นอื่น ไม่ต้องไปเตือน ไม่ต้องให้รู้ เป็นการทำงานคนละส่วน แต่
+//    เห็นกันผ่านสมองเท่านั้น". So the room is opt-in again, and an order with
+//    nobody in the room gets a session the broker starts for it. Room work
+//    stays in the room: no notice, no mail, no nudge reaches a session that
+//    did not join, and agent_send from room work is said in the room.
 //
 // Attachments land under the same files/ root the mail lane uses, because the
 // client already serves that folder to the room over bus.local — a picture
@@ -309,6 +314,7 @@ internal static partial class Program
         if (cannot != null) member["cannot"] = cannot;
 
         AtomicWriteJson(CoworkMemberFile(me), member);
+        _coworkJoinedHere = true;
 
         var recent = CoworkReadMessages(CoworkMessageFiles().TakeLast(
             Math.Clamp(args["catch_up"]?.ToObject<int>() ?? 12, 0, 100)), me);
@@ -323,7 +329,10 @@ internal static partial class Program
                      + "`cowork` notice on your next tool response — read with cowork_read, answer with "
                      + "cowork_say. `board` is who is doing what: put the part you take on it with cowork_task. "
                      + "This lane is separate from agent_send/agent_inbox on purpose: do not "
-                     + "mail people about what was said here, say it in the room. cowork_leave when you stop working."
+                     + "mail people about what was said here, say it in the room (agent_send from this session is said "
+                     + "in the room anyway). Sessions outside the room are working on other things and are told NOTHING "
+                     + "of this — the only way room work reaches them, or theirs reaches you, is the brain: save what "
+                     + "matters as a note. cowork_leave when you stop working."
         };
     }
 
@@ -459,7 +468,7 @@ internal static partial class Program
             {
                 ["agent"] = kv.Key,
                 ["notesOnThis"] = kv.Value,
-                ["inRoom"] = CoworkIsMember(kv.Key),
+                ["inRoom"] = CoworkHasLiveSession(kv.Key),
                 ["says"] = (seat?["skills"] as JArray) ?? can,
                 ["cannot"] = (seat?["cannot"] as JArray) ?? cannot,
                 ["wroteAbout"] = byAgent[kv.Key],
@@ -476,7 +485,7 @@ internal static partial class Program
         var others = counts.Where(k => !k.Key.Equals(me, StringComparison.OrdinalIgnoreCase))
                            .OrderByDescending(k => k.Value)
                            .ToList();
-        var best = others.Where(k => CoworkIsMember(k.Key)).Select(k => k.Key).FirstOrDefault();
+        var best = others.Where(k => CoworkHasLiveSession(k.Key)).Select(k => k.Key).FirstOrDefault();
 
         // Deepest history overall, seat or no seat — worth naming so the
         // reader knows whose notes those are before reading them.
@@ -509,6 +518,7 @@ internal static partial class Program
 
     private static JToken CoworkLeave()
     {
+        _coworkJoinedHere = false;
         var me = BusIdentity();
         var f = CoworkMemberFile(me);
         var existing = ReadJsonOrNull(f);
@@ -565,18 +575,19 @@ internal static partial class Program
         {
             ["left"] = me,
             ["wasInRoom"] = wasIn,
-            ["note"] = "You will not be told about anything said in the room until you cowork_join again. "
-                     + "This survives reconnecting — sessions are otherwise in the room by default.",
+            ["note"] = "You will not be told about anything said in the room until you cowork_join again.",
         };
     }
 
     /// <summary>
-    /// Put this session in the room unless it has explicitly left.
+    /// Put a session that JOINED back in its chair — after the owner switched
+    /// the light off and on, which takes every seat away.
     ///
-    /// Owner (2026-09-20): "ทำไม เอเจน ที่ออนไลน์ไม่อยู่ฟังในห้องต้องเรียกทุกครั้ง
-    /// เองเหรอ". Being connected is being at work; a session that is up should
-    /// hear the owner without anybody paying to start a second one. Opt-in was
-    /// the wrong default — it made every order cost a spawn.
+    /// It used to seat every connected session, joined or not (owner,
+    /// 2026-09-20: "ทำไม เอเจน ที่ออนไลน์ไม่อยู่ฟังในห้องต้องเรียกทุกครั้งเองเหรอ").
+    /// That made every chat on another project a listener; the owner reversed
+    /// it on 2026-10-04 ("อย่าไปรบกวน แชทเซสชั่นอื่น"). A session that never
+    /// called cowork_join is never seated here.
     ///
     /// A leave tombstone is honoured rather than overwritten.
     ///
@@ -591,6 +602,7 @@ internal static partial class Program
     /// </summary>
     internal static void CoworkAutoJoin()
     {
+        if (!_coworkJoinedHere) return;
         var me = BusIdentity();
         if (IsReservedIdentity(me)) return;
 
@@ -877,7 +889,7 @@ internal static partial class Program
         return new JObject
         {
             // A leave tombstone, or this session having left, is not "in".
-            ["inRoom"] = member != null && member["optedOut"]?.ToObject<bool?>() != true
+            ["inRoom"] = _coworkJoinedHere && member != null && member["optedOut"]?.ToObject<bool?>() != true
                          && CoworkMySession(member)?["left"]?.ToObject<bool?>() != true,
             ["messages"] = messages,
             ["moreWaiting"] = left,
@@ -1026,6 +1038,12 @@ internal static partial class Program
 
     private static void CoworkAdvanceCursor(string agent, IEnumerable<string> delivered)
     {
+        // Only a session that joined has a place to move. Writing one for a
+        // session that merely spoke or peeked (agent_send said in the room, a
+        // cowork_read out of curiosity) gave a chat on other work a place on
+        // the seat — and the broker then counted it as "in the room" and left
+        // the owner's order with a session that hears nothing.
+        if (!_coworkJoinedHere) return;
         var handed = delivered.ToList();
         try
         {
@@ -1052,6 +1070,107 @@ internal static partial class Program
 
     /// <summary>This process's key in a seat's <c>sessions</c>.</summary>
     private static string CoworkSessionKey => Environment.ProcessId.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// This session called cowork_join (and has not left). The seat is the
+    /// AGENT's and outlives every window, so "my agent has a seat" is not "I am
+    /// in the room" — a chat working on another project shares the seat's name
+    /// and must hear nothing. Only this flag lets the room talk to a session.
+    /// </summary>
+    private static volatile bool _coworkJoinedHere;
+
+    /// <summary>Is this session doing room work: it joined the room.</summary>
+    internal static bool CoworkInRoomHere => _coworkJoinedHere;
+
+    /// <summary>Live sessions that joined this seat and have not left.</summary>
+    private static int CoworkLiveSessions(JObject? seat)
+    {
+        if (seat == null || seat["optedOut"]?.ToObject<bool?>() == true) return 0;
+        if (seat["sessions"] is not JObject sessions) return 0;
+        return sessions.Properties().Count(p => (p.Value as JObject)?["left"]?.ToObject<bool?>() != true
+                                                && CoworkSessionAlive(p.Name));
+    }
+
+    /// <summary>
+    /// Is somebody of this agent actually in the room right now — a live
+    /// process that joined. The broker's question before it leaves an order to
+    /// the piggyback: the piggyback only ever reaches sessions that joined, so
+    /// a seat with nobody on it must get a session started instead.
+    /// </summary>
+    internal static bool CoworkHasLiveSession(string agent)
+    {
+        try { return CoworkLiveSessions(ReadJsonOrNull(CoworkMemberFile(agent))) > 0; }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// Take away seats nobody is sitting in — no live session that joined.
+    ///
+    /// A seat is "somebody of this agent is listening": the office draws the
+    /// headset and hides the board's call button from it, and the broker counts
+    /// the owner's unread lines on it as work. A seat left behind by a run that
+    /// ended, or by the sessions that used to be seated on connect, said all
+    /// three about nobody: the call button for claude's work was hidden while
+    /// no claude was in the room, and an old unread order would have started a
+    /// run for it. Tombstones (cowork_leave) are left as they are. Run by the
+    /// broker each tick; a seat touched in the last minute is left alone.
+    /// </summary>
+    internal static int CoworkPruneEmptySeats()
+    {
+        var removed = 0;
+        try
+        {
+            if (!Directory.Exists(CoworkMembersDir)) return 0;
+            foreach (var f in Directory.GetFiles(CoworkMembersDir, "*.json"))
+            {
+                try
+                {
+                    var agent = Path.GetFileNameWithoutExtension(f);
+                    using var gate = CoworkMemberLock(agent);
+                    var seat = ReadJsonOrNull(f);
+                    if (seat == null || seat["optedOut"]?.ToObject<bool?>() == true) continue;
+                    if (CoworkLiveSessions(seat) > 0) continue;
+                    var touched = CoworkUtc(seat["lastSeenUtc"]) ?? CoworkUtc(seat["joinedUtc"]) ?? DateTime.MinValue;
+                    if (DateTime.UtcNow - File.GetLastWriteTimeUtc(f) < TimeSpan.FromMinutes(1)
+                        || DateTime.UtcNow - touched < TimeSpan.FromMinutes(1)) continue;
+                    File.Delete(f);
+                    removed++;
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return removed;
+    }
+
+    /// <summary>
+    /// Does this work label belong to the room — on a board task, or on a room
+    /// line in the last week? Mail about it would carry the room's business
+    /// into whichever session opens that inbox: on 2026-10-04 codex mailed
+    /// "claude" asking for the game scene, and the broker nudged three chats on
+    /// other projects about it seven times.
+    /// </summary>
+    internal static bool CoworkIsRoomWork(string? label)
+    {
+        if (string.IsNullOrWhiteSpace(label)) return false;
+        string? Slug(string? s) { try { return string.IsNullOrWhiteSpace(s) ? null : SanitizeAgentSlug(s!); } catch { return null; } }
+        var want = Slug(label);
+        if (want == null) return false;
+        bool Same(JToken? t) => t?.ToString() is { Length: > 0 } s
+                                && (s.Equals(label, StringComparison.OrdinalIgnoreCase) || string.Equals(Slug(s), want, StringComparison.OrdinalIgnoreCase));
+        try
+        {
+            if (CoworkTasks().Any(t => Same(t["work"]))) return true;
+            var since = (DateTime.UtcNow - TimeSpan.FromDays(7)).Ticks.ToString("D19", CultureInfo.InvariantCulture);
+            foreach (var f in CoworkMessageFiles().AsEnumerable().Reverse().Take(300))
+            {
+                if (string.CompareOrdinal(Path.GetFileName(f), since) < 0) break;
+                if (Same(ReadJsonOrNull(f)?["work"])) return true;
+            }
+        }
+        catch { }
+        return false;
+    }
 
     /// <summary>A run the broker started (it sets this on the child). Its leave
     /// never closes the seat for the agent's other sessions.</summary>
@@ -1157,11 +1276,12 @@ internal static partial class Program
             if (o["optedOut"]?.ToObject<bool?>() == true) continue;
 
             var agent = o["agent"]?.ToString() ?? Path.GetFileNameWithoutExtension(f);
-            var age = PresenceAgeSeconds(agent);
             var entry = new JObject
             {
                 ["agent"] = agent,
-                ["online"] = IsOnline(age),
+                // In the room, not merely connected: an agent's chat on another
+                // project is online and hears nothing here.
+                ["online"] = CoworkLiveSessions(o) > 0,
                 ["joinedUtc"] = o["joinedUtc"],
             };
             if (o["work"] != null) entry["work"] = o["work"];
@@ -1318,6 +1438,14 @@ internal static partial class Program
             {
                 var o = ReadJsonOrNull(f);
                 if (o == null) continue;
+                // The owner's answer to a question asked from the room calls
+                // the agent that asked, exactly like an order to it by name.
+                if (CoworkIsOwnerDecisionLine(o, f))
+                {
+                    foreach (var t in CoworkRecipients(o["to"]).Select(CollapseToReadableBox).Distinct(StringComparer.OrdinalIgnoreCase))
+                        if (!IsReservedIdentity(t)) result[t] = result.TryGetValue(t, out var k) ? k + 1 : 1;
+                    continue;
+                }
                 if (!IsAuthenticOwnerLine(o, f))
                 {
                     // A forged order must never become a spawned session: this
@@ -1427,9 +1555,12 @@ internal static partial class Program
             {
                 var name = Path.GetFileName(f);
                 if (string.CompareOrdinal(name, floor) <= 0) continue;
-                if (!CoworkSpeakerFromName(f).Equals("owner", StringComparison.OrdinalIgnoreCase)) continue;
+                var speaker = CoworkSpeakerFromName(f);
+                var byOwner = speaker.Equals("owner", StringComparison.OrdinalIgnoreCase);
+                if (!byOwner && !speaker.Equals("broker", StringComparison.OrdinalIgnoreCase)) continue;
                 var o = ReadJsonOrNull(f);
-                if (!IsAuthenticOwnerLine(o, f)) continue;
+                // The owner's own line, or the owner's answer carried by the broker.
+                if (byOwner ? !IsAuthenticOwnerLine(o, f) : !CoworkIsOwnerDecisionLine(o, f)) continue;
                 var to = CoworkRecipients(o!["to"]);
                 if (to.Count > 0 && !to.Contains(agent, StringComparer.OrdinalIgnoreCase)) continue;
                 count++;
@@ -1479,6 +1610,64 @@ internal static partial class Program
         catch { }
     }
 
+    /// <summary>
+    /// The owner's answer to a question asked from the room, said in the room
+    /// to the agent that asked — not mailed, because the agent's inbox is
+    /// shared with its chats on other work. Returns false when nothing was
+    /// written.
+    /// </summary>
+    internal static bool CoworkDecisionLine(string fileName, string agent, string decisionId, string? work, string question, string answer)
+    {
+        try
+        {
+            Directory.CreateDirectory(CoworkMessagesDir);
+            var payload = new JObject
+            {
+                ["id"] = $"c-{DateTime.UtcNow.Ticks}-{Guid.NewGuid().ToString("N")[..6]}",
+                ["ts"] = DateTime.UtcNow.ToString("o"),
+                ["from"] = "broker",
+                ["fromClient"] = "brainx-broker",
+                ["topic"] = "owner-decision",
+                ["to"] = agent,
+                ["decision"] = decisionId,
+                ["body"] = $"บอสตอบคำถามของ {agent} แล้ว — ทำต่อตามนี้ ไม่ต้องถามซ้ำ\n\nQ: {question}\nA: {answer}",
+            };
+            if (!string.IsNullOrWhiteSpace(work)) payload["work"] = work;
+            AtomicWriteJson(Path.Combine(CoworkMessagesDir, fileName), payload);
+            return true;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>A fresh room line file name for the broker, so the decision
+    /// can record it BEFORE the line exists.</summary>
+    internal static string CoworkBrokerLineName() =>
+        $"{DateTime.UtcNow.Ticks:D19}-broker-{Guid.NewGuid().ToString("N")[..4]}.json";
+
+    /// <summary>
+    /// A broker line carrying the owner's answer — checked against the
+    /// decision it names, which must be answered, belong to the agent the line
+    /// is for, and name THIS file as the one its answer was said in. Anything
+    /// can write a file into the room; a copy with the real decision id and a
+    /// different answer in its body is not that file, and is peer text.
+    /// </summary>
+    internal static bool CoworkIsOwnerDecisionLine(JObject? o, string fileName)
+    {
+        if (o == null || !CoworkSpeakerFromName(fileName).Equals("broker", StringComparison.OrdinalIgnoreCase)) return false;
+        if (!string.Equals(o["topic"]?.ToString(), "owner-decision", StringComparison.Ordinal)) return false;
+        var id = o["decision"]?.ToString();
+        if (string.IsNullOrWhiteSpace(id)) return false;
+        try
+        {
+            var d = ReadJsonOrNull(Path.Combine(BrokerDecisionDir, SanitizeAgentSlug(id!) + ".json"));
+            return d != null
+                && string.Equals(d["status"]?.ToString(), "answered", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(d["roomLine"]?.ToString(), Path.GetFileName(fileName), StringComparison.Ordinal)
+                && CoworkRecipients(o["to"]).Contains(d["agent"]?.ToString() ?? "", StringComparer.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
     /// <summary>The room's own voice, for the broker to report with. Written
     /// as `broker` so it is visibly not the owner and not an agent.</summary>
     internal static void CoworkSystemLine(string body)
@@ -1524,6 +1713,11 @@ internal static partial class Program
         // conversation from restarting itself: the piggyback is how an idle
         // session finds out there is something to answer, and there is not.
         if (!CoworkRoomIsOpen()) return null;
+
+        // Not in the room, not told — however much is said there, and even
+        // when it is said to this session's agent by name. The seat belongs to
+        // the agent; a chat of that agent on another project never joined.
+        if (!_coworkJoinedHere) return null;
 
         try
         {
@@ -1599,6 +1793,10 @@ internal static partial class Program
                 // talking to THEM. Dragging the whole room in is how one
                 // question turns into two agents doing the same job.
                 if (authenticOwner && (mine || to.Count == 0))
+                    ownerWantsMe = true;
+                // The owner's answer to my question, carried by the broker, is
+                // the owner speaking to me.
+                if (mine && CoworkIsOwnerDecisionLine(o, f))
                     ownerWantsMe = true;
             }
 

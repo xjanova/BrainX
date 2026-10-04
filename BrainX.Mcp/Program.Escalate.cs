@@ -49,7 +49,8 @@ internal static partial class Program
         string Work,
         string Question,
         IReadOnlyList<string> Options,
-        string? Fingerprint = null);
+        string? Fingerprint = null,
+        string? Lane = null);
 
     private static readonly HttpClient EscalateHttp = new() { Timeout = TimeSpan.FromSeconds(20) };
 
@@ -150,6 +151,8 @@ internal static partial class Program
                 ["askedUtc"] = DateTime.UtcNow.ToString("o"),
             };
             if (d.Fingerprint != null) rec["fingerprint"] = d.Fingerprint;
+            // Asked from the room: the answer goes back to the room.
+            if (d.Lane != null) rec["lane"] = d.Lane;
             AtomicWriteJson(path, rec);
             BrokerLog($"DECISION NEEDED [{d.Id}] {d.Question}");
 
@@ -328,7 +331,12 @@ internal static partial class Program
                 var deliverable = (cfg.Runners.ContainsKey(agent) || IsOnline(PresenceAgeSeconds(agent)))
                                   && workdirMode is null or "use"
                                   && intent is null or "retry" or "later" or "go";
-                if (!string.IsNullOrWhiteSpace(agent) && deliverable)
+                // Asked from the room: answered in the room, after the card is
+                // marked answered (the room line is only honoured against an
+                // answered card).
+                var intoRoom = deliverable && !string.IsNullOrWhiteSpace(agent)
+                               && string.Equals(o["lane"]?.ToString(), "cowork", StringComparison.Ordinal);
+                if (!string.IsNullOrWhiteSpace(agent) && deliverable && !intoRoom)
                 {
                     DeliverBusMessage("broker", agent,
                         $"The owner answered your question.\n\nQ: {question}\nA: {answer}\n\n"
@@ -339,7 +347,14 @@ internal static partial class Program
 
                 o["status"] = "answered";
                 o["answeredUtc"] = DateTime.UtcNow.ToString("o");
+                // The one room line that may carry this answer, named before it
+                // is written (see CoworkIsOwnerDecisionLine).
+                var roomLine = intoRoom ? CoworkBrokerLineName() : null;
+                if (roomLine != null) o["roomLine"] = roomLine;
                 AtomicWriteJson(f, o);
+
+                if (roomLine != null && !CoworkDecisionLine(roomLine, agent, id, o["work"]?.ToString(), question, answer))
+                    BrokerLog($"decision [{id}] — could not say the answer in the room");
 
                 // The quiet period starts from the ANSWER. It used to run only
                 // from when the question was asked, so an answer given two days
@@ -366,6 +381,7 @@ internal static partial class Program
                                 ? $" — '{work}' is {(workdirMode == "cancel" ? "cancelled" : $"on hold ({workdirMode})")}; not asking again, nothing queued for {agent}"
                              : intent is "mine" or "cancel"
                                 ? $" — the owner took {agent}'s waiting work ({intent}); not spawning for it or asking about it again"
+                             : intoRoom ? $" — said in the room to {agent}"
                              : deliverable ? $" — handed to {agent}"
                                            : $" — noted; '{agent}' has no runner and no session, so nothing was queued for it"));
             }
@@ -523,7 +539,10 @@ internal static partial class Program
             Agent: me,
             Work: work,
             Question: question!.Trim(),
-            Options: options);
+            Options: options,
+            // Room work: the answer is said in the room, never mailed into an
+            // inbox the agent's chats on other projects share.
+            Lane: CoworkInRoomHere || CoworkIsRoomWork(work) ? "cowork" : null);
 
         var cfg = LoadBrokerConfig();
         // Fire-and-forget would lose the Telegram send on a short-lived CLI
@@ -539,8 +558,12 @@ internal static partial class Program
             ["channels"] = new JArray(ChannelsUsed(cfg)),
             ["hint"] = "Asked. STOP working this item now — the broker has parked it so nothing else picks it up, "
                      + "and asking again will not reach the owner any faster. Tell your user you are waiting and on what. "
-                     + "The answer arrives as a normal message in your inbox (topic 'owner-decision'); your Stop hook "
-                     + "wakes you on it, so you do not need to poll."
+                     + (d.Lane == "cowork"
+                        ? "This is room work, so the answer is said IN THE ROOM to you (a broker line, topic "
+                          + "'owner-decision'), and the broker calls you back in for it — you do not need to poll."
+                        : "The answer arrives as a normal message in your inbox (topic 'owner-decision'); your Stop hook "
+                          + "wakes you on it, so you do not need to poll."),
+            ["lane"] = d.Lane,
         };
     }
 

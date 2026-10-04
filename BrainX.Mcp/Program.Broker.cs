@@ -496,6 +496,10 @@ internal static partial class Program
     {
         ReapFinishedRuns(cfg, live);
         DrainBrokerInbox();
+        // Before anything reads the seats: a seat with nobody in it is not an
+        // agent in the room (see CoworkPruneEmptySeats).
+        if (!dryRun && CoworkPruneEmptySeats() is > 0 and var gone)
+            BrokerLog($"cowork: {gone} empty seat(s) cleared — nobody of that agent had joined the room");
 
         // The cowork room, read once per tick. `onCall` runners are the
         // fallback when the owner gives an order to an empty room; a line
@@ -615,13 +619,15 @@ internal static partial class Program
                     // somebody's. A spawn is a NEW session with its own
                     // identity: the running one keeps its work, the room gets
                     // somebody who joined it on purpose.
-                    // CoworkIsMember, not "has nothing unread": a member that
-                    // is up to date and a session that never joined both read
-                    // zero unread, and treating them the same is how an order
-                    // was left with a session that could not receive it.
-                    if (work.Room > 0 && !CoworkIsMember(agent))
+                    // A LIVE session that joined, not "the agent has a seat":
+                    // the seat outlives every window, and the session that is
+                    // working may be a chat on another project that never
+                    // joined — it hears nothing from the room, by design
+                    // (owner, 2026-10-04). Leaving the order to it left the
+                    // order with nobody.
+                    if (work.Room > 0 && !CoworkHasLiveSession(agent))
                     {
-                        spawnReason = "called into the cowork room but this session never joined it — spawning one that will";
+                        spawnReason = "called into the cowork room and nobody of this agent is in it — spawning a session that joins (its other sessions are not told)";
                         goto case SessionVerdict.Absent;
                     }
 
@@ -642,10 +648,14 @@ internal static partial class Program
                     // there is: it rides the piggyback onto its very next tool
                     // call. It is safe to repeat because HasPendingNudge keeps
                     // exactly one outstanding.
-                    if (work.OldestHours * 60 >= cfg.StaleMailMinutes)
+                    // Mail lane only. A nudge is mail every session of the agent
+                    // is told about; the room's lines never ride one (the room
+                    // session in the room hears them through its own notice).
+                    var mailOnly = work with { Room = 0 };
+                    if (mailOnly.Mail + mailOnly.Tasks > 0 && work.OldestHours * 60 >= cfg.StaleMailMinutes)
                     {
-                        if (dryRun) { BrokerLog($"{agent}: would nudge busy session about stale work ({Describe(work)})"); continue; }
-                        NudgeParkedSession(agent, work);
+                        if (dryRun) { BrokerLog($"{agent}: would nudge busy session about stale work ({Describe(mailOnly)})"); continue; }
+                        NudgeParkedSession(agent, mailOnly);
                         continue;
                     }
                     // Fresh work on an active session: genuinely nothing to do,
@@ -849,12 +859,12 @@ internal static partial class Program
                 // in front of the owner while codex was in the room answering
                 // them, which is worse than saying nothing.
                 var named = coworkCalls.Keys.ToList();
-                var seated = named.Where(CoworkIsMember).ToList();
+                var seated = named.Where(CoworkHasLiveSession).ToList();
                 // An agent with a run in flight is ON ITS WAY, not unreachable.
                 // Reporting it as "could not be called" while its process is
                 // booting is the same lie in a different shape.
-                var coming = named.Where(a => !CoworkIsMember(a) && live.ContainsKey(a)).ToList();
-                var missing = named.Where(a => !CoworkIsMember(a) && !live.ContainsKey(a)).ToList();
+                var coming = named.Where(a => !CoworkHasLiveSession(a) && live.ContainsKey(a)).ToList();
+                var missing = named.Where(a => !CoworkHasLiveSession(a) && !live.ContainsKey(a)).ToList();
 
                 if (coming.Count > 0 && missing.Count == 0)
                     CoworkSystemLine($"{string.Join(", ", coming)} กำลังเข้ามา (เพิ่งเรียก รอสักครู่)");

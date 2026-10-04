@@ -357,6 +357,35 @@ internal static partial class Program
 
     // ───────────── agent_send ─────────────
 
+    /// <summary>agent_send from room work: said in the room, addressed to the
+    /// same agent, instead of mailed.</summary>
+    private static JToken AgentSendIntoRoom(JObject args, string? work)
+    {
+        var to = args["to"]?.ToString()?.Trim();
+        var say = new JObject { ["message"] = args["message"] };
+        if (!string.IsNullOrWhiteSpace(to) && !to.Equals("all", StringComparison.OrdinalIgnoreCase)) say["to"] = to;
+        if (work != null) say["work"] = work;
+        if (args["topic"] is JToken topic && topic.Type != JTokenType.Null) say["topic"] = topic;
+        if (args["attachments"] is JToken files && files.Type != JTokenType.Null) say["attachments"] = files;
+
+        var said = CoworkSay(say) as JObject ?? new JObject();
+        var delivered = said["said"] is JToken id && id.Type != JTokenType.Null;
+        var why = CoworkInRoomHere ? "you are in the cowork room" : $"'{work}' is work the cowork room is doing";
+        return new JObject
+        {
+            ["sent"] = delivered,
+            ["lane"] = "cowork",
+            ["said"] = said["said"],
+            ["heardBy"] = said["heardBy"] ?? new JArray(),
+            ["note"] = delivered
+                ? $"Said in the cowork room, not mailed: {why}, and room work never goes into an agent's inbox — "
+                + "that inbox is shared with its sessions on other work. Whoever it is for hears it in the room. "
+                + "A session outside the room is told nothing; if it really must know, write it in the brain."
+                + (said["note"]?.Type == JTokenType.String ? " " + said["note"] : "")
+                : $"Not delivered, and not mailed either: {why}. {said["note"]}",
+        };
+    }
+
     private static JToken AgentSend(JObject args)
     {
         StartPresenceHeartbeat();
@@ -369,6 +398,14 @@ internal static partial class Program
 
         var toRaw = args["to"]?.ToString();
         if (string.IsNullOrWhiteSpace(toRaw)) throw new ArgumentException("to is required — 'codex', 'claude', or 'all' (agent_peers lists who's here)");
+
+        // Room work stays in the room. Mail goes to an agent's shared inbox,
+        // which every session of that agent — chats on other projects included
+        // — is told about and nudged over (owner, 2026-10-04: "ไม่ต้องรายงานไป
+        // เรียกในงานอื่นๆ เพราะคนอื่นไม่รู้เรื่องที่บอสสั่งด้วย").
+        var label = args["work"]?.ToString() is { Length: > 0 } lw ? SanitizeAgentSlug(lw) : null;
+        if (CoworkInRoomHere || CoworkIsRoomWork(label))
+            return AgentSendIntoRoom(args, label);
 
         List<string> recipients;
         string? requestedAs = null;
