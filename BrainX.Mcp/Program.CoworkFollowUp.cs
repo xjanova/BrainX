@@ -22,8 +22,9 @@ namespace BrainX.Mcp;
 //  - A board task that is doing/assigned, whose holder has a runner, is not in
 //    the room, has no run going and has been quiet for FollowUpIdle, is
 //    followed up: the broker says so in the room, to the holder by name, and
-//    calls it back in. At most every FollowUpEvery per task and
-//    FollowUpMaxPerDay a day; past that the task is blocked for the owner.
+//    calls it back in. At most every FollowUpEvery per task; after
+//    FollowUpMaxWithoutProgress chases in a row that moved nothing, the task
+//    is blocked for the owner.
 //  - A run that ends on a usage limit pauses its agent's board work: the
 //    tasks go to blocked with a `paused` record, where it got to is written
 //    into the brain, and the room is told who is out, until when, and that
@@ -34,9 +35,15 @@ namespace BrainX.Mcp;
 
 internal static partial class Program
 {
-    private static readonly TimeSpan FollowUpIdle = TimeSpan.FromMinutes(15);
-    private static readonly TimeSpan FollowUpEvery = TimeSpan.FromMinutes(30);
-    private const int FollowUpMaxPerDay = 6;
+    // Owner (2026-10-04, watching codex's images go 4 → 6 of 15 in fifteen-
+    // minute runs with half-hour gaps): "ทำไม ยังวนตรงบอร์ดงาน เหมือนเดิม". The
+    // first numbers (15 min quiet, 30 min apart, 6 a day) made real progress
+    // look like a loop — and the daily cap counted chases that DID move the
+    // work, so a long job would have been stopped half done. Now the gap is
+    // short and only chasing that moves nothing is capped.
+    private static readonly TimeSpan FollowUpIdle = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan FollowUpEvery = TimeSpan.FromMinutes(10);
+    private const int FollowUpMaxWithoutProgress = 3;
 
     private static string CoworkFollowUpLedgerPath => Path.Combine(CoworkRoot, "followups.json");
 
@@ -54,7 +61,6 @@ internal static partial class Program
         try
         {
             var now = DateTime.UtcNow;
-            var today = now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
             var ledger = ReadJsonOrNull(CoworkFollowUpLedgerPath) ?? new JObject();
             var changed = false;
             var resumed = new Dictionary<string, List<(string Id, string? Note)>>(StringComparer.OrdinalIgnoreCase);
@@ -101,18 +107,18 @@ internal static partial class Program
                 if (now - updated < FollowUpIdle || CoworkSpokeSince(agent, now - FollowUpIdle)) continue;
 
                 var rec = ledger[id] as JObject;
-                if (CoworkUtc(rec?["lastUtc"]) is DateTime last && now - last < FollowUpEvery) continue;
-                var count = rec?["day"]?.ToString() == today ? rec?["count"]?.ToObject<int?>() ?? 0 : 0;
-                if (count >= FollowUpMaxPerDay)
+                var last = CoworkUtc(rec?["lastUtc"]);
+                if (last is DateTime l && now - l < FollowUpEvery) continue;
+                // The task moved since the last chase (a checkpoint, a note, a
+                // status): that chase worked, so the count starts again. Only
+                // chases that change nothing add up.
+                var count = last is DateTime l2 && updated > l2 ? 0 : rec?["count"]?.ToObject<int?>() ?? 0;
+                if (count >= FollowUpMaxWithoutProgress)
                 {
-                    // Chased all day and still not done: that is the owner's call.
-                    if (!dryRun && rec?["gaveUp"]?.ToString() != today)
-                    {
+                    // Chased and nothing moved, again and again: the owner's call.
+                    if (!dryRun)
                         CoworkBrokerSetTask(id, "blocked",
-                            $"ติดตามไปแล้ว {count} ครั้งวันนี้ยังไม่เสร็จ — รอบอสดูว่าจะไปต่อทางไหน");
-                        rec!["gaveUp"] = today;
-                        changed = true;
-                    }
+                            $"ติดตามไปแล้ว {count} ครั้งติดกันโดยงานไม่ขยับ — รอบอสดูว่าจะไปต่อทางไหน");
                     continue;
                 }
 
@@ -121,7 +127,7 @@ internal static partial class Program
                 ql.Add((id, t["title"]?.ToString() ?? id, (int)Math.Min(9999, (now - updated).TotalMinutes)));
                 if (!dryRun)
                 {
-                    ledger[id] = new JObject { ["lastUtc"] = now.ToString("o"), ["day"] = today, ["count"] = count + 1 };
+                    ledger[id] = new JObject { ["lastUtc"] = now.ToString("o"), ["count"] = count + 1 };
                     changed = true;
                 }
             }

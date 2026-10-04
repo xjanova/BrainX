@@ -788,6 +788,33 @@ internal static partial class Program
             Check("…and codex is called back in", back.Contains("spawned"), back);
             Check("…and a run that works clears the rest", JObject.Parse(File.ReadAllText(stateFile))["quotaResumeUtc"]?.Type is null or JTokenType.Null,
                   File.ReadAllText(stateFile));
+
+            // Chases that moved the work do not count against it…
+            var ledgerPath = Path.Combine(bus, "cowork", "followups.json");
+            void Ledger(int count, TimeSpan lastAgo)
+            {
+                var lg = JObject.Parse(File.ReadAllText(ledgerPath));
+                lg["t-abc123"] = new JObject { ["lastUtc"] = DateTime.UtcNow.Subtract(lastAgo).ToString("o"), ["count"] = count };
+                File.WriteAllText(ledgerPath, lg.ToString(), new UTF8Encoding(false));
+            }
+            var moving = Board();
+            moving["status"] = "doing";
+            moving["updatedUtc"] = DateTime.UtcNow.AddMinutes(-6).ToString("o");   // a checkpoint since the last chase
+            File.WriteAllText(Path.Combine(tasks, "t-abc123.json"), moving.ToString(), new UTF8Encoding(false));
+            Ledger(3, TimeSpan.FromMinutes(20));
+            var progressed = await BrokerOnce();
+            Check("work that moved since the last chase is chased again, the count starting over",
+                  progressed.Contains("spawned") && JObject.Parse(File.ReadAllText(ledgerPath))["t-abc123"]?["count"]?.Value<int>() == 1, progressed);
+
+            // …chases that moved nothing do, and the third one in a row hands it to the owner.
+            var stuck = Board();
+            stuck["status"] = "doing";
+            stuck["updatedUtc"] = DateTime.UtcNow.AddHours(-1).ToString("o");
+            File.WriteAllText(Path.Combine(tasks, "t-abc123.json"), stuck.ToString(), new UTF8Encoding(false));
+            Ledger(3, TimeSpan.FromMinutes(11));
+            var gaveUp = await BrokerOnce();
+            Check("three chases in a row that moved nothing hand it to the owner", Board()["status"]?.ToString() == "blocked"
+                  && Board()["note"]?.ToString().Contains("ไม่ขยับ") == true && !gaveUp.Contains("spawned"), Board().ToString() + " || " + gaveUp);
         }
         finally
         {
