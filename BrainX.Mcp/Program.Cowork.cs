@@ -323,6 +323,7 @@ internal static partial class Program
         {
             ["joined"] = me,
             ["room"] = CoworkMembersSnapshot(),
+            ["resting"] = CoworkResting(),
             ["board"] = CoworkBoard(includeDone: false),
             ["recent"] = recent,
             ["hint"] = "You are in the room. The owner's lines and other members' messages reach you as a "
@@ -894,6 +895,8 @@ internal static partial class Program
             ["messages"] = messages,
             ["moreWaiting"] = left,
             ["room"] = CoworkMembersSnapshot(),
+            // Out of quota right now — their work is paused, not abandoned.
+            ["resting"] = CoworkResting(),
             // Who is on what, next to what was said: an order is only half
             // read by an agent that cannot see who already took which part.
             ["board"] = CoworkBoard(includeDone: false),
@@ -1367,7 +1370,26 @@ internal static partial class Program
       + "who is who. "
       + "(6) CLOSE WHAT YOU OPEN: cowork_task update {id, status:'done', note:'<one-line result>'} when it is "
       + "finished, status:'blocked' with the reason when you are stuck. A task left 'doing' reads as still "
-      + "happening.";
+      + "happening. "
+      // Owner (2026-10-04): "ทำไม ไม่เห็นบอกว่าตัวเองกำลังทำอะไร การส่งงาน มอบงาน คุยกัน
+      // ไม่เห็นเกิดขึ้นเลย" — codex had drawn four of fifteen destination images
+      // and said so only in its own terminal.
+      + "(7) SAY WHAT YOU ARE DOING AS YOU GO. The owner watches the room, not your terminal: one short "
+      + "cowork_say when you start each piece and one when it lands (what changed, where the file is — attach "
+      + "it). Twenty minutes of silent work looks exactly like a run that is stuck. Anything you need from "
+      + "another agent, or hand to one, goes through the room by name (cowork_say to:'<agent>', cowork_task "
+      + "add assignee) — never by mail, and never left in your final message where nobody reads it. "
+      // Owner (2026-10-04): "ถ้างานยังไม่เสร็จต้องตามงานกันถามกันว่าใครทำอะไรถึงไหน
+      // แล้วพัฒนาต่อกันให้ได้ หากมีใครหมดโควต้า ก็ทำของตัวเองไว้ และรู้ว่าอีกคนอาจหมดโควต้า".
+      + "(8) CHASE WHAT IS OPEN. Read the board when you come in. For every piece that is not done — yours, or "
+      + "one your part depends on — know where it stands: ask its holder by name in the room (what is done, what "
+      + "is next, when), and answer that question about yours the same way. Do not wait in silence on something "
+      + "nobody is moving. "
+      + "(9) OUT OF QUOTA. Somebody listed under `resting` (cowork_read), or announced with ⏸ in the room, is out "
+      + "of quota: their work is paused, not yours to redo. Carry on with your own part, write on the board what "
+      + "you need from them, and leave it — the broker calls them back when their quota resets. If YOU hit a "
+      + "limit, first save where you are (brain note + one line on the board task): that note is how the work "
+      + "continues.";
 
     // ───────────── what the broker sees ─────────────
 
@@ -1670,7 +1692,7 @@ internal static partial class Program
 
     /// <summary>The room's own voice, for the broker to report with. Written
     /// as `broker` so it is visibly not the owner and not an agent.</summary>
-    internal static void CoworkSystemLine(string body)
+    internal static void CoworkSystemLine(string body, string? to = null, string? topic = null, string? task = null)
     {
         try
         {
@@ -1681,9 +1703,11 @@ internal static partial class Program
                 ["ts"] = DateTime.UtcNow.ToString("o"),
                 ["from"] = "broker",
                 ["fromClient"] = "brainx-broker",
-                ["topic"] = "broker",
+                ["topic"] = topic ?? "broker",
                 ["body"] = body,
             };
+            if (!string.IsNullOrWhiteSpace(to)) payload["to"] = to;
+            if (!string.IsNullOrWhiteSpace(task)) payload["task"] = task;
             var file = $"{DateTime.UtcNow.Ticks:D19}-broker-{Guid.NewGuid().ToString("N")[..4]}.json";
             AtomicWriteJson(Path.Combine(CoworkMessagesDir, file), payload);
         }

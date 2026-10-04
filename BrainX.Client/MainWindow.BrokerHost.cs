@@ -176,7 +176,12 @@ public partial class MainWindow
 
             _brokerProc = p;
             _brokerStartedUtc = DateTime.UtcNow;
-            try { p.PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
+            // Normal priority, deliberately. It used to be BelowNormal, and on
+            // 2026-10-04 — all twelve cores busy with the owner's python jobs,
+            // a qemu VM and mysqld — a BelowNormal broker got no CPU at all:
+            // it sat for eight minutes before "broker up", the next one longer,
+            // and the room stopped. The broker sleeps between ticks; it has no
+            // load worth lowering.
         }
         catch (Exception ex)
         {

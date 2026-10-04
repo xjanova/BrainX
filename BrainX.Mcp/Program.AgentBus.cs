@@ -404,7 +404,10 @@ internal static partial class Program
         // — is told about and nudged over (owner, 2026-10-04: "ไม่ต้องรายงานไป
         // เรียกในงานอื่นๆ เพราะคนอื่นไม่รู้เรื่องที่บอสสั่งด้วย").
         var label = args["work"]?.ToString() is { Length: > 0 } lw ? SanitizeAgentSlug(lw) : null;
-        if (CoworkInRoomHere || CoworkIsRoomWork(label))
+        // The broker is not a session: a reply to it is its own channel, read
+        // by nobody else, and said in the room it is only noise ("codex → broker").
+        var toBroker = toRaw.Trim().Equals("broker", StringComparison.OrdinalIgnoreCase);
+        if (!toBroker && (CoworkInRoomHere || CoworkIsRoomWork(label)))
             return AgentSendIntoRoom(args, label);
 
         List<string> recipients;

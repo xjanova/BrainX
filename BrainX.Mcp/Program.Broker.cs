@@ -70,16 +70,24 @@ internal static partial class Program
     /// the temp vaults was unlabelled, so this path was not once exercised.
     /// The oldest stuck message was three days old.
     /// </summary>
-    private static string BuildSpawnPrompt(WaitingWork work)
+    private static string BuildSpawnPrompt(WaitingWork work, int maxRunSeconds = 0)
     {
         var sb = new StringBuilder(
             "BrainX broker: work is queued for you on this brain and nobody is driving this session. ");
+
+        // How long it has. Codex drew four of fifteen images and was cut off at
+        // the ceiling without a word anywhere about where it had got to.
+        if (maxRunSeconds > 0)
+            sb.Append($"This run is stopped after {maxRunSeconds / 60} minutes. Pace the work: say progress in the room as you go, ")
+              .Append("and before the end — or the moment you see you will not finish, or you hit a usage limit — write where ")
+              .Append("you are into the brain (brain_create_note: what is done, what is next, the file paths) and put that one ")
+              .Append("line on the board task, so the next run continues instead of starting over. ");
 
         // The room first, when the room is why this session exists. An order
         // the owner typed into the office outranks queued mail, and a spawn
         // sent looking for mail that does not exist finds an empty inbox and
         // exits — the same no-progress loop the labelled-mail bug caused.
-        if (work.Room > 0)
+        if (work.Room > work.FollowUps)
         {
             sb.Append("THE OWNER SPOKE IN THE COWORK ROOM. That is your user talking. ")
               .Append("Call cowork_join {work:'...'} FIRST, then cowork_read. ")
@@ -89,6 +97,19 @@ internal static partial class Program
               // with the owner's own windows, and a finished run leaving took
               // them out of the room too. The run's exit is its leaving.
               .Append("Do not call cowork_leave when you finish — just stop; the seat is shared with your other sessions. ");
+        }
+        else if (work.FollowUps > 0)
+        {
+            // Not the owner: the broker chasing work that stopped. Saying "the
+            // owner spoke" here would send the run looking for an order that
+            // was never given.
+            sb.Append("UNFINISHED WORK ON THE COWORK BOARD IS YOURS and nobody is moving it — the broker is following it up. ")
+              .Append("Call cowork_join {work:'...'} FIRST, then cowork_read and cowork_task list. Pick it up WHERE IT STOPPED: ")
+              .Append("the task's note, the room and the brain (brain_search the task title; paused work has a note in ")
+              .Append("Notes/Cowork-Paused) say how far it got — do not start over. Say in the room what you are picking up. ")
+              .Append(CoworkFloorRules)
+              .Append(" Report in the room with cowork_say, not by mail. ")
+              .Append("Do not call cowork_leave when you finish — just stop. ");
         }
 
         // The owner's answer to a question this agent asked — named even when
@@ -123,6 +144,17 @@ internal static partial class Program
               .Append("Read every one of these: ")
               .Append(string.Join(", ", work.Works.Select(InboxCallFor)))
               .Append(". ");
+
+            // Mail about work the room is doing is the room's work. The run
+            // that drew codex's destination images was started by mail and
+            // reported only in its own terminal; the owner, watching the
+            // room, saw nothing happen.
+            var roomWork = work.Works.Where(CoworkIsRoomWork).ToList();
+            if (roomWork.Count > 0)
+                sb.Append($"'{string.Join("', '", roomWork)}' is work the COWORK ROOM is doing: call cowork_join {{work:'{roomWork[0]}'}} ")
+                  .Append("first, then work it like a room order. ")
+                  .Append(CoworkFloorRules)
+                  .Append(" ");
         }
         else
         {
@@ -492,8 +524,25 @@ internal static partial class Program
 
     // ───────────── one tick ─────────────
 
+    /// <summary>
+    /// Back to Normal priority if whoever started this lowered it. The app
+    /// lowers it right after Process.Start, which can land after Main has
+    /// already looked — so every tick looks again (see Main for why).
+    /// </summary>
+    internal static void BrokerNotStarved()
+    {
+        try
+        {
+            using var me = Process.GetCurrentProcess();
+            if (me.PriorityClass is ProcessPriorityClass.BelowNormal or ProcessPriorityClass.Idle)
+                me.PriorityClass = ProcessPriorityClass.Normal;
+        }
+        catch { /* not ours to change: run as we are */ }
+    }
+
     private static async Task BrokerTick(BrokerConfig cfg, Dictionary<string, BrokerRun> live, bool dryRun)
     {
+        BrokerNotStarved();
         ReapFinishedRuns(cfg, live);
         DrainBrokerInbox();
         // Before anything reads the seats: a seat with nobody in it is not an
@@ -514,7 +563,11 @@ internal static partial class Program
         // talking while real work arrives is precisely the case to cut off.
         BrokerStudyBreaker(cfg, dryRun);
 
-        var waiting = AgentsWithWaitingWork(coworkCalls.Keys);
+        // Unfinished board work nobody is moving, and paused work whose quota
+        // should be back (Program.CoworkFollowUp.cs).
+        var followUps = CoworkFollowUps(cfg, live, dryRun);
+
+        var waiting = AgentsWithWaitingWork(coworkCalls.Keys.Concat(followUps.Keys));
         foreach (var agent in waiting)
         {
             // A run is still going: that IS the session. Spawning a second
@@ -528,13 +581,15 @@ internal static partial class Program
             var work = WaitingWorkFor(agent);
             if (coworkCalls.TryGetValue(agent, out var called) && called > work.Room)
                 work = work with { Room = called };
+            if (followUps.TryGetValue(agent, out var chased))
+                work = work with { Room = work.Room + chased.Count, FollowUps = chased.Count };
             // Fresh call vs. standing backlog. work.Room counts what this
             // agent has not read, which for a parked session is every room
             // line ever written and never goes down; the ledger counts what
             // the BROKER has not handed out yet, and is cleared at the end of
             // the tick. Act on the second, or the fix below becomes a spawn
             // loop that never runs dry.
-            var calledIntoRoom = coworkCalls.ContainsKey(agent);
+            var calledIntoRoom = coworkCalls.ContainsKey(agent) || followUps.ContainsKey(agent);
             if (work.Mail == 0 && work.Tasks == 0 && work.Room == 0) continue;
 
             // Work that is parked on the OWNER does not wake anybody. Asking
@@ -849,7 +904,7 @@ internal static partial class Program
         // a line that arrived while this tick was busy (a Telegram send can
         // take twenty seconds) has not been acted on, and reading it here
         // reported "nobody is in the room" for it and then marked it handled.
-        if (coworkCalls.Count > 0 || coworkUnheard > 0)
+        if (coworkCalls.Count > 0 || coworkUnheard > 0 || followUps.Count > 0)
         {
             if (!coworkHandled && !dryRun)
             {
@@ -858,7 +913,7 @@ internal static partial class Program
                 // "could not be called" is what put `ยังเรียก codex เข้ามาไม่ได้`
                 // in front of the owner while codex was in the room answering
                 // them, which is worse than saying nothing.
-                var named = coworkCalls.Keys.ToList();
+                var named = coworkCalls.Keys.Concat(followUps.Keys).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
                 var seated = named.Where(CoworkHasLiveSession).ToList();
                 // An agent with a run in flight is ON ITS WAY, not unreachable.
                 // Reporting it as "could not be called" while its process is
@@ -1118,6 +1173,14 @@ internal static partial class Program
     /// </summary>
     private static readonly string[] QuotaSigns = { "usage limit", "credit balance", "quota", "rate limit" };
 
+    /// <summary>A CLI too old for the model it was started on refuses at any
+    /// point and says so — reported as "left without a word" before, after a
+    /// run that took 46s to give up (2026-10-04).</summary>
+    private static readonly string[] VersionSigns = { "version_too_old", "or newer is required", "does not support this model" };
+
+    /// <summary>Doors that are shut at any point in a run, not only at startup.</summary>
+    private static readonly string[] AnyTimeSigns = QuotaSigns.Concat(VersionSigns).ToArray();
+
     /// <summary>Things only a runner that never got going says. In the tail of
     /// a run that worked for minutes they are as likely to be the work.</summary>
     private static readonly string[] StartupSigns =
@@ -1126,12 +1189,12 @@ internal static partial class Program
         "is not recognized", "command not found", "no such file",
     };
 
-    private static readonly string[] FatalRunnerSigns = QuotaSigns.Concat(StartupSigns).ToArray();
+    private static readonly string[] FatalRunnerSigns = AnyTimeSigns.Concat(StartupSigns).ToArray();
 
     /// <summary>The run's own complaint, when it is one of the fatal kind.</summary>
     private static string? FatalComplaint(string logPath, bool startup = true)
     {
-        var signs = startup ? FatalRunnerSigns : QuotaSigns;
+        var signs = startup ? FatalRunnerSigns : AnyTimeSigns;
         try
         {
             if (!File.Exists(logPath)) return null;
@@ -1185,7 +1248,7 @@ internal static partial class Program
         // neither become a flag nor smuggle a {prompt} in.
         var model = RunnerModelFor(agent, runner);
         foreach (var a in RunnerModels.ApplyToArgs(runner.Args, model, runner.ModelFlag))
-            psi.ArgumentList.Add(a.Replace("{prompt}", BuildSpawnPrompt(work))
+            psi.ArgumentList.Add(a.Replace("{prompt}", BuildSpawnPrompt(work, cfg.MaxRunSeconds))
                                   .Replace("{cwd}", psi.WorkingDirectory)
                                   .Replace("{agent}", agent));
 
@@ -1263,7 +1326,15 @@ internal static partial class Program
             p.BeginErrorReadLine();
 
             var startedUtc = DateTime.UtcNow;
-            live[agent] = new BrokerRun { Process = p, Agent = agent, StartedUtc = startedUtc, LogPath = log, ForRoom = reportToRoom && work.Room > 0 };
+            // The room hears how a run on ITS work ended, whatever started it:
+            // codex's destination images were started by mail, cut off at the
+            // fifteen-minute ceiling with four of fifteen drawn, and the room
+            // the owner was watching said nothing at all.
+            live[agent] = new BrokerRun
+            {
+                Process = p, Agent = agent, StartedUtc = startedUtc, LogPath = log,
+                ForRoom = reportToRoom && (work.Room > 0 || work.Works.Any(CoworkIsRoomWork)),
+            };
             state.Spawns.Add(startedUtc);
             // A study is not a hop on anybody's work. Counting it froze an agent
             // after three days of idle studies with nothing ever queued.
@@ -1513,34 +1584,61 @@ internal static partial class Program
     /// </summary>
     private static string? ResolveRunnerExe(RunnerSpec runner)
     {
-        if (Path.IsPathRooted(runner.Exe) && File.Exists(runner.Exe)) return runner.Exe;
-        if (OnPath(runner.Exe) is { } found) return found;
-
-        foreach (var raw in runner.ExeFallbacks)
+        // `exe` first, then the fallbacks, each one a bare name (PATH), a path,
+        // or a pattern. `exe` may be a pattern too: the claude on PATH here was
+        // npm's 2.1.50, too old for the model picked in the room — every claude
+        // run died on "version 2.1.280 or newer is required" (2026-10-04) while
+        // the desktop app's own 2.1.286 sat under a versioned folder.
+        foreach (var raw in runner.ExeFallbacks.Prepend(runner.Exe))
         {
-            var pattern = Environment.ExpandEnvironmentVariables(raw);
-            if (File.Exists(pattern)) return pattern;
-            if (!pattern.Contains('*')) continue;
-
-            // One wildcard segment, expanded shallowly. Deliberately not a
-            // recursive search: the fallbacks name a known layout, and a
-            // recursive walk of %LOCALAPPDATA% on every miss is a tick that
-            // takes minutes.
-            try
+            var spec = Environment.ExpandEnvironmentVariables(raw);
+            if (spec.Contains('*'))
             {
-                var star = pattern.IndexOf('*');
-                var root = Path.GetDirectoryName(pattern[..star]);
-                if (root == null || !Directory.Exists(root)) continue;
-                var tail = pattern[(pattern.IndexOf(Path.DirectorySeparatorChar, star) + 1)..];
-                foreach (var dir in Directory.GetDirectories(root))
-                {
-                    var candidate = Path.Combine(dir, tail);
-                    if (File.Exists(candidate)) return candidate;
-                }
+                if (NewestMatch(spec) is { } matched) return matched;
+                continue;
             }
-            catch { }
+            if (Path.IsPathRooted(spec)) { if (File.Exists(spec)) return spec; continue; }
+            if (OnPath(spec) is { } found) return found;
         }
         return null;
+    }
+
+    /// <summary>
+    /// The newest file a pattern names, `*` matching one folder name per
+    /// segment (claude-code\*\*\claude.exe is version\build). Expanded segment
+    /// by segment, never recursively: a recursive walk of %APPDATA% on every
+    /// tick takes minutes. Newest by write time, because version folders are
+    /// left behind when the app updates and the first one listed is not the
+    /// one that works.
+    /// </summary>
+    private static string? NewestMatch(string pattern)
+    {
+        try
+        {
+            var parts = pattern.Split(Path.DirectorySeparatorChar);
+            var star = Array.FindIndex(parts, p => p.Contains('*'));
+            var level = new List<string> { string.Join(Path.DirectorySeparatorChar, parts[..star]) + Path.DirectorySeparatorChar };
+            for (var i = star; i < parts.Length; i++)
+            {
+                var last = i == parts.Length - 1;
+                var next = new List<string>();
+                foreach (var dir in level)
+                {
+                    if (!Directory.Exists(dir)) continue;
+                    if (!parts[i].Contains('*'))
+                    {
+                        var p = Path.Combine(dir, parts[i]);
+                        if (last ? File.Exists(p) : Directory.Exists(p)) next.Add(p);
+                        continue;
+                    }
+                    next.AddRange(last ? Directory.GetFiles(dir, parts[i]) : Directory.GetDirectories(dir, parts[i]));
+                }
+                level = next;
+                if (level.Count == 0) return null;
+            }
+            return level.Where(File.Exists).OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault();
+        }
+        catch { return null; }
     }
 
     private static string? OnPath(string exe)
@@ -1646,13 +1744,23 @@ internal static partial class Program
                 if (left.Mail == 0 && left.Tasks == 0 && left.Room == 0) st.Hops = 0;
                 // A run that got going answers "the runner will not start".
                 WithdrawDecision("budget-" + agent, "the runner started and finished normally");
+                // …and "is it still out of quota?".
+                st.QuotaPauses = 0;
+                st.QuotaResumeUtc = null;
             }
             st.RunPid = null;
             st.RunStartedUtc = null;
             st.RunModel = null;
             SaveRunnerState(agent, st);
 
-            if (run.ForRoom) CoworkReportRun(cfg, agent, run, failed, killed, st.LastFailure);
+            // Out of quota: pause its board work, save where it got to in the
+            // brain, and tell the room until when — whatever started the run.
+            // Only a limit that resets by itself: "credit balance is too low"
+            // waits for the owner to fix the account, and its own line says how.
+            var paused = fatal != null && FailureClass(fatal) == "quota"
+                         && CoworkPauseForQuota(cfg, agent, fatal, run.LogPath);
+
+            if (run.ForRoom && !paused) CoworkReportRun(cfg, agent, run, failed, killed, st.LastFailure);
         }
     }
 
@@ -1668,7 +1776,8 @@ internal static partial class Program
         if (failed)
             CoworkSystemLine($"เรียก {agent} เข้าห้องไม่สำเร็จ — {RunnerTroubleTh(agent, failure ?? "exit")}");
         else if (killed)
-            CoworkSystemLine($"{agent} ทำงานเกิน {cfg.MaxRunSeconds / 60} นาทีที่ตั้งไว้ จึงถูกหยุด — ดูบนบอร์ดว่างานค้างอยู่ตรงไหน");
+            CoworkSystemLine($"{agent} ทำงานเกิน {cfg.MaxRunSeconds / 60} นาทีที่ตั้งไว้ จึงถูกหยุด — งานบนบอร์ดที่ยังไม่เสร็จ "
+                           + $"broker จะตามให้ทำต่อเองเมื่อเงียบเกิน {FollowUpIdle.TotalMinutes:F0} นาที");
         else if (!CoworkSpokeSince(agent, run.StartedUtc))
             // It ran and left, and never said a word in the room it was
             // called into. From the owner's chair that is the same silence as
@@ -1705,6 +1814,9 @@ internal static partial class Program
                 + "รัน `claude setup-token` แล้วตั้ง token ที่ได้เป็นตัวแปรผู้ใช้ CLAUDE_CODE_OAUTH_TOKEN "
                 + "(หรือเปิด `claude` แล้ว /login ด้วยบัญชี subscription)"
                 : $"บัญชีที่ {agent} ใช้เครดิตหมด ({clip})";
+        if (low.Contains("version_too_old") || low.Contains("or newer is required") || low.Contains("does not support this model"))
+            return $"โปรแกรม {agent} ที่ broker เปิดเก่าเกินไปสำหรับโมเดลที่เลือกไว้ — ชี้ exe ใน runners.json ไปที่ตัวใหม่ "
+                 + $"หรืออัปเดตโปรแกรม (เช่น `claude update`) หรือเปลี่ยนโมเดลในห้อง ({clip})";
         if (low.Contains("usage limit") || low.Contains("quota") || low.Contains("rate limit"))
             return $"{agent} ชนโควตาการใช้งาน รอรีเซ็ตแล้วจะลองใหม่เอง ({clip})";
         if (low.Contains("inside another claude code session"))
@@ -1864,6 +1976,7 @@ internal static partial class Program
     {
         var low = (failure ?? "").ToLowerInvariant();
         if (low.Contains("credit balance")) return "credit";
+        if (VersionSigns.Any(low.Contains)) return "version";
         if (QuotaSigns.Any(low.Contains)) return "quota";
         if (low.Contains("inside another claude code session")) return "nested";
         if (low.Contains("not logged in") || low.Contains("please log in") || low.Contains("authentication") || low.Contains("unauthorized")) return "login";
@@ -1946,6 +2059,10 @@ internal static partial class Program
         /// a question this agent asked. Kept apart from <see cref="Works"/>
         /// because it must survive the label being parked.</summary>
         public IReadOnlyList<string> Answers { get; init; } = Array.Empty<string>();
+
+        /// <summary>How much of <see cref="Room"/> is the broker following up
+        /// unfinished board work rather than the owner speaking.</summary>
+        public int FollowUps { get; init; }
     }
 
     /// <summary>The same thing as <see cref="Describe"/>, for the owner.
@@ -2238,6 +2355,13 @@ internal static partial class Program
         /// itself is asking them to do the machine's waiting.
         /// </summary>
         public DateTime? FailedUtc { get; set; }
+
+        /// <summary>Out of quota: when the broker calls this agent back to its
+        /// paused board work (see CoworkPauseForQuota). Null when not resting.</summary>
+        public DateTime? QuotaResumeUtc { get; set; }
+
+        /// <summary>Quota pauses in a row, for backing off; reset by a run that works.</summary>
+        public int QuotaPauses { get; set; }
 
         /// <summary>
         /// The last budget refusal the owner was told about, and when.

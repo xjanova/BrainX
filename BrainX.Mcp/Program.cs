@@ -121,6 +121,14 @@ internal static partial class Program
         // is writing to.
         if (args.Length > 0 && args[0].Equals("broker", StringComparison.OrdinalIgnoreCase))
         {
+            // First thing, before anything that needs CPU. The app starts the
+            // broker at BelowNormal so it never competes with the owner's work
+            // — and on 2026-10-04, with all twelve cores busy (python jobs, a
+            // qemu VM, mysqld), BelowNormal meant never: its threads sat
+            // "Ready" for half an hour without logging "broker up", and the
+            // room stopped dead. The broker sleeps nearly all the time; at
+            // Normal it costs nothing and is never starved. Its runs inherit it.
+            BrokerNotStarved();
             try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
             return await RunBroker(args.Skip(1).ToArray()).ConfigureAwait(false);
         }

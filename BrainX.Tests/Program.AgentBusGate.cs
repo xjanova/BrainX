@@ -26,6 +26,8 @@ internal static partial class Program
         checks.Add(("broker decisions: the owner's answer reaches the agent even while its work is parked", OwnerAnswerSurvivesParking));
         checks.Add(("broker decisions: what an answer means — ทำต่อ is carry on, ค่อยทำต่อ is not", AnswerIntentChecks));
         checks.Add(("cowork lane: room work never reaches a session that did not join", RoomStaysInTheRoom));
+        checks.Add(("broker runners: the newest build in a versioned folder, and a CLI too old for its model is named", RunnerResolutionChecks));
+        checks.Add(("cowork follow-up: unfinished work is chased; out of quota it is paused, saved to the brain and resumed", FollowUpAndQuota));
         checks.Add(("cowork room: two windows of one agent both hear the owner, and one leaving does not deafen the other", TwoWindowsOneSeat));
     }
 
@@ -547,6 +549,8 @@ internal static partial class Program
             Check("…and speaking or peeking does not give the chat a place in the room", (seat["sessions"] as JObject)?.Count == 1, seat.ToString());
             var plain = await chat.Call("agent_send", new JObject { ["to"] = "claude", ["message"] = "unrelated", ["work"] = "other-job" });
             Check("…mail about other work is still mail", plain["lane"] == null && Mail("claude") == 1, plain.ToString());
+            var toBroker = await inRoom.Call("agent_send", new JObject { ["to"] = "broker", ["message"] = "done with that", ["work"] = "isle-art" });
+            Check("…and a reply to the broker stays the broker's, even from the room", toBroker["lane"] == null && Mail("broker") == 1, toBroker.ToString());
 
             // A question asked from the room is answered in the room.
             var asked = await inRoom.Call("agent_ask_user", new JObject { ["question"] = "Images first, or wait for the scene?", ["options"] = new JArray("images first", "wait"), ["work"] = "isle-art" });
@@ -603,6 +607,203 @@ internal static partial class Program
             if (chat != null) await chat.DisposeAsync();
             try { Directory.Delete(root, recursive: true); } catch { }
         }
+    }
+
+    /// <summary>
+    /// 2026-10-04: the claude on PATH was npm's 2.1.50, too old for the model
+    /// picked in the room, and every room run died on it while the desktop
+    /// app's 2.1.286 sat in claude-code\&lt;version&gt;\&lt;build&gt;\claude.exe.
+    /// </summary>
+    private static Task RunnerResolutionChecks()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the check", false); return Task.CompletedTask; }
+        var program = System.Reflection.Assembly.LoadFrom(Path.ChangeExtension(exe, ".dll")).GetType("BrainX.Mcp.Program")!;
+        const System.Reflection.BindingFlags any = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static;
+
+        var root = Path.Combine(Path.GetTempPath(), "brainx-exe-" + Guid.NewGuid().ToString("N"));
+        string Make(string rel, int minutesAgo)
+        {
+            var p = Path.Combine(root, rel);
+            Directory.CreateDirectory(Path.GetDirectoryName(p)!);
+            File.WriteAllText(p, "x");
+            File.SetLastWriteTimeUtc(p, DateTime.UtcNow.AddMinutes(-minutesAgo));
+            return p;
+        }
+        try
+        {
+            Make(@"2.1.284\aaa\claude.exe", 60);
+            var newest = Make(@"2.1.286\bbb\claude.exe", 1);
+            Make(@"2.1.286\bbb\notes.txt", 0);
+            var got = program.GetMethod("NewestMatch", any)!.Invoke(null, [Path.Combine(root, "*", "*", "claude.exe")]) as string;
+            Check("a pattern with a wildcard per folder level finds the newest build", got == newest, got);
+            var none = program.GetMethod("NewestMatch", any)!.Invoke(null, [Path.Combine(root, "*", "claude.exe")]) as string;
+            Check("…and nothing when the layout does not match", none == null, none);
+
+            var said = program.GetMethod("RunnerTroubleTh", any)!.Invoke(null, ["claude",
+                "API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Claude Code 2.1.50 does not support this model; version 2.1.280 or newer is required.\",\"details\":{\"error_code\":\"claude_code_version_too_old\"}}}"]) as string;
+            Check("a CLI too old for its model is told to the owner as exactly that", said?.Contains("เก่าเกินไป") == true, said);
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Owner (2026-10-04): "ถ้างานยังไม่เสร็จต้องตามงานกัน … หากมีใครหมดโควต้า …
+    /// บอสจะรู้และให้พักงานไว้และเก็บเข้า สมอง" / "เขาจะตามเมื่อโควต้ากลับมาได้ด้วย".
+    /// </summary>
+    private static async Task FollowUpAndQuota()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the check", false); return; }
+
+        var root = Path.Combine(Path.GetTempPath(), "brainx-followup-e2e-" + Guid.NewGuid().ToString("N"));
+        var vault = Path.Combine(root, "vault");
+        var bus = Path.Combine(vault, ".obsidianx", "agent-bus");
+        var room = Path.Combine(bus, "cowork", "messages");
+        var tasks = Path.Combine(bus, "cowork", "tasks");
+        var stateFile = Path.Combine(bus, "broker", "codex.state.json");
+        var key = Path.Combine(root, "bus-seal.key");
+        Directory.CreateDirectory(room);
+        Directory.CreateDirectory(tasks);
+        Directory.CreateDirectory(Path.Combine(bus, "broker"));
+        Directory.CreateDirectory(Path.Combine(vault, "Notes"));
+        BusSeal.EnsureKey(key);
+        SetRoomLight(bus, on: true);
+
+        void Runner(string script) => File.WriteAllText(Path.Combine(bus, "runners.json"), new JObject
+        {
+            ["pollSeconds"] = 5,
+            ["idleStudy"] = false,
+            ["workRoots"] = new JArray(),
+            ["escalation"] = new JObject { ["toast"] = false, ["chatCard"] = false, ["telegram"] = new JObject { ["botToken"] = "", ["chatId"] = "" } },
+            ["runners"] = new JObject
+            {
+                ["codex"] = new JObject { ["exe"] = "cmd", ["args"] = new JArray("/c", script), ["cwd"] = root, ["onCall"] = true },
+            },
+        }.ToString(), new UTF8Encoding(false));
+        async Task<string> BrokerOnce()
+        {
+            var psi = new ProcessStartInfo(exe, $"broker --vault \"{vault}\" --once")
+            {
+                RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false,
+                StandardOutputEncoding = new UTF8Encoding(false),
+            };
+            psi.Environment["BRAINX_BUS_SEAL_KEY"] = key;
+            psi.Environment["BRAINX_SANDBOX"] = "1";
+            psi.Environment.Remove(StubMcpServer.EnvFlag);
+            using var p = Process.Start(psi)!;
+            var outTask = p.StandardOutput.ReadToEndAsync();
+            _ = p.StandardError.ReadToEndAsync();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+            await p.WaitForExitAsync(cts.Token);
+            return await outTask;
+        }
+        JObject Board() => JObject.Parse(File.ReadAllText(Path.Combine(tasks, "t-abc123.json")));
+        List<JObject> Lines(string topic) => Directory.GetFiles(room, "*-broker-*.json").OrderBy(Path.GetFileName, StringComparer.Ordinal)
+            .Select(f => JObject.Parse(File.ReadAllText(f))).Where(o => o["topic"]?.ToString() == topic).ToList();
+        void Age(string file, string field, TimeSpan by)
+        {
+            var o = JObject.Parse(File.ReadAllText(file));
+            o[field] = DateTime.UtcNow.Subtract(by).ToString("o");
+            File.WriteAllText(file, o.ToString(), new UTF8Encoding(false));
+        }
+
+        try
+        {
+            // Four of fifteen images drawn, the run cut off, nobody on it since.
+            File.WriteAllText(Path.Combine(tasks, "t-abc123.json"), new JObject
+            {
+                ["id"] = "t-abc123", ["title"] = "draw 15 destination cards", ["status"] = "doing", ["assignee"] = "codex",
+                ["createdBy"] = "owner", ["work"] = "isle-art",
+                ["createdUtc"] = DateTime.UtcNow.AddHours(-2).ToString("o"), ["updatedUtc"] = DateTime.UtcNow.AddMinutes(-40).ToString("o"),
+            }.ToString(), new UTF8Encoding(false));
+
+            Runner("exit /b 0");
+            var chased = await BrokerOnce();
+            var chase = Lines("follow-up").LastOrDefault();
+            Check("quiet unfinished work is followed up in the room, to its holder", chase?["to"]?.ToString() == "codex"
+                  && chase["body"]?.ToString().Contains("[t-abc123]") == true, chased);
+            Check("…and its holder is called back to it", chased.Contains("spawned"), chased);
+            var again = await BrokerOnce();
+            Check("…but not again on the very next tick", Lines("follow-up").Count == 1 && !again.Contains("spawned"), again);
+
+            // A run on record whose process is gone is not "busy": it must not
+            // stop the next follow-up for ever.
+            var dead = JObject.Parse(File.ReadAllText(stateFile));
+            dead["runPid"] = 999999;
+            dead["runStartedUtc"] = DateTime.UtcNow.AddMinutes(-50).ToString("o");
+            File.WriteAllText(stateFile, dead.ToString(), new UTF8Encoding(false));
+            var ledger0 = JObject.Parse(File.ReadAllText(Path.Combine(bus, "cowork", "followups.json")));
+            ledger0["t-abc123"]!["lastUtc"] = DateTime.UtcNow.AddMinutes(-31).ToString("o");
+            File.WriteAllText(Path.Combine(bus, "cowork", "followups.json"), ledger0.ToString(), new UTF8Encoding(false));
+            Age(Path.Combine(tasks, "t-abc123.json"), "updatedUtc", TimeSpan.FromMinutes(40));
+            var afterDead = await BrokerOnce();
+            Check("a dead run on record does not block the follow-up", Lines("follow-up").Count == 2 && afterDead.Contains("spawned"), afterDead);
+
+            // The next follow-up runs into a usage limit.
+            Runner("echo You've hit your usage limit. Try again in 2 hours. & exit /b 1");
+            var ledger = JObject.Parse(File.ReadAllText(Path.Combine(bus, "cowork", "followups.json")));
+            ledger["t-abc123"]!["lastUtc"] = DateTime.UtcNow.AddMinutes(-31).ToString("o");
+            File.WriteAllText(Path.Combine(bus, "cowork", "followups.json"), ledger.ToString(), new UTF8Encoding(false));
+            Age(Path.Combine(tasks, "t-abc123.json"), "updatedUtc", TimeSpan.FromMinutes(40));
+            var outOfQuota = await BrokerOnce();
+            var t = Board();
+            Check("out of quota, the work is paused — not lost", t["status"]?.ToString() == "blocked"
+                  && t["paused"]?["reason"]?.ToString() == "quota", t.ToString() + " || " + outOfQuota);
+            var until = t["paused"]?["untilUtc"]?.ToObject<DateTime>().ToUniversalTime() ?? DateTime.MinValue;
+            Check("…until the reset the runner named", Math.Abs((until - DateTime.UtcNow).TotalMinutes - 122) < 5, until.ToString("o"));
+            var told = Lines("quota").LastOrDefault();
+            Check("the room — and so the owner — is told who is out and until when", told?["body"]?.ToString().Contains("codex หมดโควต้า") == true
+                  && told["body"]?.ToString().Contains("[t-abc123]") == true, told?.ToString());
+            var saved = Directory.Exists(Path.Combine(vault, "Notes", "Cowork-Paused"))
+                ? Directory.GetFiles(Path.Combine(vault, "Notes", "Cowork-Paused"), "*.md") : Array.Empty<string>();
+            Check("where it got to is saved in the brain", saved.Length == 1 && File.ReadAllText(saved[0]).Contains("draw 15 destination cards"),
+                  string.Join(", ", saved));
+            Check("…and the board points at that note", t["note"]?.ToString().Contains("Cowork paused") == true, t["note"]?.ToString());
+
+            // Resting: not chased while out.
+            Age(Path.Combine(tasks, "t-abc123.json"), "updatedUtc", TimeSpan.FromHours(1));
+            var chasedSoFar = Lines("follow-up").Count;
+            var resting = await BrokerOnce();
+            Check("while out of quota it is not chased", !resting.Contains("spawned") && Lines("follow-up").Count == chasedSoFar, resting);
+
+            // The reset has passed: called back to the paused work.
+            Runner("exit /b 0");
+            var tf = Board();
+            tf["paused"]!["untilUtc"] = DateTime.UtcNow.AddMinutes(-1).ToString("o");
+            File.WriteAllText(Path.Combine(tasks, "t-abc123.json"), tf.ToString(), new UTF8Encoding(false));
+            var st = JObject.Parse(File.ReadAllText(stateFile));
+            st["quotaResumeUtc"] = DateTime.UtcNow.AddMinutes(-1).ToString("o");
+            st["failedUtc"] = DateTime.UtcNow.AddHours(-1).ToString("o");
+            File.WriteAllText(stateFile, st.ToString(), new UTF8Encoding(false));
+            var back = await BrokerOnce();
+            var resumedLine = Lines("follow-up").LastOrDefault();
+            Check("when the quota is back, the paused work is handed back to its holder", Board()["status"]?.ToString() is "assigned" or "doing"
+                  && Board()["paused"] == null, Board().ToString());
+            Check("…the room hears it", resumedLine?["body"]?.ToString().Contains("โควต้าของ codex น่าจะกลับมาแล้ว") == true, resumedLine?.ToString());
+            Check("…and codex is called back in", back.Contains("spawned"), back);
+            Check("…and a run that works clears the rest", JObject.Parse(File.ReadAllText(stateFile))["quotaResumeUtc"]?.Type is null or JTokenType.Null,
+                  File.ReadAllText(stateFile));
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+
+        // The reset, read from what the runners actually say.
+        var program = System.Reflection.Assembly.LoadFrom(Path.ChangeExtension(exe, ".dll")).GetType("BrainX.Mcp.Program")!;
+        var parse = program.GetMethod("QuotaResetFrom", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+        var now = DateTime.UtcNow;
+        DateTime? P(string s) => parse.Invoke(null, [s, now]) as DateTime?;
+        Check("\"try again in 2 hours 5 minutes\"", P("You've hit your usage limit. Try again in 2 hours 5 minutes.") == now + new TimeSpan(2, 5, 0));
+        Check("\"in 45 minutes\"", P("rate limit — retry in 45 minutes") == now.AddMinutes(45));
+        var at = P("Usage limit reached. Resets at 4pm");
+        Check("\"resets at 4pm\" is the next 16:00 local", at is DateTime a && a.ToLocalTime().Hour == 16 && a > now && a - now <= TimeSpan.FromDays(1), at?.ToString("o"));
+        Check("no time in it, no guess", P("quota exceeded") == null);
     }
 
     private static Task AnswerIntentChecks()
