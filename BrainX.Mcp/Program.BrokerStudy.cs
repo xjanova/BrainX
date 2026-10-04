@@ -161,6 +161,10 @@ internal static partial class Program
                     Args = runner.Args,
                     Cwd = runner.Cwd,
                     OnCall = runner.OnCall,
+                    // Without these a study ran on the CLI default whatever
+                    // the owner had picked for this agent.
+                    Model = runner.Model,
+                    ModelFlag = runner.ModelFlag,
                 }, new WaitingWork(0, 0, new List<string>(), 0, Room: 1), live, rs, reportToRoom: false))
                 started++;
         }

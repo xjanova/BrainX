@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
+using BrainX.Core.Services;
 using Newtonsoft.Json.Linq;
 
 namespace BrainX.Mcp;
@@ -719,7 +720,7 @@ internal static partial class Program
                     }
 
                     if (spawnReason != null) BrokerLog($"{agent}: {spawnReason}");
-                    if (dryRun) { BrokerLog($"{agent}: would spawn {runner.Exe} in {WorkDirFor(cfg, runner, work)} ({Describe(work)})"); continue; }
+                    if (dryRun) { BrokerLog($"{agent}: would spawn {runner.Exe}{(RunnerModelFor(agent, runner) is { } dm ? " on " + dm : "")} in {WorkDirFor(cfg, runner, work)} ({Describe(work)})"); continue; }
                     var started = SpawnRunner(cfg, agent, runner, work, live, state);
                     if (started && work.Room > 0)
                     {
@@ -1010,7 +1011,11 @@ internal static partial class Program
         // still put quoting rules between this code and what actually runs,
         // and that is precisely the class of bug the Codex headless note cost
         // a session to find.
-        foreach (var a in runner.Args)
+        // The model goes in BEFORE the substitutions, and can only ever be one
+        // validated id (RunnerModels.IsValidId): no dash, no braces, so it can
+        // neither become a flag nor smuggle a {prompt} in.
+        var model = RunnerModelFor(agent, runner);
+        foreach (var a in RunnerModels.ApplyToArgs(runner.Args, model, runner.ModelFlag))
             psi.ArgumentList.Add(a.Replace("{prompt}", BuildSpawnPrompt(work))
                                   .Replace("{cwd}", psi.WorkingDirectory)
                                   .Replace("{agent}", agent));
@@ -1086,12 +1091,29 @@ internal static partial class Program
             state.Hops++;
             state.RunPid = p.Id;
             state.RunStartedUtc = startedUtc;
+            state.RunModel = model;
             SaveRunnerState(agent, state);
 
-            BrokerLog($"{agent}: spawned {Path.GetFileName(exe)} pid {p.Id} for {Describe(work)} · log {Path.GetFileName(log)}");
+            BrokerLog($"{agent}: spawned {Path.GetFileName(exe)} pid {p.Id}"
+                      + (model != null ? $" on {model}" : "")
+                      + $" for {Describe(work)} · log {Path.GetFileName(log)}");
             return true;
         }
         catch (Exception ex) { BrokerLog($"{agent}: spawn failed — {Redact(ex.Message)}"); return false; }
+    }
+
+    /// <summary>
+    /// The model this run starts on: what the owner picked in the room
+    /// (cowork/models.json, read now so a pick needs no restart), else the
+    /// runner's own `model` in runners.json, else nothing — the CLI decides.
+    /// </summary>
+    private static string? RunnerModelFor(string agent, RunnerSpec runner)
+    {
+        if (RunnerModels.ReadChoice(BusRoot, agent) is { } picked) return picked;
+        if (runner.Model.Length == 0) return null;
+        if (RunnerModels.IsValidId(runner.Model)) return runner.Model;
+        BrokerLog($"{agent}: runners.json model '{Redact(runner.Model)}' is not a model id — starting on the CLI default");
+        return null;
     }
 
     /// <summary>
@@ -1353,6 +1375,7 @@ internal static partial class Program
             }
             st.RunPid = null;
             st.RunStartedUtc = null;
+            st.RunModel = null;
             SaveRunnerState(agent, st);
 
             if (run.ForRoom) CoworkReportRun(cfg, agent, run, failed, killed, st.LastFailure);
@@ -1462,6 +1485,7 @@ internal static partial class Program
         var st = ReadRunnerState(agent);
         st.RunPid = null;
         st.RunStartedUtc = null;
+        st.RunModel = null;
         SaveRunnerState(agent, st);
     }
 
@@ -1769,6 +1793,10 @@ internal static partial class Program
         public int? RunPid { get; set; }
         public DateTime? RunStartedUtc { get; set; }
 
+        /// <summary>The model the current run was started on, so the room can
+        /// say "this one is on X, the next one will be on Y" after a pick.</summary>
+        public string? RunModel { get; set; }
+
         /// <summary>
         /// Runs that died immediately, in a row, and what the last one said.
         ///
@@ -1866,6 +1894,7 @@ internal static partial class Program
                             .Select(Utc).Where(d => d.HasValue).Select(d => d!.Value).ToList(),
                 RunPid = o["runPid"]?.ToObject<int?>(),
                 RunStartedUtc = Utc(o["runStartedUtc"]),
+                RunModel = o["runModel"]?.Type == JTokenType.String ? o["runModel"]!.ToString() : null,
                 ConsecutiveFailures = o["consecutiveFailures"]?.ToObject<int?>() ?? 0,
                 LastFailure = o["lastFailure"]?.ToString(),
                 FailedUtc = Utc(o["failedUtc"]),
@@ -1889,6 +1918,7 @@ internal static partial class Program
                 ["spawns"] = JArray.FromObject(s.Spawns),
                 ["runPid"] = s.RunPid,
                 ["runStartedUtc"] = s.RunStartedUtc,
+                ["runModel"] = s.RunModel,
                 ["consecutiveFailures"] = s.ConsecutiveFailures,
                 ["lastFailure"] = s.LastFailure,
                 ["failedUtc"] = s.FailedUtc,
@@ -1907,6 +1937,15 @@ internal static partial class Program
         public List<string> ExeFallbacks { get; init; } = new();
         public List<string> Args { get; init; } = new();
         public string Cwd { get; init; } = "";
+
+        /// <summary>The model to start on when the owner has not picked one in
+        /// the room. Empty = the CLI's own default.</summary>
+        public string Model { get; init; } = "";
+
+        /// <summary>How the model is passed: the option name put in front of
+        /// it, unless the args carry a {model} placeholder. Empty = this runner
+        /// takes no model, and the room offers no choice for it.</summary>
+        public string ModelFlag { get; init; } = RunnerModels.DefaultFlag;
 
         /// <summary>
         /// Answers the cowork room when the owner gives an order with nobody
@@ -2027,6 +2066,8 @@ internal static partial class Program
                     Args = r["args"]?.ToObject<List<string>>() ?? new(),
                     Cwd = Environment.ExpandEnvironmentVariables(r["cwd"]?.ToString() ?? ""),
                     OnCall = r["onCall"]?.ToObject<bool?>() ?? false,
+                    Model = r["model"]?.Type == JTokenType.String ? r["model"]!.ToString().Trim() : "",
+                    ModelFlag = r["modelFlag"]?.Type == JTokenType.String ? r["modelFlag"]!.ToString().Trim() : RunnerModels.DefaultFlag,
                 };
             }
 
@@ -2115,6 +2156,7 @@ internal static partial class Program
   },
 
   "//runners": "{prompt} and {cwd} are substituted. NOTHING from a peer message is ever interpolated.",
+  "//model": "Per runner: \"model\" is the default model (empty = the CLI's own), \"modelFlag\" how it is passed (default --model; empty = no model), \"models\" the list the cowork room offers. A pick made in the room (cowork/models.json) wins and needs no restart. Put {model} in args to place it yourself.",
   "runners": {
     "codex": {
       "//": "--approve-for-me is REQUIRED: headless Codex auto-denies every MCP tool call through its approval gate without it.",

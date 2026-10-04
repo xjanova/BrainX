@@ -44,6 +44,10 @@
            CLIENT to start or stop it — the page cannot, and must not, run a
            process that spawns agents. -->
       <button id="room-broker" type="button" title="บอสจัดสรรงาน (broker)">—</button>
+      <!-- Which model the boss starts each agent on. Only runs the broker
+           starts — a session the owner opened keeps its own app's model. -->
+      <button id="room-model" type="button" aria-expanded="false" aria-controls="model-panel"
+              title="เลือกโมเดลที่บอสใช้เรียก agent เข้ามาทำงาน">🧠 โมเดล</button>
       <!-- The Windows Service the boss used to have. Retired 2026-09-21: it ran
            as SYSTEM, which cannot reach the owner's agents. The chip stays so an
            install left over from before is visible, and removable. -->
@@ -59,6 +63,14 @@
            talking until the tokens run out. -->
       <button id="room-light" type="button" title="ไฟห้อง — ปิดแล้วทุกคนออก ไม่มีใครคุยได้จนกว่าจะเปิดใหม่">💡</button>
     </div>
+
+    <section id="model-panel" hidden aria-label="โมเดลที่บอสใช้เรียก agent">
+      <header>โมเดลของ agent <span>— ตอนบอสเรียกเข้ามาทำงาน</span></header>
+      <ol id="model-list"></ol>
+      <p id="model-note" role="status"></p>
+      <p class="model-foot">มีผลกับรอบถัดไปที่บอสเรียก agent เข้ามาเอง (ห้องว่าง / รอบศึกษา) ไม่ต้องรีสตาร์ต ·
+        เซสชันที่คุณเปิดเองใช้โมเดลตามแอปของมัน</p>
+    </section>
 
     <section id="service-panel" hidden aria-label="Windows Service ของบอส">
       <header>Windows Service <span>— แบบเก่า เลิกใช้แล้ว</span></header>

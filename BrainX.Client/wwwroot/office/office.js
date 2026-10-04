@@ -189,6 +189,7 @@ let DECISIONS = [];
 let TASKS = [];         // the board: [{id,title,status,assignee,createdBy,note,at}]
 let ROSTER = [];        // everyone with a desk, lit room or not — who a line can be for
 let BROKER = null;      // {state,tail} — the boss: running / adopted / stopped / failed
+let MODELS = [];        // [{agent,canChoose,chosen,configured,cliDefault,onCall,running,options:[{id,label,note}]}]
 const DESKS = new Map();  // agent id → {gx,gy,seat:{x,y},screen:{x,y}}
 const SEEN = new Set();   // message ids already shown as bubbles
 const EMOTES_PLAYED = new Set();  // agent|atUtc, so one emote sounds once
@@ -2797,10 +2798,13 @@ function apply(p) {
         + (rigs.length ? ` · เครื่องมือ ${rigsUp}/${rigs.length}` : '');
     document.getElementById('room-dot').classList.toggle('off', online === 0);
 
+    MODELS = Array.isArray(p.models) ? p.models : [];
+
     renderLog();
     renderDecisions();
     renderBoard();
     renderChips();
+    renderModels();
 }
 
 function firstLine(s) {
@@ -2831,6 +2835,130 @@ document.getElementById('say').addEventListener('submit', (e) => {
     // happened gets sent twice.
     BOSS = { until: T + 260, text: firstLine(text) };
 });
+
+// ── which model the boss starts each agent on ───────────────────────
+//
+// Owner (2026-10-04): "ให้เลือกโมเดลที่ซัพพอตเพื่อเข้าทำงานได้ มีตัวเลือก".
+// Only runs the BROKER starts; a session the owner opened keeps its own app's
+// model. The page asks, and the client writes only a value it offered — the
+// pick ends up on the command line of a process that can edit the repos.
+
+let MODELS_KEY = '';
+/** Picks sent and not yet seen back in a payload: agent → {model, at}. */
+const MODEL_PENDING = new Map();
+/** Picks that just came back, for a short "saved" mark: agent → time. */
+const MODEL_SAVED = new Map();
+let MODEL_NOTE = '';
+
+function modelLabel(row, id) {
+    const o = (row.options || []).find(x => x.id === id);
+    return o ? o.label : id;
+}
+
+/** What "no pick" means for this runner, in words — runners.json's model if
+ *  it names one, else whatever the CLI itself is set to. */
+function modelDefaultText(row) {
+    if (row.configured) return `ค่าเริ่มต้น — ${modelLabel(row, row.configured)} (runners.json)`;
+    if (row.cliDefault) return `ค่าเริ่มต้นของ CLI — ${modelLabel(row, row.cliDefault)}`;
+    return 'ค่าเริ่มต้นของ CLI';
+}
+
+function renderModels() {
+    const now = Date.now();
+    for (const [agent, p] of MODEL_PENDING) {
+        const row = MODELS.find(m => m.agent === agent);
+        if (row && (row.chosen || '') === p.model) {
+            MODEL_PENDING.delete(agent);
+            MODEL_SAVED.set(agent, now);
+        } else if (now - p.at > 8000) {
+            // The client refused it or never got it. Say so rather than leave
+            // the dropdown showing a choice that is not on disk.
+            MODEL_PENDING.delete(agent);
+            MODEL_NOTE = `บันทึกโมเดลของ ${agent} ไม่สำเร็จ — ลองเลือกใหม่อีกครั้ง`;
+        }
+    }
+    for (const [agent, t] of MODEL_SAVED) if (now - t > 4000) MODEL_SAVED.delete(agent);
+
+    const chip = document.getElementById('room-model');
+    if (chip) {
+        chip.classList.toggle('set', MODELS.some(m => m.chosen));
+        chip.title = MODELS.length
+            ? 'โมเดลที่บอสใช้เรียก agent เข้ามาทำงาน\n' + MODELS.map(m =>
+                `${m.agent}: ${m.chosen ? modelLabel(m, m.chosen) : modelDefaultText(m)}`).join('\n')
+            : 'ยังไม่มี agent ที่บอสเรียกได้ (runners.json)';
+    }
+    const note = document.getElementById('model-note');
+    if (note) note.textContent = MODEL_NOTE;
+
+    const list = document.getElementById('model-list');
+    if (!list) return;
+    // Rebuilt only when something changed: this runs on every two-second poll,
+    // and a rebuild closes a dropdown the owner has open.
+    const key = JSON.stringify([MODELS, [...MODEL_PENDING], [...MODEL_SAVED.keys()]]);
+    if (key === MODELS_KEY) return;
+    MODELS_KEY = key;
+    const focused = document.activeElement?.closest?.('#model-list select')?.dataset.agent;
+
+    list.innerHTML = !MODELS.length
+        ? '<li class="mnote">ยังไม่มี agent ที่บอสเรียกเข้ามาทำงานได้ — เพิ่ม runner ใน runners.json</li>'
+        : MODELS.map(row => {
+            const pending = MODEL_PENDING.get(row.agent);
+            const value = pending ? pending.model : (row.chosen || '');
+            const opts = Array.isArray(row.options) ? row.options : [];
+            // A pick the CLI no longer offers still shows as what it is,
+            // rather than silently reading as the default.
+            const stale = value && !opts.some(o => o.id === value);
+            const options = [`<option value="">${esc(modelDefaultText(row))}</option>`]
+                .concat(stale ? [`<option value="${esc(value)}" selected>${esc(value)} (ไม่อยู่ในรายการแล้ว)</option>`] : [])
+                .concat(opts.map(o => `<option value="${esc(o.id)}"${o.id === value ? ' selected' : ''}>${esc(o.label)}</option>`))
+                .join('');
+            const picked = opts.find(o => o.id === value);
+            const why = !row.canChoose ? 'runner นี้ไม่รับการเลือกโมเดล (modelFlag ว่างใน runners.json)'
+                : !opts.length ? 'ไม่พบรายการโมเดลของ runner นี้ — ใส่ "models" ใน runners.json'
+                : picked ? (picked.note || '') : '';
+            const next = value || row.configured || '';
+            const run = row.running && row.running !== next
+                ? `<p class="mrun">รอบที่กำลังทำงานอยู่ใช้ ${esc(modelLabel(row, row.running))} — รอบถัดไปจะใช้ ${esc(value ? modelLabel(row, value) : modelDefaultText(row))}</p>`
+                : '';
+            const state = pending ? ' · กำลังบันทึก…'
+                : MODEL_SAVED.has(row.agent) ? ' · <span class="msave">✓ บันทึกแล้ว</span>' : '';
+            return `<li><div><span class="who" style="--pc:${agentColor(row.agent)}">${esc(label(row.agent))}</span>`
+                + `<span class="tag">${row.onCall ? 'ถูกเรียกเมื่อห้องว่าง' : ''}${state}</span></div>`
+                + `<select data-agent="${esc(row.agent)}" aria-label="โมเดลของ ${esc(row.agent)}"`
+                + `${row.canChoose && opts.length ? '' : ' disabled'}>${options}</select>`
+                + `<p class="mnote">${esc(why)}</p>${run}</li>`;
+        }).join('');
+
+    if (focused) list.querySelector(`select[data-agent="${CSS.escape(focused)}"]`)?.focus();
+}
+
+document.getElementById('model-list')?.addEventListener('change', (e) => {
+    const sel = e.target.closest('select[data-agent]');
+    if (!sel) return;
+    MODEL_NOTE = '';
+    MODEL_PENDING.set(sel.dataset.agent, { model: sel.value, at: Date.now() });
+    post({ type: 'officeModel', agent: sel.dataset.agent, model: sel.value });
+    renderModels();
+});
+
+function closeModelPanel() {
+    const panel = document.getElementById('model-panel');
+    if (!panel || panel.hidden) return;
+    panel.hidden = true;
+    document.getElementById('room-model')?.setAttribute('aria-expanded', 'false');
+}
+document.getElementById('room-model')?.addEventListener('click', (e) => {
+    const panel = document.getElementById('model-panel');
+    if (!panel) return;
+    const open = panel.hidden;
+    panel.hidden = !open;
+    e.currentTarget.setAttribute('aria-expanded', String(open));
+    if (open) { MODEL_NOTE = ''; MODELS_KEY = ''; renderModels(); }
+});
+document.addEventListener('click', (e) => {
+    if (!e.target.closest('#model-panel, #room-model')) closeModelPanel();
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModelPanel(); });
 
 // ── the Windows Service half of the boss ────────────────────────────
 //
@@ -3067,7 +3195,21 @@ function demo() {
         { id: 't-12aa04', title: 'ตั้งชื่อ workstream ใหม่', status: 'done', assignee: 'codex', createdBy: 'claude',
           note: 'ใช้ tpix-market', at: now - 2 * 3600e3 },
     ];
-    apply({ agents, messages, decisions, tasks });
+    const models = [
+        { agent: 'claude', canChoose: true, chosen: 'claude-sonnet-5-5', configured: '', cliDefault: '', onCall: true, running: '',
+          options: [
+              { id: 'claude-fable-5-1', label: 'Fable 5.1', note: 'เก่งที่สุด — งานยาก งานยาว ราคาสูงสุด' },
+              { id: 'claude-opus-5-5', label: 'Opus 5.5', note: 'เก่งรอบด้าน สมดุลระหว่างฝีมือกับราคา' },
+              { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', note: 'เร็วและคุ้ม — งานโค้ดประจำวัน' },
+              { id: 'claude-haiku-4-5', label: 'Haiku 4.5', note: 'เร็วสุด ถูกสุด — งานง่าย ๆ' },
+          ] },
+        { agent: 'codex', canChoose: true, chosen: '', configured: '', cliDefault: 'gpt-6.1-sol', onCall: true, running: 'gpt-6-astra',
+          options: [
+              { id: 'gpt-6.1-sol', label: 'GPT-6.1-Sol', note: 'Latest workhorse model for coding and everyday work.' },
+              { id: 'gpt-6-astra', label: 'GPT-6-Astra', note: 'Frontier intelligence for the most demanding work.' },
+          ] },
+    ];
+    apply({ agents, messages, decisions, tasks, models });
 
     // A message every few seconds, so the bubbles and the packets can be seen
     // doing what they do on a live vault.
@@ -3077,7 +3219,7 @@ function demo() {
         const to = ['codex', 'claude', 'claude'][i % 3];
         messages.push(mk(i, from, to, 'ทดสอบห้อง — ข้อความที่ ' + i, { topic: 'demo' }));
         if (messages.length > 40) messages.shift();
-        apply({ agents, messages: messages.slice(), decisions, tasks });
+        apply({ agents, messages: messages.slice(), decisions, tasks, models });
         i++;
     }, 4200);
 }

@@ -133,6 +133,8 @@ public partial class MainWindow
                 // write with cowork_task, never parsed out of the chat.
                 ["tasks"] = CoworkTasks(),
                 ["roomOpen"] = CoworkRoomIsOpen(),
+                // Which model the boss starts each agent on, and what it can be.
+                ["models"] = CoworkModels(),
             };
             CoworkWebView.CoreWebView2?.PostWebMessageAsJson(
                 new JObject { ["type"] = "officeState", ["payload"] = payload }.ToString());
@@ -489,6 +491,7 @@ public partial class MainWindow
                     if (verb is "uninstall" or "stop") RunBrokerServiceVerb(verb);
                     break;
                 case "officeOpen": CoworkOpen(m["path"]?.ToString()); break;
+                case "officeModel": CoworkSetModel(m["agent"]?.ToString(), m["model"]?.ToString()); break;
             }
         }
         catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"Cowork msg: {ex.Message}"); }
@@ -866,6 +869,138 @@ public partial class MainWindow
             PostCowork();
         }
         catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"CoworkAnswer: {ex.Message}"); }
+    }
+
+    // ───────────── which model the boss starts each agent on ─────────────
+
+    /* Owner (2026-10-04): "ให้เลือกโมเดลที่ซัพพอตเพื่อเข้าทำงานได้ มีตัวเลือก".
+     *
+     * Only for runs the BROKER starts — an order in an empty room, an idle
+     * study. A session the owner opened runs on whatever its own app is set
+     * to, and nothing here can change that. The pick lands in
+     * cowork/models.json, which the broker reads at every spawn: no restart.
+     */
+
+    private (string Path, DateTime Stamp, JObject? Runners) _coworkRunnersCache;
+
+    /// <summary>runners.json's runners, re-read only when the file changes —
+    /// this is asked every two seconds.</summary>
+    private JObject? CoworkRunners()
+    {
+        try
+        {
+            var p = Path.Combine(CoworkBusRoot, "runners.json");
+            if (!File.Exists(p)) return null;
+            var stamp = File.GetLastWriteTimeUtc(p);
+            // Keyed by path as well: a vault switch is a different file.
+            if (_coworkRunnersCache.Stamp != stamp || _coworkRunnersCache.Path != p)
+            {
+                JObject? runners = null;
+                try { runners = JObject.Parse(File.ReadAllText(p))["runners"] as JObject; }
+                catch { /* the owner's file, mid-edit; the broker logs it */ }
+                _coworkRunnersCache = (p, stamp, runners);
+            }
+            return _coworkRunnersCache.Runners;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>The agent name a runners.json key becomes — the same folding
+    /// brainx-mcp's SanitizeAgentSlug does, so a pick is filed under the name
+    /// the broker looks it up by.</summary>
+    private static string CoworkSlug(string raw)
+    {
+        var slug = new string(raw.Trim().ToLowerInvariant()
+            .Select(c => char.IsLetterOrDigit(c) ? c : '-').ToArray()).Trim('-');
+        return slug.Length > 32 ? slug[..32].Trim('-') : slug;
+    }
+
+    /// <summary>One row per runner: what it can be started on, what the owner
+    /// picked, and what a run already in flight was started on.</summary>
+    private JArray CoworkModels()
+    {
+        var arr = new JArray();
+        var runners = CoworkRunners();
+        if (runners == null) return arr;
+        var picks = BrainX.Core.Services.RunnerModels.ReadChoices(CoworkBusRoot);
+
+        foreach (var (name, val) in runners)
+        {
+            if (val is not JObject r || name.StartsWith("//", StringComparison.Ordinal)) continue;
+            try
+            {
+                var agent = CoworkSlug(name);
+                if (agent.Length == 0) continue;
+                var args = (r["args"] as JArray)?.Select(t => t.ToString()).ToList() ?? new List<string>();
+                var flag = r["modelFlag"]?.Type == JTokenType.String
+                    ? r["modelFlag"]!.ToString().Trim()
+                    : BrainX.Core.Services.RunnerModels.DefaultFlag;
+                var options = BrainX.Core.Services.RunnerModels.Supported(
+                    agent, r["exe"]?.ToString() ?? "", r["models"], out var cliDefault);
+                var configured = r["model"]?.Type == JTokenType.String
+                                 && BrainX.Core.Services.RunnerModels.IsValidId(r["model"]!.ToString().Trim())
+                    ? r["model"]!.ToString().Trim() : "";
+
+                arr.Add(new JObject
+                {
+                    ["agent"] = agent,
+                    ["canChoose"] = BrainX.Core.Services.RunnerModels.CanChoose(args, flag),
+                    ["chosen"] = picks.TryGetValue(agent, out var pick) ? pick : "",
+                    ["configured"] = configured,
+                    ["cliDefault"] = cliDefault ?? "",
+                    ["onCall"] = r["onCall"]?.Type == JTokenType.Boolean && r["onCall"]!.ToObject<bool>(),
+                    ["running"] = CoworkRunModel(agent) ?? "",
+                    ["options"] = new JArray(options.Select(o => new JObject
+                    {
+                        ["id"] = o.Id,
+                        ["label"] = o.Label,
+                        ["note"] = o.Note,
+                    })),
+                });
+            }
+            catch { /* one broken runner entry must not hide the others */ }
+        }
+        return arr;
+    }
+
+    /// <summary>The model a broker run still in flight was started on.</summary>
+    private string? CoworkRunModel(string agent)
+    {
+        try
+        {
+            var p = Path.Combine(CoworkBusRoot, "broker", agent + ".state.json");
+            if (!File.Exists(p)) return null;
+            var o = JObject.Parse(File.ReadAllText(p));
+            if (o["runPid"] == null || o["runPid"]!.Type == JTokenType.Null) return null;
+            return o["runModel"]?.Type == JTokenType.String ? o["runModel"]!.ToString() : null;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// The owner picked a model in the room. Only a value that was OFFERED for
+    /// that runner is written: the page is a document, and this string ends up
+    /// on the command line of a process with write access to the owner's repos.
+    /// Empty clears the pick back to the runner's default.
+    /// </summary>
+    private void CoworkSetModel(string? agent, string? model)
+    {
+        agent = agent?.Trim() ?? "";
+        model = model?.Trim() ?? "";
+        try
+        {
+            var row = CoworkModels().OfType<JObject>().FirstOrDefault(m =>
+                string.Equals(m["agent"]?.ToString(), agent, StringComparison.OrdinalIgnoreCase));
+            if (row == null || row["canChoose"]?.ToObject<bool>() != true) return;
+            var offered = (row["options"] as JArray ?? new JArray())
+                .Any(o => string.Equals(o["id"]?.ToString(), model, StringComparison.Ordinal));
+            if (model.Length > 0 && !offered) return;
+
+            BrainX.Core.Services.RunnerModels.WriteChoice(
+                CoworkBusRoot, row["agent"]!.ToString(), model.Length == 0 ? null : model);
+        }
+        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"CoworkSetModel: {ex.Message}"); }
+        PostCowork();
     }
 
     /// <summary>Open an attachment with whatever the owner normally opens it with.</summary>

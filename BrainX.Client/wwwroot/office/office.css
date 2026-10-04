@@ -125,6 +125,20 @@ body {
     align-self: center;
 }
 #room-map:hover { border-color: rgba(216,185,120,0.55); color: var(--ink); }
+#room-model {
+    appearance: none;
+    border: 1px solid rgba(242, 239, 230, 0.12);
+    background: linear-gradient(180deg, rgba(34,39,50,0.88), rgba(16,19,26,0.88));
+    color: var(--ink-dim);
+    font: inherit;
+    letter-spacing: 1px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    cursor: pointer;
+    align-self: center;
+}
+#room-model:hover, #room-model[aria-expanded="true"] { border-color: rgba(216,185,120,0.55); color: var(--ink); }
+#room-model.set { border-color: rgba(111,207,151,0.4); }
 
 /* The service chip — same chip as the boss, coloured by the one fact that
    matters at a glance: is anything going to carry on when the app closes. */
@@ -145,7 +159,7 @@ body {
 #room-service.warn { border-color: rgba(224,168,106,0.5); color: #e0b98a; }
 #room-service.off { border-color: rgba(224,115,107,0.35); color: var(--ink-faint); }
 
-#service-panel {
+#service-panel, #model-panel {
     position: absolute;
     top: 34px;
     left: 10px;
@@ -161,9 +175,32 @@ body {
     font-size: 11px;
     line-height: 1.45;
 }
-#service-panel[hidden] { display: none; }
-#service-panel header { color: var(--ink); font-weight: 600; margin-bottom: 8px; }
-#service-panel header span { color: var(--ink-faint); font-weight: 400; }
+#service-panel[hidden], #model-panel[hidden] { display: none; }
+#service-panel header, #model-panel header { color: var(--ink); font-weight: 600; margin-bottom: 8px; }
+#service-panel header span, #model-panel header span { color: var(--ink-faint); font-weight: 400; }
+#model-panel { width: min(380px, calc(100% - 20px)); max-height: calc(100% - 50px); overflow-y: auto; }
+#model-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+#model-list li { display: grid; gap: 4px; }
+#model-list .who { color: var(--pc, var(--ink)); font-weight: 600; }
+#model-list .tag { color: var(--ink-faint); font-size: 10px; margin-left: 6px; }
+#model-list select {
+    width: 100%;
+    font: inherit;
+    color: var(--ink);
+    background: rgba(16,19,26,0.95);
+    border: 1px solid rgba(242, 239, 230, 0.18);
+    border-radius: 6px;
+    padding: 4px 6px;
+}
+#model-list select:focus-visible { outline: 1px solid rgba(216,185,120,0.8); outline-offset: 1px; }
+#model-list select:disabled { opacity: 0.55; }
+#model-list .mnote { margin: 0; color: var(--ink-faint); }
+#model-list .mnote:empty { display: none; }
+#model-list .mrun { margin: 0; color: #e0b98a; }
+#model-list .msave { color: #8fdcae; }
+#model-note { margin: 8px 0 0; color: #e0938c; }
+#model-note:empty { display: none; }
+#model-panel .model-foot { margin: 8px 0 0; color: var(--ink-faint); font-size: 10px; }
 #service-facts {
     display: grid;
     grid-template-columns: auto 1fr;

@@ -65,6 +65,7 @@ internal static partial class Program
         RegisterNoteWriteChecks(sshChecks);
         RegisterLearningLoopChecks(sshChecks);
         RegisterShieldChecks(sshChecks);
+        RegisterRunnerModelChecks(sshChecks);
         RegisterIndexerChecks(sshChecks);
         RegisterLiveIndexChecks(sshChecks);
         RegisterCloudChecks(sshChecks);
