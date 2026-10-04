@@ -194,7 +194,12 @@ const DESKS = new Map();  // agent id → {gx,gy,seat:{x,y},screen:{x,y}}
 const SEEN = new Set();   // message ids already shown as bubbles
 const EMOTES_PLAYED = new Set();  // agent|atUtc, so one emote sounds once
 let PRIMED = false;       // first payload is backlog: show it, don't perform it
-const BUBBLES = [];       // {agent,text,color,until}
+const BUBBLES = [];       // {agent,text,color,until} — `until` in performance.now() ms
+/** How long a line stays up, in milliseconds. It used to be counted in FRAMES
+ *  (T + 240): four seconds at 60 Hz, under two on a 144 Hz screen, and frozen
+ *  in place whenever the browser throttled the hidden pane. */
+const SAY_MS = 4000, BOSS_SAY_MS = 4300, MURMUR_MS = 1500;
+const nowMs = () => performance.now();
 const PACKETS = [];       // {from,to,color,t0,ms}
 let BOSS = null;          // {until,text} — the owner's last line, as a bubble
 
@@ -297,6 +302,21 @@ let T = 0;                // frame counter, drives every idle animation
  * layout: the first agent takes the best seat and the rest fill outward in a
  * stable order, so nobody's chair moves when somebody else connects.
  */
+/**
+ * Who gets a desk. The plate has STATIONS.length desks; seats were handed out
+ * as i % STATIONS.length, so the ninth agent sat on top of the first and both
+ * nameplates became unreadable. With more people than desks, the ones that are
+ * here sit first and the empty chairs are the ones left out — everybody is
+ * still on the "send to" chips. Under the limit nothing changes, and nobody's
+ * chair moves.
+ */
+function seated(roster) {
+    if (roster.length <= STATIONS.length) return roster;
+    const here = roster.filter(a => a.state !== 'offline');
+    const away = roster.filter(a => a.state === 'offline');
+    return here.concat(away).slice(0, STATIONS.length).sort((a, b) => a.id.localeCompare(b.id));
+}
+
 function layoutDesks() {
     plateFit();
     DESKS.clear();
@@ -715,7 +735,7 @@ function drawRoom() {
     // would read as somebody who left. Brighter while he is talking.
     {
         const p = bossSpot();
-        const talking = BOSS && T < BOSS.until;
+        const talking = BOSS && nowMs() < BOSS.until;
         LIGHTS.push({
             x: p.x, y: p.y - 10,
             r: 30,
@@ -726,7 +746,7 @@ function drawRoom() {
 
     // Only while the pack is still loading: the painted boss is drawn at
     // device resolution in present(), not here on the sprite grid.
-    if (!BOSS_AV && BOSS && T < BOSS.until) drawBoss();
+    if (!BOSS_AV && BOSS && nowMs() < BOSS.until) drawBoss();
     drawPackets();
 }
 
@@ -1469,7 +1489,7 @@ function drawWalker(a) {
 
     // While they are over there, they are talking to whoever sits there.
     if (!walking && !BUBBLES.some(b => b.agent === a.id))
-        BUBBLES.push({ agent: a.id, text: '…', color: agentColor(a.id), until: T + 90 });
+        BUBBLES.push({ agent: a.id, text: '…', color: agentColor(a.id), until: nowMs() + MURMUR_MS });
 }
 
 const ease = (t) => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
@@ -2024,7 +2044,7 @@ function bossTick() {
     // somebody muttering into a cup.
     // Nothing is said in the dark — a line from just before the switch must not
     // pull him off the sofa and back to the rug to deliver it to nobody.
-    const talking = ROOM_OPEN && BOSS && T < BOSS.until;
+    const talking = ROOM_OPEN && BOSS && nowMs() < BOSS.until;
     if (talking && !BOSS_SUMMONED) {
         BOSS_SUMMONED = true;
         bossGoTo(BOSS_HOME, { viaMiddle: false });
@@ -2395,8 +2415,9 @@ function drawOverlay() {
             `<span class="doing">${esc(doing)}</span>`);
     }
 
+    const now = nowMs();
     for (const b of BUBBLES) {
-        if (T >= b.until) continue;
+        if (now >= b.until) continue;
         const d = DESKS.get(b.agent);
         if (!d) continue;
         overlayPut(seen, `b:${b.agent}:${b.until}`, 'bubble',
@@ -2404,7 +2425,7 @@ function drawOverlay() {
             esc(b.text));
     }
 
-    if (BOSS && T < BOSS.until) {
+    if (BOSS && now < BOSS.until) {
         const p = bossSpot();
         overlayPut(seen, `boss:${BOSS.until}`, 'bubble',
             `--bc:${FIXED.owner};left:${(p.x * sx).toFixed(1)}px;top:${((p.y - 6) * sy).toFixed(1)}px`,
@@ -2413,7 +2434,7 @@ function drawOverlay() {
 
     for (const [key, n] of OVERLAY_NODES)
         if (!seen.has(key)) { n.el.remove(); OVERLAY_NODES.delete(key); }
-    while (BUBBLES.length && T >= BUBBLES[0].until) BUBBLES.shift();
+    while (BUBBLES.length && now >= BUBBLES[0].until) BUBBLES.shift();
 }
 
 // ── 16-bit sound ────────────────────────────────────────────────────
@@ -2766,7 +2787,7 @@ function apply(p) {
     // same as being HERE, and drawing them at desks would say the room is
     // still in session.
     ROSTER = (p.agents || []).slice().sort((a, b) => a.id.localeCompare(b.id));
-    AGENTS = ROOM_OPEN ? ROSTER : [];
+    AGENTS = ROOM_OPEN ? seated(ROSTER) : [];
     // By who, not how many: one agent aging out in the same poll another
     // arrives left the newcomer with no desk, and the next frame threw on it.
     if (AGENTS.map(a => a.id).join('|') !== hadAgents) layoutDesks();
@@ -2787,6 +2808,10 @@ function apply(p) {
     }
     BROKER = p.broker || null;
 
+    // Expired bubbles go here as well as in the frame loop: a hidden pane gets
+    // no frames, and the list grew with every line said while nobody watched.
+    for (let i = BUBBLES.length - 1; i >= 0; i--) if (nowMs() >= BUBBLES[i].until) BUBBLES.splice(i, 1);
+
     // Perform only what is NEW. The first payload is the backlog, and replaying
     // a day of it as bubbles would say "all of this just happened".
     const fresh = MESSAGES.filter(m => m.id && !SEEN.has(m.id));
@@ -2795,13 +2820,13 @@ function apply(p) {
         for (const m of fresh.slice(-4)) {
             const c = agentColor(m.from);
             if (m.from === 'owner') {
-                BOSS = { until: T + 260, text: firstLine(m.body) };
+                BOSS = { until: nowMs() + BOSS_SAY_MS, text: firstLine(m.body) };
                 // He says it with his body too. `instruct` runs once and the
                 // pack sends him back to idle on its own, so nothing here has
                 // to remember to put him back.
                 try { BOSS_AV?.play('instruct', { loop: false }); } catch { /* pack still loading */ }
             } else {
-                BUBBLES.push({ agent: m.from, text: firstLine(m.body), color: c, until: T + 240 });
+                BUBBLES.push({ agent: m.from, text: firstLine(m.body), color: c, until: nowMs() + SAY_MS });
             }
             if (DESKS.has(m.from) && DESKS.has(m.to)) {
                 PACKETS.push({ from: m.from, to: m.to, color: c, t0: performance.now(), ms: 900 });
@@ -2828,7 +2853,7 @@ function apply(p) {
         // by here, so every live emote played the moment the room was opened.
         if (wasPrimed) {
             playSound(e.sound);
-            if (e.say) BUBBLES.push({ agent: a.id, text: firstLine(e.say), color: agentColor(a.id), until: T + 240 });
+            if (e.say) BUBBLES.push({ agent: a.id, text: firstLine(e.say), color: agentColor(a.id), until: nowMs() + SAY_MS });
         }
     }
     // Oldest first, never all of them: clearing the set replayed every emote
@@ -2908,7 +2933,7 @@ document.getElementById('say').addEventListener('submit', (e) => {
     // Show the boss immediately rather than waiting for the next poll. The
     // round trip is under two seconds, but a send that looks like nothing
     // happened gets sent twice.
-    BOSS = { until: T + 260, text: firstLine(text) };
+    BOSS = { until: nowMs() + BOSS_SAY_MS, text: firstLine(text) };
 });
 
 // ── which model the boss starts each agent on ───────────────────────
@@ -3199,7 +3224,9 @@ document.getElementById('room-light')?.addEventListener('click', () => {
 });
 
 document.getElementById('room-map')?.addEventListener('click', () => {
-    location.href = 'tools/mask-paint.html';
+    // The stamp travels with it so coming back loads this build, not a cached one.
+    const v = window.OFFICE_ASSET_V;
+    location.href = 'tools/mask-paint.html' + (v && v !== '0' ? '?v=' + v : '');
 });
 
 // Right-click used to install the Windows Service too. That service is

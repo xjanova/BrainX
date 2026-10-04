@@ -21,6 +21,9 @@ internal static partial class Program
         checks.Add(("cowork room: the light re-seats, @names route, the board holds who is doing what", CoworkRoomEndToEnd));
         checks.Add(("cowork broker: a call that dies is reported in the room, with the reason", CoworkBrokerReportsFailedCall));
         checks.Add(("broker decisions: a folder question answered once stays answered", BrokerKeepsFolderAnswers));
+        checks.Add(("broker decisions: an answer holds for that situation — same wall, same work is never asked again", BrokerAnswersStick));
+        checks.Add(("agent questions: the same question twice is one card; an answered one is answered again", AskUserIsNotRepeated));
+        checks.Add(("cowork room: two windows of one agent both hear the owner, and one leaving does not deafen the other", TwoWindowsOneSeat));
     }
 
     /// <summary>
@@ -109,14 +112,37 @@ internal static partial class Program
             Answer("office-avatars", "ยกเลิกไปก่อน");
             var t2 = await Tick();
             Check("the answer closes it", Decision("office-avatars")?["status"]?.ToString() == "answered", t2);
-            Check("…and is not mailed back into the queue that asked (8 → 9)", Waiting() == 1, $"{Waiting()} waiting");
+            Check("…cancel means the work goes: nothing left waiting (and nothing mailed back, 8 → 9)", Waiting() == 0, $"{Waiting()} waiting");
+            var retired = Directory.GetFiles(Path.Combine(bus, "read", "codex"), "*.json")
+                .Select(f => JObject.Parse(File.ReadAllText(f))).FirstOrDefault(o => o["work"]?.ToString() == "office-avatars");
+            Check("…retired to read/, stamped as the owner's call", retired?["clearedBy"]?.ToString() == "owner", retired?.ToString());
 
+            // A week later — the hold used to expire here and ask again.
+            foreach (var stamp in Directory.GetFiles(Path.Combine(bus, "wake"), "decision-*.stamp"))
+                File.SetLastWriteTimeUtc(stamp, DateTime.UtcNow.AddDays(-8));
             var t3 = await Tick();
             var t4 = await Tick();
-            Check("the same card does not come back on the next ticks",
+            Check("the same card does not come back on the next ticks, or a week later",
                   Decision("office-avatars")?["status"]?.ToString() == "answered", Decision("office-avatars")?.ToString());
-            Check("…the work is held, and says so", (t3 + t4).Contains("on hold by the owner"), t3 + t4);
             Check("…and nothing is started for it", !(t3 + t4).Contains("spawned"), t3 + t4);
+
+            // ── "not now" ──
+            Mail("side-quest");
+            await Tick();
+            foreach (var stamp in Directory.GetFiles(Path.Combine(bus, "wake"), "decision-*.stamp"))
+                File.SetLastWriteTimeUtc(stamp, DateTime.UtcNow.AddDays(-3));
+            Answer("side-quest", "ไว้ทีหลัง");
+            await Tick();
+            Check("\"not now\" keeps the work, and does not mail the answer into it", Waiting() == 1, $"{Waiting()} waiting");
+            foreach (var stamp in Directory.GetFiles(Path.Combine(bus, "wake"), "decision-*.stamp"))
+                File.SetLastWriteTimeUtc(stamp, DateTime.UtcNow.AddDays(-9));
+            var t5 = await Tick();
+            Check("…a hold does not run out by the calendar", Decision("side-quest")?["status"]?.ToString() == "answered", Decision("side-quest")?.ToString());
+            Check("…the work is held, and says so", t5.Contains("on hold by the owner"), t5);
+            Check("…and nothing is started for it", !t5.Contains("spawned"), t5);
+            Mail("side-quest");
+            await Tick();
+            Check("NEW work on a held label is a new question", Decision("side-quest")?["status"]?.ToString() == "open", Decision("side-quest")?.ToString());
 
             // ── a folder ──
             Mail("brand-art");
@@ -132,6 +158,262 @@ internal static partial class Program
         }
         finally
         {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// The card that kept coming back (owner, 2026-10-04: "กดคำเตือนที่เด้งมาแล้ว
+    /// ยังวนกลับมาเด้งเรื่องเดิม"). A budget card answered "try again" must not
+    /// return for the same wall over the same work; one answered "I'll do it"
+    /// must leave that work alone for good; and only NEW work asks again.
+    /// </summary>
+    private static async Task BrokerAnswersStick()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the check", false); return; }
+
+        var root = Path.Combine(Path.GetTempPath(), "brainx-answers-e2e-" + Guid.NewGuid().ToString("N"));
+        var vault = Path.Combine(root, "vault");
+        var bus = Path.Combine(vault, ".obsidianx", "agent-bus");
+        var inbox = Path.Combine(bus, "inbox", "codex");
+        var decisions = Path.Combine(bus, "broker", "decisions");
+        var state = Path.Combine(bus, "broker", "codex.state.json");
+        Directory.CreateDirectory(inbox);
+        Directory.CreateDirectory(Path.Combine(bus, "broker"));
+        Directory.CreateDirectory(Path.Combine(vault, "Notes"));
+        File.WriteAllText(Path.Combine(bus, "runners.json"), new JObject
+        {
+            ["pollSeconds"] = 5,
+            ["idleStudy"] = false,
+            ["workRoots"] = new JArray(),
+            ["escalation"] = new JObject { ["telegram"] = new JObject { ["botToken"] = "", ["chatId"] = "" } },
+            ["runners"] = new JObject
+            {
+                ["codex"] = new JObject { ["exe"] = "cmd", ["args"] = new JArray("/c", "exit /b 0"), ["cwd"] = root },
+            },
+        }.ToString(), new UTF8Encoding(false));
+
+        void Mail()
+        {
+            var name = $"{DateTime.UtcNow.Ticks:D19}-claude-{Guid.NewGuid().ToString("N")[..4]}.json";
+            File.WriteAllText(Path.Combine(inbox, name), new JObject
+            {
+                ["id"] = "m-" + Guid.NewGuid().ToString("N")[..8], ["ts"] = DateTime.UtcNow.ToString("o"),
+                ["from"] = "claude", ["to"] = "codex", ["body"] = "please",
+            }.ToString(), new UTF8Encoding(false));
+            Thread.Sleep(20);
+        }
+        void Hops(int n)
+        {
+            var o = File.Exists(state) ? JObject.Parse(File.ReadAllText(state)) : new JObject();
+            o["hops"] = n;
+            File.WriteAllText(state, o.ToString(), new UTF8Encoding(false));
+        }
+        void Later()
+        {
+            var wake = Path.Combine(bus, "wake");
+            if (Directory.Exists(wake))
+                foreach (var stamp in Directory.GetFiles(wake, "decision-*.stamp"))
+                    File.SetLastWriteTimeUtc(stamp, DateTime.UtcNow.AddDays(-3));
+        }
+        JObject? Card() => File.Exists(Path.Combine(decisions, "budget-codex.json"))
+            ? JObject.Parse(File.ReadAllText(Path.Combine(decisions, "budget-codex.json"))) : null;
+        void Answer(string answer)
+        {
+            var d = Card()!;
+            d["answer"] = answer;
+            d["answeredVia"] = "cowork";
+            File.WriteAllText(Path.Combine(decisions, "budget-codex.json"), d.ToString(), new UTF8Encoding(false));
+        }
+        async Task<string> Tick()
+        {
+            var psi = new ProcessStartInfo(exe, $"broker --vault \"{vault}\" --once")
+            {
+                RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false,
+                StandardOutputEncoding = new UTF8Encoding(false),
+            };
+            psi.Environment["BRAINX_SANDBOX"] = "1";
+            psi.Environment.Remove(StubMcpServer.EnvFlag);
+            using var p = Process.Start(psi)!;
+            var outTask = p.StandardOutput.ReadToEndAsync();
+            _ = p.StandardError.ReadToEndAsync();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+            await p.WaitForExitAsync(cts.Token);
+            return await outTask;
+        }
+
+        try
+        {
+            Mail();
+            Hops(12);
+            var t1 = await Tick();
+            Check("a hop ceiling raises the budget card", Card()?["status"]?.ToString() == "open", t1);
+            Check("…with the situation it is about", Card()?["fingerprint"]?.ToString().StartsWith("hops|") == true, Card()?.ToString());
+            Check("…and a cancel option on it", (Card()?["options"] as JArray)?.Any(o => o.ToString().Contains("ยกเลิก")) == true, Card()?.ToString());
+
+            Later();
+            Answer("แก้ให้แล้ว ลองใหม่");
+            await Tick();
+            Check("\"try again\" closes it", Card()?["status"]?.ToString() == "answered", Card()?.ToString());
+
+            // The same loop again, over the same work, two hours later.
+            Hops(12);
+            Later();
+            var t3 = await Tick();
+            Check("the same wall over the same work is NOT asked again", Card()?["status"]?.ToString() == "answered", t3);
+            Check("…and the log says why", t3.Contains("already answered for this exact situation"), t3);
+
+            // New work is a new question.
+            Mail();
+            Later();
+            await Tick();
+            Check("new work behind the wall asks again", Card()?["status"]?.ToString() == "open", Card()?.ToString());
+
+            Later();
+            Answer("งานนี้เดี๋ยวฉันทำเอง");
+            var before = Directory.GetFiles(inbox, "*.json").Length;
+            await Tick();
+            Check("\"I'll do it\" closes it", Card()?["status"]?.ToString() == "answered", Card()?.ToString());
+            Check("…and records that the owner took the work", JObject.Parse(File.ReadAllText(state))["ownerTookUtc"] != null);
+            Check("…without mailing the answer into the queue", Directory.GetFiles(inbox, "*.json").Length == before,
+                  $"{before} → {Directory.GetFiles(inbox, "*.json").Length} waiting");
+
+            Hops(0);
+            Later();
+            var t5 = await Tick();
+            Check("work the owner took is not started", !t5.Contains("spawned"), t5);
+            Hops(12);
+            Later();
+            await Tick();
+            Check("…and never asked about again", Card()?["status"]?.ToString() == "answered", Card()?.ToString());
+
+            // "Too many starts this hour" clears itself: never a card.
+            File.Delete(Path.Combine(decisions, "budget-codex.json"));
+            Mail();
+            var o = JObject.Parse(File.ReadAllText(state));
+            o["hops"] = 0;
+            o["spawns"] = new JArray(Enumerable.Range(0, 25).Select(i => DateTime.UtcNow.AddMinutes(-i).ToString("o")));
+            File.WriteAllText(state, o.ToString(), new UTF8Encoding(false));
+            var t6 = await Tick();
+            Check("an hourly ceiling is logged, not asked", Card() == null && t6.Contains("budget stop"), t6);
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    private static async Task AskUserIsNotRepeated()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the check", false); return; }
+
+        var root = Path.Combine(Path.GetTempPath(), "brainx-ask-e2e-" + Guid.NewGuid().ToString("N"));
+        var vault = Path.Combine(root, "vault");
+        var bus = Path.Combine(vault, ".obsidianx", "agent-bus");
+        var key = Path.Combine(root, "bus-seal.key");
+        Directory.CreateDirectory(Path.Combine(vault, "Notes"));
+        Directory.CreateDirectory(bus);
+        BusSeal.EnsureKey(key);
+        File.WriteAllText(Path.Combine(bus, "runners.json"), new JObject
+        {
+            ["idleStudy"] = false,
+            ["escalation"] = new JObject { ["telegram"] = new JObject { ["botToken"] = "", ["chatId"] = "" } },
+            ["runners"] = new JObject(),
+        }.ToString(), new UTF8Encoding(false));
+
+        BusSession? s1 = null, impostor = null;
+        try
+        {
+            s1 = await StartBusSession(exe, vault, key, "codex");
+            var q = new JObject { ["question"] = "Which engine for Lucky Isles?", ["options"] = new JArray("Godot", "Unity") };
+            var first = await s1.Call("agent_ask_user", q);
+            Check("the first asking raises a card", first["asked"]?.Value<bool>() == true, first.ToString());
+
+            var again = await s1.Call("agent_ask_user", new JObject { ["question"] = "  which engine for   Lucky Isles? " });
+            Check("asking the same thing again points at the card already up", again["alreadyOpen"]?.Value<bool>() == true, again.ToString());
+            Check("…and raises no second card",
+                  Directory.GetFiles(Path.Combine(bus, "broker", "decisions"), "ask-*.json").Length == 1);
+
+            var card = Directory.GetFiles(Path.Combine(bus, "broker", "decisions"), "ask-*.json").Single();
+            var d = JObject.Parse(File.ReadAllText(card));
+            d["status"] = "answered";
+            d["answer"] = "Godot";
+            d["answeredUtc"] = DateTime.UtcNow.ToString("o");
+            File.WriteAllText(card, d.ToString(), new UTF8Encoding(false));
+
+            var third = await s1.Call("agent_ask_user", q);
+            Check("an answered question is answered again, without a card", third["alreadyAnswered"]?.Value<bool>() == true
+                  && third["answer"]?.ToString() == "Godot", third.ToString());
+            Check("…still one card in all",
+                  Directory.GetFiles(Path.Combine(bus, "broker", "decisions"), "ask-*.json").Length == 1);
+
+            var other = await s1.Call("agent_ask_user", new JObject { ["question"] = "Which art style?" });
+            Check("a different question is a new card", other["asked"]?.Value<bool>() == true, other.ToString());
+
+            // A client that calls itself "owner" is an ordinary peer.
+            impostor = await StartBusSession(exe, vault, key, "owner");
+            var seat = await impostor.Call("cowork_join", new JObject());
+            Check("a handshake claiming 'owner' is demoted to an ordinary name",
+                  seat["joined"]?.ToString() == "owner-agent", seat.ToString());
+        }
+        finally
+        {
+            if (s1 != null) await s1.DisposeAsync();
+            if (impostor != null) await impostor.DisposeAsync();
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    private static async Task TwoWindowsOneSeat()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the check", false); return; }
+
+        var root = Path.Combine(Path.GetTempPath(), "brainx-twowin-e2e-" + Guid.NewGuid().ToString("N"));
+        var vault = Path.Combine(root, "vault");
+        var bus = Path.Combine(vault, ".obsidianx", "agent-bus");
+        var room = Path.Combine(bus, "cowork", "messages");
+        var key = Path.Combine(root, "bus-seal.key");
+        Directory.CreateDirectory(room);
+        Directory.CreateDirectory(Path.Combine(vault, "Notes"));
+        BusSeal.EnsureKey(key);
+        SetRoomLight(bus, on: true);
+
+        BusSession? a = null, b = null;
+        try
+        {
+            a = await StartBusSession(exe, vault, key, "codex");
+            b = await StartBusSession(exe, vault, key, "codex");
+            await a.Call("cowork_join", new JObject());
+            await b.Call("cowork_join", new JObject());
+            var seat = JObject.Parse(File.ReadAllText(Path.Combine(bus, "cowork", "members", "codex.json")));
+            Check("both windows have their own place on the one seat", (seat["sessions"] as JObject)?.Count == 2, seat.ToString());
+
+            OwnerSays(room, key, "codex: check the build", to: "codex");
+            var readA = await a.Call("cowork_read", new JObject());
+            Check("window A reads the order", (readA["messages"] as JArray)?.Any(m => m["body"]?.ToString().Contains("check the build") == true) == true, readA.ToString());
+            var noticeB = CoworkNotice(await b.Raw("agent_peers", new JObject()));
+            Check("window B is STILL told after A read it", noticeB?["action"]?.ToString().Contains("THE OWNER SPOKE") == true, noticeB?.ToString());
+            var readB = await b.Call("cowork_read", new JObject());
+            Check("…and reads it too", (readB["messages"] as JArray)?.Any(m => m["body"]?.ToString().Contains("check the build") == true) == true, readB.ToString());
+
+            var left = await a.Call("cowork_leave", new JObject());
+            Check("A leaving with B still here leaves for A only", left["sessionOnly"]?.Value<bool>() == true, left.ToString());
+            seat = JObject.Parse(File.ReadAllText(Path.Combine(bus, "cowork", "members", "codex.json")));
+            Check("…the seat is not tombstoned", seat["optedOut"] == null, seat.ToString());
+
+            OwnerSays(room, key, "codex: and ship it", to: "codex");
+            var noticeB2 = CoworkNotice(await b.Raw("agent_peers", new JObject()));
+            Check("B still hears the next order", noticeB2?["action"]?.ToString().Contains("THE OWNER SPOKE") == true, noticeB2?.ToString());
+            var noticeA2 = CoworkNotice(await a.Raw("agent_peers", new JObject()));
+            Check("A, which left, does not", noticeA2 == null, noticeA2?.ToString());
+        }
+        finally
+        {
+            if (a != null) await a.DisposeAsync();
+            if (b != null) await b.DisposeAsync();
             try { Directory.Delete(root, recursive: true); } catch { }
         }
     }

@@ -39,12 +39,17 @@ namespace BrainX.Mcp;
 
 internal static partial class Program
 {
+    /// <param name="Fingerprint">What makes this the SAME situation — the wall
+    /// that was hit and the newest work behind it. A question already answered
+    /// (or taken back) for this exact fingerprint is never asked again, however
+    /// long ago that was. New work, or a different wall, is a new question.</param>
     private sealed record BrokerDecision(
         string Id,
         string Agent,
         string Work,
         string Question,
-        IReadOnlyList<string> Options);
+        IReadOnlyList<string> Options,
+        string? Fingerprint = null);
 
     private static readonly HttpClient EscalateHttp = new() { Timeout = TimeSpan.FromSeconds(20) };
 
@@ -97,6 +102,18 @@ internal static partial class Program
                     var existing = JObject.Parse(File.ReadAllText(path));
                     if (string.Equals(existing["status"]?.ToString(), "open", StringComparison.OrdinalIgnoreCase))
                         return;   // already asked; do not ask twice
+
+                    // Answered, or taken back, for this very situation. The two-
+                    // hour stamp below was the only guard, and two hours is not
+                    // an answer: "ยกเลิกหมดเลย" came back a week later about the
+                    // same nine messages, "แก้ให้แล้ว ลองใหม่" came back about the
+                    // same runner that still could not log in.
+                    if (d.Fingerprint != null
+                        && string.Equals(existing["fingerprint"]?.ToString(), d.Fingerprint, StringComparison.Ordinal))
+                    {
+                        BrokerSay(d.Agent, $"[{d.Id}] already {existing["status"]} for this exact situation — not asking again");
+                        return;
+                    }
                 }
                 catch { /* unreadable decision file: fall through and rewrite it */ }
             }
@@ -132,6 +149,7 @@ internal static partial class Program
                 ["status"] = "open",
                 ["askedUtc"] = DateTime.UtcNow.ToString("o"),
             };
+            if (d.Fingerprint != null) rec["fingerprint"] = d.Fingerprint;
             AtomicWriteJson(path, rec);
             BrokerLog($"DECISION NEEDED [{d.Id}] {d.Question}");
 
@@ -220,6 +238,14 @@ internal static partial class Program
                     var o = JObject.Parse(File.ReadAllText(f));
                     if (!string.Equals(o["status"]?.ToString(), "open", StringComparison.OrdinalIgnoreCase)) continue;
                     if (!string.Equals(o["agent"]?.ToString(), agent, StringComparison.OrdinalIgnoreCase)) continue;
+                    // A budget card REPORTS a gate; the gate itself does the
+                    // stopping (and the quiet retry after its cooldown). Letting
+                    // the card park the agent too meant the only way to retry
+                    // was to withdraw the card — and raise it again on the next
+                    // failure, every two hours, for as long as it lasted.
+                    if ((o["id"]?.ToString() ?? "").StartsWith("budget-", StringComparison.Ordinal)) continue;
+                    // Answered but not yet pumped: the owner has spoken.
+                    if (!string.IsNullOrWhiteSpace(o["answer"]?.ToString())) continue;
 
                     var work = o["work"]?.ToString();
                     if (string.IsNullOrWhiteSpace(work)) return (true, blocked);   // about the agent itself
@@ -268,7 +294,25 @@ internal static partial class Program
                 // label with no folder and ask all over again.
                 string? workdirMode = null;
                 if (id.StartsWith("workdir-", StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(work) && !string.IsNullOrWhiteSpace(agent))
+                {
                     workdirMode = RecordWorkDirAnswer(agent, work!, answer);
+                    // "ยกเลิก" means the work goes, not that it waits a week and asks again.
+                    if (workdirMode == "cancel") ClearWorkstream(work!);
+                }
+
+                // The same for questions about the agent itself. The answer used
+                // to be mailed to the agent and nothing else happened, so "งานนี้
+                // เดี๋ยวฉันทำเอง" left the work in the queue, the broker kept
+                // trying it, and the same card came back.
+                var intent = id.StartsWith("budget-", StringComparison.Ordinal) || id.StartsWith("norunner-", StringComparison.Ordinal)
+                    ? AnswerIntent(answer) : null;
+                if (intent is "mine" or "cancel" && !string.IsNullOrWhiteSpace(agent))
+                {
+                    var stTook = ReadRunnerState(agent);
+                    stTook.OwnerTookUtc = DateTime.UtcNow;
+                    SaveRunnerState(agent, stTook);
+                    if (intent == "cancel") CancelPendingFor(agent, DateTime.UtcNow);
+                }
 
                 // Only into a box something can actually open. Delivering an
                 // answer to an agent with no runner and no session grows the
@@ -281,7 +325,8 @@ internal static partial class Program
                 // same label is one more message in the queue that raised the
                 // question — which is how 8 waiting became 9 on 2026-09-25.
                 var deliverable = (cfg.Runners.ContainsKey(agent) || IsOnline(PresenceAgeSeconds(agent)))
-                                  && workdirMode is null or "use";
+                                  && workdirMode is null or "use"
+                                  && intent is null or "retry" or "later";
                 if (!string.IsNullOrWhiteSpace(agent) && deliverable)
                 {
                     DeliverBusMessage("broker", agent,
@@ -316,14 +361,42 @@ internal static partial class Program
                 SaveRunnerState(agent, st);
 
                 BrokerLog($"decision [{o["id"]}] answered: {answer}"
-                          + (workdirMode is "hold" or "later"
-                                ? $" — '{work}' is on hold ({workdirMode}); not asking again, nothing queued for {agent}"
+                          + (workdirMode is "hold" or "later" or "cancel"
+                                ? $" — '{work}' is {(workdirMode == "cancel" ? "cancelled" : $"on hold ({workdirMode})")}; not asking again, nothing queued for {agent}"
+                             : intent is "mine" or "cancel"
+                                ? $" — the owner took {agent}'s waiting work ({intent}); not spawning for it or asking about it again"
                              : deliverable ? $" — handed to {agent}"
                                            : $" — noted; '{agent}' has no runner and no session, so nothing was queued for it"));
             }
             catch (Exception ex) { BrokerLog("decision pump — " + Redact(ex.Message)); }
         }
     }
+
+    /// <summary>
+    /// What an answer to one of the broker's own questions MEANS, from the
+    /// button text or whatever the owner typed: retry · later (runners.json /
+    /// add a runner) · cancel · mine (I'll handle it / move it myself) · use
+    /// (names a folder; workdir only). Checked in this order on purpose —
+    /// "เดี๋ยวฉันเพิ่มใน runners.json เอง" is "later", not "mine".
+    /// </summary>
+    internal static string AnswerIntent(string answer)
+    {
+        var a = (answer ?? "").ToLowerInvariant();
+        bool Has(params string[] words) => words.Any(w => a.Contains(w, StringComparison.Ordinal));
+        if (Has("ยกเลิก", "cancel", "call off", "drop it", "ทิ้ง", "ไม่ต้องทำ", "เลิกทำ")) return "cancel";
+        if (Has("runners.json", "runner ให้", "เพิ่ม runner", "add a runner", "add runner", "add it to")) return "later";
+        if (Has("ลองใหม่", "try again", "retry", "แก้ให้แล้ว", "fixed")) return "retry";
+        if (Has("ทำเอง", "for me", "myself", "ย้ายงาน", "reassign", "คนอื่น", "leave that", "ปล่อย")) return "mine";
+        return "mine";
+    }
+
+    /// <summary>A question, reduced to what makes two askings the same one.</summary>
+    private static string NormalizeQuestion(string q) =>
+        Regex.Replace((q ?? "").Trim().ToLowerInvariant(), @"\s+", " ");
+
+    /// <summary>How long an answered agent question is reused when the same
+    /// agent asks it again word for word.</summary>
+    private static readonly TimeSpan AskReuseFor = TimeSpan.FromDays(7);
 
     // ───────────── agent_ask_user ─────────────
 
@@ -352,6 +425,52 @@ internal static partial class Program
 
         var me = BusIdentity();
         var work = args["work"]?.ToString() is { Length: > 0 } w ? SanitizeAgentSlug(w) : "";
+
+        // The same question again — a fresh session re-reading the same notes,
+        // a run that forgot it already asked. It used to raise a brand-new card
+        // each time, which from the owner's chair is the card they just answered
+        // coming back. Open: point at the card already up. Answered: hand back
+        // the answer they already gave.
+        try
+        {
+            var asked = NormalizeQuestion(question!);
+            if (Directory.Exists(BrokerDecisionDir))
+                foreach (var f in Directory.GetFiles(BrokerDecisionDir, "ask-*.json").OrderByDescending(x => x, StringComparer.Ordinal))
+                {
+                    var o = ReadJsonOrNull(f);
+                    if (o == null) continue;
+                    if (!string.Equals(o["agent"]?.ToString(), me, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!string.Equals(o["work"]?.ToString() ?? "", work, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (NormalizeQuestion(o["question"]?.ToString() ?? "") != asked) continue;
+
+                    var status = o["status"]?.ToString();
+                    if (string.Equals(status, "open", StringComparison.OrdinalIgnoreCase))
+                        return new JObject
+                        {
+                            ["asked"] = false,
+                            ["id"] = o["id"],
+                            ["alreadyOpen"] = true,
+                            ["hint"] = "You already asked exactly this and it is still in front of the owner. STOP working this item; "
+                                     + "the answer will arrive in your inbox (topic 'owner-decision'). Do not ask again.",
+                        };
+                    var answeredAt = CoworkUtc(o["answeredUtc"]);
+                    if (string.Equals(status, "answered", StringComparison.OrdinalIgnoreCase)
+                        && answeredAt is DateTime at && DateTime.UtcNow - at < AskReuseFor
+                        && o["answer"]?.ToString() is { Length: > 0 } prior)
+                        return new JObject
+                        {
+                            ["asked"] = false,
+                            ["id"] = o["id"],
+                            ["alreadyAnswered"] = true,
+                            ["answer"] = prior,
+                            ["answeredUtc"] = at.ToString("o"),
+                            ["hint"] = "The owner already answered this exact question — use that answer and carry on. "
+                                     + "Do not ask it again; if the situation has really changed, ask a NEW question that says what changed.",
+                        };
+                }
+        }
+        catch { /* a failed lookup only costs a duplicate card */ }
+
         var d = new BrokerDecision(
             Id: $"ask-{DateTime.UtcNow.Ticks}-{Guid.NewGuid().ToString("N")[..4]}",
             Agent: me,

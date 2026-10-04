@@ -239,7 +239,12 @@ function fit() {
 addEventListener('resize', fit);
 
 function say(t) { document.getElementById('status').textContent = t; }
-document.getElementById('back').addEventListener('click', () => { location.href = '../index.html'; });
+// Back with the room's cache stamp, or the room reloads whatever office.js the
+// WebView cached last (the host stamps index.html; the room passes it here).
+document.getElementById('back').addEventListener('click', () => {
+  const v = new URLSearchParams(location.search).get('v');
+  location.href = '../index.html' + (v ? '?v=' + encodeURIComponent(v) : '');
+});
 
 function pos(e) {
     const r = paint.getBoundingClientRect();

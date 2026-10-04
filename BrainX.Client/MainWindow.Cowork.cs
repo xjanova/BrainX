@@ -176,9 +176,14 @@ public partial class MainWindow
             var calls = o["calls"]?.ToObject<long?>() ?? 0;
             var online = age <= 90;
 
-            var prev = _coworkCalls.TryGetValue(id, out var c) ? c : (long?)null;
-            _coworkCalls[id] = calls;
-            var moving = prev.HasValue && calls != prev.Value;
+            // Per session when the sessions publish themselves: every window of
+            // one agent overwrites this file with its own counter, so with two
+            // windows open the number changed every heartbeat and the desk read
+            // "working" while both sat at a prompt.
+            var sig = CoworkCallSignature(id) ?? calls.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var prev = _coworkCalls.TryGetValue(id, out var c) ? c : null;
+            _coworkCalls[id] = sig;
+            var moving = prev != null && sig != prev;
 
             arr.Add(new JObject
             {
@@ -307,7 +312,34 @@ public partial class MainWindow
         catch { return null; }
     }
 
-    private readonly Dictionary<string, long> _coworkCalls = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _coworkCalls = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>"pid:calls|pid:calls" over this agent's live sessions, or null
+    /// when none publish themselves (an older brainx-mcp).</summary>
+    private string? CoworkCallSignature(string agent)
+    {
+        try
+        {
+            var dir = Path.Combine(CoworkBusRoot, "presence", "sessions");
+            if (!Directory.Exists(dir)) return null;
+            var parts = new List<string>();
+            foreach (var f in Directory.GetFiles(dir, agent + ".*.json"))
+            {
+                if ((DateTime.UtcNow - File.GetLastWriteTimeUtc(f)).TotalSeconds > 90) continue;
+                try
+                {
+                    var o = JObject.Parse(File.ReadAllText(f));
+                    if (!string.Equals(o["agent"]?.ToString(), agent, StringComparison.OrdinalIgnoreCase)) continue;
+                    parts.Add($"{o["pid"]}:{o["calls"]}");
+                }
+                catch { }
+            }
+            if (parts.Count == 0) return null;
+            parts.Sort(StringComparer.Ordinal);
+            return string.Join("|", parts);
+        }
+        catch { return null; }
+    }
 
     /// <summary>The agent's chosen appearance, if it has set one. A missing
     /// file is not an error — the room derives a stable look from the name,

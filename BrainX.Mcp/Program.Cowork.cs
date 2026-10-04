@@ -252,6 +252,7 @@ internal static partial class Program
         // deliberately (limit on cowork_read), and starting at zero would
         // announce eight hundred old lines as "new" on the first tool call.
         var latest = CoworkMessageFiles().LastOrDefault();
+        using var gate = CoworkMemberLock(me);
         var existing = ReadJsonOrNull(CoworkMemberFile(me));
         // Coming back after cowork_leave is arriving, not resuming: the cursor
         // a tombstone kept can be days old, and resuming from it announced
@@ -260,6 +261,14 @@ internal static partial class Program
         var cursor = returning
             ? CoworkArrivalCursor()
             : existing?["cursor"]?.ToString() ?? (latest is null ? "" : Path.GetFileName(latest));
+        // A seat nobody has read from in days: start inside the order horizon.
+        // The broker's spawned run used to join with a twelve-day-old cursor and
+        // spend itself reading the oldest thirty lines of chatter.
+        var horizon = (DateTime.UtcNow - CoworkOrderHorizon).Ticks.ToString("D19", CultureInfo.InvariantCulture);
+        if (string.CompareOrdinal(cursor, horizon) < 0) cursor = horizon;
+        // This session's own place: where it already was, else where the seat is.
+        var mine = returning ? null : CoworkMySession(existing);
+        var myCursor = mine?["cursor"]?.ToString() is { Length: > 0 } mc && string.CompareOrdinal(mc, horizon) > 0 ? mc : cursor;
 
         var member = new JObject
         {
@@ -276,6 +285,11 @@ internal static partial class Program
             ["cursor"] = cursor,
         };
         if (!returning && existing?["seen"] is JArray seenBefore && seenBefore.Count > 0) member["seen"] = seenBefore;
+        // The other sessions of this agent keep their places — joining from one
+        // window used to rewrite the seat and take everybody else's with it.
+        member["sessions"] = !returning && existing?["sessions"] is JObject others ? others.DeepClone() : new JObject();
+        CoworkSetMySession(member, myCursor, mine?["seen"]);
+        CoworkPruneSessions(member);
         if (!string.IsNullOrWhiteSpace(display)) member["display"] = display;
         if (work != null) member["work"] = work;
 
@@ -500,6 +514,36 @@ internal static partial class Program
         var existing = ReadJsonOrNull(f);
         var wasIn = existing != null && existing["optedOut"]?.ToObject<bool?>() != true;
 
+        // The seat is the AGENT's; leaving is one session's. A broker run is
+        // told to leave when it is done, and its leave used to tombstone the
+        // seat for every session of that vendor — the owner's own Claude
+        // window went deaf to the room because a headless run finished. Only
+        // the last live, owner-run session closes the seat.
+        var othersHere = existing?["sessions"] is JObject ss
+            && ss.Properties().Any(p => p.Name != CoworkSessionKey
+                                        && (p.Value as JObject)?["left"]?.ToObject<bool?>() != true
+                                        && CoworkSessionAlive(p.Name));
+        if (wasIn && (othersHere || IsBrokerRun))
+        {
+            try
+            {
+                CoworkUpdateMember(me, m =>
+                {
+                    var (cur, seen) = CoworkMyCursor(m);
+                    CoworkSetMySession(m, cur, seen, left: true);
+                });
+            }
+            catch { }
+            return new JObject
+            {
+                ["left"] = me,
+                ["wasInRoom"] = true,
+                ["sessionOnly"] = true,
+                ["note"] = "This session will not be told about the room any more. Your agent's seat stays — "
+                         + (othersHere ? "another session of yours is still in the room." : "you are a broker run, and the seat belongs to every session of this agent."),
+            };
+        }
+
         // Recorded, not deleted. Sessions are auto-joined when they connect
         // (see CoworkAutoJoin), so a deleted file would be recreated on the
         // very next heartbeat and "leave" would mean nothing. The tombstone
@@ -556,7 +600,27 @@ internal static partial class Program
         if (!CoworkRoomIsOpen()) return;
 
         var f = CoworkMemberFile(me);
-        if (File.Exists(f)) return;   // already seated, or deliberately out
+        if (File.Exists(f))
+        {
+            // Seated already — by this session or by another window of the same
+            // agent. That window's cursor is not this one's: give this session
+            // its own place, starting where the seat stands (what nobody of this
+            // agent has read yet). A tombstone, or this session having left,
+            // is honoured.
+            var seat = ReadJsonOrNull(f);
+            if (seat == null || seat["optedOut"]?.ToObject<bool?>() == true || CoworkMySession(seat) != null) return;
+            try
+            {
+                CoworkUpdateMember(me, m =>
+                {
+                    if (m["optedOut"]?.ToObject<bool?>() == true || CoworkMySession(m) != null) return;
+                    CoworkSetMySession(m, m["cursor"]?.ToString() ?? CoworkArrivalCursor(), m["seen"]);
+                    CoworkPruneSessions(m);
+                });
+            }
+            catch { }
+            return;
+        }
 
         Directory.CreateDirectory(CoworkMessagesDir);
         Directory.CreateDirectory(CoworkMembersDir);
@@ -565,15 +629,18 @@ internal static partial class Program
         // roster fills that in from skills.json or the defaults every time it
         // is read, so an agent that never says a word about itself still
         // shows up as something other than a name.
-        AtomicWriteJson(f, new JObject
+        var arrival = CoworkArrivalCursor();
+        var fresh = new JObject
         {
             ["agent"] = me,
             ["client"] = _clientName ?? "unknown",
             ["joinedUtc"] = DateTime.UtcNow.ToString("o"),
             ["lastSeenUtc"] = DateTime.UtcNow.ToString("o"),
-            ["cursor"] = CoworkArrivalCursor(),
+            ["cursor"] = arrival,
             ["auto"] = true,
-        });
+        };
+        CoworkSetMySession(fresh, arrival, null);
+        AtomicWriteJson(f, fresh);
 
         // The light went off between the look and the write. A seat in a dark
         // room is exactly what would make it start talking on its own.
@@ -739,13 +806,13 @@ internal static partial class Program
         SweepStaleTemps(CoworkMessagesDir);
 
         var member = ReadJsonOrNull(CoworkMemberFile(me));
-        var cursor = member?["cursor"]?.ToString();
+        var (cursor, mySeen) = member != null ? CoworkMyCursor(member) : (null, null);
         var file = $"{DateTime.UtcNow.Ticks:D19}-{me}-{Guid.NewGuid().ToString("N")[..4]}.json";
         AtomicWriteJson(Path.Combine(CoworkMessagesDir, file), payload);
 
         if (cursor != null)
         {
-            var between = CoworkAfter(cursor, member!["seen"])
+            var between = CoworkAfter(cursor, mySeen)
                 .Where(f => string.CompareOrdinal(Path.GetFileName(f), file) < 0)
                 .ToList();
             var skipped = between.Any(f => !CoworkSpeakerFromName(f).Equals(me, StringComparison.OrdinalIgnoreCase));
@@ -780,13 +847,13 @@ internal static partial class Program
         // peeks stays out of the notice list, which keeps "who gets
         // interrupted" an explicit choice rather than a side effect.
         var member = ReadJsonOrNull(CoworkMemberFile(me));
-        var cursor = member?["cursor"]?.ToString() ?? "";
+        var (cursor, mySeen) = member != null ? CoworkMyCursor(member) : ("", null);
 
         List<string> pending;
         var deadline = DateTime.UtcNow.AddSeconds(wait);
         while (true)
         {
-            pending = CoworkAfter(cursor, member?["seen"]);
+            pending = CoworkAfter(cursor, mySeen);
             if (pending.Count > 0 || DateTime.UtcNow >= deadline) break;
             Thread.Sleep(500);
         }
@@ -809,7 +876,9 @@ internal static partial class Program
         var left = history ? pending.Count : Math.Max(0, pending.Count - files.Count);
         return new JObject
         {
-            ["inRoom"] = member != null,
+            // A leave tombstone, or this session having left, is not "in".
+            ["inRoom"] = member != null && member["optedOut"]?.ToObject<bool?>() != true
+                         && CoworkMySession(member)?["left"]?.ToObject<bool?>() != true,
             ["messages"] = messages,
             ["moreWaiting"] = left,
             ["room"] = CoworkMembersSnapshot(),
@@ -957,14 +1026,116 @@ internal static partial class Program
 
     private static void CoworkAdvanceCursor(string agent, IEnumerable<string> delivered)
     {
+        var handed = delivered.ToList();
+        try
+        {
+            CoworkUpdateMember(agent, member =>
+            {
+                // This session's own place…
+                var (mine, mySeen) = CoworkMyCursor(member);
+                var (myCursor, myNewSeen) = CoworkSettle(mine, mySeen, handed);
+                CoworkSetMySession(member, myCursor, myNewSeen, left: CoworkMySession(member)?["left"]?.ToObject<bool?>() == true);
+                // …and the seat's: the furthest ANY session of this agent has
+                // read, which is what the broker asks ("is this agent behind?")
+                // and where a newly opened window starts.
+                var (cursor, seen) = CoworkSettle(member["cursor"]?.ToString(), member["seen"], handed);
+                member["cursor"] = cursor;
+                if (seen.Count > 0) member["seen"] = seen; else member.Remove("seen");
+                member["lastSeenUtc"] = DateTime.UtcNow.ToString("o");
+                CoworkPruneSessions(member);
+            });
+        }
+        catch { /* cursor is best-effort */ }
+    }
+
+    // ───────────── one seat, several sessions ─────────────
+
+    /// <summary>This process's key in a seat's <c>sessions</c>.</summary>
+    private static string CoworkSessionKey => Environment.ProcessId.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>A run the broker started (it sets this on the child). Its leave
+    /// never closes the seat for the agent's other sessions.</summary>
+    private static bool IsBrokerRun => Environment.GetEnvironmentVariable("BRAINX_BROKER_RUN") == "1";
+
+    private static JObject? CoworkMySession(JObject? member) =>
+        (member?["sessions"] as JObject)?[CoworkSessionKey] as JObject;
+
+    /// <summary>Where THIS session reads from: its own place, or — the first
+    /// time it looks — the seat's (the furthest its agent has read).</summary>
+    private static (string Cursor, JToken? Seen) CoworkMyCursor(JObject member)
+    {
+        var mine = CoworkMySession(member);
+        return mine != null
+            ? (mine["cursor"]?.ToString() ?? "", mine["seen"])
+            : (member["cursor"]?.ToString() ?? "", member["seen"]);
+    }
+
+    private static void CoworkSetMySession(JObject member, string cursor, JToken? seen, bool left = false)
+    {
+        if (member["sessions"] is not JObject sessions) member["sessions"] = sessions = new JObject();
+        var entry = new JObject { ["cursor"] = cursor, ["atUtc"] = DateTime.UtcNow.ToString("o") };
+        if (seen is JArray { Count: > 0 } s) entry["seen"] = s.DeepClone();
+        if (left) entry["left"] = true;
+        sessions[CoworkSessionKey] = entry;
+    }
+
+    private static bool CoworkSessionAlive(string key)
+    {
+        if (key == CoworkSessionKey) return true;
+        try
+        {
+            using var p = System.Diagnostics.Process.GetProcessById(int.Parse(key, CultureInfo.InvariantCulture));
+            return !p.HasExited;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>Forget sessions whose process is gone, or that have not moved
+    /// in two days (a reused pid must not inherit a place).</summary>
+    private static void CoworkPruneSessions(JObject member)
+    {
+        if (member["sessions"] is not JObject sessions) return;
+        foreach (var p in sessions.Properties().ToList())
+        {
+            if (p.Name == CoworkSessionKey) continue;
+            var at = CoworkUtc((p.Value as JObject)?["atUtc"]);
+            if (!CoworkSessionAlive(p.Name) || at is null || DateTime.UtcNow - at.Value > TimeSpan.FromDays(2)) p.Remove();
+        }
+    }
+
+    /// <summary>
+    /// Hold a seat while it is read and rewritten: every session of one agent
+    /// writes the same member file, and two read-modify-writes at once lost a
+    /// cursor. Best effort — after a short wait it goes ahead unlocked rather
+    /// than fail the tool call it is part of.
+    /// </summary>
+    private static IDisposable? CoworkMemberLock(string agent)
+    {
+        try
+        {
+            Directory.CreateDirectory(CoworkMembersDir);
+            var deadline = DateTime.UtcNow.AddSeconds(2);
+            while (true)
+            {
+                try
+                {
+                    return new FileStream(CoworkMemberFile(agent) + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite,
+                                          FileShare.None, 1, FileOptions.DeleteOnClose);
+                }
+                catch (IOException) when (DateTime.UtcNow < deadline) { Thread.Sleep(25); }
+            }
+        }
+        catch { return null; }
+    }
+
+    private static void CoworkUpdateMember(string agent, Action<JObject> change)
+    {
+        using var gate = CoworkMemberLock(agent);
         var path = CoworkMemberFile(agent);
         var member = ReadJsonOrNull(path);
         if (member == null) return;
-        var (cursor, seen) = CoworkSettle(member["cursor"]?.ToString(), member["seen"], delivered);
-        member["cursor"] = cursor;
-        if (seen.Count > 0) member["seen"] = seen; else member.Remove("seen");
-        member["lastSeenUtc"] = DateTime.UtcNow.ToString("o");
-        try { AtomicWriteJson(path, member); } catch { /* cursor is best-effort */ }
+        change(member);
+        AtomicWriteJson(path, member);
     }
 
     /// <summary>
@@ -1229,6 +1400,48 @@ internal static partial class Program
         catch { return 0; }
     }
 
+    /// <summary>
+    /// How far back an unanswered owner order still counts as work. Inside it,
+    /// an order nobody heard (quota out overnight, a run that died) is picked
+    /// up again; past it, it is history, and history is not a reason to start
+    /// a session — that is what kept codex "69 lines behind" for twelve days.
+    /// </summary>
+    internal static readonly TimeSpan CoworkOrderHorizon = TimeSpan.FromHours(12);
+
+    /// <summary>
+    /// Genuine owner lines this member has not read, said to it or to the
+    /// whole room, written after <paramref name="sinceUtc"/>. Peer chatter is
+    /// not work for the broker — CoworkSay already tells agents "the broker
+    /// only calls agents in for the OWNER's lines".
+    /// </summary>
+    internal static (int Count, DateTime NewestUtc) CoworkOwnerOrdersFor(string agent, DateTime sinceUtc)
+    {
+        try
+        {
+            var member = ReadJsonOrNull(CoworkMemberFile(agent));
+            if (member == null || member["optedOut"]?.ToObject<bool?>() == true) return (0, DateTime.MinValue);
+            var floor = sinceUtc.Ticks.ToString("D19", CultureInfo.InvariantCulture);
+            var count = 0;
+            var newest = DateTime.MinValue;
+            foreach (var f in CoworkAfter(member["cursor"]?.ToString(), member["seen"]))
+            {
+                var name = Path.GetFileName(f);
+                if (string.CompareOrdinal(name, floor) <= 0) continue;
+                if (!CoworkSpeakerFromName(f).Equals("owner", StringComparison.OrdinalIgnoreCase)) continue;
+                var o = ReadJsonOrNull(f);
+                if (!IsAuthenticOwnerLine(o, f)) continue;
+                var to = CoworkRecipients(o!["to"]);
+                if (to.Count > 0 && !to.Contains(agent, StringComparer.OrdinalIgnoreCase)) continue;
+                count++;
+                if (long.TryParse(name.AsSpan(0, Math.Min(19, name.Length)), NumberStyles.None, CultureInfo.InvariantCulture, out var ticks)
+                    && ticks > newest.Ticks)
+                    newest = new DateTime(ticks, DateTimeKind.Utc);
+            }
+            return (count, newest);
+        }
+        catch { return (0, DateTime.MinValue); }
+    }
+
     /// <summary>Has this agent put a line on the wall since <paramref name="sinceUtc"/>?
     /// Read off the file names, which carry both the time and the speaker.</summary>
     internal static bool CoworkSpokeSince(string agent, DateTime sinceUtc)
@@ -1323,11 +1536,16 @@ internal static partial class Program
 
             var member = ReadJsonOrNull(CoworkMemberFile(me));
             if (member == null || member["optedOut"]?.ToObject<bool?>() == true) return null;
+            // This window left; its agent's other windows are still told.
+            if (CoworkMySession(member)?["left"]?.ToObject<bool?>() == true) return null;
 
-            var cursor = member["cursor"]?.ToString() ?? "";
+            // THIS session's place, not the seat's: with two windows of one
+            // agent open, whichever read first used to move the only cursor and
+            // the other never heard the owner at all.
+            var (cursor, mySeen) = CoworkMyCursor(member);
             // Your own lines are not news to you. They can wait past the cursor
             // behind a line you have not read yet (see CoworkAppend).
-            var pending = CoworkAfter(cursor, member["seen"])
+            var pending = CoworkAfter(cursor, mySeen)
                 .Where(f => !CoworkSpeakerFromName(f).Equals(me, StringComparison.OrdinalIgnoreCase))
                 .ToList();
             if (pending.Count == 0) return null;
@@ -1687,6 +1905,14 @@ internal static partial class Program
             var wanted = args["status"]?.ToString()?.Trim().ToLowerInvariant();
             if (wanted is { Length: > 0 } && !CoworkTaskStatuses.Contains(wanted))
                 throw new ArgumentException("status must be one of: " + string.Join(", ", CoworkTaskStatuses));
+
+            // Nobody holds it, so nobody vouches for it being finished. "Anyone
+            // may pick up something nobody holds" was also letting anyone CLOSE
+            // it — a peer could mark the owner's open piece done or dropped
+            // without ever having been on it. Do the work by taking it first.
+            if (assignee == null && wanted is "done" or "dropped" && creator != null && !Is(creator, me))
+                return Refuse($"[{id}] has nobody on it — only {creator}, who raised it, can close it. "
+                            + "If you did the work, take it first (cowork_task claim) and then mark it done.");
 
             if (reassign != null)
             {

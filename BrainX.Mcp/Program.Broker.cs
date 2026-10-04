@@ -85,7 +85,10 @@ internal static partial class Program
               .Append("Call cowork_join {work:'...'} FIRST, then cowork_read. ")
               .Append(CoworkFloorRules)
               .Append(" Report in the room with cowork_say, not by mail — the owner is watching that window. ")
-              .Append("cowork_leave when the work is done. ");
+              // Not "cowork_leave when done": the seat is the agent's, shared
+              // with the owner's own windows, and a finished run leaving took
+              // them out of the room too. The run's exit is its leaving.
+              .Append("Do not call cowork_leave when you finish — just stop; the seat is shared with your other sessions. ");
         }
 
         if (work.Mail == 0 && work.Tasks == 0 && work.Room > 0)
@@ -263,6 +266,7 @@ internal static partial class Program
         var cfg = LoadBrokerConfig();
         var cfgStamp = ConfigStamp();
         var prunedUtc = DateTime.MinValue;
+        if (!dryRun) HonourPastCancels();
 
         BrokerLog($"broker up · vault={_vaultPath} · runners={string.Join(", ", cfg.Runners.Keys)}"
                   + (dryRun ? " · DRY RUN" : ""));
@@ -362,33 +366,10 @@ internal static partial class Program
         var root = Path.Combine(BusRoot, "inbox");
         if (!Directory.Exists(root)) { BrokerLog($"no inbox directory — nothing to clear"); return 0; }
 
-        var cleared = 0;
         var senders = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var box in Directory.GetDirectories(root))
-        {
-            foreach (var f in Directory.GetFiles(box, "*.json"))
-            {
-                JObject o;
-                try { o = JObject.Parse(File.ReadAllText(f)); } catch { continue; }
-                if (!string.Equals(o["work"]?.ToString(), work, StringComparison.OrdinalIgnoreCase)) continue;
-
-                o["clearedBy"] = "owner";
-                o["clearedUtc"] = DateTime.UtcNow.ToString("o");
-                var from = o["from"]?.ToString();
-                if (!string.IsNullOrWhiteSpace(from)) senders.Add(from!);
-
-                var readDir = Path.Combine(BusRoot, "read", Path.GetFileName(box));
-                Directory.CreateDirectory(readDir);
-                try
-                {
-                    AtomicWriteJson(Path.Combine(readDir, Path.GetFileName(f)), o);
-                    File.Delete(f);
-                    cleared++;
-                }
-                catch (Exception ex) { BrokerLog($"could not clear {Path.GetFileName(f)} — {Redact(ex.Message)}"); }
-            }
-        }
+        var cleared = RetireMail(Directory.GetDirectories(root),
+            o => string.Equals(o["work"]?.ToString(), work, StringComparison.OrdinalIgnoreCase),
+            DateTime.MaxValue, senders);
 
         // Decisions raised ABOUT this workstream go with it. A question about
         // where called-off work should run is not a question any more.
@@ -428,6 +409,72 @@ internal static partial class Program
         BrokerLog($"cleared '{work}': {cleared} message(s) retired, {closed} decision(s) closed"
                   + (senders.Count > 0 ? $", told {string.Join(", ", senders)}" : ""));
         return 0;
+    }
+
+    /// <summary>
+    /// Move matching pending mail to read/ with a `clearedBy: owner` stamp.
+    /// Nothing is destroyed — read/ is the audit folder a normal consume
+    /// writes to — and the stamp tells "the owner called this off" apart from
+    /// "an agent read it", which look identical once a file is in read/.
+    /// </summary>
+    private static int RetireMail(IEnumerable<string> boxes, Func<JObject, bool> match, DateTime writtenBy, ISet<string> senders)
+    {
+        var cleared = 0;
+        foreach (var box in boxes)
+        {
+            if (!Directory.Exists(box)) continue;
+            foreach (var f in Directory.GetFiles(box, "*.json"))
+            {
+                JObject o;
+                try
+                {
+                    if (File.GetLastWriteTimeUtc(f) > writtenBy) continue;
+                    o = JObject.Parse(File.ReadAllText(f));
+                }
+                catch { continue; }
+                if (!match(o)) continue;
+
+                o["clearedBy"] = "owner";
+                o["clearedUtc"] = DateTime.UtcNow.ToString("o");
+                var from = o["from"]?.ToString();
+                if (!string.IsNullOrWhiteSpace(from)) senders.Add(from!);
+
+                var readDir = Path.Combine(BusRoot, "read", Path.GetFileName(box));
+                Directory.CreateDirectory(readDir);
+                try
+                {
+                    AtomicWriteJson(Path.Combine(readDir, Path.GetFileName(f)), o);
+                    File.Delete(f);
+                    cleared++;
+                }
+                catch (Exception ex) { BrokerLog($"could not clear {Path.GetFileName(f)} — {Redact(ex.Message)}"); }
+            }
+        }
+        return cleared;
+    }
+
+    /// <summary>"ยกเลิกงานที่ค้าง" about an agent: its pending mail is retired and
+    /// the senders are told, exactly as `--clear` does for one workstream.</summary>
+    private static void CancelPendingFor(string agent, DateTime asOf)
+    {
+        var senders = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        var cleared = RetireMail(BoxesFor(agent).Select(BusInboxDir).Distinct(),
+            o => !string.Equals(o["topic"]?.ToString(), "broker-nudge", StringComparison.OrdinalIgnoreCase),
+            asOf, senders);
+        foreach (var from in senders)
+        {
+            if (from.Equals("broker", StringComparison.OrdinalIgnoreCase) || from.Equals(agent, StringComparison.OrdinalIgnoreCase)) continue;
+            try
+            {
+                DeliverBusMessage("broker", from,
+                    $"The owner CANCELLED the work that was waiting for '{agent}'. Your pending messages to it were "
+                    + "retired unread and nobody is going to answer them. Do not resend; say so to your user if it came from them.",
+                    topic: "work-cleared", work: null);
+            }
+            catch (Exception ex) { BrokerLog($"telling {from} — {Redact(ex.Message)}"); }
+        }
+        BrokerLog($"cancelled pending work for {agent}: {cleared} message(s) retired"
+                  + (senders.Count > 0 ? $", told {string.Join(", ", senders)}" : ""));
     }
 
     // ───────────── one tick ─────────────
@@ -513,7 +560,7 @@ internal static partial class Program
             // Work the owner has put on hold by answering its folder question
             // with "not now". Neither asked about again nor started, and the
             // agent's other work carries on.
-            var held = work.Works.Where(w => WorkDirHold(w) != null).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var held = work.Works.Where(w => WorkDirHold(w, work.NewestFor(w)) != null).ToHashSet(StringComparer.OrdinalIgnoreCase);
             if (held.Count > 0)
             {
                 work = WithoutBlockedWork(work, held);
@@ -672,7 +719,9 @@ internal static partial class Program
                             Work: "",
                             Question: $"{agent} มีงานค้างอยู่ {DescribeTh(work)} แต่ไม่มี session เปิดอยู่ "
                                     + "และไม่มีรายการของมันใน runners.json เลย ตอนนี้จึงไม่มีใครหยิบงานนี้ได้",
-                            Options: new[] { "เพิ่ม runner ให้", "ย้ายงานให้คนอื่น", "ยกเลิกงานนี้" })).ConfigureAwait(false);
+                            Options: new[] { "เดี๋ยวฉันเพิ่ม runner ให้", "ย้ายงานให้คนอื่นเอง", "ยกเลิกงานที่ค้าง" },
+                            // Asked again only when something NEW is waiting.
+                            Fingerprint: $"work:{work.NewestUtc.Ticks}")).ConfigureAwait(false);
                         continue;
                     }
 
@@ -700,12 +749,19 @@ internal static partial class Program
                             state.LastBudgetLogUtc = DateTime.UtcNow;
                             SaveRunnerState(agent, state);
                         }
-                        await EscalateAsync(cfg, new BrokerDecision(
-                            Id: "budget-" + agent,
-                            Agent: agent,
-                            Work: "",
-                            Question: $"{agent} หยิบงานของตัวเองไม่ได้ ({DescribeTh(work)}) — {gate.Th}",
-                            Options: new[] { "แก้ให้แล้ว ลองใหม่", "งานนี้เดี๋ยวฉันทำเอง" })).ConfigureAwait(false);
+                        // "Too many starts this hour" clears itself within the
+                        // hour: a question nobody needs to answer is just noise.
+                        if (gate.Kind != "spawns")
+                            await EscalateAsync(cfg, new BrokerDecision(
+                                Id: "budget-" + agent,
+                                Agent: agent,
+                                Work: "",
+                                Question: $"{agent} หยิบงานของตัวเองไม่ได้ ({DescribeTh(work)}) — {gate.Th}",
+                                Options: new[] { "แก้ให้แล้ว ลองใหม่", "งานนี้เดี๋ยวฉันทำเอง", "ยกเลิกงานที่ค้าง" },
+                                // Same wall, same work: already asked, whatever
+                                // the clock says. A different wall, or new work,
+                                // is a new question.
+                                Fingerprint: $"{gate.Kind}|work:{work.NewestUtc.Ticks}")).ConfigureAwait(false);
                         continue;
                     }
 
@@ -734,7 +790,8 @@ internal static partial class Program
                             Question: $"{agent} มีงานป้าย '{unmapped[0]}' ค้างอยู่ ({DescribeTh(work)}) และยังไม่มี session ไหนทำ "
                                     + $"— งานนี้ต้องรันในโฟลเดอร์ไหน? ตอนนี้มันจะไปลงที่ {runner.Cwd} ซึ่งน่าจะผิด "
                                     + "(เพิ่มได้ใน \"workDirs\" ของ runners.json)",
-                            Options: new[] { $"ใช้ {runner.Cwd} ไปก่อน", "เดี๋ยวฉันเพิ่มใน runners.json เอง" })).ConfigureAwait(false);
+                            Options: new[] { $"ใช้ {runner.Cwd} ไปก่อน", "เดี๋ยวฉันเพิ่มใน runners.json เอง", "ยกเลิกงานนี้" },
+                            Fingerprint: $"work:{work.NewestFor(unmapped[0]).Ticks}")).ConfigureAwait(false);
                         continue;
                     }
 
@@ -835,10 +892,42 @@ internal static partial class Program
     private static SessionVerdict ClassifySession(string agent, RunnerState state, BrokerConfig cfg)
     {
         var age = PresenceAgeSeconds(agent);
-        if (!IsOnline(age)) { state.LastCalls = null; state.CallsStillSince = null; return SessionVerdict.Absent; }
+        if (!IsOnline(age)) { state.LastCalls = null; state.CallsStillSince = null; state.SessionCalls = null; return SessionVerdict.Absent; }
+
+        var now = DateTime.UtcNow;
+
+        // Per session, when the sessions publish themselves. The agent's one
+        // presence file is written by EVERY window of that agent, each with its
+        // own counter, so with two parked windows open the number flipped every
+        // heartbeat — "working" forever, never parked, and an order to the room
+        // was left with "the piggyback has it" while nobody was reading.
+        var sessions = PresenceSessions(agent);
+        if (sessions.Count > 0)
+        {
+            var before = state.SessionCalls ?? new JObject();
+            var after = new JObject();
+            var moving = false;
+            DateTime? stillest = null;
+            foreach (var (pid, sessionCalls) in sessions)
+            {
+                var prev = before[pid] as JObject;
+                if (prev == null || prev["calls"]?.ToObject<long?>() != sessionCalls)
+                {
+                    moving = true;
+                    after[pid] = new JObject { ["calls"] = sessionCalls, ["since"] = now };
+                    continue;
+                }
+                var since = Utc(prev["since"]) ?? now;
+                after[pid] = new JObject { ["calls"] = sessionCalls, ["since"] = since };
+                // Parked only when EVERY session has been still long enough.
+                if (stillest == null || since > stillest) stillest = since;
+            }
+            state.SessionCalls = after;
+            if (moving || stillest == null) return SessionVerdict.Working;
+            return (now - stillest.Value).TotalSeconds >= cfg.IdleGraceSeconds ? SessionVerdict.Parked : SessionVerdict.Working;
+        }
 
         var calls = PresenceCalls(agent);
-        var now = DateTime.UtcNow;
 
         if (calls != state.LastCalls)
         {
@@ -851,6 +940,32 @@ internal static partial class Program
         return (now - state.CallsStillSince.Value).TotalSeconds >= cfg.IdleGraceSeconds
             ? SessionVerdict.Parked
             : SessionVerdict.Working;
+    }
+
+    /// <summary>This agent's live sessions and their call counters, from
+    /// presence/sessions/&lt;agent&gt;.&lt;pid&gt;.json (each window writes its own).</summary>
+    private static List<(string Pid, long Calls)> PresenceSessions(string agent)
+    {
+        var found = new List<(string, long)>();
+        try
+        {
+            var dir = Path.Combine(BusPresenceDir, "sessions");
+            if (!Directory.Exists(dir)) return found;
+            foreach (var f in Directory.GetFiles(dir, agent + ".*.json"))
+            {
+                try
+                {
+                    var o = JObject.Parse(File.ReadAllText(f));
+                    if (!string.Equals(o["agent"]?.ToString(), agent, StringComparison.OrdinalIgnoreCase)) continue;
+                    var seen = Utc(o["lastSeenUtc"]);
+                    if (seen is null || !IsOnline((DateTime.UtcNow - seen.Value).TotalSeconds)) continue;
+                    found.Add((o["pid"]?.ToString() ?? Path.GetFileName(f), o["calls"]?.ToObject<long?>() ?? 0));
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return found;
     }
 
     private static long? PresenceCalls(string agent)
@@ -1055,6 +1170,9 @@ internal static partial class Program
         // on one path and not another — set it explicitly so a spawned agent
         // always reads the same brain the broker is watching.
         psi.Environment["BRAINX_VAULT"] = _vaultPath;
+        // So the brain this run talks to knows it is a broker run: its
+        // cowork_leave then leaves for itself only, never for the agent's seat.
+        psi.Environment["BRAINX_BROKER_RUN"] = "1";
 
         // Claude Code refuses to start inside another Claude Code session, and
         // it decides that from an inherited environment variable:
@@ -1236,10 +1354,6 @@ internal static partial class Program
 
     private static string WorkDirAnswersPath => Path.Combine(BrokerDir, "workdir-answers.json");
 
-    /// <summary>A week of quiet for "not now". Long enough to never feel like
-    /// nagging, short enough that parked work is not forgotten for good.</summary>
-    private static readonly TimeSpan WorkDirHoldFor = TimeSpan.FromDays(7);
-
     private sealed record WorkDirAnswer(string Mode, string? Path, string Answer, DateTime AtUtc);
 
     private static WorkDirAnswer? ReadWorkDirAnswer(string work)
@@ -1252,21 +1366,80 @@ internal static partial class Program
             CoworkUtc(o["atUtc"]) ?? DateTime.MinValue);
     }
 
-    /// <summary>The owner's hold on this label, or null when the broker may ask
-    /// about it and run it again.</summary>
-    private static WorkDirAnswer? WorkDirHold(string work)
+    /// <summary>
+    /// The owner's hold on this label, or null when the broker may ask about it
+    /// and run it again.
+    ///
+    /// A hold used to last a week. On 2026-09-26 the owner answered "ยกเลิกหมดเลย"
+    /// about office-avatars; on 2026-10-04 the week was up and the same card
+    /// was back, about the same nine old messages. The calendar was the wrong
+    /// clock: what makes the question fair again is NEW work on the label, so
+    /// a hold now lasts until a message newer than the answer arrives, and
+    /// "I'll add it myself" until runners.json is touched.
+    /// </summary>
+    private static WorkDirAnswer? WorkDirHold(string work, DateTime newestWork)
     {
         var a = ReadWorkDirAnswer(work);
         if (a == null || a.Mode == "use") return null;
-        if (DateTime.UtcNow - a.AtUtc > WorkDirHoldFor) return null;
-        // "I'll add it myself" is kept until they have touched the file.
-        if (a.Mode == "later" && File.Exists(BrokerConfigPath)
-            && File.GetLastWriteTimeUtc(BrokerConfigPath) > a.AtUtc) return null;
-        return a;
+        if (a.Mode == "later")
+            return File.Exists(BrokerConfigPath) && File.GetLastWriteTimeUtc(BrokerConfigPath) > a.AtUtc ? null : a;
+        return newestWork > a.AtUtc ? null : a;
+    }
+
+    /// <summary>
+    /// Answers given before cancel meant cancel. "ยกเลิกหมดเลย" was stored as a
+    /// week's hold, so the work it called off stayed queued and its card came
+    /// back. Run once per answer: the mail that was waiting WHEN the owner said
+    /// it is retired, and a card still open about nothing newer is closed with
+    /// the answer they already gave.
+    /// </summary>
+    private static void HonourPastCancels()
+    {
+        try
+        {
+            if (ReadJsonOrNull(WorkDirAnswersPath) is not JObject all) return;
+            var changed = false;
+            foreach (var (label, val) in all.Properties().Select(p => (p.Name, p.Value)).ToList())
+            {
+                if (val is not JObject rec || rec["migratedUtc"] != null) continue;
+                var answer = rec["answer"]?.ToString() ?? "";
+                if (rec["mode"]?.ToString() != "hold" || AnswerIntent(answer) != "cancel") continue;
+                var at = CoworkUtc(rec["atUtc"]) ?? DateTime.MinValue;
+
+                var senders = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+                var root = Path.Combine(BusRoot, "inbox");
+                var retired = Directory.Exists(root)
+                    ? RetireMail(Directory.GetDirectories(root),
+                        o => string.Equals(o["work"]?.ToString(), label, StringComparison.OrdinalIgnoreCase), at, senders)
+                    : 0;
+                var newer = Directory.Exists(root) && Directory.GetDirectories(root).SelectMany(d => Directory.GetFiles(d, "*.json"))
+                    .Any(f => { try { return string.Equals(JObject.Parse(File.ReadAllText(f))["work"]?.ToString(), label, StringComparison.OrdinalIgnoreCase); } catch { return false; } });
+
+                if (!newer)
+                {
+                    var card = Path.Combine(BrokerDecisionDir, SanitizeAgentSlug("workdir-" + label) + ".json");
+                    if (ReadJsonOrNull(card) is JObject d && string.Equals(d["status"]?.ToString(), "open", StringComparison.OrdinalIgnoreCase))
+                    {
+                        d["status"] = "answered";
+                        d["answer"] = answer;
+                        d["answeredVia"] = "earlier-answer";
+                        d["answeredUtc"] = DateTime.UtcNow.ToString("o");
+                        AtomicWriteJson(card, d);
+                    }
+                }
+                rec["mode"] = "cancel";
+                rec["migratedUtc"] = DateTime.UtcNow.ToString("o");
+                changed = true;
+                BrokerLog($"'{label}': the owner's earlier \"{answer}\" now cancels it — {retired} message(s) retired"
+                          + (newer ? "; newer work on it is still queued" : "; its card is closed"));
+            }
+            if (changed) AtomicWriteJson(WorkDirAnswersPath, all);
+        }
+        catch (Exception ex) { BrokerLog("honouring earlier cancels — " + Redact(ex.Message)); }
     }
 
     /// <summary>Keep the owner's answer to a folder question, and say what it
-    /// means: use, later or hold.</summary>
+    /// means: use, later, cancel or hold.</summary>
     private static string RecordWorkDirAnswer(string agent, string work, string answer)
     {
         // A folder named in the answer, if it exists — both of the card's own
@@ -1278,9 +1451,12 @@ internal static partial class Program
             var p = m.Value.TrimEnd('.', ',', ')', ';');
             if (p.Length > 3 && Directory.Exists(p)) { dir = p; break; }
         }
-        var mode = dir != null ? "use"
-                 : answer.Contains("runners.json", StringComparison.OrdinalIgnoreCase) ? "later"
-                 : "hold";
+        var mode = dir != null ? "use" : AnswerIntent(answer) switch
+        {
+            "later" => "later",
+            "cancel" => "cancel",
+            _ => "hold",
+        };
 
         var all = ReadJsonOrNull(WorkDirAnswersPath) ?? new JObject();
         all[work] = new JObject
@@ -1435,6 +1611,8 @@ internal static partial class Program
                 // spread over a week hit the ceiling as if they were a loop.
                 var left = WaitingWorkFor(agent);
                 if (left.Mail == 0 && left.Tasks == 0 && left.Room == 0) st.Hops = 0;
+                // A run that got going answers "the runner will not start".
+                WithdrawDecision("budget-" + agent, "the runner started and finished normally");
             }
             st.RunPid = null;
             st.RunStartedUtc = null;
@@ -1596,8 +1774,11 @@ internal static partial class Program
         st.LastFailure = null;
         st.FailedUtc = null;
         SaveRunnerState(agent, st);
-        WithdrawDecision("budget-" + agent,
-            "the runner is being retried; the earlier refusal has expired");
+        // The card is NOT withdrawn here any more. Withdrawing it to retry,
+        // and raising it again when the retry failed, is what made a runner
+        // that stayed logged out pop the same card every two hours for days.
+        // The retry happens quietly (budget cards do not park the agent —
+        // see OpenDecisionScope); the card goes when a run succeeds.
     }
 
     /// <summary>
@@ -1615,6 +1796,10 @@ internal static partial class Program
         {
             var path = Path.Combine(BrokerDecisionDir, SanitizeAgentSlug("budget-" + agent) + ".json");
             if (!File.Exists(path)) return;
+            // Only a COUNTING ceiling clears by itself. A runner that would not
+            // start is cleared by a run that does (ReapFinishedRuns).
+            var fp = ReadJsonOrNull(path)?["fingerprint"]?.ToString() ?? "";
+            if (fp.StartsWith("failure:", StringComparison.Ordinal)) return;
             if (BudgetGate(cfg, agent, ReadRunnerState(agent)) == null)
                 WithdrawDecision("budget-" + agent, "the ceiling it hit has cleared on its own");
         }
@@ -1638,7 +1823,20 @@ internal static partial class Program
     /// owner reads Thai. One string for both jobs is how English ended up in
     /// the box.
     /// </summary>
-    private sealed record SpawnGate(string Log, string Th);
+    private sealed record SpawnGate(string Log, string Th, string Kind);
+
+    /// <summary>Which wall a runner hit, coarsely — "you've hit your usage
+    /// limit, resets at 2:12" and "…at 4:40" are the same wall.</summary>
+    private static string FailureClass(string? failure)
+    {
+        var low = (failure ?? "").ToLowerInvariant();
+        if (low.Contains("credit balance")) return "credit";
+        if (QuotaSigns.Any(low.Contains)) return "quota";
+        if (low.Contains("inside another claude code session")) return "nested";
+        if (low.Contains("not logged in") || low.Contains("please log in") || low.Contains("authentication") || low.Contains("unauthorized")) return "login";
+        if (low.Contains("is not recognized") || low.Contains("command not found") || low.Contains("no such file")) return "missing";
+        return "other";
+    }
 
     private static SpawnGate? BudgetGate(BrokerConfig cfg, string agent, RunnerState state)
     {
@@ -1658,11 +1856,6 @@ internal static partial class Program
             state.LastFailure = null;
             state.FailedUtc = null;
             SaveRunnerState(agent, state);
-            // And take the question back. Clearing the counter without closing
-            // the decision leaves the agent blocked by a query nobody still
-            // needs answered — which is how a queue sits idle overnight while
-            // the log insists it is "waiting on the owner".
-            WithdrawDecision("budget-" + agent, "the runner is being retried; the earlier refusal has expired");
         }
 
         // Checked BEFORE the counting ceilings, because it is the answer the
@@ -1676,16 +1869,19 @@ internal static partial class Program
                 $"the {agent} runner is not starting — {state.LastFailure ?? "it exits immediately"} "
               + $"({state.ConsecutiveFailures} runs in a row). Retrying will not change that.",
                 $"เปิด session ของ {agent} ไม่ขึ้น — {state.LastFailure ?? "เปิดแล้วดับทันที"} "
-              + $"(ล้มติดกัน {state.ConsecutiveFailures} ครั้ง) ลองใหม่เฉย ๆ ไม่ช่วย");
+              + $"(ล้มติดกัน {state.ConsecutiveFailures} ครั้ง) ลองใหม่เฉย ๆ ไม่ช่วย",
+                "failure:" + FailureClass(state.LastFailure));
 
         if (state.Spawns.Count >= cfg.MaxSpawnsPerHour)
             return new SpawnGate(
                 $"{state.Spawns.Count} spawns in the last hour (max {cfg.MaxSpawnsPerHour})",
-                $"เปิด session ไปแล้ว {state.Spawns.Count} ครั้งในหนึ่งชั่วโมง (เพดาน {cfg.MaxSpawnsPerHour})");
+                $"เปิด session ไปแล้ว {state.Spawns.Count} ครั้งในหนึ่งชั่วโมง (เพดาน {cfg.MaxSpawnsPerHour})",
+                "spawns");
         if (state.Hops >= cfg.MaxHopsPerWork)
             return new SpawnGate(
                 $"{state.Hops} hops without the work closing (max {cfg.MaxHopsPerWork})",
-                $"งานนี้ส่งต่อกันมา {state.Hops} รอบแล้วยังไม่ปิด (เพดาน {cfg.MaxHopsPerWork})");
+                $"งานนี้ส่งต่อกันมา {state.Hops} รอบแล้วยังไม่ปิด (เพดาน {cfg.MaxHopsPerWork})",
+                "hops");
         return null;
     }
 
@@ -1699,7 +1895,13 @@ internal static partial class Program
     /// Mail is answered with agent_send; the room is answered in the room.
     /// </summary>
     private readonly record struct WaitingWork(
-        int Mail, int Tasks, IReadOnlyList<string> Works, double OldestHours, int Room = 0, int Unlabelled = 0);
+        int Mail, int Tasks, IReadOnlyList<string> Works, double OldestHours, int Room = 0, int Unlabelled = 0,
+        DateTime NewestUtc = default, IReadOnlyDictionary<string, DateTime>? WorkNewest = null)
+    {
+        /// <summary>When the newest message on this label arrived.</summary>
+        public DateTime NewestFor(string work) =>
+            WorkNewest != null && WorkNewest.TryGetValue(work, out var t) ? t : NewestUtc;
+    }
 
     /// <summary>The same thing as <see cref="Describe"/>, for the owner.
     /// It goes inside a question they have to answer, so it is Thai and it
@@ -1782,8 +1984,15 @@ internal static partial class Program
         var mail = 0;
         var unlabelled = 0;
         var oldest = 0.0;
+        var newest = DateTime.MinValue;
         var works = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        var workNewest = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
         var nudges = new List<string>();
+        // What the owner said they would take care of themselves. Everything
+        // that was waiting at that moment is theirs now, not this broker's:
+        // spawning for it, or asking about it again, is the nagging the owner
+        // answered to make stop.
+        var took = ReadRunnerState(agent).OwnerTookUtc ?? DateTime.MinValue;
         try
         {
             // Same both-boxes rule the wake hook uses: the bus collapses every
@@ -1816,6 +2025,10 @@ internal static partial class Program
                     // into inbox/ cannot be assumed to have gone through
                     // agent_send — so a label that is not already a slug is not
                     // a label, and its message is not this broker's to act on.
+                    DateTime written;
+                    try { written = File.GetLastWriteTimeUtc(f); } catch { written = DateTime.UtcNow; }
+                    if (written <= took) continue;
+
                     var w = o?["work"]?.ToString();
                     if (!string.IsNullOrWhiteSpace(w))
                     {
@@ -1831,12 +2044,21 @@ internal static partial class Program
                     else unlabelled++;
 
                     mail++;
-                    try
+                    // The broker's own mail (an answer handed on, a cleared-work
+                    // notice) is work for the agent but not NEWS for the owner:
+                    // counting it as the newest work made delivering "try again"
+                    // look like new work, and the answered card came straight back.
+                    if (!string.Equals(o?["from"]?.ToString(), "broker", StringComparison.OrdinalIgnoreCase))
                     {
-                        var age = (DateTime.UtcNow - File.GetLastWriteTimeUtc(f)).TotalHours;
-                        if (age > oldest) oldest = age;
+                        if (written > newest) newest = written;
+                        if (!string.IsNullOrWhiteSpace(w))
+                        {
+                            var key = SanitizeAgentSlug(w!);
+                            if (!workNewest.TryGetValue(key, out var seen) || written > seen) workNewest[key] = written;
+                        }
                     }
-                    catch { }
+                    var age = (DateTime.UtcNow - written).TotalHours;
+                    if (age > oldest) oldest = age;
                 }
             }
         }
@@ -1845,16 +2067,30 @@ internal static partial class Program
         var tasks = 0;
         try
         {
-            var open = OpenTasksForWake(agent);
-            tasks = open.Count;
-            foreach (var t in open) if (t.AgeHours > oldest) oldest = t.AgeHours;
+            foreach (var t in OpenTasksForWake(agent))
+            {
+                var at = DateTime.UtcNow.AddHours(-t.AgeHours);
+                if (at <= took) continue;
+                tasks++;
+                if (t.AgeHours > oldest) oldest = t.AgeHours;
+                if (at > newest) newest = at;
+            }
         }
         catch { }
-        // The room. An agent that took a seat and has fallen behind counts as
-        // having work even with an empty inbox — that is what "the owner said
-        // something and nobody is listening" looks like from here.
+        // The room. Only what the OWNER said to this agent or to the room, and
+        // only recently. Counting every unread line made a seat that went quiet
+        // twelve days ago "69 lines behind" — the broker started codex again
+        // and again to read old chatter, every start a hop, until the hop
+        // ceiling raised the same budget card the owner had already answered.
         var room = 0;
-        try { room = CoworkUnreadFor(agent); } catch { }
+        try
+        {
+            var floor = DateTime.UtcNow - CoworkOrderHorizon;
+            var (orders, latest) = CoworkOwnerOrdersFor(agent, took > floor ? took : floor);
+            room = orders;
+            if (latest > newest) newest = latest;
+        }
+        catch { }
 
         // A nudge whose work is gone points at nothing — and while it sits
         // there HasPendingNudge reads "one already outstanding" and no real
@@ -1863,7 +2099,7 @@ internal static partial class Program
             foreach (var n in nudges)
                 try { if ((DateTime.UtcNow - File.GetLastWriteTimeUtc(n)).TotalMinutes > 2) File.Delete(n); } catch { }
 
-        return new WaitingWork(mail, tasks, works.ToList(), oldest, room, unlabelled);
+        return new WaitingWork(mail, tasks, works.ToList(), oldest, room, unlabelled, newest, workNewest);
     }
 
     /// <summary>
@@ -1918,6 +2154,17 @@ internal static partial class Program
         /// <summary>The model the current run was started on, so the room can
         /// say "this one is on X, the next one will be on Y" after a pick.</summary>
         public string? RunModel { get; set; }
+
+        /// <summary>
+        /// "งานนี้เดี๋ยวฉันทำเอง", "ย้ายงานให้คนอื่นเอง", "ยกเลิกงานที่ค้าง": the owner
+        /// has taken everything that was waiting at this moment. Work that
+        /// arrived before it is not spawned for and not asked about again.
+        /// </summary>
+        public DateTime? OwnerTookUtc { get; set; }
+
+        /// <summary>Per live session: its call counter and since when it has
+        /// not moved. See ClassifySession.</summary>
+        public JObject? SessionCalls { get; set; }
 
         /// <summary>
         /// Runs that died immediately, in a row, and what the last one said.
@@ -2017,6 +2264,8 @@ internal static partial class Program
                 RunPid = o["runPid"]?.ToObject<int?>(),
                 RunStartedUtc = Utc(o["runStartedUtc"]),
                 RunModel = o["runModel"]?.Type == JTokenType.String ? o["runModel"]!.ToString() : null,
+                OwnerTookUtc = Utc(o["ownerTookUtc"]),
+                SessionCalls = o["sessionCalls"] as JObject,
                 ConsecutiveFailures = o["consecutiveFailures"]?.ToObject<int?>() ?? 0,
                 LastFailure = o["lastFailure"]?.ToString(),
                 FailedUtc = Utc(o["failedUtc"]),
@@ -2041,6 +2290,8 @@ internal static partial class Program
                 ["runPid"] = s.RunPid,
                 ["runStartedUtc"] = s.RunStartedUtc,
                 ["runModel"] = s.RunModel,
+                ["ownerTookUtc"] = s.OwnerTookUtc,
+                ["sessionCalls"] = s.SessionCalls,
                 ["consecutiveFailures"] = s.ConsecutiveFailures,
                 ["lastFailure"] = s.LastFailure,
                 ["failedUtc"] = s.FailedUtc,

@@ -249,7 +249,28 @@ internal static partial class Program
         };
         if (!string.IsNullOrEmpty(_busLastTool)) o["lastTool"] = _busLastTool;
         AtomicWriteJson(Path.Combine(BusPresenceDir, me + ".json"), o);
+
+        // And this session on its own. The file above is the AGENT's and every
+        // window of that agent overwrites it with its own counter; the broker
+        // and the room need to tell "two windows, both parked" from "working".
+        // A subfolder, so every reader of presence/*.json is unchanged.
+        try
+        {
+            var sessions = Path.Combine(BusPresenceDir, "sessions");
+            Directory.CreateDirectory(sessions);
+            AtomicWriteJson(Path.Combine(sessions, $"{me}.{Environment.ProcessId}.json"), o);
+            if (DateTime.UtcNow - _sessionSweepUtc > TimeSpan.FromHours(1))
+            {
+                _sessionSweepUtc = DateTime.UtcNow;
+                foreach (var f in Directory.GetFiles(sessions, "*.json"))
+                    try { if (DateTime.UtcNow - File.GetLastWriteTimeUtc(f) > TimeSpan.FromDays(1)) File.Delete(f); } catch { }
+                SweepStaleTemps(sessions);
+            }
+        }
+        catch { /* the agent-level file is the one that must not fail */ }
     }
+
+    private static DateTime _sessionSweepUtc = DateTime.MinValue;
 
     /// <summary>
     /// Republish presence immediately after serving a tool call, with the call
