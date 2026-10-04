@@ -45,6 +45,59 @@ internal static partial class Program
     private static readonly TimeSpan FollowUpEvery = TimeSpan.FromMinutes(10);
     private const int FollowUpMaxWithoutProgress = 3;
 
+    // A teammate asking. On 2026-10-04 codex asked claude in the room "ตอนนี้
+    // คุณทำถึงไหน/ถัดไปอะไร/คาดส่งเมื่อไร?" and nothing woke claude: only the
+    // owner's lines called anybody, so "ask each other" reached nobody who was
+    // not already running. A peer's line to an agent that is not here now
+    // calls it — after a short grace, once per line, and never more often than
+    // PeerAskEvery per agent, so two agents cannot keep waking each other.
+    private static readonly TimeSpan PeerAskHorizon = TimeSpan.FromHours(2);
+    private static readonly TimeSpan PeerAskGrace = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan PeerAskEvery = TimeSpan.FromMinutes(15);
+
+    private static readonly Regex CoworkTaskRef = new(@"\bt-[0-9a-f]{6}\b", RegexOptions.CultureInvariant);
+
+    /// <summary>Lines another agent addressed to an agent in the room since
+    /// <paramref name="sinceUtc"/>: target → (newest, who asked). Board lines
+    /// (topic task) are left to the board's own follow-up.</summary>
+    private static Dictionary<string, (DateTime Newest, SortedSet<string> From)> CoworkPeerAsks(DateTime sinceUtc)
+    {
+        var asks = new Dictionary<string, (DateTime, SortedSet<string>)>(StringComparer.OrdinalIgnoreCase);
+        var floor = sinceUtc.Ticks.ToString("D19", CultureInfo.InvariantCulture);
+        foreach (var f in CoworkMessageFiles())
+        {
+            var name = Path.GetFileName(f);
+            if (string.CompareOrdinal(name, floor) <= 0) continue;
+            var speaker = CoworkSpeakerFromName(f);
+            if (IsReservedIdentity(speaker) || speaker.Equals("unknown", StringComparison.OrdinalIgnoreCase)) continue;
+            var o = ReadJsonOrNull(f);
+            if (o == null || string.Equals(o["topic"]?.ToString(), "task", StringComparison.Ordinal)) continue;
+            if (!long.TryParse(name.AsSpan(0, Math.Min(19, name.Length)), NumberStyles.None, CultureInfo.InvariantCulture, out var ticks)) continue;
+            var at = new DateTime(ticks, DateTimeKind.Utc);
+            foreach (var target in CoworkRecipients(o["to"]))
+            {
+                if (target.Equals(speaker, StringComparison.OrdinalIgnoreCase) || IsReservedIdentity(target)) continue;
+                if (!asks.TryGetValue(target, out var a)) a = (DateTime.MinValue, new SortedSet<string>(StringComparer.OrdinalIgnoreCase));
+                a.Item2.Add(speaker);
+                asks[target] = (at > a.Item1 ? at : a.Item1, a.Item2);
+            }
+        }
+        return asks;
+    }
+
+    /// <summary>Has this agent a question in front of the owner right now?</summary>
+    private static bool CoworkHasOpenAsk(string agent)
+    {
+        try
+        {
+            if (!Directory.Exists(BrokerDecisionDir)) return false;
+            return Directory.GetFiles(BrokerDecisionDir, "ask-*.json").Select(ReadJsonOrNull).Any(d =>
+                d != null && string.Equals(d["status"]?.ToString(), "open", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(d["agent"]?.ToString(), agent, StringComparison.OrdinalIgnoreCase));
+        }
+        catch { return false; }
+    }
+
     private static string CoworkFollowUpLedgerPath => Path.Combine(CoworkRoot, "followups.json");
 
     /// <summary>
@@ -74,7 +127,11 @@ internal static partial class Program
             bool Busy(string a) => live.ContainsKey(a)
                 || (running.TryGetValue(a, out var r) ? r : running[a] = AdoptOrClearOrphanRun(cfg, a));
 
-            foreach (var t in CoworkTasks())
+            var board = CoworkTasks();
+            var byId = board.Where(t => t["id"] != null)
+                            .GroupBy(t => t["id"]!.ToString(), StringComparer.OrdinalIgnoreCase)
+                            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+            foreach (var t in board)
             {
                 var id = t["id"]?.ToString();
                 var agent = t["assignee"]?.Type == JTokenType.String ? t["assignee"]!.ToString() : null;
@@ -95,6 +152,28 @@ internal static partial class Program
                     Add(calls, agent, id);
                     if (!resumed.TryGetValue(agent, out var rl)) resumed[agent] = rl = new();
                     rl.Add((id, paused["note"]?.ToString()));
+                    continue;
+                }
+
+                // Blocked on other board work that has since closed: the wait is
+                // over. claude's prototype sat blocked on "รอ codex t-047a12"
+                // after t-047a12 was done, and blocked work is never chased.
+                // Not while its holder has a question open with the owner — that
+                // is a different wait.
+                if (status == "blocked" && t["paused"] == null)
+                {
+                    var deps = CoworkTaskRef.Matches(t["note"]?.ToString() ?? "").Select(m => m.Value)
+                        .Where(d => !d.Equals(id, StringComparison.OrdinalIgnoreCase))
+                        .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                    if (deps.Count == 0
+                        || !deps.All(d => byId.TryGetValue(d, out var dt) && (dt["status"]?.ToString() is "done" or "dropped"))
+                        || busy || CoworkHasLiveSession(agent) || (st.QuotaResumeUtc is DateTime rq && rq > now)
+                        || CoworkHasOpenAsk(agent))
+                        continue;
+                    if (!dryRun)
+                        CoworkBrokerSetTask(id, "assigned",
+                            $"▶ งานที่รออยู่ ({string.Join(", ", deps.Select(d => $"[{d}]"))}) เสร็จแล้ว — @{agent} ทำต่อจากที่ค้างได้เลย");
+                    Add(calls, agent, id);
                     continue;
                 }
 
@@ -132,8 +211,27 @@ internal static partial class Program
                 }
             }
 
+            // A teammate asked, and the one asked is not here to hear it.
+            var peerLines = new List<(string Target, string From, int Minutes)>();
+            foreach (var (target, (newest, from)) in CoworkPeerAsks(now - PeerAskHorizon))
+            {
+                if (calls.ContainsKey(target) || !cfg.Runners.ContainsKey(target)) continue;
+                if (now - newest < PeerAskGrace || CoworkSpokeSince(target, newest)) continue;
+                if (Busy(target) || CoworkHasLiveSession(target)) continue;
+                if (ReadRunnerState(target).QuotaResumeUtc is DateTime pq && pq > now) continue;
+                var key = "peer:" + target;
+                if (CoworkUtc((ledger[key] as JObject)?["lastUtc"]) is DateTime pl && (pl >= newest || now - pl < PeerAskEvery)) continue;
+                Add(calls, target, "peer");
+                peerLines.Add((target, string.Join(", ", from), (int)Math.Min(999, (now - newest).TotalMinutes)));
+                if (!dryRun) { ledger[key] = new JObject { ["lastUtc"] = now.ToString("o") }; changed = true; }
+            }
+
             if (!dryRun)
             {
+                foreach (var (target, from, minutes) in peerLines)
+                    CoworkSystemLine(
+                        $"💬 @{target}: {from} ถามคุณในห้อง (เมื่อ {minutes} นาทีก่อน) และยังไม่มีคำตอบ — เข้ามาอ่านแล้วตอบในห้อง",
+                        to: target, topic: "follow-up");
                 foreach (var (agent, items) in resumed)
                     CoworkSystemLine(
                         $"▶ โควต้าของ {agent} น่าจะกลับมาแล้ว — ตามงานที่พักไว้ให้ทำต่อ: "

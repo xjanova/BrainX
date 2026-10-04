@@ -28,6 +28,7 @@ internal static partial class Program
         checks.Add(("cowork lane: room work never reaches a session that did not join", RoomStaysInTheRoom));
         checks.Add(("broker runners: the newest build in a versioned folder, and a CLI too old for its model is named", RunnerResolutionChecks));
         checks.Add(("cowork follow-up: unfinished work is chased; out of quota it is paused, saved to the brain and resumed", FollowUpAndQuota));
+        checks.Add(("cowork follow-up: a task blocked on a closed one goes back to work, and a teammate's question wakes the one asked", PeersWakeEachOther));
         checks.Add(("cowork room: two windows of one agent both hear the owner, and one leaving does not deafen the other", TwoWindowsOneSeat));
     }
 
@@ -831,6 +832,113 @@ internal static partial class Program
         var at = P("Usage limit reached. Resets at 4pm");
         Check("\"resets at 4pm\" is the next 16:00 local", at is DateTime a && a.ToLocalTime().Hour == 16 && a > now && a - now <= TimeSpan.FromDays(1), at?.ToString("o"));
         Check("no time in it, no guess", P("quota exceeded") == null);
+    }
+
+    /// <summary>
+    /// 2026-10-04: claude's prototype sat blocked on "รอ codex t-047a12" after
+    /// t-047a12 was done, and codex's question to claude in the room ("ตอนนี้
+    /// คุณทำถึงไหน") woke nobody.
+    /// </summary>
+    private static async Task PeersWakeEachOther()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the check", false); return; }
+
+        var root = Path.Combine(Path.GetTempPath(), "brainx-peers-e2e-" + Guid.NewGuid().ToString("N"));
+        var vault = Path.Combine(root, "vault");
+        var bus = Path.Combine(vault, ".obsidianx", "agent-bus");
+        var room = Path.Combine(bus, "cowork", "messages");
+        var tasks = Path.Combine(bus, "cowork", "tasks");
+        var key = Path.Combine(root, "bus-seal.key");
+        Directory.CreateDirectory(room);
+        Directory.CreateDirectory(tasks);
+        Directory.CreateDirectory(Path.Combine(vault, "Notes"));
+        BusSeal.EnsureKey(key);
+        SetRoomLight(bus, on: true);
+        File.WriteAllText(Path.Combine(bus, "runners.json"), new JObject
+        {
+            ["pollSeconds"] = 5,
+            ["idleStudy"] = false,
+            ["workRoots"] = new JArray(),
+            ["escalation"] = new JObject { ["toast"] = false, ["chatCard"] = false, ["telegram"] = new JObject { ["botToken"] = "", ["chatId"] = "" } },
+            ["runners"] = new JObject
+            {
+                ["codex"] = new JObject { ["exe"] = "cmd", ["args"] = new JArray("/c", "exit /b 0"), ["cwd"] = root, ["onCall"] = true },
+                ["claude"] = new JObject { ["exe"] = "cmd", ["args"] = new JArray("/c", "exit /b 0"), ["cwd"] = root, ["onCall"] = true },
+            },
+        }.ToString(), new UTF8Encoding(false));
+
+        async Task<string> BrokerOnce()
+        {
+            var psi = new ProcessStartInfo(exe, $"broker --vault \"{vault}\" --once")
+            {
+                RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false,
+                StandardOutputEncoding = new UTF8Encoding(false),
+            };
+            psi.Environment["BRAINX_BUS_SEAL_KEY"] = key;
+            psi.Environment["BRAINX_SANDBOX"] = "1";
+            psi.Environment.Remove(StubMcpServer.EnvFlag);
+            using var p = Process.Start(psi)!;
+            var outTask = p.StandardOutput.ReadToEndAsync();
+            _ = p.StandardError.ReadToEndAsync();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+            await p.WaitForExitAsync(cts.Token);
+            return await outTask;
+        }
+        void Put(string id, string status, string assignee, string note) =>
+            File.WriteAllText(Path.Combine(tasks, id + ".json"), new JObject
+            {
+                ["id"] = id, ["title"] = id + " work", ["status"] = status, ["assignee"] = assignee, ["createdBy"] = assignee,
+                ["note"] = note, ["createdUtc"] = DateTime.UtcNow.AddHours(-3).ToString("o"), ["updatedUtc"] = DateTime.UtcNow.AddHours(-1).ToString("o"),
+            }.ToString(), new UTF8Encoding(false));
+        JObject Board(string id) => JObject.Parse(File.ReadAllText(Path.Combine(tasks, id + ".json")));
+        List<JObject> To(string agent) => Directory.GetFiles(room, "*-broker-*.json").OrderBy(Path.GetFileName, StringComparer.Ordinal)
+            .Select(f => JObject.Parse(File.ReadAllText(f))).Where(o => o["to"]?.ToString() == agent).ToList();
+        void PeerSays(string from, string to, string body, TimeSpan ago)
+        {
+            var at = DateTime.UtcNow - ago;
+            File.WriteAllText(Path.Combine(room, $"{at.Ticks:D19}-{from}-{Guid.NewGuid().ToString("N")[..4]}.json"), new JObject
+            {
+                ["id"] = $"c-{at.Ticks}-ab12cd", ["ts"] = at.ToString("o"), ["from"] = from, ["to"] = to, ["body"] = body,
+            }.ToString(), new UTF8Encoding(false));
+        }
+
+        try
+        {
+            // Blocked on a task that has closed → back to work.
+            Put("t-aaa111", "done", "codex", "import passed");
+            Put("t-bbb222", "blocked", "claude", "รอ codex t-aaa111 รัน import แล้ว commit");
+            var t1 = await BrokerOnce();
+            Check("a task blocked on a closed task goes back to its holder", Board("t-bbb222")["status"]?.ToString() == "assigned", Board("t-bbb222").ToString());
+            Check("…the room says so, to the holder", To("claude").Any(o => o["body"]?.ToString().Contains("[t-aaa111]") == true), t1);
+            Check("…and the holder is called", t1.Contains("claude: spawned"), t1);
+
+            // Still blocked on something open → left alone.
+            Put("t-ccc333", "doing", "codex", "");
+            Put("t-ddd444", "blocked", "claude", "รอ t-ccc333");
+            await BrokerOnce();
+            Check("…but not while the task it waits on is still open", Board("t-ddd444")["status"]?.ToString() == "blocked");
+
+            // A teammate's question wakes the one asked — once.
+            Put("t-ccc333", "done", "codex", "");   // keep the board quiet for this part
+            File.Delete(Path.Combine(tasks, "t-ddd444.json"));
+            File.Delete(Path.Combine(tasks, "t-bbb222.json"));
+            var before = To("claude").Count;
+            PeerSays("codex", "claude", "@claude ตอนนี้คุณทำถึงไหน/ถัดไปอะไร?", TimeSpan.FromMinutes(5));
+            var t3 = await BrokerOnce();
+            var woke = To("claude").Skip(before).FirstOrDefault(o => o["body"]?.ToString().Contains("codex ถามคุณ") == true);
+            Check("a teammate's question to an agent that is not here wakes it", woke != null && t3.Contains("claude: spawned"), t3);
+            var t4 = await BrokerOnce();
+            Check("…once: the same question does not wake it again", To("claude").Count(o => o["body"]?.ToString().Contains("ถามคุณ") == true) == 1
+                  && !t4.Contains("claude: spawned"), t4);
+            PeerSays("codex", "claude", "@claude อีกเรื่อง", TimeSpan.FromMinutes(3));
+            await BrokerOnce();
+            Check("…and a new question within the quiet period waits", To("claude").Count(o => o["body"]?.ToString().Contains("ถามคุณ") == true) == 1);
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
     }
 
     private static Task AnswerIntentChecks()

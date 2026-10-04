@@ -103,8 +103,10 @@ internal static partial class Program
             // Not the owner: the broker chasing work that stopped. Saying "the
             // owner spoke" here would send the run looking for an order that
             // was never given.
-            sb.Append("UNFINISHED WORK ON THE COWORK BOARD IS YOURS and nobody is moving it — the broker is following it up. ")
-              .Append("Call cowork_join {work:'...'} FIRST, then cowork_read and cowork_task list. Pick it up WHERE IT STOPPED: ")
+            sb.Append("WORK IN THE COWORK ROOM IS WAITING FOR YOU and nobody is moving it — unfinished board work of yours, ")
+              .Append("work you were waiting on that has now closed, or a teammate who asked you something; the broker's line ")
+              .Append("in the room to you says which. Call cowork_join {work:'...'} FIRST, then cowork_read and cowork_task list. ")
+              .Append("ANSWER a teammate's question in the room before anything else. Pick work up WHERE IT STOPPED: ")
               .Append("the task's note, the room and the brain (brain_search the task title; paused work has a note in ")
               .Append("Notes/Cowork-Paused) say how far it got — do not start over. Say in the room what you are picking up. ")
               .Append(CoworkFloorRules)
