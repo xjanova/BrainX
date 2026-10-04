@@ -79,9 +79,14 @@ body {
     position: absolute;
     top: 8px;
     left: 10px;
+    /* Wraps instead of running off the room: at ~900px windows the light
+       switch and the map button were cut off and could not be pressed. */
+    right: 10px;
     display: flex;
+    flex-wrap: wrap;
     align-items: baseline;
     gap: 7px;
+    row-gap: 5px;
     font-size: 10px;
     letter-spacing: 1.4px;
     color: var(--ink-dim);
@@ -577,6 +582,9 @@ body {
     border: 1px solid var(--stroke);
 }
 #say-text:focus { outline: none; border-color: var(--accent); }
+#say-note { margin: 4px 0 0; color: #e0938c; font-size: 11px; flex: none; }
+#say-note:empty { display: none; }
+#room-broker:disabled { opacity: 0.6; cursor: progress; }
 #say-send {
     font: inherit;
     font-size: 11.5px;

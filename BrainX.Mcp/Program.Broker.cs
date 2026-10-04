@@ -261,6 +261,8 @@ internal static partial class Program
     {
         Directory.CreateDirectory(BrokerDir);
         var cfg = LoadBrokerConfig();
+        var cfgStamp = ConfigStamp();
+        var prunedUtc = DateTime.MinValue;
 
         BrokerLog($"broker up · vault={_vaultPath} · runners={string.Join(", ", cfg.Runners.Keys)}"
                   + (dryRun ? " · DRY RUN" : ""));
@@ -277,6 +279,22 @@ internal static partial class Program
         {
             do
             {
+                // runners.json is the owner's file, and an edit to it used to
+                // need a broker restart nobody knew about: a workDirs entry
+                // added in answer to "which folder?" was ignored, and the same
+                // question came back two hours later.
+                if (ConfigStamp() is var stamp && stamp != cfgStamp)
+                {
+                    cfgStamp = stamp;
+                    cfg = LoadBrokerConfig();
+                    BrokerLog($"runners.json changed — reloaded · runners={string.Join(", ", cfg.Runners.Keys)}");
+                }
+                if (DateTime.UtcNow - prunedUtc > TimeSpan.FromHours(6))
+                {
+                    prunedUtc = DateTime.UtcNow;
+                    PruneBrokerLogs();
+                }
+
                 try { await BrokerTick(cfg, live, dryRun).ConfigureAwait(false); }
                 catch (Exception ex) { BrokerLog("tick failed: " + Redact(ex.Message)); }
 
@@ -424,7 +442,7 @@ internal static partial class Program
         // addressed to somebody, or said while people are sitting in there,
         // never reaches them.
         var coworkCalls = CoworkCallsWaiting(
-            cfg.Runners.Where(r => r.Value.OnCall).Select(r => r.Key));
+            cfg.Runners.Where(r => r.Value.OnCall).Select(r => r.Key), out var coworkScanned, out var coworkUnheard);
         var coworkHandled = false;
 
         // Before anything else: is a circle still running that should not be?
@@ -467,6 +485,7 @@ internal static partial class Program
             // that clears the block sat behind the block. The counter expired
             // on schedule and the agent stayed frozen anyway.
             ExpireStaleRefusal(cfg, agent);
+            ExpireClearedBudgetStop(cfg, agent);
 
             // But only the parked WORKSTREAM stops — the agent keeps its
             // other jobs. Anything else and one unanswered question freezes an
@@ -746,7 +765,11 @@ internal static partial class Program
         // "ฟังอยู่ 0" plus silence is indistinguishable from a broken bus.
         // The cursor moves either way, so this is said once per order rather
         // than once every fifteen seconds.
-        if (coworkCalls.Count > 0 || CoworkCallsWaiting().Count > 0)
+        // From the snapshot taken at the top of this tick, never a fresh read:
+        // a line that arrived while this tick was busy (a Telegram send can
+        // take twenty seconds) has not been acted on, and reading it here
+        // reported "nobody is in the room" for it and then marked it handled.
+        if (coworkCalls.Count > 0 || coworkUnheard > 0)
         {
             if (!coworkHandled && !dryRun)
             {
@@ -775,8 +798,10 @@ internal static partial class Program
                     CoworkSystemLine("ไม่มีใครอยู่ในห้อง และไม่มี runner ที่ตั้ง onCall ไว้ใน runners.json — คำสั่งนี้ยังไม่มีใครรับ");
                 // else: everyone called is already seated. Silence is correct.
             }
-            if (!dryRun) CoworkMarkCalled();
         }
+        // Up to what was scanned and no further — including lines with nothing
+        // to dispatch, so a forged line is logged once, not every tick.
+        if (!dryRun) CoworkMarkCalled(coworkScanned);
 
         await PumpDecisionsAsync(cfg).ConfigureAwait(false);
 
@@ -953,16 +978,22 @@ internal static partial class Program
     /// the owner needs the sentence rather than a hop count — "codex has hit
     /// its usage limit, resets at 2:12 AM" is actionable, "12 hops" is not.
     /// </summary>
-    private static readonly string[] FatalRunnerSigns =
+    private static readonly string[] QuotaSigns = { "usage limit", "credit balance", "quota", "rate limit" };
+
+    /// <summary>Things only a runner that never got going says. In the tail of
+    /// a run that worked for minutes they are as likely to be the work.</summary>
+    private static readonly string[] StartupSigns =
     {
-        "usage limit", "credit balance", "quota", "rate limit",
         "not logged in", "please log in", "authentication", "unauthorized",
         "is not recognized", "command not found", "no such file",
     };
 
+    private static readonly string[] FatalRunnerSigns = QuotaSigns.Concat(StartupSigns).ToArray();
+
     /// <summary>The run's own complaint, when it is one of the fatal kind.</summary>
-    private static string? FatalComplaint(string logPath)
+    private static string? FatalComplaint(string logPath, bool startup = true)
     {
+        var signs = startup ? FatalRunnerSigns : QuotaSigns;
         try
         {
             if (!File.Exists(logPath)) return null;
@@ -972,7 +1003,7 @@ internal static partial class Program
             foreach (var line in tail)
             {
                 var low = line.ToLowerInvariant();
-                if (FatalRunnerSigns.Any(low.Contains))
+                if (signs.Any(low.Contains))
                     return line.Trim() is { Length: > 0 } t ? (t.Length > 300 ? t[..300] : t) : null;
             }
         }
@@ -1056,7 +1087,12 @@ internal static partial class Program
         // owner's USER environment at spawn time rather than inherited, so
         // setting it once takes effect without restarting the app that hosts
         // this broker. Never logged.
-        if (!psi.Environment.ContainsKey("CLAUDE_CODE_OAUTH_TOKEN"))
+        //
+        // To claude ONLY. Every runner used to get it, codex included — a
+        // process that runs shell commands and writes its output to a run log
+        // in the synced vault, which Redact does not scrub this token from.
+        if (Path.GetFileNameWithoutExtension(exe).Equals("claude", StringComparison.OrdinalIgnoreCase)
+            && !psi.Environment.ContainsKey("CLAUDE_CODE_OAUTH_TOKEN"))
         {
             try
             {
@@ -1088,7 +1124,9 @@ internal static partial class Program
             var startedUtc = DateTime.UtcNow;
             live[agent] = new BrokerRun { Process = p, Agent = agent, StartedUtc = startedUtc, LogPath = log, ForRoom = reportToRoom && work.Room > 0 };
             state.Spawns.Add(startedUtc);
-            state.Hops++;
+            // A study is not a hop on anybody's work. Counting it froze an agent
+            // after three days of idle studies with nothing ever queued.
+            if (reportToRoom) state.Hops++;
             state.RunPid = p.Id;
             state.RunStartedUtc = startedUtc;
             state.RunModel = model;
@@ -1318,11 +1356,19 @@ internal static partial class Program
         return null;
     }
 
+    private static readonly object RunLogGate = new();
+
+    /// <summary>stdout and stderr arrive on two threads; two AppendAllText at
+    /// once threw on the share lock and the line was swallowed — often the one
+    /// line that said WHY ("Credit balance is too low").</summary>
     private static void AppendRunLog(string path, string? line)
     {
         if (line == null) return;
-        try { File.AppendAllText(path, Redact(line) + Environment.NewLine, new UTF8Encoding(false)); }
-        catch { }
+        lock (RunLogGate)
+        {
+            try { File.AppendAllText(path, Redact(line) + Environment.NewLine, new UTF8Encoding(false)); }
+            catch { }
+        }
     }
 
     /// <summary>
@@ -1346,6 +1392,11 @@ internal static partial class Program
 
             var code = run.Process.HasExited ? run.Process.ExitCode : -1;
             var elapsed = DateTime.UtcNow - run.StartedUtc;
+            // Exited is not drained: the last lines can still be in the async
+            // readers. Bounded, because a grandchild holding the pipe open would
+            // otherwise hang the broker here.
+            if (!killed)
+                try { Task.Run(() => run.Process.WaitForExit()).Wait(TimeSpan.FromSeconds(3)); } catch { }
             BrokerLog($"{agent}: run finished, exit {code}, {elapsed.TotalSeconds:F0}s");
             run.Process.Dispose();
             live.Remove(agent);
@@ -1355,7 +1406,13 @@ internal static partial class Program
             // is the only thing that tells the owner WHY, and it is the
             // difference between "a budget was hit" and "there is no credit".
             var st = ReadRunnerState(agent);
-            var fatal = code != 0 ? FatalComplaint(run.LogPath) : null;
+            // A run that was KILLED did not refuse anything, and a long run that
+            // printed "No such file" or "authentication" while working on auth
+            // code did not fail to start — only a quota message means a shut
+            // door at any point in a run.
+            var fatal = code != 0 && !killed
+                ? FatalComplaint(run.LogPath, startup: elapsed < RunTooFastToBeReal)
+                : null;
             var failed = fatal != null || (code != 0 && elapsed < RunTooFastToBeReal);
             if (failed)
             {
@@ -1372,6 +1429,12 @@ internal static partial class Program
                 st.ConsecutiveFailures = 0;
                 st.LastFailure = null;
                 st.FailedUtc = null;
+                // The work closed: the run finished and left nothing waiting.
+                // Hops count passes over ONE piece of work, and only the owner
+                // answering a question used to reset them — so twelve good runs
+                // spread over a week hit the ceiling as if they were a loop.
+                var left = WaitingWorkFor(agent);
+                if (left.Mail == 0 && left.Tasks == 0 && left.Room == 0) st.Hops = 0;
             }
             st.RunPid = null;
             st.RunStartedUtc = null;
@@ -1538,6 +1601,27 @@ internal static partial class Program
     }
 
     /// <summary>
+    /// Take back a budget question whose ceiling has since cleared.
+    ///
+    /// ExpireStaleRefusal only covers a refusal with a clock on it (FailedUtc).
+    /// "20 spawns in the last hour" and "12 hops" raise the same `budget-`
+    /// question, and an open question parks the agent BEFORE the gate is ever
+    /// looked at again — so the hour passed, the gate would have opened, and
+    /// the agent stayed frozen until the owner pressed a button.
+    /// </summary>
+    private static void ExpireClearedBudgetStop(BrokerConfig cfg, string agent)
+    {
+        try
+        {
+            var path = Path.Combine(BrokerDecisionDir, SanitizeAgentSlug("budget-" + agent) + ".json");
+            if (!File.Exists(path)) return;
+            if (BudgetGate(cfg, agent, ReadRunnerState(agent)) == null)
+                WithdrawDecision("budget-" + agent, "the ceiling it hit has cleared on its own");
+        }
+        catch { }
+    }
+
+    /// <summary>
     /// Why the loop is allowed to stop. Returns null when a spawn is fine, or
     /// the reason it is not.
     ///
@@ -1615,7 +1699,7 @@ internal static partial class Program
     /// Mail is answered with agent_send; the room is answered in the room.
     /// </summary>
     private readonly record struct WaitingWork(
-        int Mail, int Tasks, IReadOnlyList<string> Works, double OldestHours, int Room = 0);
+        int Mail, int Tasks, IReadOnlyList<string> Works, double OldestHours, int Room = 0, int Unlabelled = 0);
 
     /// <summary>The same thing as <see cref="Describe"/>, for the owner.
     /// It goes inside a question they have to answer, so it is Thai and it
@@ -1696,8 +1780,10 @@ internal static partial class Program
     private static WaitingWork WaitingWorkFor(string agent)
     {
         var mail = 0;
+        var unlabelled = 0;
         var oldest = 0.0;
         var works = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        var nudges = new List<string>();
         try
         {
             // Same both-boxes rule the wake hook uses: the bus collapses every
@@ -1709,6 +1795,41 @@ internal static partial class Program
                 if (!Directory.Exists(dir)) continue;
                 foreach (var f in Directory.GetFiles(dir, "*.json"))
                 {
+                    // Opening the file is the price of knowing the label. The
+                    // dashboard counts from filenames alone and is right to —
+                    // it only ever needs a number. A spawn needs the label.
+                    JObject? o = null;
+                    try { o = JObject.Parse(File.ReadAllText(f)); }
+                    catch { /* half-written message: next tick's problem */ }
+
+                    // The broker's own nudge is a pointer to work, not work: an
+                    // agent whose work closed without opening its inbox left one
+                    // behind, and it cost a headless run just to read it.
+                    if (string.Equals(o?["topic"]?.ToString(), "broker-nudge", StringComparison.OrdinalIgnoreCase))
+                    {
+                        nudges.Add(f);
+                        continue;
+                    }
+
+                    // The label goes into a spawned agent's PROMPT and argv.
+                    // agent_send slugs it, but anything that can write a file
+                    // into inbox/ cannot be assumed to have gone through
+                    // agent_send — so a label that is not already a slug is not
+                    // a label, and its message is not this broker's to act on.
+                    var w = o?["work"]?.ToString();
+                    if (!string.IsNullOrWhiteSpace(w))
+                    {
+                        string? slug;
+                        try { slug = SanitizeAgentSlug(w!); } catch { slug = null; }
+                        if (slug == null || !slug.Equals(w!.Trim(), StringComparison.OrdinalIgnoreCase))
+                        {
+                            BrokerSay(agent, $"{agent}: ignored {Path.GetFileName(f)} — its work label is not a valid label");
+                            continue;
+                        }
+                        works.Add(slug);
+                    }
+                    else unlabelled++;
+
                     mail++;
                     try
                     {
@@ -1716,15 +1837,6 @@ internal static partial class Program
                         if (age > oldest) oldest = age;
                     }
                     catch { }
-                    // Opening the file is the price of knowing the label. The
-                    // dashboard counts from filenames alone and is right to —
-                    // it only ever needs a number. A spawn needs the label.
-                    try
-                    {
-                        var w = JObject.Parse(File.ReadAllText(f))["work"]?.ToString();
-                        if (!string.IsNullOrWhiteSpace(w)) works.Add(w!);
-                    }
-                    catch { /* half-written message: next tick's problem */ }
                 }
             }
         }
@@ -1743,7 +1855,15 @@ internal static partial class Program
         // something and nobody is listening" looks like from here.
         var room = 0;
         try { room = CoworkUnreadFor(agent); } catch { }
-        return new WaitingWork(mail, tasks, works.ToList(), oldest, room);
+
+        // A nudge whose work is gone points at nothing — and while it sits
+        // there HasPendingNudge reads "one already outstanding" and no real
+        // nudge can ever be sent again.
+        if (mail == 0 && tasks == 0)
+            foreach (var n in nudges)
+                try { if ((DateTime.UtcNow - File.GetLastWriteTimeUtc(n)).TotalMinutes > 2) File.Delete(n); } catch { }
+
+        return new WaitingWork(mail, tasks, works.ToList(), oldest, room, unlabelled);
     }
 
     /// <summary>
@@ -1755,7 +1875,9 @@ internal static partial class Program
     {
         var keep = work.Works.Where(w => !blocked.Contains(w)).ToList();
         if (keep.Count == work.Works.Count) return work;
-        var mail = keep.Count == 0 ? 0 : work.Mail;
+        // Every label parked: what is left is the unlabelled mail, which the
+        // summary above promises survives every block. It used to be zeroed.
+        var mail = keep.Count == 0 ? work.Unlabelled : work.Mail;
         return work with { Works = keep, Mail = mail };
     }
 
@@ -2054,18 +2176,41 @@ internal static partial class Program
             o = new JObject();
         }
 
+        // Read field by field and forgiving about shape. One "pollSeconds":"15s"
+        // or "exeFallbacks":"C:\x.exe" used to throw out of here, the broker
+        // died at start, the app gave up after five restarts — and
+        // agent_ask_user, which loads the same file, broke with it.
+        static int Int(JToken? t, int fallback)
+        {
+            try { return t?.ToObject<int?>() ?? fallback; } catch { return fallback; }
+        }
+        static bool Bool(JToken? t, bool fallback)
+        {
+            try { return t?.ToObject<bool?>() ?? fallback; } catch { return fallback; }
+        }
+        static List<string> Strings(JToken? t) => t switch
+        {
+            JArray a => a.Where(x => x.Type is JTokenType.String or JTokenType.Integer).Select(x => x.ToString()).ToList(),
+            JValue { Type: JTokenType.String } v => new List<string> { v.ToString() },
+            _ => new List<string>(),
+        };
+
         var runners = new Dictionary<string, RunnerSpec>(StringComparer.OrdinalIgnoreCase);
         if (o["runners"] is JObject rs)
             foreach (var (name, val) in rs)
             {
-                if (val is not JObject r) continue;
-                runners[SanitizeAgentSlug(name)] = new RunnerSpec
+                // "//codex" is a commented-out runner, not a second codex.
+                if (val is not JObject r || name.StartsWith("//", StringComparison.Ordinal)) continue;
+                string key;
+                try { key = SanitizeAgentSlug(name); }
+                catch { BrokerLog($"runners.json: '{Redact(name)}' is not a usable agent name — skipped"); continue; }
+                runners[key] = new RunnerSpec
                 {
                     Exe = r["exe"]?.ToString() ?? "",
-                    ExeFallbacks = r["exeFallbacks"]?.ToObject<List<string>>() ?? new(),
-                    Args = r["args"]?.ToObject<List<string>>() ?? new(),
+                    ExeFallbacks = Strings(r["exeFallbacks"]),
+                    Args = Strings(r["args"]),
                     Cwd = Environment.ExpandEnvironmentVariables(r["cwd"]?.ToString() ?? ""),
-                    OnCall = r["onCall"]?.ToObject<bool?>() ?? false,
+                    OnCall = Bool(r["onCall"], false),
                     Model = r["model"]?.Type == JTokenType.String ? r["model"]!.ToString().Trim() : "",
                     ModelFlag = r["modelFlag"]?.Type == JTokenType.String ? r["modelFlag"]!.ToString().Trim() : RunnerModels.DefaultFlag,
                 };
@@ -2083,26 +2228,24 @@ internal static partial class Program
         var b = o["budget"] as JObject ?? new JObject();
         return new BrokerConfig
         {
-            PollSeconds = Math.Max(5, o["pollSeconds"]?.ToObject<int?>() ?? 15),
-            IdleGraceSeconds = Math.Max(10, o["idleGraceSeconds"]?.ToObject<int?>() ?? 45),
-            MaxRunSeconds = Math.Max(60, b["maxRunSeconds"]?.ToObject<int?>() ?? 900),
-            MaxHopsPerWork = Math.Max(1, b["maxHopsPerWork"]?.ToObject<int?>() ?? 12),
-            MaxSpawnsPerHour = Math.Max(1, b["maxSpawnsPerHour"]?.ToObject<int?>() ?? 20),
-            IdleStudy = o["idleStudy"]?.ToObject<bool?>() ?? true,
-            IdleStudyHours = Math.Max(1, o["idleStudyHours"]?.ToObject<int?>() ?? 6),
-            IdleStudyMaxSpawns = Math.Max(0, o["idleStudyMaxSpawns"]?.ToObject<int?>() ?? 1),
-            StudyMaxLines = Math.Max(2, o["studyMaxLines"]?.ToObject<int?>() ?? 12),
-            StudyMaxMinutes = Math.Max(2, o["studyMaxMinutes"]?.ToObject<int?>() ?? 30),
-            StudyQuietMinutes = Math.Max(1, o["studyQuietMinutes"]?.ToObject<int?>() ?? 10),
-            StaleMailMinutes = Math.Max(1, o["staleMailMinutes"]?.ToObject<int?>() ?? 10),
-            MaxConsecutiveFailures = Math.Max(1, b["maxConsecutiveFailures"]?.ToObject<int?>() ?? 2),
-            RetryAfterFailureMinutes = Math.Max(1, b["retryAfterFailureMinutes"]?.ToObject<int?>() ?? 25),
-            ParkedSpawnAfterMinutes = Math.Max(1, o["parkedSpawnAfterMinutes"]?.ToObject<int?>() ?? 20),
+            PollSeconds = Math.Max(5, Int(o["pollSeconds"], 15)),
+            IdleGraceSeconds = Math.Max(10, Int(o["idleGraceSeconds"], 45)),
+            MaxRunSeconds = Math.Max(60, Int(b["maxRunSeconds"], 900)),
+            MaxHopsPerWork = Math.Max(1, Int(b["maxHopsPerWork"], 12)),
+            MaxSpawnsPerHour = Math.Max(1, Int(b["maxSpawnsPerHour"], 20)),
+            IdleStudy = Bool(o["idleStudy"], true),
+            IdleStudyHours = Math.Max(1, Int(o["idleStudyHours"], 6)),
+            IdleStudyMaxSpawns = Math.Max(0, Int(o["idleStudyMaxSpawns"], 1)),
+            StudyMaxLines = Math.Max(2, Int(o["studyMaxLines"], 12)),
+            StudyMaxMinutes = Math.Max(2, Int(o["studyMaxMinutes"], 30)),
+            StudyQuietMinutes = Math.Max(1, Int(o["studyQuietMinutes"], 10)),
+            StaleMailMinutes = Math.Max(1, Int(o["staleMailMinutes"], 10)),
+            MaxConsecutiveFailures = Math.Max(1, Int(b["maxConsecutiveFailures"], 2)),
+            RetryAfterFailureMinutes = Math.Max(1, Int(b["retryAfterFailureMinutes"], 25)),
+            ParkedSpawnAfterMinutes = Math.Max(1, Int(o["parkedSpawnAfterMinutes"], 20)),
             WorkDirs = workDirs,
-            RelayDecisionsToSessions = (o["escalation"] as JObject)?["relayToSessions"]?.ToObject<bool?>() ?? false,
-            WorkRoots = o["workRoots"]?.ToObject<List<string>>()?
-                            .Select(Environment.ExpandEnvironmentVariables).ToList()
-                        ?? new List<string>(),
+            RelayDecisionsToSessions = Bool((o["escalation"] as JObject)?["relayToSessions"], false),
+            WorkRoots = Strings(o["workRoots"]).Select(Environment.ExpandEnvironmentVariables).ToList(),
             Runners = runners,
             Escalation = o["escalation"] as JObject ?? new JObject(),
         };
@@ -2179,6 +2322,32 @@ internal static partial class Program
             BrokerLog("wrote a default runners.json — edit it to add agents");
         }
         catch (Exception ex) { BrokerLog("could not write default runners.json — " + Redact(ex.Message)); }
+    }
+
+    private static DateTime ConfigStamp()
+    {
+        try { return File.Exists(BrokerConfigPath) ? File.GetLastWriteTimeUtc(BrokerConfigPath) : DateTime.MinValue; }
+        catch { return DateTime.MinValue; }
+    }
+
+    /// <summary>How long run logs and the daily broker log are kept. They live
+    /// in the vault, which is synced: one run log per spawn, and up to 480
+    /// spawns a day per agent, adds up in a place that is backed up.</summary>
+    private const int BrokerLogKeepDays = 14;
+
+    private static void PruneBrokerLogs()
+    {
+        try
+        {
+            if (!Directory.Exists(BrokerDir)) return;
+            var cutoff = DateTime.UtcNow.AddDays(-BrokerLogKeepDays);
+            var gone = 0;
+            foreach (var f in new DirectoryInfo(BrokerDir).EnumerateFiles("*.log"))
+                if (f.LastWriteTimeUtc < cutoff)
+                    try { f.Delete(); gone++; } catch { }
+            if (gone > 0) BrokerLog($"pruned {gone} log file(s) older than {BrokerLogKeepDays} days");
+        }
+        catch { }
     }
 
     // ───────────── logging ─────────────

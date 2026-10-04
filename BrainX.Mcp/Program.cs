@@ -992,7 +992,11 @@ internal static partial class Program
                     {
                         ["work"] = new JObject { ["type"] = "string", ["description"] = "what you are in the room for, e.g. 'office-avatars' — shown on your seat so the owner knows which job you are on" },
                         ["display"] = new JObject { ["type"] = "string", ["description"] = "the name on your seat, if not your agent id" },
-                        ["catch_up"] = new JObject { ["type"] = "integer", ["default"] = 12, ["description"] = "how many recent lines to hand you on the way in (0-100). You start listening from NOW — these are for context only." }
+                        ["catch_up"] = new JObject { ["type"] = "integer", ["default"] = 12, ["description"] = "how many recent lines to hand you on the way in (0-100). You start listening from NOW — these are for context only." },
+                        // Read by CoworkJoin all along, and listed nowhere, so no
+                        // agent knew it could say what it is for this session.
+                        ["skills"] = new JObject { ["type"] = "array", ["items"] = new JObject { ["type"] = "string" }, ["description"] = "what you are good at THIS session (e.g. 'image generation'), so the room routes work to you — overrides the roster default" },
+                        ["cannot"] = new JObject { ["type"] = "array", ["items"] = new JObject { ["type"] = "string" }, ["description"] = "what you cannot do and who should, e.g. 'generate images — hand that to codex'" }
                     }
                 }),
             Tool("cowork_read",

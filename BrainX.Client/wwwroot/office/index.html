@@ -19,12 +19,21 @@
   to fit the scene would be unreadable, and the owner has to be able to read
   what the agents said.
 -->
-<html lang="en">
+<html lang="th">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BrainX — Cowork Room</title>
-<link rel="stylesheet" href="office.css">
+<!-- The host cache-busts index.html with ?v=<newest file under office/>; the
+     same stamp goes on everything it loads, or WebView2 keeps serving the old
+     office.js from cache after an update and the room looks undeployed. -->
+<script>
+  (function () {
+    var v = encodeURIComponent(new URLSearchParams(location.search).get('v') || '0');
+    document.write('<link rel="stylesheet" href="office.css?v=' + v + '">');
+    window.OFFICE_ASSET_V = v;
+  })();
+</script>
 </head>
 <body>
   <div id="room">
@@ -106,16 +115,19 @@
          means the whole room. -->
     <div id="say-to" aria-label="ส่งถึงใคร"></div>
     <form id="say" autocomplete="off">
-      <input id="say-text" type="text" maxlength="4000"
+      <input id="say-text" type="text" maxlength="4000" aria-label="สั่งงานในห้อง"
              placeholder="สั่งงาน — ใส่ @ชื่อ เพื่อสั่งเจาะจงคน ไม่ใส่ = ทุกคนในห้อง">
       <button type="submit" id="say-send" title="ส่งเข้าห้อง">ส่ง</button>
     </form>
+    <p id="say-note" role="status"></p>
   </aside>
 
   <!-- The room's rules (walkable floor, solid furniture, what stands in front
        of whom, and the places worth walking to) before the room itself: a
        classic script, so office.js can just use them. -->
-  <script src="roommap.js"></script>
-  <script src="office.js"></script>
+  <script>
+    document.write('<script src="roommap.js?v=' + window.OFFICE_ASSET_V + '"><\/script>'
+                 + '<script src="office.js?v=' + window.OFFICE_ASSET_V + '"><\/script>');
+  </script>
 </body>
 </html>

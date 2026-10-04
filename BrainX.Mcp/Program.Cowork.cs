@@ -212,9 +212,15 @@ internal static partial class Program
                 ["reason"] = reason,
             });
 
+            // A leave tombstone stays: "I chose to leave" is the agent's own
+            // decision and must survive the night. Deleting it meant the next
+            // morning's light put back in the room an agent that had asked out.
             if (Directory.Exists(CoworkMembersDir))
                 foreach (var f in Directory.GetFiles(CoworkMembersDir, "*.json"))
+                {
+                    if (ReadJsonOrNull(f)?["optedOut"]?.ToObject<bool?>() == true) continue;
                     try { File.Delete(f); } catch { /* it will be gone next time */ }
+                }
         }
         catch { }
     }
@@ -247,7 +253,13 @@ internal static partial class Program
         // announce eight hundred old lines as "new" on the first tool call.
         var latest = CoworkMessageFiles().LastOrDefault();
         var existing = ReadJsonOrNull(CoworkMemberFile(me));
-        var cursor = existing?["cursor"]?.ToString() ?? (latest is null ? "" : Path.GetFileName(latest));
+        // Coming back after cowork_leave is arriving, not resuming: the cursor
+        // a tombstone kept can be days old, and resuming from it announced
+        // every order of those days as "THE OWNER SPOKE … NOW".
+        var returning = existing?["optedOut"]?.ToObject<bool?>() == true;
+        var cursor = returning
+            ? CoworkArrivalCursor()
+            : existing?["cursor"]?.ToString() ?? (latest is null ? "" : Path.GetFileName(latest));
 
         var member = new JObject
         {
@@ -263,6 +275,7 @@ internal static partial class Program
             ["lastSeenUtc"] = DateTime.UtcNow.ToString("o"),
             ["cursor"] = cursor,
         };
+        if (!returning && existing?["seen"] is JArray seenBefore && seenBefore.Count > 0) member["seen"] = seenBefore;
         if (!string.IsNullOrWhiteSpace(display)) member["display"] = display;
         if (work != null) member["work"] = work;
 
@@ -725,20 +738,18 @@ internal static partial class Program
         Directory.CreateDirectory(CoworkMessagesDir);
         SweepStaleTemps(CoworkMessagesDir);
 
-        var cursor = ReadJsonOrNull(CoworkMemberFile(me))?["cursor"]?.ToString();
+        var member = ReadJsonOrNull(CoworkMemberFile(me));
+        var cursor = member?["cursor"]?.ToString();
         var file = $"{DateTime.UtcNow.Ticks:D19}-{me}-{Guid.NewGuid().ToString("N")[..4]}.json";
         AtomicWriteJson(Path.Combine(CoworkMessagesDir, file), payload);
 
         if (cursor != null)
         {
-            var skipped = CoworkMessageFiles().Any(f =>
-            {
-                var n = Path.GetFileName(f);
-                return string.CompareOrdinal(n, cursor) > 0
-                    && string.CompareOrdinal(n, file) < 0
-                    && !CoworkSpeakerFromName(f).Equals(me, StringComparison.OrdinalIgnoreCase);
-            });
-            if (!skipped) CoworkAdvanceCursor(me, file);
+            var between = CoworkAfter(cursor, member!["seen"])
+                .Where(f => string.CompareOrdinal(Path.GetFileName(f), file) < 0)
+                .ToList();
+            var skipped = between.Any(f => !CoworkSpeakerFromName(f).Equals(me, StringComparison.OrdinalIgnoreCase));
+            if (!skipped) CoworkAdvanceCursor(me, between.Append(file));
         }
         CoworkTrim();
         return file;
@@ -775,9 +786,7 @@ internal static partial class Program
         var deadline = DateTime.UtcNow.AddSeconds(wait);
         while (true)
         {
-            pending = CoworkMessageFiles()
-                .Where(f => string.CompareOrdinal(Path.GetFileName(f), cursor) > 0)
-                .ToList();
+            pending = CoworkAfter(cursor, member?["seen"]);
             if (pending.Count > 0 || DateTime.UtcNow >= deadline) break;
             Thread.Sleep(500);
         }
@@ -789,10 +798,15 @@ internal static partial class Program
 
         // Only a member has a cursor to move. Advancing one for a non-member
         // would silently make its first join miss everything it had peeked at.
-        if (member != null && pending.Count > 0)
-            CoworkAdvanceCursor(me, Path.GetFileName(files.LastOrDefault() ?? pending.Last()));
+        //
+        // And only for what was actually handed over. `history` shows the tail
+        // of the wall, not what is waiting: moving the cursor to its end ate
+        // every unread line in between — "moreWaiting: 35", and then none of
+        // the 35 ever arrived.
+        if (member != null && !history && files.Count > 0)
+            CoworkAdvanceCursor(me, files);
 
-        var left = Math.Max(0, pending.Count - files.Count);
+        var left = history ? pending.Count : Math.Max(0, pending.Count - files.Count);
         return new JObject
         {
             ["inRoom"] = member != null,
@@ -827,18 +841,77 @@ internal static partial class Program
     /// window (BusSeal). Until a sealing client has run on this machine there
     /// is no key and the old rule holds — see BusSeal's rollout note.
     /// </summary>
-    internal static bool IsAuthenticOwnerLine(JObject? o)
+    ///
+    /// Given the file it came from, the line must also have been WRITTEN
+    /// there: a seal proves who wrote a line, not when, and a copy of last
+    /// week's sealed "@codex deploy" under a fresh file name used to pass and
+    /// be dispatched again (BusSeal.WrittenAs). And the window never attaches
+    /// files to the owner's line — the seal does not cover attachments, so a
+    /// sealed line that carries some has been edited.
+    /// </summary>
+    internal static bool IsAuthenticOwnerLine(JObject? o, string? file = null)
     {
         if (o == null) return false;
         if (!(o["from"]?.ToString() ?? "").Equals("owner", StringComparison.OrdinalIgnoreCase)) return false;
-        return !BusSeal.IsActive() || BusSeal.Verify(o);
+        if (!BusSeal.IsActive()) return true;
+        if (!BusSeal.Verify(o)) return false;
+        if (o["attachments"] is JArray { Count: > 0 }) return false;
+        return file == null || BusSeal.WrittenAs(o, Path.GetFileName(file));
     }
 
     /// <summary>Claims the owner's name without the owner's seal.</summary>
-    internal static bool IsForgedOwnerLine(JObject? o) =>
+    internal static bool IsForgedOwnerLine(JObject? o, string? file = null) =>
         o != null
         && (o["from"]?.ToString() ?? "").Equals("owner", StringComparison.OrdinalIgnoreCase)
-        && !IsAuthenticOwnerLine(o);
+        && !IsAuthenticOwnerLine(o, file);
+
+    /// <summary>
+    /// How long a line can still be landing after the tick in its file name.
+    ///
+    /// The name is stamped BEFORE the write, and the file appears when the
+    /// move finishes. Two agents acking the owner at once: A stamps T1, B
+    /// stamps T2, B's move lands first — and a cursor moved to T2 in that
+    /// window never shows A's line to anybody who read in between. Lines
+    /// younger than this are remembered by name instead of settled into the
+    /// cursor, so one that lands late is still news.
+    /// </summary>
+    private static readonly TimeSpan CoworkCursorGrace = TimeSpan.FromSeconds(10);
+
+    /// <summary>The lines after <paramref name="cursor"/> that have not
+    /// already been handed over (<paramref name="seen"/>).</summary>
+    private static List<string> CoworkAfter(string? cursor, JToken? seen)
+    {
+        cursor ??= "";
+        var skip = (seen as JArray)?.Select(t => t.ToString()).ToHashSet(StringComparer.Ordinal);
+        return CoworkMessageFiles().Where(f =>
+        {
+            var n = Path.GetFileName(f);
+            return string.CompareOrdinal(n, cursor) > 0 && (skip == null || !skip.Contains(n));
+        }).ToList();
+    }
+
+    /// <summary>
+    /// Where a cursor stands once <paramref name="delivered"/> has been handed
+    /// over: as far as the newest of them, but never into the grace window —
+    /// what is in there is kept by name. Only what was actually delivered is
+    /// recorded; re-listing the folder here would mark a line that landed late
+    /// as read without anybody reading it, which is the race this exists for.
+    /// </summary>
+    private static (string Cursor, JArray Seen) CoworkSettle(string? oldCursor, JToken? oldSeen, IEnumerable<string> delivered)
+    {
+        oldCursor ??= "";
+        var names = (oldSeen as JArray)?.Select(t => t.ToString()).ToList() ?? new List<string>();
+        names.AddRange(delivered.Select(f => Path.GetFileName(f)));
+        names = names.Where(n => n.Length > 0).Distinct(StringComparer.Ordinal).ToList();
+
+        var upTo = names.Count == 0 ? oldCursor : names.Max(StringComparer.Ordinal)!;
+        var floor = (DateTime.UtcNow - CoworkCursorGrace).Ticks.ToString("D19", CultureInfo.InvariantCulture);
+        var cursor = string.CompareOrdinal(upTo, floor) <= 0 ? upTo : floor;
+        if (string.CompareOrdinal(cursor, oldCursor) < 0) cursor = oldCursor;   // never backwards
+
+        return (cursor, new JArray(names.Where(n => string.CompareOrdinal(n, cursor) > 0)
+                                       .OrderBy(n => n, StringComparer.Ordinal)));
+    }
 
     private static JArray CoworkReadMessages(IEnumerable<string> files, string me)
     {
@@ -849,7 +922,7 @@ internal static partial class Program
             if (o == null) continue;
 
             // Shown for what it is: a peer line wearing the owner's name.
-            if (IsForgedOwnerLine(o))
+            if (IsForgedOwnerLine(o, f))
             {
                 o["from"] = "unverified-owner";
                 o["unverified"] = true;
@@ -882,12 +955,14 @@ internal static partial class Program
         catch { return null; }
     }
 
-    private static void CoworkAdvanceCursor(string agent, string fileName)
+    private static void CoworkAdvanceCursor(string agent, IEnumerable<string> delivered)
     {
         var path = CoworkMemberFile(agent);
         var member = ReadJsonOrNull(path);
         if (member == null) return;
-        member["cursor"] = fileName;
+        var (cursor, seen) = CoworkSettle(member["cursor"]?.ToString(), member["seen"], delivered);
+        member["cursor"] = cursor;
+        if (seen.Count > 0) member["seen"] = seen; else member.Remove("seen");
         member["lastSeenUtc"] = DateTime.UtcNow.ToString("o");
         try { AtomicWriteJson(path, member); } catch { /* cursor is best-effort */ }
     }
@@ -1035,9 +1110,21 @@ internal static partial class Program
     /// once it has actually acted (<see cref="CoworkMarkCalled"/>), or an
     /// agent that could not be spawned would be forgotten after one tick.
     /// </summary>
-    internal static Dictionary<string, int> CoworkCallsWaiting(IEnumerable<string>? onCall = null)
+    internal static Dictionary<string, int> CoworkCallsWaiting(IEnumerable<string>? onCall = null) =>
+        CoworkCallsWaiting(onCall, out _, out _);
+
+    /// <param name="scanned">The lines this answer was made from — what
+    /// <see cref="CoworkMarkCalled"/> may move past, and nothing newer: a line
+    /// that arrived while the broker was busy acting on this answer has not
+    /// been looked at, and marking "everything up to now" dropped it.</param>
+    /// <param name="unheard">Genuine owner lines nobody could be called for
+    /// (no seat, nobody on call).</param>
+    internal static Dictionary<string, int> CoworkCallsWaiting(IEnumerable<string>? onCall,
+                                                               out List<string> scanned, out int unheard)
     {
         var result = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        scanned = new List<string>();
+        unheard = 0;
 
         // A dark room calls nobody. The owner's own line turns the light on
         // before it is ever written, so an order still reaches people — this
@@ -1046,10 +1133,9 @@ internal static partial class Program
 
         try
         {
-            var cursor = ReadJsonOrNull(CoworkBrokerCursorPath)?["cursor"]?.ToString() ?? "";
-            var fresh = CoworkMessageFiles()
-                .Where(f => string.CompareOrdinal(Path.GetFileName(f), cursor) > 0)
-                .ToList();
+            var state = ReadJsonOrNull(CoworkBrokerCursorPath);
+            var fresh = CoworkAfter(state?["cursor"]?.ToString(), state?["seen"]);
+            scanned = fresh;
             if (fresh.Count == 0) return result;
 
             var members = CoworkMembersSnapshot()
@@ -1061,12 +1147,12 @@ internal static partial class Program
             {
                 var o = ReadJsonOrNull(f);
                 if (o == null) continue;
-                if (!IsAuthenticOwnerLine(o))
+                if (!IsAuthenticOwnerLine(o, f))
                 {
                     // A forged order must never become a spawned session: this
                     // is the step that turned one hand-written file into a
                     // headless `codex exec --approve-for-me`.
-                    if (IsForgedOwnerLine(o))
+                    if (IsForgedOwnerLine(o, f))
                         BrokerLog($"cowork: ignored {Path.GetFileName(f)} — says it is the owner but carries no valid seal");
                     continue;
                 }
@@ -1088,11 +1174,14 @@ internal static partial class Program
                              .Distinct(StringComparer.OrdinalIgnoreCase)
                              .ToList();
 
+                var called = 0;
                 foreach (var t in targets)
                 {
                     if (IsReservedIdentity(t)) continue;
                     result[t] = result.TryGetValue(t, out var n) ? n + 1 : 1;
+                    called++;
                 }
+                if (called == 0) unheard++;
             }
         }
         catch { }
@@ -1126,13 +1215,16 @@ internal static partial class Program
         try
         {
             var member = ReadJsonOrNull(CoworkMemberFile(agent));
-            if (member == null) return 0;
+            // A leave tombstone keeps its cursor but is not behind on anything:
+            // it chose not to hear the room, and counting the room's lines as
+            // its unread work made the broker spawn a second session for it.
+            if (member == null || member["optedOut"]?.ToObject<bool?>() == true) return 0;
             var cursor = member["cursor"]?.ToString() ?? "";
             // Its own lines are not something it is behind on. They can sit
             // past the cursor now (CoworkAppend no longer skips unread lines
             // to get past them), and counting them would read as work waiting.
-            return CoworkMessageFiles().Count(f => string.CompareOrdinal(Path.GetFileName(f), cursor) > 0
-                                                && !CoworkSpeakerFromName(f).Equals(agent, StringComparison.OrdinalIgnoreCase));
+            return CoworkAfter(cursor, member["seen"])
+                .Count(f => !CoworkSpeakerFromName(f).Equals(agent, StringComparison.OrdinalIgnoreCase));
         }
         catch { return 0; }
     }
@@ -1150,21 +1242,26 @@ internal static partial class Program
         catch { return true; }   // cannot tell: do not accuse it of silence
     }
 
-    /// <summary>Everything up to now has been handed to somebody. Called after
-    /// a spawn, never before: a cursor moved on intent rather than on action
-    /// silently drops the order when the spawn is refused by the budget.</summary>
-    internal static void CoworkMarkCalled()
+    /// <summary>The lines <paramref name="handled"/> (what CoworkCallsWaiting
+    /// scanned) have been acted on. Called after a spawn, never before: a cursor
+    /// moved on intent rather than on action silently drops the order when the
+    /// spawn is refused by the budget.</summary>
+    internal static void CoworkMarkCalled(IEnumerable<string> handled)
     {
         try
         {
-            var latest = CoworkMessageFiles().LastOrDefault();
-            if (latest == null) return;
+            var list = handled.ToList();
+            if (list.Count == 0) return;
+            var state = ReadJsonOrNull(CoworkBrokerCursorPath);
+            var (cursor, seen) = CoworkSettle(state?["cursor"]?.ToString(), state?["seen"], list);
             Directory.CreateDirectory(CoworkRoot);
-            AtomicWriteJson(CoworkBrokerCursorPath, new JObject
+            var o = new JObject
             {
-                ["cursor"] = Path.GetFileName(latest),
+                ["cursor"] = cursor,
                 ["atUtc"] = DateTime.UtcNow.ToString("o"),
-            });
+            };
+            if (seen.Count > 0) o["seen"] = seen;
+            AtomicWriteJson(CoworkBrokerCursorPath, o);
         }
         catch { }
     }
@@ -1230,9 +1327,8 @@ internal static partial class Program
             var cursor = member["cursor"]?.ToString() ?? "";
             // Your own lines are not news to you. They can wait past the cursor
             // behind a line you have not read yet (see CoworkAppend).
-            var pending = CoworkMessageFiles()
-                .Where(f => string.CompareOrdinal(Path.GetFileName(f), cursor) > 0
-                         && !CoworkSpeakerFromName(f).Equals(me, StringComparison.OrdinalIgnoreCase))
+            var pending = CoworkAfter(cursor, member["seen"])
+                .Where(f => !CoworkSpeakerFromName(f).Equals(me, StringComparison.OrdinalIgnoreCase))
                 .ToList();
             if (pending.Count == 0) return null;
 
@@ -1262,7 +1358,7 @@ internal static partial class Program
 
                 // The owner's name is only the owner's when the line is sealed;
                 // otherwise it is a peer, and is named as one.
-                var authenticOwner = IsAuthenticOwnerLine(o);
+                var authenticOwner = IsAuthenticOwnerLine(o, f);
                 if (from.Equals("owner", StringComparison.OrdinalIgnoreCase) && !authenticOwner)
                 {
                     from = "unverified-owner";

@@ -13,6 +13,21 @@ internal static partial class Program
     {
         checks.Add(("runner models: the model goes in front of the first option, never behind a list option", RunnerModelArgs));
         checks.Add(("runner models: a pick round-trips and a flag dressed as a model never does", RunnerModelChoices));
+        checks.Add(("bus seal: a sealed line is only the owner's under the name it was written as", SealWrittenAsChecks));
+    }
+
+    private static Task SealWrittenAsChecks()
+    {
+        var now = DateTime.UtcNow;
+        var line = new JObject { ["id"] = $"c-{now.Ticks}-abcdef", ["from"] = "owner", ["body"] = "x" };
+        Check("written a moment before its file: genuine",
+            BusSeal.WrittenAs(line, $"{now.AddMilliseconds(40).Ticks:D19}-owner-ab12.json"));
+        Check("an hour-old line under a fresh name: a copy",
+            !BusSeal.WrittenAs(line, $"{now.AddHours(1).Ticks:D19}-owner-ab12.json"));
+        Check("no tick in the id: not provable",
+            !BusSeal.WrittenAs(new JObject { ["id"] = "c-x-abcdef" }, $"{now.Ticks:D19}-owner-ab12.json"));
+        Check("no tick in the name: not provable", !BusSeal.WrittenAs(line, "owner.json"));
+        return Task.CompletedTask;
     }
 
     private static string ArgLine(IEnumerable<string> args) => string.Join(" ", args);

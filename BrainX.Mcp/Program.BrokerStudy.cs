@@ -224,7 +224,7 @@ internal static partial class Program
                 var lastDash = n.LastIndexOf('-');
                 var from = lastDash > dash ? n[(dash + 1)..lastDash] : "";
                 // Read the line, not the file name: a name is a claim, the seal is the proof.
-                if (from.Equals("owner", StringComparison.OrdinalIgnoreCase) && IsAuthenticOwnerLine(ReadJsonOrNull(f)))
+                if (from.Equals("owner", StringComparison.OrdinalIgnoreCase) && IsAuthenticOwnerLine(ReadJsonOrNull(f), f))
                 { ownerSpoke = true; break; }
                 if (IsReservedIdentity(from)) continue;
 

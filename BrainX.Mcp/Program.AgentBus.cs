@@ -79,7 +79,11 @@ internal static partial class Program
     {
         var tag = SourceTag();
         if (tag == "mcp") return "agent";
-        return tag.EndsWith("-mcp", StringComparison.Ordinal) ? tag[..^4] : tag;
+        // Demoted HERE, where identity is decided. DemoteReservedIdentity
+        // existed and nothing called it: a client announcing itself as
+        // "owner" came out as `owner`, could light a dark room by speaking,
+        // join it while dark, and talk in the broker's voice.
+        return DemoteReservedIdentity(tag.EndsWith("-mcp", StringComparison.Ordinal) ? tag[..^4] : tag);
     }
 
     /// <summary>

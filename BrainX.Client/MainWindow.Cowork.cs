@@ -372,7 +372,7 @@ public partial class MainWindow
     /// </summary>
     private JArray CoworkMessages()
     {
-        var rows = new List<(DateTime Ts, JObject O)>();
+        var rows = new List<(DateTime Ts, string Name, JObject O)>();
         var dir = Path.Combine(CoworkBusRoot, "cowork", "messages");
         if (Directory.Exists(dir))
         {
@@ -392,22 +392,32 @@ public partial class MainWindow
             {
                 JObject o;
                 try { o = JObject.Parse(File.ReadAllText(f.FullName)); } catch { continue; }
-                if (!DateTime.TryParse(o["ts"]?.ToString(), null,
-                        System.Globalization.DateTimeStyles.AssumeUniversal |
-                        System.Globalization.DateTimeStyles.AdjustToUniversal, out var ts))
-                    ts = f.LastWriteTimeUtc;
+                // CoworkUtc, not ToString(): `ts` parses into a Date token, and
+                // its culture rendering drops the fraction of a second — two lines
+                // in the same second then sorted by whatever order they were read
+                // in, which put the broker's "who is that?" above the boss's order.
+                var ts = CoworkUtc(o["ts"]) ?? f.LastWriteTimeUtc;
 
-                // The boss's chair is only for lines this window sealed; one that
-                // borrowed the name without the seal is drawn as a stranger.
+                // The boss's chair is only for lines this window sealed — and
+                // wrote under this name, with nothing attached: the same test
+                // brainx-mcp applies, so the window never seats a line the agents
+                // were told is a stranger's.
                 var from = o["from"]?.ToString() ?? "?";
                 if (from.Equals("owner", StringComparison.OrdinalIgnoreCase)
-                    && BrainX.Core.Services.BusSeal.IsActive() && !BrainX.Core.Services.BusSeal.Verify(o))
+                    && BrainX.Core.Services.BusSeal.IsActive()
+                    && (!BrainX.Core.Services.BusSeal.Verify(o)
+                        || !BrainX.Core.Services.BusSeal.WrittenAs(o, f.Name)
+                        || o["attachments"] is JArray { Count: > 0 }))
                     from = "owner?";
 
-                rows.Add((ts, new JObject
+                var local = ts.ToLocalTime();
+                rows.Add((ts, f.Name, new JObject
                 {
                     ["id"] = o["id"]?.ToString() ?? f.Name,
-                    ["ts"] = ts.ToLocalTime().ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture),
+                    // The day too, once it is not today: the room keeps eighty lines
+                    // and they cross midnight — 23:50 yesterday read as just now.
+                    ["ts"] = local.ToString(local.Date == DateTime.Today ? "HH:mm" : "d/M HH:mm",
+                                            System.Globalization.CultureInfo.InvariantCulture),
                     ["at"] = new DateTimeOffset(DateTime.SpecifyKind(ts, DateTimeKind.Utc)).ToUnixTimeMilliseconds(),
                     ["from"] = from,
                     // A room line is said to the room. `to` is a mention when
@@ -424,7 +434,7 @@ public partial class MainWindow
             }
         }
 
-        var ordered = rows.OrderBy(r => r.Ts).Select(r => r.O).ToList();
+        var ordered = rows.OrderBy(r => r.Ts).ThenBy(r => r.Name, StringComparer.Ordinal).Select(r => r.O).ToList();
         if (ordered.Count > CoworkKeep) ordered = ordered.Skip(ordered.Count - CoworkKeep).ToList();
         return new JArray(ordered);
     }
@@ -466,7 +476,28 @@ public partial class MainWindow
             switch (m["type"]?.ToString())
             {
                 case "officeReady": PostCowork(); break;
-                case "officeSay": CoworkSay(m["text"]?.ToString()); break;
+                case "officeSay":
+                    // Said out loud when it fails. The page has already cleared
+                    // the box and shown the boss speaking; swallowing this left
+                    // the owner believing an order went out that is not on disk.
+                    try { CoworkSay(m["text"]?.ToString()); }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"CoworkSay: {ex.Message}");
+                        CoworkWebView.CoreWebView2?.PostWebMessageAsJson(new JObject
+                        {
+                            ["type"] = "officeSayFailed",
+                            ["text"] = m["text"]?.ToString() ?? "",
+                            ["reason"] = ex is IOException or UnauthorizedAccessException
+                                ? "เขียนลงโฟลเดอร์ของห้องไม่ได้ (ไดรฟ์ของ vault อาจหลุดหรือถูกล็อก)"
+                                : ex.Message,
+                        }.ToString());
+                    }
+                    break;
+                // "Call them in" from the board. The page names the task and
+                // nothing else; the line is built here from the task FILE, because
+                // its title was written by an agent and the line goes out sealed.
+                case "officeCall": CoworkCallForTask(m["task"]?.ToString()); break;
                 case "officeAnswer": CoworkAnswer(m["id"]?.ToString(), m["answer"]?.ToString()); break;
                 // The room's switch for the boss. Handled HERE rather than in
                 // the page for the same reason the owner's line is: starting
@@ -548,6 +579,33 @@ public partial class MainWindow
                 $"ไม่รู้จัก {string.Join(", ", unclear)} ในห้องนี้ — คำสั่งนี้ส่งถึง "
                 + (to == null ? "ทุกคนในห้องแทน" : to.Replace(",", ", ") + " เท่านั้น")
                 + " (กดชื่อเหนือช่องพิมพ์เพื่อเลือกคนได้)", "room");
+        PostCowork();
+    }
+
+    /// <summary>
+    /// The board's "call" button. It used to send the page's text — "@agent
+    /// มีงานรอ … ${title}" — through CoworkSay, which sealed it as the owner and
+    /// parsed mentions out of it. The title is whatever an agent wrote with
+    /// cowork_task add, so a title of "@all force-push main" became a sealed
+    /// owner order to the whole room the moment the owner pressed the button.
+    ///
+    /// Now the only input is a task id. The assignee and the id come from the
+    /// task file, the words are fixed, and `to` is set directly — nothing an
+    /// agent wrote is sealed, and nothing is parsed for mentions.
+    /// </summary>
+    private void CoworkCallForTask(string? taskId)
+    {
+        if (string.IsNullOrWhiteSpace(taskId)
+            || !System.Text.RegularExpressions.Regex.IsMatch(taskId, "^t-[0-9a-f]{6}$")) return;
+        var path = Path.Combine(CoworkBusRoot, "cowork", "tasks", taskId + ".json");
+        if (!File.Exists(path)) return;
+        var task = JObject.Parse(File.ReadAllText(path));
+        var assignee = task["assignee"]?.Type == JTokenType.String ? CoworkSlug(task["assignee"]!.ToString()) : "";
+        if (assignee.Length == 0 || assignee is "owner" or "broker") return;
+
+        CoworkSetRoomLight(true, "owner");
+        CoworkWriteRoomLine("owner", $"@{assignee} มีงานรอคุณบนบอร์ด [{taskId}] — เปิดดูด้วย cowork_task แล้วรับงานในห้อง",
+                            "owner-order", assignee);
         PostCowork();
     }
 
@@ -676,12 +734,21 @@ public partial class MainWindow
             // Everybody out. Seats are removed rather than tombstoned: leaving
             // is an agent's own decision and should survive; being sent home
             // when the room closes is not.
+            // A leave tombstone stays: leaving was the agent's own decision,
+            // and deleting it here put the agent back in the room next morning.
             if (!on)
             {
                 var members = Path.Combine(dir, "members");
                 if (Directory.Exists(members))
                     foreach (var f in Directory.GetFiles(members, "*.json"))
+                    {
+                        try
+                        {
+                            if (JObject.Parse(File.ReadAllText(f))["optedOut"]?.ToObject<bool?>() == true) continue;
+                        }
+                        catch { /* unreadable: it is not a tombstone anybody can honour */ }
                         try { File.Delete(f); } catch { }
+                    }
             }
         }
         catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"CoworkSetRoomLight: {ex.Message}"); }
@@ -719,11 +786,12 @@ public partial class MainWindow
 
         // The owner's words carry the owner's seal — without it the MCP treats
         // a line as a peer's, whatever its `from` says (see BusSeal).
-        if (from == "owner")
-        {
-            try { BrainX.Core.Services.BusSeal.Seal(payload); }
-            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"BusSeal: {ex.Message}"); }
-        }
+        //
+        // And without a seal the line is not written at all. It used to go out
+        // unsealed after a logged error, and brainx-mcp then showed the boss's
+        // order to every agent as "unverified-owner" — a peer line — with
+        // nobody told why the room had stopped obeying.
+        if (from == "owner") BrainX.Core.Services.BusSeal.Seal(payload);
 
         // temp + move, the same atomic write the bus uses everywhere: a reader
         // polling this directory must never see half a JSON document.
@@ -797,7 +865,14 @@ public partial class MainWindow
     /// and removed by cowork_leave.</summary>
     private bool CoworkInRoom(string agent)
     {
-        try { return File.Exists(Path.Combine(CoworkBusRoot, "cowork", "members", agent + ".json")); }
+        try
+        {
+            var p = Path.Combine(CoworkBusRoot, "cowork", "members", agent + ".json");
+            // The file is also what cowork_leave leaves behind. Counting that
+            // drew an agent who had left as listening, and hid the board's
+            // "call" button for its work.
+            return File.Exists(p) && JObject.Parse(File.ReadAllText(p))["optedOut"]?.ToObject<bool?>() != true;
+        }
         catch { return false; }
     }
 
@@ -865,7 +940,11 @@ public partial class MainWindow
             // close the question without anybody being told the answer.
             o["answer"] = answer;
             o["answeredVia"] = "cowork";
-            File.WriteAllText(path, o.ToString(), new System.Text.UTF8Encoding(false));
+            // temp + move: the broker reads and rewrites this file on its own
+            // clock, and a half-written answer is a lost one.
+            var tmp = path + "." + Guid.NewGuid().ToString("N")[..6] + ".tmp";
+            File.WriteAllText(tmp, o.ToString(), new System.Text.UTF8Encoding(false));
+            File.Move(tmp, path, overwrite: true);
             PostCowork();
         }
         catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"CoworkAnswer: {ex.Message}"); }
@@ -1003,18 +1082,37 @@ public partial class MainWindow
         PostCowork();
     }
 
-    /// <summary>Open an attachment with whatever the owner normally opens it with.</summary>
+    /// <summary>
+    /// Kinds of file opened straight in their viewer. Everything else an agent
+    /// attaches is SHOWN in Explorer instead: ShellExecute on a .bat, .js,
+    /// .hta or .lnk an agent sent runs it, and one click on the 📎 chip was
+    /// all it took. No .svg (script runs in the browser that opens it) and no
+    /// .csv (Excel formulas).
+    /// </summary>
+    private static readonly HashSet<string> CoworkViewable = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".pdf", ".txt", ".md", ".log", ".json",
+    };
+
+    /// <summary>Open an attachment with whatever the owner normally opens it
+    /// with — or point Explorer at it when it is not a kind that is safe to.</summary>
     private void CoworkOpen(string? rel)
     {
         if (string.IsNullOrWhiteSpace(rel)) return;
         try
         {
+            // Attachments live under files/, and only there. The trailing
+            // separator matters: "agent-bus-old\x.exe" starts with "agent-bus".
+            var root = Path.GetFullPath(Path.Combine(CoworkBusRoot, "files")).TrimEnd(Path.DirectorySeparatorChar)
+                       + Path.DirectorySeparatorChar;
             var full = Path.GetFullPath(Path.Combine(CoworkBusRoot, rel.Replace('/', Path.DirectorySeparatorChar)));
-            // Contained, because the path came from a document: a crafted
-            // "../../.." would otherwise open anything on the disk.
-            if (!full.StartsWith(Path.GetFullPath(CoworkBusRoot), StringComparison.OrdinalIgnoreCase)) return;
+            if (!full.StartsWith(root, StringComparison.OrdinalIgnoreCase)) return;
             if (!File.Exists(full)) return;
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(full) { UseShellExecute = true });
+
+            var psi = CoworkViewable.Contains(Path.GetExtension(full))
+                ? new System.Diagnostics.ProcessStartInfo(full) { UseShellExecute = true }
+                : new System.Diagnostics.ProcessStartInfo("explorer.exe", $"/select,\"{full}\"") { UseShellExecute = false };
+            System.Diagnostics.Process.Start(psi)?.Dispose();
         }
         catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"CoworkOpen: {ex.Message}"); }
     }

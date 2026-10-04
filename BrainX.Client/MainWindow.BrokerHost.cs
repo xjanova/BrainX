@@ -43,6 +43,12 @@ public partial class MainWindow
     /// <summary>Another broker already owns this vault (exit code 3). We are
     /// not running it, and must not keep trying to: the work IS being done.</summary>
     private bool _brokerAdopted;
+    /// <summary>When another broker was found holding the vault.</summary>
+    private DateTime _brokerAdoptedUtc;
+    /// <summary>How long before looking again whether that other broker is
+    /// still there. A CLI run someone closed, or a crashed app's orphan, used
+    /// to leave this app "adopted" — and dispatching nothing — for good.</summary>
+    private static readonly TimeSpan BrokerAdoptRecheck = TimeSpan.FromMinutes(5);
 
     private DispatcherTimer? _brokerWatch;
     private int _brokerRestarts;
@@ -195,6 +201,7 @@ public partial class MainWindow
         if (code == 3)
         {
             _brokerAdopted = true;
+            _brokerAdoptedUtc = DateTime.UtcNow;
             RememberBrokerLine("another broker already owns this vault — leaving it to that one");
             return;
         }
@@ -214,7 +221,14 @@ public partial class MainWindow
     /// room's badge honest.</summary>
     private void SuperviseBroker()
     {
-        if (_brokerStopRequested || _brokerAdopted) return;
+        if (_brokerStopRequested) return;
+        if (_brokerAdopted)
+        {
+            if (DateTime.UtcNow - _brokerAdoptedUtc < BrokerAdoptRecheck) return;
+            // Try to take over. If the other one is still up, the new process
+            // exits 3 at once and this is adopted again for another five minutes.
+            _brokerAdopted = false;
+        }
         if (BrokerRunning) return;
         if (_brokerRestarts >= BrokerMaxRestarts) return;
         _ = Task.Run(() => SpawnBroker(manual: false));

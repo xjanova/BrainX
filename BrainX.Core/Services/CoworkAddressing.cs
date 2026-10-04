@@ -22,8 +22,23 @@ public static class CoworkAddressing
         "all", "everyone", "room", "ทุกคน", "ทั้งหมด", "ทั้งห้อง",
     };
 
-    /// <summary>Not after a letter, digit, underscore or dot — "x@y.com" is an address, not a mention.</summary>
-    private static readonly Regex Mention = new(@"(?<![\p{L}\p{Nd}_.])@([\p{L}\p{Nd}_-]{2,32})", RegexOptions.CultureInvariant);
+    /// <summary>Not after a letter, digit, underscore or dot — "x@y.com" is an address, not a mention.
+    /// \p{M} because Thai vowels and tone marks are combining marks (ุ ั ้ ่): without
+    /// it "@ทุกคน" stopped at "@ท" and never meant the room.</summary>
+    private static readonly Regex Mention = new(@"(?<![\p{L}\p{M}\p{Nd}_.])@([\p{L}\p{M}\p{Nd}_-]{2,32})", RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// The longest of <paramref name="words"/> that <paramref name="token"/>
+    /// starts with, where the rest is not more of a Latin name. Thai runs
+    /// words together — "@codexตรวจ" is "@codex ตรวจ" — but "@allison" is
+    /// not "@all".
+    /// </summary>
+    private static string? Leading(string token, IEnumerable<string> words) =>
+        words.Where(w => w.Length > 0 && token.Length > w.Length
+                         && token.StartsWith(w, StringComparison.OrdinalIgnoreCase)
+                         && !(char.IsAsciiLetterOrDigit(token[w.Length]) || token[w.Length] is '_' or '-'))
+             .OrderByDescending(w => w.Length)
+             .FirstOrDefault();
 
     /// <summary>
     /// "@claude @codex …" → ("claude,codex", []), plus every @name that could
@@ -42,9 +57,9 @@ public static class CoworkAddressing
         foreach (Match m in Mention.Matches(text ?? ""))
         {
             var token = m.Groups[1].Value.ToLowerInvariant();
-            if (Everyone.Contains(token)) return (null, new List<string>());
+            if (Everyone.Contains(token) || Leading(token, Everyone) != null) return (null, new List<string>());
 
-            var hit = known.Contains(token) ? token : null;
+            var hit = known.Contains(token) ? token : Leading(token, known);
             if (hit == null)
             {
                 var near = known.Where(n => (token.Length >= 3 && n.StartsWith(token, StringComparison.Ordinal))

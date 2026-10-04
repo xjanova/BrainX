@@ -554,10 +554,15 @@ internal static partial class Program
             // One button per option, each carrying the decision id, so a press
             // can be matched back to its question even after the owner has let
             // several pile up.
-            var keyboard = new JArray(d.Options.Select(o => new JArray(new JObject
+            //
+            // The INDEX, not the text: Telegram caps callback_data at 64 bytes
+            // and rejects the whole message past it, and a Thai option is three
+            // bytes a letter — "budget-codex|แก้ให้แล้ว ลองใหม่" is 65. Budget and
+            // folder questions never reached the phone at all.
+            var keyboard = new JArray(d.Options.Select((o, i) => new JArray(new JObject
             {
                 ["text"] = o,
-                ["callback_data"] = $"{d.Id}|{o}"
+                ["callback_data"] = $"{SanitizeAgentSlug(d.Id)}|#{i}"
             })).ToArray());
 
             var text = $"🧠 *BrainX* — `{d.Agent}` needs a decision\n\n{EscapeTelegramMarkdown(d.Question)}";
@@ -570,8 +575,9 @@ internal static partial class Program
             if (d.Options.Count > 0)
                 body["reply_markup"] = new JObject { ["inline_keyboard"] = keyboard };
 
-            await TelegramCallAsync("sendMessage", body).ConfigureAwait(false);
-            BrokerLog($"decision [{d.Id}] sent to Telegram");
+            // Logged as sent only when Telegram said so.
+            if (await TelegramCallAsync("sendMessage", body).ConfigureAwait(false) != null)
+                BrokerLog($"decision [{d.Id}] sent to Telegram");
         }
         catch (Exception ex) { BrokerLog("telegram send — " + Redact(ex.Message)); }
     }
@@ -621,6 +627,16 @@ internal static partial class Program
                 // the owner may have replied on the dashboard first, and the
                 // second answer would re-open a closed decision.
                 if (!string.Equals(o["status"]?.ToString(), "open", StringComparison.OrdinalIgnoreCase)) continue;
+
+                // "#2" is the third option of THIS question. Buttons sent before
+                // the index form still carry the text itself.
+                if (answer.StartsWith('#') && int.TryParse(answer.AsSpan(1), System.Globalization.NumberStyles.None,
+                        System.Globalization.CultureInfo.InvariantCulture, out var pick))
+                {
+                    var opts = o["options"] as JArray;
+                    if (opts == null || pick >= opts.Count) continue;
+                    answer = opts[pick].ToString();
+                }
 
                 o["answer"] = answer;
                 o["answeredVia"] = "telegram";

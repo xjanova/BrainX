@@ -705,7 +705,8 @@ function drawRoom() {
     }
 
     // Back to front, so somebody nearer the viewer covers whoever is behind.
-    const order = [...AGENTS].sort((x, y) => DESKS.get(x.id).desk.y - DESKS.get(y.id).desk.y);
+    const deskY = (a) => DESKS.get(a.id)?.desk.y ?? 0;
+    const order = [...AGENTS].sort((x, y) => deskY(x) - deskY(y));
     for (const a of order) if (a.state !== 'offline' && !VISITS.has(a.id)) drawSeated(a);
     for (const a of order) if (!a.bridge) drawWalker(a);
 
@@ -2351,10 +2352,27 @@ function shade(hex, k) {
 
 // ── overlay: name plates and bubbles ────────────────────────────────
 
+/** Overlay nodes by key, reused frame to frame. */
+const OVERLAY_NODES = new Map();
+
+/** Put one overlay node in place, touching the DOM only where it changed. */
+function overlayPut(seen, key, cls, css, inner) {
+    let n = OVERLAY_NODES.get(key);
+    if (!n) {
+        n = { el: document.createElement('div'), cls: null, css: null, inner: null };
+        overlay.appendChild(n.el);
+        OVERLAY_NODES.set(key, n);
+    }
+    if (n.cls !== cls) { n.el.className = cls; n.cls = cls; }
+    if (n.css !== css) { n.el.style.cssText = css; n.css = css; }
+    if (n.inner !== inner) { n.el.innerHTML = inner; n.inner = inner; }
+    seen.add(key);
+}
+
 function drawOverlay() {
     const r = cv.getBoundingClientRect();
     const sx = r.width / CW, sy = r.height / CH;   // CSS px per logical px
-    const html = [];
+    const seen = new Set();
 
     for (const a of AGENTS) {
         const d = DESKS.get(a.id);
@@ -2367,33 +2385,34 @@ function drawOverlay() {
             : a.state === 'offline' ? 'ไม่อยู่'
                 : a.state === 'working' ? (a.lastTool || 'ทำงานอยู่')
                     : 'ว่าง';
-        html.push(
-            `<div class="plate${a.state === 'offline' ? ' is-off' : ''}${a.bridge ? ' is-rig' : ''}" ` +
-            `style="--pc:${agentColor(a.id)};left:${(d.desk.x * sx).toFixed(1)}px;top:${((d.desk.y + 14) * sy).toFixed(1)}px">` +
+        overlayPut(seen, 'p:' + a.id,
+            `plate${a.state === 'offline' ? ' is-off' : ''}${a.bridge ? ' is-rig' : ''}`,
+            `--pc:${agentColor(a.id)};left:${(d.desk.x * sx).toFixed(1)}px;top:${((d.desk.y + 14) * sy).toFixed(1)}px`,
             `<span class="who">${esc(label(a.label || a.id))}</span>` +
             (a.bridge ? `<span class="badge rig">เครื่องมือ</span>` : '') +
             (a.spawned ? `<span class="badge">AUTO</span>` : '') +
             (a.pending ? `<span class="badge">${a.pending}</span>` : '') +
-            `<span class="doing">${esc(doing)}</span></div>`);
+            `<span class="doing">${esc(doing)}</span>`);
     }
 
     for (const b of BUBBLES) {
         if (T >= b.until) continue;
         const d = DESKS.get(b.agent);
         if (!d) continue;
-        html.push(
-            `<div class="bubble" style="--bc:${b.color};left:${(d.screen.x * sx).toFixed(1)}px;` +
-            `top:${((d.screen.y - 6) * sy).toFixed(1)}px">${esc(b.text)}</div>`);
+        overlayPut(seen, `b:${b.agent}:${b.until}`, 'bubble',
+            `--bc:${b.color};left:${(d.screen.x * sx).toFixed(1)}px;top:${((d.screen.y - 6) * sy).toFixed(1)}px`,
+            esc(b.text));
     }
 
     if (BOSS && T < BOSS.until) {
         const p = bossSpot();
-        html.push(
-            `<div class="bubble" style="--bc:${FIXED.owner};left:${(p.x * sx).toFixed(1)}px;` +
-            `top:${((p.y - 6) * sy).toFixed(1)}px">${esc(BOSS.text)}</div>`);
+        overlayPut(seen, `boss:${BOSS.until}`, 'bubble',
+            `--bc:${FIXED.owner};left:${(p.x * sx).toFixed(1)}px;top:${((p.y - 6) * sy).toFixed(1)}px`,
+            esc(BOSS.text));
     }
 
-    overlay.innerHTML = html.join('');
+    for (const [key, n] of OVERLAY_NODES)
+        if (!seen.has(key)) { n.el.remove(); OVERLAY_NODES.delete(key); }
     while (BUBBLES.length && T >= BUBBLES[0].until) BUBBLES.shift();
 }
 
@@ -2457,8 +2476,16 @@ function playSound(name) {
 
 // ── side panel ──────────────────────────────────────────────────────
 
+let LOG_KEY = '';
+
 function renderLog() {
     const el = document.getElementById('log');
+    // Rebuilt only when the lines change. Every two seconds wiped a selection
+    // the owner was making to copy, and a click landing across a rebuild.
+    const key = BUS_URL + '|' + MESSAGES.map(m => `${m.id}:${m.ts}`).join('|');
+    document.getElementById('side-count').textContent = MESSAGES.length || '—';
+    if (key === LOG_KEY) return;
+    LOG_KEY = key;
     // Stick to newest unless the reader has scrolled back to re-read. Measured
     // BEFORE the rebuild: an emptied list reports no scroll at all.
     const stick = el.clientHeight === 0 || el.scrollHeight - el.scrollTop - el.clientHeight < 24;
@@ -2481,13 +2508,20 @@ function renderLog() {
             `<span class="t">${esc(m.ts || '')}</span></div>` +
             `<div class="lb">${esc(m.body || '')}</div>` +
             attachmentsHtml(m.attachments);
+        li.tabIndex = 0;
+        const toggle = () => li.classList.toggle('open');
         li.addEventListener('click', (e) => {
             if (e.target.closest('.atts')) return;   // opening a file is not "expand"
-            li.classList.toggle('open');
+            if (getSelection()?.toString()) return;  // selecting to copy is not "expand" either
+            toggle();
+        });
+        li.addEventListener('keydown', (e) => {
+            if (e.target !== li || (e.key !== 'Enter' && e.key !== ' ')) return;
+            e.preventDefault();
+            toggle();
         });
         el.appendChild(li);
     }
-    document.getElementById('side-count').textContent = MESSAGES.length || '—';
     if (stick) el.scrollTop = el.scrollHeight;
 }
 
@@ -2498,25 +2532,26 @@ function attachmentsHtml(atts) {
         const url = fileUrl(a.path);
         if (a.kind === 'image' && url)
             return `<img src="${esc(url)}" alt="${esc(a.name)}" data-open="${esc(a.path)}" loading="lazy">`;
-        return `<span class="file" data-open="${esc(a.path)}">📎 ${esc(a.name)}${a.bytes ? ' · ' + kb(a.bytes) : ''}</span>`;
+        return `<span class="file" role="button" tabindex="0" data-open="${esc(a.path)}">📎 ${esc(a.name)}${a.bytes ? ' · ' + kb(a.bytes) : ''}</span>`;
     });
     return `<div class="atts">${parts.join('')}</div>`;
 }
 
+let DECISIONS_HTML = null;
+
 function renderDecisions() {
     const el = document.getElementById('decisions');
-    el.innerHTML = '';
-    for (const d of DECISIONS) {
-        if (d.status !== 'open') continue;
-        const li = document.createElement('li');
+    const html = DECISIONS.filter(d => d.status === 'open').map(d => {
         const opts = (d.options || []).map(o =>
             `<button data-id="${esc(d.id)}" data-answer="${esc(o)}">${esc(o)}</button>`).join('');
-        li.innerHTML =
-            `<div class="dmeta">${esc(d.agent || '?')} รออยู่${d.work ? ' · ' + esc(d.work) : ''}</div>` +
+        return `<li><div class="dmeta">${esc(d.agent || '?')} รออยู่${d.work ? ' · ' + esc(d.work) : ''}</div>` +
             `<div class="dq">${esc(d.question || '')}</div>` +
-            `<div class="opts">${opts}<button class="other" data-id="${esc(d.id)}" data-answer="">อื่น ๆ…</button></div>`;
-        el.appendChild(li);
-    }
+            `<div class="opts">${opts}<button class="other" data-id="${esc(d.id)}" data-answer="">อื่น ๆ…</button></div></li>`;
+    }).join('');
+    // Same cards as last time: leave them, and the focus on them, alone.
+    if (html === DECISIONS_HTML) return;
+    DECISIONS_HTML = html;
+    el.innerHTML = html;
 }
 
 // ── the board: who is doing what ────────────────────────────────────
@@ -2593,11 +2628,15 @@ function renderBoard() {
             + `</li>`;
     };
 
-    list.innerHTML = active.map(row).join('')
+    const html = active.map(row).join('')
         + (closed.length
-            ? `<li class="done-toggle" role="button">${BOARD_SHOW_DONE ? '▾' : '▸'} เสร็จ/ยกเลิกใน 24 ชม. (${closed.length})</li>`
+            ? `<li class="done-toggle" role="button" tabindex="0" aria-expanded="${BOARD_SHOW_DONE}">`
+              + `${BOARD_SHOW_DONE ? '▾' : '▸'} เสร็จ/ยกเลิกใน 24 ชม. (${closed.length})</li>`
               + (BOARD_SHOW_DONE ? closed.map(row).join('') : '')
             : '');
+    if (html === list.dataset.html) return;
+    list.dataset.html = html;
+    list.innerHTML = html;
 }
 
 document.getElementById('board-list')?.addEventListener('click', (e) => {
@@ -2605,11 +2644,22 @@ document.getElementById('board-list')?.addEventListener('click', (e) => {
     if (b) {
         if (b.disabled || Date.now() - (CALLED.get(b.dataset.id) || 0) < CALL_HOLD_MS) return;
         CALLED.set(b.dataset.id, Date.now());
-        post({ type: 'officeSay', text: `@${b.dataset.agent} มีงานรอคุณบนบอร์ด [${b.dataset.id}] ${b.dataset.title}` });
+        // The task id and nothing else. The host builds the line from the task
+        // file — the title was written by an agent, and the line goes out
+        // sealed as the owner, so it must never carry an agent's words.
+        post({ type: 'officeCall', task: b.dataset.id });
         renderBoard();
         return;
     }
     if (e.target.closest('.done-toggle')) { BOARD_SHOW_DONE = !BOARD_SHOW_DONE; renderBoard(); }
+});
+document.getElementById('board-list')?.addEventListener('keydown', (e) => {
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.closest('.done-toggle')) {
+        e.preventDefault();
+        BOARD_SHOW_DONE = !BOARD_SHOW_DONE;
+        renderBoard();
+        document.querySelector('#board-list .done-toggle')?.focus();
+    }
 });
 
 // ── who the next line is for ────────────────────────────────────────
@@ -2682,14 +2732,27 @@ let BUS_URL = '';
 let ROOM_OPEN = true;
 /** Is he asleep at his spot? Only true while the light is off. */
 let BOSS_ASLEEP = false;
-function fileUrl(rel) { return rel && BUS_URL ? BUS_URL + rel : ''; }
+function fileUrl(rel) {
+    return rel && BUS_URL ? BUS_URL + String(rel).split('/').map(encodeURIComponent).join('/') : '';
+}
 function kb(b) { return b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB'; }
 
 function onMessage(evt) {
     const m = evt.data;
     if (!m || typeof m !== 'object') return;
+    if (m.type === 'officeSayFailed') { sayFailed(m.text, m.reason); return; }
     if (m.type !== 'officeState') return;
     apply(m.payload || {});
+}
+
+/** The host could not put the owner's line on the wall. The box was already
+ *  cleared and the boss already "said" it — give the words back and say so. */
+function sayFailed(text, reason) {
+    const box = document.getElementById('say-text');
+    if (box && !box.value.trim() && text) { box.value = text; markChips(); }
+    BOSS = null;
+    const note = document.getElementById('say-note');
+    if (note) note.textContent = '✗ ส่งไม่สำเร็จ — ' + (reason || 'ลองส่งใหม่อีกครั้ง');
 }
 
 function apply(p) {
@@ -2697,14 +2760,16 @@ function apply(p) {
     // Read before anything uses it: the agent list and the boss both branch on
     // whether the light is on.
     if (typeof p.roomOpen === 'boolean') ROOM_OPEN = p.roomOpen;
-    const hadAgents = AGENTS.length;
+    const hadAgents = AGENTS.map(a => a.id).join('|');
     // Nobody is drawn in a dark room. The seats were cleared when it closed;
     // presence only says an MCP process is alive somewhere, which is not the
     // same as being HERE, and drawing them at desks would say the room is
     // still in session.
     ROSTER = (p.agents || []).slice().sort((a, b) => a.id.localeCompare(b.id));
     AGENTS = ROOM_OPEN ? ROSTER : [];
-    if (AGENTS.length !== hadAgents) layoutDesks();
+    // By who, not how many: one agent aging out in the same poll another
+    // arrives left the newcomer with no desk, and the next frame threw on it.
+    if (AGENTS.map(a => a.id).join('|') !== hadAgents) layoutDesks();
 
     MESSAGES = p.messages || [];
     DECISIONS = p.decisions || [];
@@ -2747,6 +2812,7 @@ function apply(p) {
             }
         }
     }
+    const wasPrimed = PRIMED;
     PRIMED = true;
 
     // Emotes: play each one ONCE. Keyed on the emote's own timestamp because
@@ -2758,12 +2824,17 @@ function apply(p) {
         const key = a.id + '|' + e.atUtc;
         if (EMOTES_PLAYED.has(key)) continue;
         EMOTES_PLAYED.add(key);
-        if (PRIMED) {
+        // Checked against the state BEFORE this payload: PRIMED is already true
+        // by here, so every live emote played the moment the room was opened.
+        if (wasPrimed) {
             playSound(e.sound);
             if (e.say) BUBBLES.push({ agent: a.id, text: firstLine(e.say), color: agentColor(a.id), until: T + 240 });
         }
     }
-    if (EMOTES_PLAYED.size > 200) EMOTES_PLAYED.clear();
+    // Oldest first, never all of them: clearing the set replayed every emote
+    // that was still live.
+    if (EMOTES_PLAYED.size > 200)
+        for (const k of [...EMOTES_PLAYED].slice(0, EMOTES_PLAYED.size - 100)) EMOTES_PLAYED.delete(k);
 
     // Sitting here and LISTENING are different facts, and the owner needs the
     // second one before they type an order: an agent at a desk that never
@@ -2775,6 +2846,8 @@ function apply(p) {
     const bb = document.getElementById('room-broker');
     if (bb) {
         const st = (BROKER && BROKER.state) || 'stopped';
+        if (BROKER_CLICK && (st !== BROKER_CLICK.from || Date.now() - BROKER_CLICK.at > 10000)) BROKER_CLICK = null;
+        bb.disabled = !!BROKER_CLICK;
         const svc = (BROKER && BROKER.service) || null;
         const label = { running: 'บอสจัดสรรงาน ✓', adopted: 'บอสจัดสรรงาน (ตัวอื่นคุม)',
                         stopped: 'บอสหยุด — กดเพื่อเริ่ม', failed: 'บอสเริ่มไม่ขึ้น' }[st] || st;
@@ -2828,6 +2901,8 @@ document.getElementById('say').addEventListener('submit', (e) => {
     // be able to: an identity the agents trust has to come from a process the
     // owner controls, not from a document.
     post({ type: 'officeSay', text });
+    const note = document.getElementById('say-note');
+    if (note) note.textContent = '';
     box.value = '';
     markChips();
     // Show the boss immediately rather than waiting for the next poll. The
@@ -2953,7 +3028,7 @@ document.getElementById('room-model')?.addEventListener('click', (e) => {
     const open = panel.hidden;
     panel.hidden = !open;
     e.currentTarget.setAttribute('aria-expanded', String(open));
-    if (open) { MODEL_NOTE = ''; MODELS_KEY = ''; renderModels(); }
+    if (open) { placeUnderHead(panel); MODEL_NOTE = ''; MODELS_KEY = ''; renderModels(); }
 });
 document.addEventListener('click', (e) => {
     if (!e.target.closest('#model-panel, #room-model')) closeModelPanel();
@@ -3012,7 +3087,8 @@ function renderService(svc) {
     const account = !s.account ? '—'
         : s.privileged ? 'SYSTEM — สูงกว่าแอดมิน'
         : esc(s.account);
-    facts.innerHTML = !svc
+    const setHtml = (el, html) => { if (el && el.dataset.html !== html) { el.dataset.html = html; el.innerHTML = html; } };
+    setHtml(facts, !svc
         ? row('สถานะ', 'ยังไม่ได้รับข้อมูลจากแอป', 'meh')
         : [
             row('ติดตั้ง', s.installed ? 'ยังติดตั้งอยู่ — เปิดเองตอนเปิดเครื่อง' : '✓ ไม่ได้ติดตั้ง — ไม่จำเป็นแล้ว',
@@ -3026,7 +3102,7 @@ function renderService(svc) {
                 : s.canControl ? '✓ ถอนออกได้ทันที'
                 : 'ถอนออกได้ — ต้องยืนยันสิทธิ์แอดมิน',
                 s.installed && s.canControl ? 'yes' : 'meh'),
-        ].join('');
+        ].join(''));
 
     // What the facts mean, when it is not good news. Both are about the same
     // choice — running as SYSTEM — and both are things the owner cannot see
@@ -3036,25 +3112,32 @@ function renderService(svc) {
         warn.push('เลิกใช้แล้ว — รันเป็น SYSTEM จึงเรียก codex / claude ที่ล็อกอินไว้ในบัญชีคุณไม่ได้ (เวอร์ชันนี้จะถอยให้บอสในแอปเอง แต่ควรถอนออก)');
     if (s.installed && s.privileged && s.userWritableBinary)
         warn.push('ไฟล์โปรแกรมของ service อยู่ในโฟลเดอร์ผู้ใช้ แต่รันด้วยสิทธิ์ SYSTEM — โปรแกรมใดก็ตามที่แก้ไฟล์นั้นได้ จะได้สิทธิ์ SYSTEM ตามไปด้วย');
-    document.getElementById('service-warn').innerHTML = warn.map(w => `<li>⚠ ${w}</li>`).join('');
+    setHtml(document.getElementById('service-warn'), warn.map(w => `<li>⚠ ${w}</li>`).join(''));
 
     const shield = (needs) => needs ? ' 🛡' : '';
     // One way out, no way in. Uninstall stops it first, so there is no
     // separate stop to reach for.
     const acts = [];
     if (s.installed) acts.push(['uninstall', 'ถอนออก' + shield(!s.canControl), 'danger']);
-    document.getElementById('service-actions').innerHTML = acts.map(([a, t, c]) =>
-        `<button type="button" data-svc="${a}"${c ? ` class="${c}"` : ''}${SVC_PENDING ? ' disabled' : ''}>${t}</button>`).join('');
+    setHtml(document.getElementById('service-actions'), acts.map(([a, t, c]) =>
+        `<button type="button" data-svc="${a}"${c ? ` class="${c}"` : ''}${SVC_PENDING ? ' disabled' : ''}>${t}</button>`).join(''));
     document.getElementById('service-note').textContent = SVC_PENDING ? SVC_PENDING.note
         : SVC_RESULT ? SVC_RESULT
         : !s.installed && svc ? 'บอสในแอปทำงานในนามบัญชีคุณอยู่แล้ว จึงเห็น codex / claude ที่ล็อกอินไว้ครบ'
         : acts.some(([, t]) => t.includes('🛡')) ? '🛡 = Windows จะถามยืนยันสิทธิ์แอดมิน' : '';
 }
 
+/** Below the header row, wherever it wrapped to on a narrow window. */
+function placeUnderHead(panel) {
+    const head = document.getElementById('room-head');
+    if (head && panel) panel.style.top = (head.offsetTop + head.offsetHeight + 6) + 'px';
+}
+
 document.getElementById('room-service')?.addEventListener('click', (e) => {
     const panel = document.getElementById('service-panel');
     const open = panel.hidden;
     panel.hidden = !open;
+    if (open) placeUnderHead(panel);
     e.currentTarget.setAttribute('aria-expanded', String(open));
     if (open) renderService(BROKER && BROKER.service);
 });
@@ -3096,7 +3179,14 @@ document.getElementById('service-actions')?.addEventListener('click', (e) => {
 
 // The boss switch. Asks the client to start or stop the broker; the page has
 // no business starting a process that spawns agents, so all it does is ask.
+// Held until the state it was pressed in changes: the host answers before the
+// broker is up, so the button still said "press to start" and a second press
+// became "stop".
+let BROKER_CLICK = null;
 document.getElementById('room-broker')?.addEventListener('click', () => {
+    if (BROKER_CLICK) return;
+    BROKER_CLICK = { from: (BROKER && BROKER.state) || 'stopped', at: Date.now() };
+    document.getElementById('room-broker').disabled = true;
     post({ type: 'officeBroker' });
 });
 
@@ -3135,6 +3225,10 @@ document.getElementById('decisions').addEventListener('click', (e) => {
 document.getElementById('log').addEventListener('click', (e) => {
     const t = e.target.closest('[data-open]');
     if (t) post({ type: 'officeOpen', path: t.dataset.open });
+});
+document.getElementById('log').addEventListener('keydown', (e) => {
+    const t = e.target.closest('[data-open]');
+    if (t && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); post({ type: 'officeOpen', path: t.dataset.open }); }
 });
 
 // ── demo mode ───────────────────────────────────────────────────────
@@ -3227,12 +3321,18 @@ function demo() {
 // ── main loop ───────────────────────────────────────────────────────
 
 function frame() {
-    T++;
-    drawRoom();     // sprites, onto the logical canvas
-    present();      // blitted up, then lit, at device resolution
-    scanlines();
-    drawOverlay();
+    // Scheduled first: one frame that throws used to end the loop for good,
+    // and the room froze until somebody reloaded it.
     requestAnimationFrame(frame);
+    T++;
+    try {
+        drawRoom();     // sprites, onto the logical canvas
+        present();      // blitted up, then lit, at device resolution
+        scanlines();
+        drawOverlay();
+    } catch (err) {
+        if (!frame.reported) { frame.reported = true; console.error('office frame', err); }
+    }
 }
 
 window.addEventListener('resize', resize);

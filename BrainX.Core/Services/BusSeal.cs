@@ -66,6 +66,28 @@ public static class BusSeal
     }
 
     /// <summary>
+    /// Was this sealed line written under <paramref name="fileName"/>?
+    ///
+    /// A seal proves who wrote a line, not when. The room orders lines by the
+    /// tick that starts the file name, and readers hand over whatever sorts
+    /// after their cursor — so a copy of an old sealed order under a fresh
+    /// name verified and was dispatched again. The id carries the tick the
+    /// line was written at (c-&lt;ticks&gt;-…, and it IS sealed); a genuine write
+    /// names its file a moment later. A copy cannot be both new enough to be
+    /// read and old enough to match.
+    /// </summary>
+    public static bool WrittenAs(JObject message, string fileName, TimeSpan? tolerance = null)
+    {
+        var id = message["id"]?.ToString() ?? "";
+        var parts = id.Split('-');
+        if (parts.Length < 2 || !long.TryParse(parts[1], System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var written)) return false;
+        if (fileName.Length < 19 || !long.TryParse(fileName.AsSpan(0, 19), System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var named)) return false;
+        return Math.Abs(named - written) <= (tolerance ?? TimeSpan.FromSeconds(10)).Ticks;
+    }
+
+    /// <summary>
     /// The fields that make a line what it is. Not `ts`: JSON readers re-render
     /// dates by culture, and the id already carries the tick it was written at.
     /// </summary>
