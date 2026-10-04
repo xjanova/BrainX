@@ -85,6 +85,79 @@ internal static partial class Program
         return asks;
     }
 
+    /// <summary>
+    /// Take back every question in front of the owner that no longer means
+    /// anything. Owner (2026-10-04), looking at a folder card from two days
+    /// earlier about work that had long since found its folder: "ไอ้พวกนี้มัน
+    /// ค้างจากอะไร" — "อันไหนทำแล้วควรหายไปเอง".
+    ///  - workdir-: the label now resolves to a folder, or nothing waits on it.
+    ///  - norunner-: the agent has a runner now, or nothing waits for it.
+    ///  - ask-: the board task it was about is closed, or the same agent has
+    ///    asked about the same work again (the newest card stays).
+    /// Budget cards already go by themselves (ExpireClearedBudgetStop).
+    /// </summary>
+    private static void ExpireMootCards(BrokerConfig cfg, bool dryRun)
+    {
+        try
+        {
+            if (!Directory.Exists(BrokerDecisionDir)) return;
+            var open = Directory.GetFiles(BrokerDecisionDir, "*.json")
+                .Select(ReadJsonOrNull)
+                .Where(o => o != null && string.Equals(o["status"]?.ToString(), "open", StringComparison.OrdinalIgnoreCase))
+                .Select(o => o!)
+                .ToList();
+            if (open.Count == 0) return;
+
+            var board = CoworkTasks().Where(t => t["id"] != null)
+                .GroupBy(t => t["id"]!.ToString(), StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+            var waiting = new Dictionary<string, WaitingWork>(StringComparer.OrdinalIgnoreCase);
+            WaitingWork For(string a) => waiting.TryGetValue(a, out var w) ? w : waiting[a] = WaitingWorkFor(a);
+
+            void Take(JObject card, string why)
+            {
+                var id = card["id"]?.ToString() ?? "";
+                if (dryRun) { BrokerLog($"would withdraw [{id}] — {why}"); return; }
+                WithdrawDecision(id, why);
+            }
+
+            foreach (var card in open)
+            {
+                var id = card["id"]?.ToString() ?? "";
+                var agent = card["agent"]?.ToString() ?? "";
+                var work = card["work"]?.ToString() ?? "";
+
+                if (id.StartsWith("workdir-", StringComparison.Ordinal) && work.Length > 0)
+                {
+                    if (ResolveWorkDir(cfg, work) is { } dir) Take(card, $"'{work}' runs in {dir} now");
+                    else if (agent.Length > 0 && !For(agent).Works.Contains(work, StringComparer.OrdinalIgnoreCase))
+                        Take(card, $"nothing is waiting on '{work}' any more");
+                }
+                else if (id.StartsWith("norunner-", StringComparison.Ordinal) && agent.Length > 0)
+                {
+                    var w = For(agent);
+                    if (cfg.Runners.ContainsKey(agent)) Take(card, $"{agent} has a runner now");
+                    else if (w.Mail == 0 && w.Tasks == 0 && w.Room == 0) Take(card, $"nothing is waiting for {agent} any more");
+                }
+                else if (id.StartsWith("ask-", StringComparison.Ordinal))
+                {
+                    // The work it was about: a board task named by the label.
+                    var task = CoworkTaskRef.Match(work) is { Success: true } m && board.TryGetValue(m.Value, out var t) ? t : null;
+                    if (task != null && task["status"]?.ToString() is "done" or "dropped")
+                        Take(card, $"[{task["id"]}] is {task["status"]}");
+                    // Asked again: only the newest card is a question.
+                    else if (open.Any(o => !ReferenceEquals(o, card)
+                                           && (o["id"]?.ToString() ?? "").StartsWith("ask-", StringComparison.Ordinal)
+                                           && string.Equals(o["agent"]?.ToString(), agent, StringComparison.OrdinalIgnoreCase)
+                                           && string.Equals(o["work"]?.ToString() ?? "", work, StringComparison.OrdinalIgnoreCase)
+                                           && (CoworkUtc(o["askedUtc"]) ?? DateTime.MinValue) > (CoworkUtc(card["askedUtc"]) ?? DateTime.MinValue)))
+                        Take(card, $"{agent} asked about '{work}' again — the newer card stands");
+                }
+            }
+        }
+        catch (Exception ex) { BrokerLog("expiring moot cards — " + Redact(ex.Message)); }
+    }
+
     /// <summary>Has this agent a question in front of the owner right now?</summary>
     private static bool CoworkHasOpenAsk(string agent)
     {

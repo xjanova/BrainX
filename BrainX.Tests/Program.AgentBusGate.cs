@@ -934,6 +934,26 @@ internal static partial class Program
             PeerSays("codex", "claude", "@claude อีกเรื่อง", TimeSpan.FromMinutes(3));
             await BrokerOnce();
             Check("…and a new question within the quiet period waits", To("claude").Count(o => o["body"]?.ToString().Contains("ถามคุณ") == true) == 1);
+
+            // Owner: "อันไหนทำแล้วควรหายไปเอง" — questions that mean nothing any more go.
+            var cards = Path.Combine(bus, "broker", "decisions");
+            Directory.CreateDirectory(cards);
+            void Card(string id, string agent, string work, TimeSpan ago) =>
+                File.WriteAllText(Path.Combine(cards, id + ".json"), new JObject
+                {
+                    ["id"] = id, ["agent"] = agent, ["work"] = work, ["question"] = "q", ["options"] = new JArray(),
+                    ["status"] = "open", ["askedUtc"] = DateTime.UtcNow.Subtract(ago).ToString("o"),
+                }.ToString(), new UTF8Encoding(false));
+            string Status(string id) => JObject.Parse(File.ReadAllText(Path.Combine(cards, id + ".json")))["status"]!.ToString();
+            Card("workdir-old-label", "claude", "old-label", TimeSpan.FromDays(2));            // nothing waits on it
+            Card("ask-1-aaaa", "codex", "t-aaa111", TimeSpan.FromHours(1));                     // its task is done
+            Card("ask-2-bbbb", "codex", "isle-art", TimeSpan.FromHours(2));                     // asked again later…
+            Card("ask-3-cccc", "codex", "isle-art", TimeSpan.FromMinutes(10));                  // …this one stands
+            var swept = await BrokerOnce();
+            Check("a folder question about a label nothing waits on goes by itself", Status("workdir-old-label") == "withdrawn", swept);
+            Check("a question about a task that is done goes by itself", Status("ask-1-aaaa") == "withdrawn");
+            Check("an older copy of a question asked again goes; the newest stays",
+                  Status("ask-2-bbbb") == "withdrawn" && Status("ask-3-cccc") == "open");
         }
         finally
         {

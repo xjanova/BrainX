@@ -565,6 +565,10 @@ internal static partial class Program
         // talking while real work arrives is precisely the case to cut off.
         BrokerStudyBreaker(cfg, dryRun);
 
+        // Questions to the owner that have stopped meaning anything go away by
+        // themselves — before anything reads them as "parked on the owner".
+        ExpireMootCards(cfg, dryRun);
+
         // Unfinished board work nobody is moving, and paused work whose quota
         // should be back (Program.CoworkFollowUp.cs).
         var followUps = CoworkFollowUps(cfg, live, dryRun);
