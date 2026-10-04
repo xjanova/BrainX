@@ -23,6 +23,8 @@ internal static partial class Program
         checks.Add(("broker decisions: a folder question answered once stays answered", BrokerKeepsFolderAnswers));
         checks.Add(("broker decisions: an answer holds for that situation — same wall, same work is never asked again", BrokerAnswersStick));
         checks.Add(("agent questions: the same question twice is one card; an answered one is answered again", AskUserIsNotRepeated));
+        checks.Add(("broker decisions: the owner's answer reaches the agent even while its work is parked", OwnerAnswerSurvivesParking));
+        checks.Add(("broker decisions: what an answer means — ทำต่อ is carry on, ค่อยทำต่อ is not", AnswerIntentChecks));
         checks.Add(("cowork room: two windows of one agent both hear the owner, and one leaving does not deafen the other", TwoWindowsOneSeat));
     }
 
@@ -155,6 +157,18 @@ internal static partial class Program
             var ran = await Tick();
             Check("a folder in the answer is where the work runs", ran.Contains("spawned") && ran.Contains("brand-art"), ran);
             Check("…and the question stays closed", Decision("brand-art")?["status"]?.ToString() == "answered", Decision("brand-art")?.ToString());
+
+            // ── "carry on" (2026-10-04: "ทำต่อ" was stored as a hold) ──
+            Mail("isle-art");
+            await Tick();
+            foreach (var stamp in Directory.GetFiles(Path.Combine(bus, "wake"), "decision-*.stamp"))
+                File.SetLastWriteTimeUtc(stamp, DateTime.UtcNow.AddDays(-3));
+            Answer("isle-art", "ทำต่อ");
+            await Tick();
+            var carried = await Tick();
+            Check("\"ทำต่อ\" runs the work in the folder the card offered",
+                  carried.Split('\n').Any(l => l.Contains("spawned") && l.Contains("isle-art")), carried);
+            Check("…and is not a hold", !carried.Contains("on hold by the owner"), carried);
         }
         finally
         {
@@ -304,6 +318,168 @@ internal static partial class Program
         }
     }
 
+    /// <summary>
+    /// The loop the owner caught on 2026-10-04 ("สั่งงานไปไม่ทำให้เสร็จ"): codex
+    /// asked "15 destination images first, or wait for the scene?", the owner
+    /// answered four times, and every answer sat in codex's inbox under a
+    /// parked label. Each run the owner then called from the board was told
+    /// "there is no mail", never saw the answer, and asked again.
+    /// </summary>
+    private static async Task OwnerAnswerSurvivesParking()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the check", false); return; }
+
+        var root = Path.Combine(Path.GetTempPath(), "brainx-answer-park-e2e-" + Guid.NewGuid().ToString("N"));
+        var vault = Path.Combine(root, "vault");
+        var bus = Path.Combine(vault, ".obsidianx", "agent-bus");
+        var inbox = Path.Combine(bus, "inbox", "codex");
+        var decisions = Path.Combine(bus, "broker", "decisions");
+        var room = Path.Combine(bus, "cowork", "messages");
+        var key = Path.Combine(root, "bus-seal.key");
+        var promptOut = Path.Combine(root, "prompt.txt");
+        var script = Path.Combine(root, "runner.ps1");
+        Directory.CreateDirectory(inbox);
+        Directory.CreateDirectory(decisions);
+        Directory.CreateDirectory(room);
+        Directory.CreateDirectory(Path.Combine(vault, "Notes"));
+        BusSeal.EnsureKey(key);
+        // The "agent": writes down the prompt it was started with, and leaves.
+        File.WriteAllText(script, $"param([string]$p) [IO.File]::WriteAllText('{promptOut}', $p, (New-Object Text.UTF8Encoding $false))",
+                          new UTF8Encoding(false));
+        File.WriteAllText(Path.Combine(bus, "runners.json"), new JObject
+        {
+            ["pollSeconds"] = 5,
+            ["idleStudy"] = false,
+            ["workRoots"] = new JArray(),
+            ["escalation"] = new JObject { ["toast"] = false, ["chatCard"] = false, ["telegram"] = new JObject { ["botToken"] = "", ["chatId"] = "" } },
+            ["runners"] = new JObject
+            {
+                ["codex"] = new JObject
+                {
+                    ["exe"] = "powershell",
+                    ["args"] = new JArray("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "{prompt}"),
+                    ["cwd"] = root,
+                    ["onCall"] = true,
+                },
+            },
+        }.ToString(), new UTF8Encoding(false));
+
+        async Task<string> Tick()
+        {
+            var psi = new ProcessStartInfo(exe, $"broker --vault \"{vault}\" --once")
+            {
+                RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false,
+                StandardOutputEncoding = new UTF8Encoding(false),
+            };
+            psi.Environment["BRAINX_BUS_SEAL_KEY"] = key;
+            psi.Environment["BRAINX_SANDBOX"] = "1";
+            psi.Environment.Remove(StubMcpServer.EnvFlag);
+            using var p = Process.Start(psi)!;
+            var outTask = p.StandardOutput.ReadToEndAsync();
+            _ = p.StandardError.ReadToEndAsync();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+            await p.WaitForExitAsync(cts.Token);
+            return await outTask;
+        }
+        JObject? Card(string id) => File.Exists(Path.Combine(decisions, id + ".json"))
+            ? JObject.Parse(File.ReadAllText(Path.Combine(decisions, id + ".json"))) : null;
+        void Later()
+        {
+            var wake = Path.Combine(bus, "wake");
+            if (Directory.Exists(wake))
+                foreach (var stamp in Directory.GetFiles(wake, "decision-*.stamp"))
+                    File.SetLastWriteTimeUtc(stamp, DateTime.UtcNow.AddDays(-3));
+        }
+
+        try
+        {
+            SetRoomLight(bus, on: true);
+
+            // A peer's mail on a label with no folder: the folder card goes up,
+            // and the owner says "not now".
+            var peer = Path.Combine(inbox, $"{DateTime.UtcNow.Ticks:D19}-claude-{Guid.NewGuid().ToString("N")[..4]}.json");
+            File.WriteAllText(peer, new JObject
+            {
+                ["id"] = "m-peer", ["ts"] = DateTime.UtcNow.ToString("o"),
+                ["from"] = "claude", ["to"] = "codex", ["body"] = "the scene is not ready", ["work"] = "isle-art",
+            }.ToString(), new UTF8Encoding(false));
+            await Tick();
+            Check("(the folder card is up)", Card("workdir-isle-art")?["status"]?.ToString() == "open", Card("workdir-isle-art")?.ToString());
+            Later();
+            var folder = Card("workdir-isle-art")!;
+            folder["answer"] = "ไว้ทีหลัง";
+            folder["answeredVia"] = "cowork";
+            File.WriteAllText(Path.Combine(decisions, "workdir-isle-art.json"), folder.ToString(), new UTF8Encoding(false));
+            await Tick();
+            // codex read the peer's line in an earlier run; only the answer will be left.
+            Directory.CreateDirectory(Path.Combine(bus, "read", "codex"));
+            File.Move(peer, Path.Combine(bus, "read", "codex", Path.GetFileName(peer)));
+
+            // codex asked the owner about that work, and the owner answered.
+            var askId = $"ask-{DateTime.UtcNow.Ticks}-ab12";
+            File.WriteAllText(Path.Combine(decisions, askId + ".json"), new JObject
+            {
+                ["id"] = askId, ["agent"] = "codex", ["work"] = "isle-art",
+                ["question"] = "15 destination images first, or wait for the scene?",
+                ["options"] = new JArray("images first", "wait for the scene"),
+                ["status"] = "open", ["askedUtc"] = DateTime.UtcNow.ToString("o"),
+                ["answer"] = "images first", ["answeredVia"] = "cowork",
+            }.ToString(), new UTF8Encoding(false));
+            var handed = await Tick();
+            Check("the answer is handed to codex", handed.Contains("handed to codex"), handed);
+            Check("…and sits in its inbox under the parked label",
+                  Directory.GetFiles(inbox, "*.json").Select(f => JObject.Parse(File.ReadAllText(f)))
+                           .Any(o => o["topic"]?.ToString() == "owner-decision" && o["work"]?.ToString() == "isle-art"));
+
+            // The owner presses "call" on the board. codex has a seat, as it
+            // did on the real vault — that is what makes the line count as
+            // the newest thing waiting for it.
+            Directory.CreateDirectory(Path.Combine(bus, "cowork", "members"));
+            File.WriteAllText(Path.Combine(bus, "cowork", "members", "codex.json"),
+                new JObject { ["agent"] = "codex", ["joinedUtc"] = DateTime.UtcNow.ToString("o"), ["cursor"] = "" }.ToString(),
+                new UTF8Encoding(false));
+            Thread.Sleep(20);
+            OwnerSays(room, key, "@codex มีงานรอคุณบนบอร์ด", to: "codex");
+            var called = await Tick();
+            Check("the owner's room line does not lift their hold and re-ask the folder question",
+                  Card("workdir-isle-art")?["status"]?.ToString() == "answered", Card("workdir-isle-art")?.ToString() + " || " + called);
+            Check("codex is started for the room", called.Contains("spawned"), called);
+
+            var deadline = DateTime.UtcNow.AddSeconds(30);
+            while (!File.Exists(promptOut) && DateTime.UtcNow < deadline) await Task.Delay(250);
+            var prompt = File.Exists(promptOut) ? File.ReadAllText(promptOut) : "";
+            Check("the run is told the owner answered, and where to read it",
+                  prompt.Contains("THE OWNER HAS ANSWERED") && prompt.Contains("agent_inbox {work:'isle-art'}"), prompt + " || " + called);
+            Check("…and is not told there is no mail", prompt.Length > 0 && !prompt.Contains("There is no mail"), prompt);
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    private static Task AnswerIntentChecks()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the check", false); return Task.CompletedTask; }
+        var intent = System.Reflection.Assembly.LoadFrom(Path.ChangeExtension(exe, ".dll")).GetType("BrainX.Mcp.Program")!
+            .GetMethod("AnswerIntent", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+        foreach (var (answer, expected) in new[]
+        {
+            ("ทำต่อ", "go"), ("ไปต่อเลย", "go"), ("continue", "go"), ("Go ahead", "go"),
+            ("ค่อยทำต่อ", "mine"), ("รอก่อน ค่อยทำต่อ", "mine"), ("don't continue", "mine"), ("ไว้ทีหลัง", "mine"),
+            ("เดี๋ยวฉันทำต่อเอง", "mine"), ("งานนี้เดี๋ยวฉันทำเอง", "mine"),
+            ("ยังไม่ต้องทำต่อ", "cancel"), ("ยกเลิกงานนี้", "cancel"),
+            ("เดี๋ยวฉันเพิ่มใน runners.json เอง", "later"), ("แก้ให้แล้ว ลองใหม่", "retry"),
+        })
+        {
+            var got = intent.Invoke(null, [answer]) as string;
+            Check($"\"{answer}\" → {expected}", got == expected, got);
+        }
+        return Task.CompletedTask;
+    }
+
     private static async Task AskUserIsNotRepeated()
     {
         var exe = FindMcpExe();
@@ -351,6 +527,24 @@ internal static partial class Program
 
             var other = await s1.Call("agent_ask_user", new JObject { ["question"] = "Which art style?" });
             Check("a different question is a new card", other["asked"]?.Value<bool>() == true, other.ToString());
+
+            // An answer waiting unread, then the same decision asked in other
+            // words — five cards for one decision on 2026-10-04.
+            var box = Path.Combine(bus, "inbox", "codex");
+            Directory.CreateDirectory(box);
+            File.WriteAllText(Path.Combine(box, $"{DateTime.UtcNow.Ticks:D19}-broker-ab12.json"), new JObject
+            {
+                ["id"] = "m-answer", ["ts"] = DateTime.UtcNow.ToString("o"), ["from"] = "broker", ["to"] = "codex",
+                ["topic"] = "owner-decision", ["body"] = "The owner answered your question.\n\nQ: Which art style?\nA: Flat",
+            }.ToString(), new UTF8Encoding(false));
+            var cards = Directory.GetFiles(Path.Combine(bus, "broker", "decisions"), "ask-*.json").Length;
+            var reworded = await s1.Call("agent_ask_user", new JObject { ["question"] = "Flat or painterly — which style should the art use?" });
+            Check("an unread answer is handed over instead of a new card",
+                  reworded["unreadAnswer"]?.Value<bool>() == true && reworded["answers"]?.ToString().Contains("A: Flat") == true, reworded.ToString());
+            Check("…no card raised", Directory.GetFiles(Path.Combine(bus, "broker", "decisions"), "ask-*.json").Length == cards);
+            Check("…and the answer is now read", Directory.GetFiles(box, "*.json").Length == 0);
+            var askedAgain = await s1.Call("agent_ask_user", new JObject { ["question"] = "Flat or painterly — which style should the art use?" });
+            Check("asking again after reading it is a real question", askedAgain["asked"]?.Value<bool>() == true, askedAgain.ToString());
 
             // A client that calls itself "owner" is an ordinary peer.
             impostor = await StartBusSession(exe, vault, key, "owner");

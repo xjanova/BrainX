@@ -91,12 +91,25 @@ internal static partial class Program
               .Append("Do not call cowork_leave when you finish — just stop; the seat is shared with your other sessions. ");
         }
 
+        // The owner's answer to a question this agent asked — named even when
+        // its label is parked and stripped from everything below. On
+        // 2026-10-04 the owner answered codex's "15 destination images first,
+        // or wait for the scene?" four times; each answer sat in its inbox
+        // under a parked label, every run the owner then called was told
+        // "there is no mail", and each one asked the same question again.
+        var answers = work.Answers ?? Array.Empty<string>();
+        if (answers.Count > 0)
+            sb.Append("THE OWNER HAS ANSWERED A QUESTION YOU ASKED, and you have not read it. Before you decide anything, read it: ")
+              .Append(string.Join(", ", answers.Select(a => a.Length == 0 ? "agent_inbox {}" : InboxCallFor(a))))
+              .Append(" (topic 'owner-decision'). Carry on with that decision; do not ask it again. ");
+
         if (work.Mail == 0 && work.Tasks == 0 && work.Room > 0)
         {
             // Nothing else is waiting: do not send it hunting through an empty
             // inbox and an empty queue, which reads as "no work" and ends the
             // run before it has looked at the only thing there is.
-            sb.Append("There is no mail and no queued task — the room is the whole job. ");
+            if (answers.Count == 0)
+                sb.Append("There is no mail and no queued task — the room is the whole job. ");
             sb.Append(HeadlessNote());
             return sb.ToString();
         }
@@ -1439,19 +1452,29 @@ internal static partial class Program
     }
 
     /// <summary>Keep the owner's answer to a folder question, and say what it
-    /// means: use, later, cancel or hold.</summary>
-    private static string RecordWorkDirAnswer(string agent, string work, string answer)
+    /// means: use, later, cancel or hold. <paramref name="offered"/> is the
+    /// card's own buttons, so "ทำต่อ" can mean the folder the card offered.</summary>
+    private static string RecordWorkDirAnswer(string agent, string work, string answer, IEnumerable<string>? offered = null)
     {
         // A folder named in the answer, if it exists — both of the card's own
         // "use <cwd>" options, and anything the owner typed that is a path.
-        string? dir = null;
-        foreach (System.Text.RegularExpressions.Match m in
-                 System.Text.RegularExpressions.Regex.Matches(answer, @"[A-Za-z]:\\[^\s""'<>|?*]*"))
+        static string? FolderIn(string text)
         {
-            var p = m.Value.TrimEnd('.', ',', ')', ';');
-            if (p.Length > 3 && Directory.Exists(p)) { dir = p; break; }
+            foreach (System.Text.RegularExpressions.Match m in
+                     System.Text.RegularExpressions.Regex.Matches(text, @"[A-Za-z]:\\[^\s""'<>|?*]*"))
+            {
+                var p = m.Value.TrimEnd('.', ',', ')', ';');
+                if (p.Length > 3 && Directory.Exists(p)) return p;
+            }
+            return null;
         }
-        var mode = dir != null ? "use" : AnswerIntent(answer) switch
+        var intent = AnswerIntent(answer);
+        var dir = FolderIn(answer);
+        // "Carry on" typed under a card that says where it would run is that
+        // button, not a hold.
+        if (dir == null && intent == "go" && offered != null)
+            dir = offered.Select(FolderIn).FirstOrDefault(d => d != null);
+        var mode = dir != null ? "use" : intent switch
         {
             "later" => "later",
             "cancel" => "cancel",
@@ -1898,9 +1921,21 @@ internal static partial class Program
         int Mail, int Tasks, IReadOnlyList<string> Works, double OldestHours, int Room = 0, int Unlabelled = 0,
         DateTime NewestUtc = default, IReadOnlyDictionary<string, DateTime>? WorkNewest = null)
     {
-        /// <summary>When the newest message on this label arrived.</summary>
+        /// <summary>
+        /// When the newest message on this label arrived. A label whose only
+        /// mail is the broker's own (an answer handed on) has no news: falling
+        /// back to the newest of EVERYTHING made the owner's next line in the
+        /// room count as new work on it, which lifted the owner's hold and put
+        /// the folder card for lucky-isles-art back up (2026-10-04).
+        /// </summary>
         public DateTime NewestFor(string work) =>
-            WorkNewest != null && WorkNewest.TryGetValue(work, out var t) ? t : NewestUtc;
+            WorkNewest == null ? NewestUtc
+            : WorkNewest.TryGetValue(work, out var t) ? t : DateTime.MinValue;
+
+        /// <summary>Labels (or "" for none) holding an answer the owner gave to
+        /// a question this agent asked. Kept apart from <see cref="Works"/>
+        /// because it must survive the label being parked.</summary>
+        public IReadOnlyList<string> Answers { get; init; } = Array.Empty<string>();
     }
 
     /// <summary>The same thing as <see cref="Describe"/>, for the owner.
@@ -1988,6 +2023,7 @@ internal static partial class Program
         var works = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
         var workNewest = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
         var nudges = new List<string>();
+        var answers = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
         // What the owner said they would take care of themselves. Everything
         // that was waiting at that moment is theirs now, not this broker's:
         // spawning for it, or asking about it again, is the nagging the owner
@@ -2044,6 +2080,8 @@ internal static partial class Program
                     else unlabelled++;
 
                     mail++;
+                    if (string.Equals(o?["topic"]?.ToString(), "owner-decision", StringComparison.OrdinalIgnoreCase))
+                        answers.Add(string.IsNullOrWhiteSpace(w) ? "" : SanitizeAgentSlug(w!));
                     // The broker's own mail (an answer handed on, a cleared-work
                     // notice) is work for the agent but not NEWS for the owner:
                     // counting it as the newest work made delivering "try again"
@@ -2099,7 +2137,10 @@ internal static partial class Program
             foreach (var n in nudges)
                 try { if ((DateTime.UtcNow - File.GetLastWriteTimeUtc(n)).TotalMinutes > 2) File.Delete(n); } catch { }
 
-        return new WaitingWork(mail, tasks, works.ToList(), oldest, room, unlabelled, newest, workNewest);
+        return new WaitingWork(mail, tasks, works.ToList(), oldest, room, unlabelled, newest, workNewest)
+        {
+            Answers = answers.ToList(),
+        };
     }
 
     /// <summary>

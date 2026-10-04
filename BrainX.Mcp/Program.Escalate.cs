@@ -295,7 +295,8 @@ internal static partial class Program
                 string? workdirMode = null;
                 if (id.StartsWith("workdir-", StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(work) && !string.IsNullOrWhiteSpace(agent))
                 {
-                    workdirMode = RecordWorkDirAnswer(agent, work!, answer);
+                    workdirMode = RecordWorkDirAnswer(agent, work!, answer,
+                        (o["options"] as JArray)?.Select(x => x.ToString()));
                     // "ยกเลิก" means the work goes, not that it waits a week and asks again.
                     if (workdirMode == "cancel") ClearWorkstream(work!);
                 }
@@ -326,7 +327,7 @@ internal static partial class Program
                 // question — which is how 8 waiting became 9 on 2026-09-25.
                 var deliverable = (cfg.Runners.ContainsKey(agent) || IsOnline(PresenceAgeSeconds(agent)))
                                   && workdirMode is null or "use"
-                                  && intent is null or "retry" or "later";
+                                  && intent is null or "retry" or "later" or "go";
                 if (!string.IsNullOrWhiteSpace(agent) && deliverable)
                 {
                     DeliverBusMessage("broker", agent,
@@ -375,9 +376,15 @@ internal static partial class Program
     /// <summary>
     /// What an answer to one of the broker's own questions MEANS, from the
     /// button text or whatever the owner typed: retry · later (runners.json /
-    /// add a runner) · cancel · mine (I'll handle it / move it myself) · use
-    /// (names a folder; workdir only). Checked in this order on purpose —
-    /// "เดี๋ยวฉันเพิ่มใน runners.json เอง" is "later", not "mine".
+    /// add a runner) · cancel · mine (I'll handle it / move it myself) · go
+    /// (carry on with what the card offered) · use (names a folder; workdir
+    /// only). Checked in this order on purpose — "เดี๋ยวฉันเพิ่มใน runners.json
+    /// เอง" is "later", not "mine", and "เดี๋ยวฉันทำต่อเอง" is "mine", not "go".
+    ///
+    /// "go" exists because "ทำต่อ" fell through to "mine", which a folder card
+    /// stores as a HOLD. On 2026-10-04 the owner typed it on lucky-isles-art's
+    /// card; the label sat parked all day, and the four answers they gave
+    /// codex's own question about that work were parked behind it, unread.
     /// </summary>
     internal static string AnswerIntent(string answer)
     {
@@ -386,7 +393,11 @@ internal static partial class Program
         if (Has("ยกเลิก", "cancel", "call off", "drop it", "ทิ้ง", "ไม่ต้องทำ", "เลิกทำ")) return "cancel";
         if (Has("runners.json", "runner ให้", "เพิ่ม runner", "add a runner", "add runner", "add it to")) return "later";
         if (Has("ลองใหม่", "try again", "retry", "แก้ให้แล้ว", "fixed")) return "retry";
-        if (Has("ทำเอง", "for me", "myself", "ย้ายงาน", "reassign", "คนอื่น", "leave that", "ปล่อย")) return "mine";
+        if (Has("ทำเอง", "ต่อเอง", "for me", "myself", "ย้ายงาน", "reassign", "คนอื่น", "leave that", "ปล่อย")) return "mine";
+        // "ค่อยทำต่อ" / "don't continue" carry the go word and mean the opposite.
+        if (Has("ค่อย", "ทีหลัง", "ไว้ก่อน", "รอก่อน", "ยังไม่", "later", "not now", "wait", "don't", "do not", "stop")) return "mine";
+        if (Has("ทำต่อ", "ไปต่อ", "ต่อเลย", "ทำเลย", "เดินต่อ", "ลุยเลย", "ดำเนินการต่อ",
+                "continue", "go ahead", "carry on", "proceed")) return "go";
         return "mine";
     }
 
@@ -425,6 +436,42 @@ internal static partial class Program
 
         var me = BusIdentity();
         var work = args["work"]?.ToString() is { Length: > 0 } w ? SanitizeAgentSlug(w) : "";
+
+        // An answer about this work is already in the inbox, unread. Asking
+        // again in other words cannot be matched against the card below, so
+        // on 2026-10-04 codex raised five cards for one decision the owner had
+        // answered four times. Hand the answer over instead — read, exactly
+        // as agent_inbox would — and let the agent ask again only if it does
+        // not cover what it needs.
+        try
+        {
+            var inbox = BusInboxDir(me);
+            var unread = new JArray();
+            if (Directory.Exists(inbox))
+                foreach (var f in Directory.GetFiles(inbox, "*.json").OrderBy(Path.GetFileName, StringComparer.Ordinal))
+                {
+                    var m = ReadJsonOrNull(f);
+                    if (m == null || !string.Equals(m["topic"]?.ToString(), "owner-decision", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!string.Equals(m["work"]?.ToString()?.Trim() ?? "", work, StringComparison.OrdinalIgnoreCase)) continue;
+                    var readDir = BusReadDir(me);
+                    Directory.CreateDirectory(readDir);
+                    try { File.Move(f, Path.Combine(readDir, Path.GetFileName(f)), overwrite: true); }
+                    catch (IOException) { continue; }            // another session of mine took it
+                    catch (UnauthorizedAccessException) { continue; }
+                    unread.Add(m["body"]?.ToString() ?? "");
+                }
+            if (unread.Count > 0)
+                return new JObject
+                {
+                    ["asked"] = false,
+                    ["unreadAnswer"] = true,
+                    ["answers"] = unread,
+                    ["hint"] = "The owner already answered a question you asked about this work, and it was waiting unread in your inbox "
+                             + "(now marked read). Carry on with that decision. Ask again only if it really does not cover what you need — "
+                             + "and then say what changed.",
+                };
+        }
+        catch { /* a failed lookup only costs a duplicate card */ }
 
         // The same question again — a fresh session re-reading the same notes,
         // a run that forgot it already asked. It used to raise a brand-new card
