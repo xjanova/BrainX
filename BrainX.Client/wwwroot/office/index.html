@@ -24,6 +24,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BrainX — Cowork Room</title>
+<!-- three.js and the VRM loader, for Mind's real body standing in the room
+     (mindfigure.js, loaded on demand). Shared with her own page. -->
+<script type="importmap">
+{ "imports": {
+  "three": "../universe/vendor/three/three.module.js",
+  "@pixiv/three-vrm": "../universe/vendor/three-vrm/three-vrm.module.min.js"
+} }
+</script>
 <!-- The host cache-busts index.html with ?v=<newest file under office/>; the
      same stamp goes on everything it loads, or WebView2 keeps serving the old
      office.js from cache after an update and the room looks undeployed. -->
@@ -62,6 +70,10 @@
            (MainWindow.CoworkHistory). The brain's notes are not touched. -->
       <button id="room-history" type="button" aria-expanded="false" aria-controls="history-panel"
               title="ประวัติงาน — ดูย้อนหลังแยกตามโปรเจค ตั้งแต่ต้นจนจบ ลบออกจากประวัติได้">🕘 ประวัติ</button>
+      <!-- Mind as the room's secretary, on the local model (MainWindow.
+           CoworkSecretary): on/off, which model, and what she may do. -->
+      <button id="room-mind" type="button" aria-expanded="false" aria-controls="mind-panel"
+              title="มาย — เลขาของห้อง บนโมเดลในเครื่อง (Ollama) เปิด/ปิด และเลือกว่าให้ทำอะไรได้บ้าง">✨ มาย</button>
       <!-- Which model the boss starts each agent on. Only runs the broker
            starts — a session the owner opened keeps its own app's model. -->
       <button id="room-model" type="button" aria-expanded="false" aria-controls="model-panel"
@@ -94,6 +106,13 @@
       <p id="work-note" role="status"></p>
       <p class="work-foot">⏸ พัก = หยุดไว้ชั่วคราว ไม่มีใครตามงานนี้จนกว่าจะกดทำต่อ ·
         🎯 โฟกัส = ทำงานนี้ก่อน งานอื่นพักไว้หมด · ✖ เลิก = ยกเลิกถาวร</p>
+    </section>
+
+    <section id="mind-panel" hidden aria-label="มาย — เลขาของห้อง">
+      <header>มาย <span>— เลขาห้อง บนโมเดลในเครื่อง (Ollama) ไม่กินโควตาของใคร</span></header>
+      <label class="mind-switch"><input type="checkbox" id="mind-on"> เปิดใช้เลขา</label>
+      <div id="mind-body"></div>
+      <p id="mind-note" role="status"></p>
     </section>
 
     <section id="history-panel" hidden aria-label="ประวัติงานแยกตามโปรเจค">

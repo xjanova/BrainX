@@ -2702,6 +2702,8 @@ public partial class MainWindow : Window
         MaybeAutoStartMind();
         // The cowork room comes back in its own window if that is where it was.
         MaybeRestoreCoworkWindow();
+        // Mind as the room's secretary, if the owner switched her on.
+        StartSecretary();
 
         // An update that landed while Claude was open leaves Claude talking to
         // the previous MCP. Check right after startup, when it matters most:

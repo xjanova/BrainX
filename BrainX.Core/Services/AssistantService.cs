@@ -317,6 +317,76 @@ public sealed class AssistantService
         catch { }
     }
 
+    /// <summary>
+    /// The model for questions about the cowork room. Measured 2026-10-06 on
+    /// the real room: llama3.2:3b handed the room snapshot back verbatim
+    /// instead of answering; gemma3:4b answered who is on what, with task ids.
+    /// So a room question goes to the first of these that is installed, and
+    /// to her usual model only when none is.
+    /// </summary>
+    public async Task<string> RoomModelAsync(CancellationToken ct = default)
+    {
+        var have = await ChatModelsAsync(ct);
+        foreach (var want in new[] { "gemma3:4b", "qwen3:4b", "qwen3", "gemma3", "qwen2.5" })
+        {
+            var hit = have.FirstOrDefault(m => m.StartsWith(want, StringComparison.OrdinalIgnoreCase)
+                                               && !m.Contains("27b", StringComparison.OrdinalIgnoreCase));
+            if (hit != null) return hit;
+        }
+        return await ModelAsync(ct);
+    }
+
+    /// <summary>
+    /// The chat models Ollama has on this machine — embedding and rerank
+    /// models left out, since asking one to chat returns nothing.
+    /// </summary>
+    public static async Task<List<string>> ChatModelsAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            var tags = await http.GetStringAsync($"{OllamaBase}/api/tags", ct);
+            return (JObject.Parse(tags)["models"] as JArray)?
+                .Select(m => m["name"]?.ToString() ?? "")
+                .Where(n => n.Length > 0
+                         && !n.Contains("embed", StringComparison.OrdinalIgnoreCase)
+                         && !n.Contains("bge", StringComparison.OrdinalIgnoreCase)
+                         && !n.Contains("nomic", StringComparison.OrdinalIgnoreCase)
+                         && !n.Contains("rerank", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+                .ToList() ?? new List<string>();
+        }
+        catch { return new List<string>(); }
+    }
+
+    /// <summary>
+    /// One question to a local model with a system prompt of the caller's own
+    /// — no persona, no brain retrieval, no history. What the room's
+    /// secretary uses: it brings its own context (the board, the transcript).
+    /// <paramref name="model"/> empty = the same model she chats with.
+    /// </summary>
+    public async Task<string> ChatAsync(string system, string user, string? model = null,
+                                        int maxTokens = 600, CancellationToken ct = default)
+    {
+        var body = new JObject
+        {
+            ["model"] = string.IsNullOrWhiteSpace(model) ? await ModelAsync(ct) : model,
+            ["messages"] = new JArray
+            {
+                new JObject { ["role"] = "system", ["content"] = system },
+                new JObject { ["role"] = "user", ["content"] = user },
+            },
+            ["stream"] = false,
+            ["keep_alive"] = "30m",
+            ["options"] = new JObject { ["num_predict"] = maxTokens, ["temperature"] = 0.3 },
+        }.ToString(Formatting.None);
+        using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(4) };
+        using var resp = await http.PostAsync($"{OllamaBase}/api/chat",
+            new StringContent(body, new UTF8Encoding(false), "application/json"), ct);
+        resp.EnsureSuccessStatusCode();
+        return Clean(JObject.Parse(await resp.Content.ReadAsStringAsync(ct))["message"]?["content"]?.ToString());
+    }
+
     public readonly List<(string Role, string Text)> History = new();
     private const int MaxTurns = 8;
     private int _sinceLearn;
@@ -337,6 +407,23 @@ public sealed class AssistantService
             sys.AppendLine();
             sys.AppendLine("## What you know about the owner");
             sys.AppendLine(owner);
+        }
+        // The cowork room, when the question is about it. Owner (2026-10-06):
+        // "เมื่อถามเรื่องที่เกิดใน ห้อง cowork กับหน้าต่าง มายด์ เธอต้องรู้ด้วย".
+        // Read live off the bus files, so it is true as of this question.
+        var aboutRoom = CoworkSnapshot.LooksAboutTheRoom(question);
+        if (aboutRoom)
+        {
+            sys.AppendLine();
+            sys.AppendLine("## The cowork room right now (read from the room's own files a moment ago)");
+            sys.AppendLine("The owner's agents (claude, codex, grok, …) work together in this room. Answer questions about it "
+                         + "from this, naming who, what and when. It is a snapshot: say what it shows, never invent progress.");
+            // Small on purpose. Measured on gemma3:4b / GTX 1070 Ti: a 3,000-char
+            // room answered in 9 s, a 7,000-char one in 113 s and less
+            // accurately — past the context the model starts dropping text.
+            sys.AppendLine(CoworkSnapshot.Build(_vault, lines: 15, maxChars: 3000));
+            // The brain's notes share that budget on a room question.
+            if (context.Length > 1500) context = context[..1500];
         }
         sys.AppendLine();
         if (context.Length > 0)
@@ -367,7 +454,7 @@ public sealed class AssistantService
 
         var body = new JObject
         {
-            ["model"] = await ModelAsync(ct),
+            ["model"] = aboutRoom ? await RoomModelAsync(ct) : await ModelAsync(ct),
             ["messages"] = msgs,
             ["stream"] = false,
             ["keep_alive"] = "30m",

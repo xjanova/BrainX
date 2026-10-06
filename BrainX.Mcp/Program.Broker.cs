@@ -593,6 +593,12 @@ internal static partial class Program
         // should be back (Program.CoworkFollowUp.cs).
         var followUps = CoworkFollowUps(cfg, live, dryRun);
 
+        // "@มาย" with no mind runner is for the secretary the BrainX window runs
+        // on the local model (MainWindow.CoworkSecretary) — not a session to
+        // start, and not "could not be called". With coding switched on she
+        // has a runner (MindCoderRunner) and is called like anyone else.
+        if (!cfg.Runners.ContainsKey("mind")) { coworkCalls.Remove("mind"); followUps.Remove("mind"); }
+
         var waiting = AgentsWithWaitingWork(coworkCalls.Keys.Concat(followUps.Keys));
         foreach (var agent in waiting)
         {
@@ -2725,6 +2731,46 @@ internal static partial class Program
     /// actually start, with the flags that are known to work — a config file
     /// whose examples do not run teaches the owner nothing.
     /// </summary>
+    /// <summary>
+    /// Mind as a coding agent, when the owner gave her that in the room
+    /// (cowork/secretary.json: enabled, can.code, codeModel — only settable on a
+    /// card with the memory for a coding model). She runs as codex on the local
+    /// model (`--oss --local-provider ollama`), with codex's own exe and
+    /// folder, and tells the brain she is "mind" through her MCP server's env —
+    /// codex hands its servers only the env their config names, so it goes in
+    /// as a config override rather than as the child's environment.
+    /// </summary>
+    private static RunnerSpec? MindCoderRunner(IReadOnlyDictionary<string, RunnerSpec> runners)
+    {
+        try
+        {
+            var o = ReadJsonOrNull(Path.Combine(CoworkRoot, "secretary.json"));
+            if (o?["enabled"]?.ToObject<bool?>() != true || o["can"]?["code"]?.ToObject<bool?>() != true) return null;
+            var model = o["codeModel"]?.ToString() ?? "";
+            if (!RunnerModels.IsValidId(model)) return null;
+            runners.TryGetValue("codex", out var codex);
+            return new RunnerSpec
+            {
+                Exe = codex?.Exe is { Length: > 0 } e ? e : "codex",
+                ExeFallbacks = codex?.ExeFallbacks ?? new List<string>(),
+                Args = new List<string>
+                {
+                    "exec", "--oss", "--local-provider", "ollama",
+                    "-c", "mcp_servers.brainx-brain.env.BRAINX_AS_AGENT=\"mind\"",
+                    "-c", "mcp_servers.brainx-brain.env.BRAINX_BROKER_RUN=\"1\"",
+                    "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox",
+                    "-C", "{cwd}", "{prompt}",
+                },
+                Cwd = codex?.Cwd ?? "",
+                Model = model,
+                ModelFlag = "-m",
+                EffortArgs = new List<string>(),
+                OnCall = false,
+            };
+        }
+        catch { return null; }
+    }
+
     private static BrokerConfig LoadBrokerConfig()
     {
         if (!File.Exists(BrokerConfigPath)) WriteDefaultBrokerConfig();
@@ -2783,6 +2829,8 @@ internal static partial class Program
                     Efforts = r["efforts"],
                 };
             }
+
+        if (!runners.ContainsKey("mind") && MindCoderRunner(runners) is { } mind) runners["mind"] = mind;
 
         var workDirs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         if (o["workDirs"] is JObject wd)

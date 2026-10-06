@@ -56,6 +56,7 @@ public partial class MainWindow
             if (Directory.Exists(CoworkBusRoot))
                 core.SetVirtualHostNameToFolderMapping("bus.local", CoworkBusRoot, CoreWebView2HostResourceAccessKind.DenyCors);
             core.WebMessageReceived += OnCoworkMessage;
+            await MapMindAvatarAsync(core);
             // ?popout tells the page it is the window: its header button then
             // brings the room back instead of popping another one out.
             core.Navigate("https://universe.local/office/index.html?popout=1&v=" + CoworkAssetStamp(wwwroot));

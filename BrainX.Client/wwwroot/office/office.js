@@ -258,6 +258,8 @@ const DESKS = new Map();  // agent id → {gx,gy,seat:{x,y},screen:{x,y}}
 const SEEN = new Set();   // message ids already shown as bubbles
 const EMOTES_PLAYED = new Set();  // agent|atUtc, so one emote sounds once
 let PRIMED = false;       // first payload is backlog: show it, don't perform it
+/** Mind as the room's secretary — from the host's payload (see renderMindPanel). */
+let SECRETARY = null;
 const BUBBLES = [];       // {agent,text,color,until} — `until` in performance.now() ms
 /** How long a line stays up, in milliseconds. It used to be counted in FRAMES
  *  (T + 240): four seconds at 60 Hz, under two on a 144 Hz screen, and frozen
@@ -3058,17 +3060,23 @@ function renderChips() {
     const el = document.getElementById('say-to');
     if (!el) return;
     const people = ROSTER.filter(a => !a.bridge).map(a => a.id);
+    // Mind, while she is on and may answer: "@มาย" asks her (MainWindow.CoworkSecretary).
+    if (SECRETARY?.enabled && SECRETARY.can?.answer && !people.includes('mind')) people.push('mind');
     const key = people.join('|');
     if (key !== CHIP_IDS) {
         CHIP_IDS = key;
         el.innerHTML = people.map(id =>
-            `<button type="button" data-id="${esc(id)}" style="--pc:${agentColor(id)}">@${esc(label(id))}</button>`).join('')
+            `<button type="button" data-id="${esc(id)}" style="--pc:${agentColor(id)}">@${esc(id === 'mind' ? 'มาย' : label(id))}</button>`).join('')
             + (people.length ? `<button type="button" data-id="" class="all">ทุกคน</button>` : '');
     }
     markChips();
 }
 
-function mentionRe(id) { return new RegExp('(^|\\s)@' + id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?=\\s|$)', 'i'); }
+function mentionRe(id) {
+    // Mind answers to her Thai name as well as her id.
+    if (id === 'mind') return /(^|\s)@(mind|มายด์|มายด|มาย)(?=\s|$)/i;
+    return new RegExp('(^|\\s)@' + id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?=\\s|$)', 'i');
+}
 
 /** Light up the chips whose names are in the line being typed. */
 function markChips() {
@@ -3078,7 +3086,8 @@ function markChips() {
         const on = b.dataset.id ? mentionRe(b.dataset.id).test(text) : false;
         if (on) any = true;
         b.classList.toggle('on', on);
-        b.classList.toggle('away', !!b.dataset.id && !presentInRoom(b.dataset.id));
+        b.classList.toggle('away', !!b.dataset.id
+            && !(b.dataset.id === 'mind' ? !!SECRETARY?.enabled : presentInRoom(b.dataset.id)));
     }
     document.querySelector('#say-to button.all')?.classList.toggle('on', !any);
 }
@@ -3094,7 +3103,7 @@ document.getElementById('say-to')?.addEventListener('click', (e) => {
     } else if (mentionRe(b.dataset.id).test(text)) {
         text = text.replace(mentionRe(b.dataset.id), '$1').replace(/\s{2,}/g, ' ').trimStart();
     } else {
-        text = `@${b.dataset.id} ` + text;
+        text = `@${b.dataset.id === 'mind' ? 'มาย' : b.dataset.id} ` + text;
     }
     box.value = text;
     box.focus();
@@ -3125,6 +3134,11 @@ function onMessage(evt) {
     if (!m || typeof m !== 'object') return;
     if (m.type === 'officeSayFailed') { sayFailed(m.text, m.reason); return; }
     if (m.type === 'officeHistory') { applyHistory(m); return; }
+    if (m.type === 'officeHistorySummary') {
+        if (typeof m.project === 'string') HIST.summary[m.project] = { text: m.text || '', error: m.error || '' };
+        renderHistory();
+        return;
+    }
     if (m.type !== 'officeState') return;
     apply(m.payload || {});
 }
@@ -3263,6 +3277,7 @@ function apply(p) {
     RUNS = Array.isArray(p.runs) ? p.runs : [];
     QUOTA = p.quota && typeof p.quota === 'object' ? p.quota : {};
     renderQuota();
+    if (p.secretary && typeof p.secretary === 'object') { SECRETARY = p.secretary; renderMindPanel(); }
 
     renderLog();
     renderDecisions();
@@ -3667,7 +3682,15 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeWorkP
 // Deleting asks the host to move finished work into the room's trash; the
 // notes the agents wrote into the brain are never part of it.
 
-const HIST = { projects: [], detail: null, sel: null, view: 'tasks', open: new Set(), note: '', loading: false, busy: false, busyAt: 0 };
+const HIST = { projects: [], detail: null, sel: null, view: 'tasks', open: new Set(), note: '', loading: false, busy: false, busyAt: 0, summary: {} };
+
+function histSummaryBox(key) {
+    const s = HIST.summary[key];
+    if (!s) return '';
+    if (s.loading) return '<div class="hx-sum"><span class="by">✨ มาย</span>กำลังสรุป… (โมเดลในเครื่อง อาจใช้เวลาสักครู่)</div>';
+    if (s.error) return `<div class="hx-sum err"><span class="by">✨ มาย</span>${esc(s.error)}</div>`;
+    return `<div class="hx-sum"><span class="by">✨ มายสรุป</span>${esc(s.text || '')}</div>`;
+}
 
 function histName(key) { return key ? key : 'ไม่ระบุโปรเจค'; }
 function histWhen(ms, withDay = true) {
@@ -3762,11 +3785,16 @@ function renderHistory() {
         + `<span class="hx-tabs">`
         + `<button type="button" class="hbtn${HIST.view === 'tasks' ? ' on' : ''}" data-view="tasks" title="งานทีละชิ้น — กดชื่องานเพื่อดูไทม์ไลน์ของมัน">งาน</button>`
         + `<button type="button" class="hbtn${HIST.view === 'timeline' ? ' on' : ''}" data-view="timeline" title="ทุกเหตุการณ์ของโปรเจคเรียงตามเวลา">ไทม์ไลน์รวม</button></span>`
+        + (SECRETARY?.enabled && SECRETARY.can?.summarize
+            ? `<button type="button" class="hbtn" data-summary="1"${HIST.summary[p.key]?.loading ? ' disabled' : ''}`
+              + ` title="ให้มาย (โมเดลในเครื่อง) สรุปโปรเจคนี้ในไม่กี่บรรทัด">✨ ให้มายสรุป</button>`
+            : '')
         + `<button type="button" class="hbtn danger" data-del-project="1"${finished && !HIST.busy ? '' : ' disabled'}`
         + ` title="${p.active ? `ลบงานที่จบแล้ว ${finished} งานออกจากประวัติ — อีก ${p.active} งานที่ยังไม่จบจะอยู่ต่อ` : 'ลบทั้งโปรเจคออกจากประวัติของห้อง'}">🗑 ลบ${p.active ? 'งานที่จบแล้ว' : 'โปรเจคนี้'}</button></div>`
         + `<div class="hx-sub">${(p.works || []).length > 1 ? `รวม ${p.works.map(esc).join(', ')} · ` : ''}`
         + `${esc(histWhen(p.first))} → ${esc(histWhen(p.last))} (${histSpan(p.last - p.first)}) · `
-        + `เสร็จ ${p.done || 0} · ยกเลิก ${p.dropped || 0} · ยังไม่จบ ${p.active || 0} · ${p.lines || 0} ข้อความ</div>`;
+        + `เสร็จ ${p.done || 0} · ยกเลิก ${p.dropped || 0} · ยังไม่จบ ${p.active || 0} · ${p.lines || 0} ข้อความ</div>`
+        + histSummaryBox(p.key);
     if (!d || d.key !== p.key) {
         box.innerHTML = head + `<div class="hx-empty">กำลังโหลด…</div>`;
         return;
@@ -3852,6 +3880,13 @@ document.getElementById('hist-projects')?.addEventListener('keydown', (e) => {
 document.getElementById('hist-detail')?.addEventListener('click', (e) => {
     const v = e.target.closest('button[data-view]');
     if (v) { HIST.view = v.dataset.view; renderHistory(); return; }
+    const sm = e.target.closest('button[data-summary]');
+    if (sm && !sm.disabled && HIST.sel != null) {
+        HIST.summary[HIST.sel] = { loading: true, at: Date.now() };
+        renderHistory();
+        post({ type: 'officeHistorySummary', project: HIST.sel });
+        return;
+    }
     const tg = e.target.closest('[data-toggle]');
     if (tg) {
         const id = tg.dataset.toggle;
@@ -3894,6 +3929,116 @@ setInterval(() => {
         renderHistory();
     }
 }, 3000);
+
+// ── Mind, the room's secretary ──────────────────────────────────────
+//
+// Owner (2026-10-06): "ทำเป็นเลขาแต่เปิดปิดใช้หรือไม่ใช้ก็ได้" … "เลือกได้ว่าจะ
+// ให้ มายด์ทำอะไรได้บ้าง". She runs on Ollama on this machine (MainWindow.
+// CoworkSecretary); this card switches her on and off, picks her model, and
+// says what she may do. Writing code needs a card with the memory for a
+// coding model — the host says whether this one has it, and why not.
+
+let MIND_KEY = '';
+const MIND_CAPS = [
+    { id: 'answer', name: 'ตอบคำถามบอสในห้อง', note: 'พิมพ์ @มาย ตามด้วยคำถาม — ตอบจากบอร์ด ข้อความในห้อง และใครทำอะไรอยู่จริง' },
+    { id: 'digest', name: 'สรุปห้องเป็นระยะ', note: 'ทุก ~30 นาทีเมื่อมีความเคลื่อนไหว: อะไรเสร็จ อะไรติด อะไรรอบอส' },
+    { id: 'summarize', name: 'สรุปโปรเจค', note: 'ปุ่ม ✨ ให้มายสรุป ในหน้าประวัติ' },
+    { id: 'code', name: 'เขียนโค้ดเหมือน agent อีกตัว', note: 'บอสเรียกเธอเข้ามาทำงานได้เหมือน codex — รันผ่าน codex บนโมเดลในเครื่อง สิทธิ์เต็มแบบเดียวกับ codex' },
+];
+
+function renderMindPanel() {
+    const s = SECRETARY || {};
+    const chip = document.getElementById('room-mind');
+    if (chip) {
+        chip.classList.toggle('on', !!s.enabled);
+        chip.classList.toggle('busy', !!s.busy);
+        chip.textContent = s.enabled ? (s.busy ? '✨ มาย…' : '✨ มาย ●') : '✨ มาย';
+    }
+    const panel = document.getElementById('mind-panel');
+    if (!panel || panel.hidden) return;
+    const on = document.getElementById('mind-on');
+    if (on && document.activeElement !== on) on.checked = !!s.enabled;
+    const note = document.getElementById('mind-note');
+    if (note) note.textContent = s.error || '';
+
+    const key = JSON.stringify([s.enabled, s.model, s.codeModel, s.can, s.models, s.codeAllowed, s.codeReason, s.busy, s.gpu]);
+    if (key === MIND_KEY) return;
+    // Not under an open dropdown: rebuilding it closes it in the owner's hand.
+    if (document.activeElement?.closest?.('#mind-body select')) return;
+    MIND_KEY = key;
+
+    const models = Array.isArray(s.models) ? s.models : [];
+    const opt = (id, cur) => `<option value="${esc(id)}"${id === cur ? ' selected' : ''}>${esc(id)}</option>`;
+    const coder = m => /coder|code|devstral|gpt-oss|qwen3|deepseek/i.test(m);
+    const body = document.getElementById('mind-body');
+    if (!body) return;
+    body.innerHTML =
+        `<div class="mrow"><span>โมเดล</span><select id="mind-model"${s.enabled ? '' : ' disabled'}>`
+        + `<option value=""${!s.model ? ' selected' : ''}>อัตโนมัติ (ตัวที่มายใช้คุย)</option>`
+        + models.map(m => opt(m, s.model)).join('')
+        + (s.model && !models.includes(s.model) ? opt(s.model, s.model) : '')
+        + `</select></div>`
+        + `<div class="caps">` + MIND_CAPS.map(c => {
+            const blocked = c.id === 'code' && !s.codeAllowed;
+            const checked = !!s.can?.[c.id] && !blocked;
+            return `<label class="cap${blocked || !s.enabled ? ' off' : ''}">`
+                + `<input type="checkbox" data-cap="${c.id}"${checked ? ' checked' : ''}${blocked || !s.enabled ? ' disabled' : ''}>`
+                + `<span><b>${esc(c.name)}</b><small>${esc(c.note)}</small>`
+                + (blocked ? `<small class="why">${esc(s.codeReason || 'การ์ดจอเครื่องนี้ไม่พอสำหรับงานเขียนโค้ด')}</small>` : '')
+                + `</span></label>`;
+        }).join('') + `</div>`
+        + (s.codeAllowed && s.can?.code
+            ? `<div class="mrow"><span>โมเดลโค้ด</span><select id="mind-code-model"${s.enabled ? '' : ' disabled'}>`
+              + `<option value=""${!s.codeModel ? ' selected' : ''}>— เลือกโมเดลที่เขียนโค้ดได้ —</option>`
+              + models.filter(coder).concat(models.filter(m => !coder(m))).map(m => opt(m, s.codeModel)).join('')
+              + `</select></div>`
+            : '')
+        + `<div class="mrow"><span>การ์ดจอ</span><small>${esc(s.gpu?.name ? `${s.gpu.name} · ${Math.round((s.gpu.vramMb || 0) / 1024)} GB` : 'ไม่พบการ์ด NVIDIA')}</small></div>`
+        + `<div class="mstat">${esc(s.busy || '')}</div>`
+        + (!models.length ? `<small class="why">ยังไม่เห็นโมเดลจาก Ollama — ตรวจว่า Ollama เปิดอยู่ที่ localhost:11434</small>` : '');
+}
+
+function openMindPanel() {
+    const panel = document.getElementById('mind-panel');
+    if (!panel) return;
+    closeWorkPanel();
+    closeHistory();
+    panel.hidden = false;
+    document.getElementById('room-mind')?.setAttribute('aria-expanded', 'true');
+    placeUnderHead(panel);
+    MIND_KEY = '';
+    renderMindPanel();
+}
+function closeMindPanel() {
+    const panel = document.getElementById('mind-panel');
+    if (!panel || panel.hidden) return;
+    panel.hidden = true;
+    document.getElementById('room-mind')?.setAttribute('aria-expanded', 'false');
+}
+function mindChange(change) {
+    // Shown at once; the host's next poll confirms it (or puts it back).
+    SECRETARY = { ...(SECRETARY || {}), ...change, can: { ...(SECRETARY?.can || {}), ...(change.can || {}) } };
+    MIND_KEY = '';
+    renderMindPanel();
+    renderChips();
+    post({ type: 'officeSecretary', ...change });
+}
+
+document.getElementById('room-mind')?.addEventListener('click', () => {
+    const panel = document.getElementById('mind-panel');
+    if (panel && !panel.hidden) closeMindPanel(); else openMindPanel();
+});
+document.getElementById('mind-on')?.addEventListener('change', (e) => mindChange({ enabled: e.target.checked }));
+document.getElementById('mind-body')?.addEventListener('change', (e) => {
+    const t = e.target;
+    if (t.id === 'mind-model') mindChange({ model: t.value });
+    else if (t.id === 'mind-code-model') mindChange({ codeModel: t.value });
+    else if (t.dataset?.cap) mindChange({ can: { [t.dataset.cap]: t.checked } });
+});
+document.addEventListener('click', (e) => {
+    if (!e.target.closest('#mind-panel, #room-mind')) closeMindPanel();
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMindPanel(); });
 
 // ── the Windows Service half of the boss ────────────────────────────
 //
@@ -4296,7 +4441,12 @@ function demo() {
               { id: 'ultra', label: 'อัลตรา (ultra)', note: 'คิดเต็มที่และแตกงานให้ agent ย่อยเอง — แพงที่สุด' },
           ] },
     ];
-    apply({ agents, messages, decisions, tasks, models, runs, quota });
+    const secretary = { enabled: true, model: '', codeModel: '', busy: '',
+        can: { answer: true, digest: true, summarize: true, code: false },
+        models: ['deepseek-r1:8b', 'gemma3:4b', 'llama3.2:3b', 'qwen3-vl:4b'],
+        gpu: { name: 'NVIDIA GeForce GTX 1070 Ti', vramMb: 8192 }, codeAllowed: false,
+        codeReason: 'การ์ดจอ NVIDIA GeForce GTX 1070 Ti มี 8 GB — โมเดลที่เขียนโค้ดได้ดีต้องการอย่างน้อย 12 GB' };
+    apply({ agents, messages, decisions, tasks, models, runs, quota, secretary });
 
     // A message every few seconds, so the bubbles and the packets can be seen
     // doing what they do on a live vault.
@@ -4306,7 +4456,7 @@ function demo() {
         const to = ['codex', 'claude', 'claude'][i % 3];
         messages.push(mk(i, from, to, 'ทดสอบห้อง — ข้อความที่ ' + i, { topic: 'demo' }));
         if (messages.length > 40) messages.shift();
-        apply({ agents, messages: messages.slice(), decisions, tasks, models, runs, quota });
+        apply({ agents, messages: messages.slice(), decisions, tasks, models, runs, quota, secretary });
         i++;
     }, 4200);
 }

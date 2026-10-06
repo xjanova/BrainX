@@ -77,6 +77,7 @@ public partial class MainWindow
                         "bus.local", CoworkBusRoot, CoreWebView2HostResourceAccessKind.DenyCors);
 
                 core.WebMessageReceived += OnCoworkMessage;
+                await MapMindAvatarAsync(core);
                 // Cache-bust on the room's own files.
                 //
                 // WebView2 caches what a virtual host serves exactly like any
@@ -161,6 +162,9 @@ public partial class MainWindow
                 // The runs the boss started that are still going — what the
                 // work window can stop.
                 ["runs"] = CoworkRuns(),
+                // Mind as the room's secretary: on/off, what she may do, the
+                // models on this machine (MainWindow.CoworkSecretary).
+                ["secretary"] = SecretaryPayload(),
             };
             // To wherever the room is showing: its own window when popped out,
             // the dashboard's view otherwise — never both.
@@ -591,6 +595,8 @@ public partial class MainWindow
                 // The room's history by project: read, and remove finished work
                 // from it (MainWindow.CoworkHistory) — never from the brain.
                 case "officeHistory": PostCoworkHistory(HistStr(m["project"])); break;
+                case "officeHistorySummary": SecretarySummarize(HistStr(m["project"])); break;
+                case "officeSecretary": SecretaryChange(m); break;
                 case "officeHistoryDelete":
                     CoworkHistoryDelete(HistStr(m["project"]), HistStr(m["task"]), HistStr(m["show"]));
                     break;
@@ -644,7 +650,8 @@ public partial class MainWindow
         // went out unaddressed (7 of 7 in the audit), so every order called and
         // interrupted everyone, and the whole "addressed to you / to somebody
         // else" machinery in brainx-mcp never saw a single owner line.
-        var (to, unclear) = BrainX.Core.Services.CoworkAddressing.Parse(text, CoworkMentionables());
+        // "@มาย" is the secretary (MainWindow.CoworkSecretary): parsed as her id.
+        var (to, unclear) = BrainX.Core.Services.CoworkAddressing.Parse(SecretaryAliasToId(text), CoworkMentionables());
         CoworkWriteRoomLine("owner", text, "owner-order", to);
 
         // A name the room could not place is said out loud rather than
@@ -717,6 +724,9 @@ public partial class MainWindow
             if (Directory.Exists(members))
                 foreach (var f in Directory.GetFiles(members, "*.json"))
                     Add(Path.GetFileNameWithoutExtension(f));
+
+            // The secretary, while she is on.
+            if (SecretaryOn) Add("mind");
         }
         catch { /* a mention that cannot be resolved just goes to the room */ }
         return names;
