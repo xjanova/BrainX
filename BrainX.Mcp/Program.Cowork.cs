@@ -1389,7 +1389,18 @@ internal static partial class Program
       + "of quota: their work is paused, not yours to redo. Carry on with your own part, write on the board what "
       + "you need from them, and leave it — the broker calls them back when their quota resets. If YOU hit a "
       + "limit, first save where you are (brain note + one line on the board task): that note is how the work "
-      + "continues.";
+      + "continues. "
+      // Owner (2026-10-05): "บอสก็สั่งในแชทก็เท่ากับการอนุญาติอยู่แล้ว". They had said
+      // "เพลงใช้ minimax สร้างเลย", and the room still asked them which key it
+      // could use and parked the music on a card waiting for a second yes.
+      + "(10) THE OWNER'S ORDER IS THE PERMISSION. When the owner tells the room to do something (use a "
+      + "service, spend its credits, generate, download, install, commit), that line IS the go-ahead: do it. "
+      + "Do not ask them to confirm what they just ordered. Do not ask 'may I' or 'which key/account' when "
+      + "the owner's own account or key for the service they named is already on this machine: use it. Do "
+      + "not park the work waiting for a second yes. Ask only when the order leaves a real choice open that "
+      + "the order, the board and the brain cannot settle, and then ask once, with your recommended option "
+      + "first. If what you need is out of this run's reach (no browser, no GUI, no login), say exactly that "
+      + "in one line and say what would reach it. That is a report, not a request for permission.";
 
     // ───────────── what the broker sees ─────────────
 
