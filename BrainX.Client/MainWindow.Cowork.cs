@@ -588,6 +588,12 @@ public partial class MainWindow
                 // work, or stop a run the boss started (MainWindow.CoworkControl).
                 case "officeTask": CoworkTaskControl(m["task"]?.ToString(), m["action"]?.ToString()); break;
                 case "officeStopRun": CoworkStopRunFromRoom(m["agent"]?.ToString()); break;
+                // The room's history by project: read, and remove finished work
+                // from it (MainWindow.CoworkHistory) — never from the brain.
+                case "officeHistory": PostCoworkHistory(HistStr(m["project"])); break;
+                case "officeHistoryDelete":
+                    CoworkHistoryDelete(HistStr(m["project"]), HistStr(m["task"]), HistStr(m["show"]));
+                    break;
                 // The room in a window of its own, and back (MainWindow.CoworkPopout).
                 case "officePopOut": _ = OpenCoworkWindowAsync(); break;
                 // Posted from inside the window being closed: let this event

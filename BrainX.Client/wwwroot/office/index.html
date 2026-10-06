@@ -57,6 +57,11 @@
            cancel, focus one piece, stop a run the boss started. -->
       <button id="room-work" type="button" aria-expanded="false" aria-controls="work-panel"
               title="สถานะงาน — ใครทำอะไรอยู่ พัก/เลิก/โฟกัสงานได้">📋 งาน</button>
+      <!-- Everything the room has worked on, by project, start to end — and
+           the owner's hand to clear finished work out of it
+           (MainWindow.CoworkHistory). The brain's notes are not touched. -->
+      <button id="room-history" type="button" aria-expanded="false" aria-controls="history-panel"
+              title="ประวัติงาน — ดูย้อนหลังแยกตามโปรเจค ตั้งแต่ต้นจนจบ ลบออกจากประวัติได้">🕘 ประวัติ</button>
       <!-- Which model the boss starts each agent on. Only runs the broker
            starts — a session the owner opened keeps its own app's model. -->
       <button id="room-model" type="button" aria-expanded="false" aria-controls="model-panel"
@@ -89,6 +94,18 @@
       <p id="work-note" role="status"></p>
       <p class="work-foot">⏸ พัก = หยุดไว้ชั่วคราว ไม่มีใครตามงานนี้จนกว่าจะกดทำต่อ ·
         🎯 โฟกัส = ทำงานนี้ก่อน งานอื่นพักไว้หมด · ✖ เลิก = ยกเลิกถาวร</p>
+    </section>
+
+    <section id="history-panel" hidden aria-label="ประวัติงานแยกตามโปรเจค">
+      <header>ประวัติงาน <span>— แยกตามโปรเจค ตั้งแต่ต้นจนจบ</span>
+        <button id="hist-close" type="button" title="ปิด (Esc)">×</button></header>
+      <div id="hist-wrap">
+        <ol id="hist-projects" aria-label="โปรเจค"></ol>
+        <div id="hist-detail"></div>
+      </div>
+      <p id="hist-note" role="status"></p>
+      <p class="hist-foot">🗑 ลบ = เอาออกจากประวัติของห้องเท่านั้น (เก็บในถังขยะของห้อง 30 วันแล้วลบถาวร) —
+        โน้ตที่ agent เขียนไว้ในสมองไม่ถูกลบ · ลบได้เฉพาะงานที่จบแล้ว</p>
     </section>
 
     <section id="model-panel" hidden aria-label="โมเดลและ effort ที่บอสใช้เรียก agent">

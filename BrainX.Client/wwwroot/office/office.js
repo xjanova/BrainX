@@ -3124,6 +3124,7 @@ function onMessage(evt) {
     const m = evt.data;
     if (!m || typeof m !== 'object') return;
     if (m.type === 'officeSayFailed') { sayFailed(m.text, m.reason); return; }
+    if (m.type === 'officeHistory') { applyHistory(m); return; }
     if (m.type !== 'officeState') return;
     apply(m.payload || {});
 }
@@ -3658,6 +3659,242 @@ document.addEventListener('click', (e) => {
 });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeWorkPanel(); });
 
+// ── the room's history, by project ──────────────────────────────────
+//
+// Owner (2026-10-06): "เรียกย้อนดู History งาน แยกเป็นโปรเจค ตั้งแต่ต้นจนจบได้
+// ลบทิ้งได้ (ไม่ใช่ลบจากสมองนะ)". The host reads every task and every line
+// that names one (MainWindow.CoworkHistory) — the board only keeps a day.
+// Deleting asks the host to move finished work into the room's trash; the
+// notes the agents wrote into the brain are never part of it.
+
+const HIST = { projects: [], detail: null, sel: null, view: 'tasks', open: new Set(), note: '', loading: false, busy: false, busyAt: 0 };
+
+function histName(key) { return key ? key : 'ไม่ระบุโปรเจค'; }
+function histWhen(ms, withDay = true) {
+    if (!ms) return '';
+    const d = new Date(ms);
+    return d.toLocaleString('th-TH', withDay
+        ? { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }
+        : { hour: '2-digit', minute: '2-digit' });
+}
+function histDay(ms) {
+    return new Date(ms).toLocaleDateString('th-TH', { weekday: 'short', day: 'numeric', month: 'long', year: 'numeric' });
+}
+function histSpan(ms) {
+    const m = Math.max(0, ms) / 60e3;
+    if (m < 60) return `${Math.max(1, Math.round(m))} นาที`;
+    if (m < 48 * 60) return `${Math.round(m / 60)} ชม.`;
+    return `${Math.round(m / 1440)} วัน`;
+}
+
+function openHistory() {
+    const panel = document.getElementById('history-panel');
+    if (!panel) return;
+    closeWorkPanel();
+    panel.hidden = false;
+    document.getElementById('room-history')?.setAttribute('aria-expanded', 'true');
+    placeUnderHead(panel);
+    HIST.note = '';
+    HIST.loading = true;
+    renderHistory();
+    post({ type: 'officeHistory', project: HIST.sel ?? undefined });
+}
+function closeHistory() {
+    const panel = document.getElementById('history-panel');
+    if (!panel || panel.hidden) return;
+    panel.hidden = true;
+    document.getElementById('room-history')?.setAttribute('aria-expanded', 'false');
+}
+function pickProject(key) {
+    if (HIST.sel === key && HIST.detail) return;
+    HIST.sel = key;
+    HIST.detail = null;
+    HIST.open.clear();
+    HIST.loading = true;
+    HIST.note = '';
+    renderHistory();
+    post({ type: 'officeHistory', project: key });
+}
+
+/** host → page: {type:"officeHistory", projects, detail, note}. */
+function applyHistory(m) {
+    HIST.projects = Array.isArray(m.projects) ? m.projects : [];
+    HIST.detail = m.detail || null;
+    if (HIST.sel != null && !HIST.projects.some(p => p.key === HIST.sel)) { HIST.sel = null; HIST.detail = null; }
+    if (HIST.sel == null && HIST.detail) HIST.sel = HIST.detail.key;
+    HIST.note = m.note || '';
+    HIST.loading = false;
+    HIST.busy = false;
+    renderHistory();
+}
+
+function renderHistory() {
+    const panel = document.getElementById('history-panel');
+    if (!panel || panel.hidden) return;
+    const note = document.getElementById('hist-note');
+    if (note) note.textContent = HIST.note;
+
+    const list = document.getElementById('hist-projects');
+    if (list) {
+        list.innerHTML = HIST.projects.length
+            ? HIST.projects.map(p => {
+                const counts = [p.done ? `✓ ${p.done}` : '', p.dropped ? `✕ ${p.dropped}` : '', p.active ? `▶ ${p.active}` : '']
+                    .filter(Boolean).join(' · ') || `${p.lines} ข้อความ`;
+                const who = (p.agents || []).map(a => `<span style="color:${agentColor(a)}">${esc(label(a))}</span>`).join(' ');
+                return `<li class="hp${p.key === HIST.sel ? ' sel' : ''}${p.active ? ' live' : ''}" data-key="${esc(p.key)}" tabindex="0">`
+                    + `<div class="hn">${esc(histName(p.key))}</div>`
+                    + `<div class="hm">${counts}${who ? ' · ' + who : ''}</div>`
+                    + `<div class="hd">${esc(histWhen(p.first))} → ${esc(histWhen(p.last))}</div></li>`;
+            }).join('')
+            : `<li class="hempty">${HIST.loading ? 'กำลังโหลด…' : 'ยังไม่มีงานในประวัติ'}</li>`;
+    }
+
+    const box = document.getElementById('hist-detail');
+    if (!box) return;
+    const p = HIST.projects.find(x => x.key === HIST.sel);
+    const d = HIST.detail;
+    if (HIST.sel == null || !p) {
+        box.innerHTML = `<div class="hx-empty">${HIST.loading ? 'กำลังโหลด…' : 'เลือกโปรเจคทางซ้าย เพื่อดูงานทั้งหมดของมัน ตั้งแต่สั่งจนจบ'}</div>`;
+        return;
+    }
+    const finished = (p.done || 0) + (p.dropped || 0);
+    const head = `<div class="hx-head"><span class="hx-title">${esc(histName(p.key))}</span>`
+        + `<span class="hx-tabs">`
+        + `<button type="button" class="hbtn${HIST.view === 'tasks' ? ' on' : ''}" data-view="tasks" title="งานทีละชิ้น — กดชื่องานเพื่อดูไทม์ไลน์ของมัน">งาน</button>`
+        + `<button type="button" class="hbtn${HIST.view === 'timeline' ? ' on' : ''}" data-view="timeline" title="ทุกเหตุการณ์ของโปรเจคเรียงตามเวลา">ไทม์ไลน์รวม</button></span>`
+        + `<button type="button" class="hbtn danger" data-del-project="1"${finished && !HIST.busy ? '' : ' disabled'}`
+        + ` title="${p.active ? `ลบงานที่จบแล้ว ${finished} งานออกจากประวัติ — อีก ${p.active} งานที่ยังไม่จบจะอยู่ต่อ` : 'ลบทั้งโปรเจคออกจากประวัติของห้อง'}">🗑 ลบ${p.active ? 'งานที่จบแล้ว' : 'โปรเจคนี้'}</button></div>`
+        + `<div class="hx-sub">${(p.works || []).length > 1 ? `รวม ${p.works.map(esc).join(', ')} · ` : ''}`
+        + `${esc(histWhen(p.first))} → ${esc(histWhen(p.last))} (${histSpan(p.last - p.first)}) · `
+        + `เสร็จ ${p.done || 0} · ยกเลิก ${p.dropped || 0} · ยังไม่จบ ${p.active || 0} · ${p.lines || 0} ข้อความ</div>`;
+    if (!d || d.key !== p.key) {
+        box.innerHTML = head + `<div class="hx-empty">กำลังโหลด…</div>`;
+        return;
+    }
+    box.innerHTML = head + (HIST.view === 'timeline' ? histTimeline(d) : histTasks(d));
+}
+
+function histEvents(t) {
+    const ev = [{ ts: t.created, who: t.createdBy, kind: 'made', text: `📌 สร้างงาน${t.assignee ? ` → ${label(t.assignee)}` : ''}` }];
+    for (const h of t.history || []) {
+        const st = TASK_STATE[h.status] || { ico: '•', th: h.status };
+        ev.push({ ts: h.ts, who: h.by, kind: 'move',
+                  text: `${st.ico} ${st.th}${h.assignee && h.assignee !== h.by ? ` (${label(h.assignee)})` : ''}${h.note ? ' — ' + h.note : ''}` });
+    }
+    for (const l of t.lines || [])
+        ev.push({ ts: l.ts, who: l.from, kind: 'line', text: `💬 ${l.to ? `→ ${label(l.to)}: ` : ''}${l.body}` });
+    return ev.sort((a, b) => a.ts - b.ts);
+}
+
+function evRow(e, tag) {
+    return `<div class="ev ${e.kind}"><span class="when">${esc(histWhen(e.ts))}</span>`
+        + `<span class="what">${tag ? `<span class="tag">${esc(tag)}</span>` : ''}`
+        + `<span class="who" style="--pc:${agentColor(e.who || '')}">${esc(e.who ? label(e.who) : '')}</span> ${esc(e.text)}</span></div>`;
+}
+
+function histTasks(d) {
+    if (!d.tasks.length && !d.lines.length) return '<div class="hx-empty">ไม่มีงานในโปรเจคนี้แล้ว</div>';
+    const rows = d.tasks.map(t => {
+        const st = taskState(t);
+        const done = t.status === 'done' || t.status === 'dropped';
+        const open = HIST.open.has(t.id);
+        const end = done ? `${histWhen(t.updated)} (${histSpan(t.updated - t.created)})` : 'ยังไม่จบ';
+        const more = open
+            ? `<div class="ht-more">${t.detail ? `<div class="ht-detail">${esc(t.detail)}</div>` : ''}`
+              + histEvents(t).map(e => evRow(e)).join('') + `</div>`
+            : '';
+        return `<li class="ht st-${esc(t.status)}" data-id="${esc(t.id)}">`
+            + `<div class="ht-top"><span class="ico">${st.ico}</span>`
+            + `<span class="tt" data-toggle="${esc(t.id)}" title="${open ? 'ซ่อนไทม์ไลน์' : 'ดูไทม์ไลน์ของงานนี้'}">${open ? '▾' : '▸'} ${esc(t.title)}</span>`
+            + `<span class="who" style="--pc:${t.assignee ? agentColor(t.assignee) : 'var(--ink-faint)'}">${esc(t.assignee ? label(t.assignee) : 'ว่าง')}</span>`
+            + `<button type="button" class="hbtn danger" data-del-task="${esc(t.id)}"${done && !HIST.busy ? '' : ' disabled'}`
+            + ` title="${done ? 'ลบงานนี้ออกจากประวัติของห้อง' : 'ยังไม่จบ — เลิกงานจากหน้าต่าง 📋 งาน ก่อน'}">🗑</button></div>`
+            + `<div class="ht-sub">${esc(t.id)} · ${esc(st.th)} · ${esc(histWhen(t.created))} → ${esc(end)}`
+            + `${(t.history || []).length ? ` · ${t.history.length} ขั้น` : ''}${(t.lines || []).length ? ` · ${t.lines.length} ข้อความ` : ''}`
+            + `${t.note ? ` — ${esc(t.note)}` : ''}</div>${more}</li>`;
+    });
+    const loose = d.lines.length
+        ? `<li class="ht"><div class="ht-top"><span class="ico">💬</span><span class="tt">ข้อความในห้องที่พูดถึงโปรเจคนี้ (ไม่ผูกกับงานไหน)</span><span></span><span></span></div>`
+          + `<div class="ht-more">${d.lines.map(l => evRow({ ts: l.ts, who: l.from, kind: 'line', text: `${l.to ? `→ ${label(l.to)}: ` : ''}${l.body}` })).join('')}</div></li>`
+        : '';
+    return `<ol>${rows.join('')}${loose}</ol>`;
+}
+
+function histTimeline(d) {
+    const all = [];
+    for (const t of d.tasks) for (const e of histEvents(t)) all.push({ ...e, tag: t.id });
+    for (const l of d.lines) all.push({ ts: l.ts, who: l.from, kind: 'line', text: `💬 ${l.to ? `→ ${label(l.to)}: ` : ''}${l.body}` });
+    if (!all.length) return '<div class="hx-empty">ไม่มีเหตุการณ์</div>';
+    all.sort((a, b) => a.ts - b.ts);
+    let day = '';
+    return all.map(e => {
+        const dd = histDay(e.ts);
+        const sep = dd !== day ? `<div class="day">${esc(dd)}</div>` : '';
+        day = dd;
+        return sep + evRow(e, e.tag);
+    }).join('');
+}
+
+document.getElementById('room-history')?.addEventListener('click', () => {
+    const panel = document.getElementById('history-panel');
+    if (panel && !panel.hidden) closeHistory();
+    else openHistory();
+});
+document.getElementById('hist-close')?.addEventListener('click', closeHistory);
+document.getElementById('hist-projects')?.addEventListener('click', (e) => {
+    const li = e.target.closest('.hp[data-key]');
+    if (li) pickProject(li.dataset.key);
+});
+document.getElementById('hist-projects')?.addEventListener('keydown', (e) => {
+    const li = e.target.closest('.hp[data-key]');
+    if (li && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); pickProject(li.dataset.key); }
+});
+document.getElementById('hist-detail')?.addEventListener('click', (e) => {
+    const v = e.target.closest('button[data-view]');
+    if (v) { HIST.view = v.dataset.view; renderHistory(); return; }
+    const tg = e.target.closest('[data-toggle]');
+    if (tg) {
+        const id = tg.dataset.toggle;
+        if (HIST.open.has(id)) HIST.open.delete(id); else HIST.open.add(id);
+        renderHistory();
+        return;
+    }
+    const brain = '\n\nลบเฉพาะบันทึกของห้อง (งานและข้อความในห้องที่ผูกกับมัน) — เก็บในถังขยะของห้อง 30 วันแล้วลบถาวร\nโน้ตที่ agent เขียนไว้ในสมองไม่ถูกลบ';
+    const dt = e.target.closest('button[data-del-task]');
+    if (dt && !dt.disabled) {
+        const t = HIST.detail?.tasks.find(x => x.id === dt.dataset.delTask);
+        if (!t || !confirm(`ลบงาน [${t.id}] «${t.title}» ออกจากประวัติ?${brain}`)) return;
+        HIST.busy = true; HIST.busyAt = Date.now(); HIST.note = 'กำลังลบ…';
+        renderHistory();
+        post({ type: 'officeHistoryDelete', task: t.id, show: HIST.sel });
+        return;
+    }
+    const dp = e.target.closest('button[data-del-project]');
+    if (dp && !dp.disabled) {
+        const p = HIST.projects.find(x => x.key === HIST.sel);
+        if (!p) return;
+        const n = (p.done || 0) + (p.dropped || 0);
+        const keep = p.active ? `\n\nงานที่ยังไม่จบ ${p.active} งานจะไม่ถูกลบ` : '';
+        if (!confirm(`ลบ${p.active ? `งานที่จบแล้ว ${n} งานของ` : 'ทั้ง'}โปรเจค «${histName(p.key)}» ออกจากประวัติ?${keep}${brain}`)) return;
+        HIST.busy = true; HIST.busyAt = Date.now(); HIST.note = 'กำลังลบ…';
+        renderHistory();
+        post({ type: 'officeHistoryDelete', project: p.key, show: HIST.sel });
+    }
+});
+document.addEventListener('click', (e) => {
+    if (!e.target.closest('#history-panel, #room-history')) closeHistory();
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeHistory(); });
+// The host never answered (not hosted, or it fell over): do not leave the
+// buttons dead behind "กำลังลบ…" for good.
+setInterval(() => {
+    if (HIST.busy && Date.now() - HIST.busyAt > 15000) {
+        HIST.busy = false;
+        HIST.note = 'ยังไม่ได้รับคำตอบจากแอป — ลองเปิดประวัติใหม่อีกครั้ง';
+        renderHistory();
+    }
+}, 3000);
+
 // ── the Windows Service half of the boss ────────────────────────────
 //
 // Owner (2026-09-21): "การติดตั้ง service boss ต้องแสดงสถานะว่าติดตั้งแล้วหรือยัง
@@ -3768,21 +4005,37 @@ function hpColor(left) {
     return '#e0564f';
 }
 
-/** A game HP bar over a head, on the sprite grid. */
+/** SP — stamina, the short round (5 hours): gold when fresh, burning down
+ *  to orange and red as the round runs out. */
+function spColor(left) {
+    if (left == null) return '#6b7088';
+    if (left > 40) return '#f0c45a';
+    if (left > 15) return '#f08a3c';
+    return '#e0564f';
+}
+
+/** A game HP bar over a head, on the sprite grid — and the SP bar under it
+ *  when the agent's round is known. */
 function drawHp(x, yTop, id) {
     const q = QUOTA[id];
     if (!q) return;
     const w = 16, h = 2;
-    const x0 = Math.round(x - w / 2), y0 = Math.round(yTop);
-    px(x0 - 1, y0 - 1, w + 2, h + 2, 'rgba(5,6,15,0.85)');
-    if (q.left == null) {
+    const sp = q.sp && q.sp.left != null ? q.sp : null;
+    const x0 = Math.round(x - w / 2), y0 = Math.round(yTop) - (sp ? 2 : 0);
+    px(x0 - 1, y0 - 1, w + 2, (sp ? h * 2 + 1 : h) + 2, 'rgba(5,6,15,0.85)');
+    meter(x0, y0, w, h, q.left, hpColor);
+    if (sp) meter(x0, y0 + h + 1, w, h - 1, sp.left, spColor);
+}
+
+function meter(x0, y0, w, h, value, colorOf) {
+    if (value == null) {
         for (let i = 0; i < w; i += 2) px(x0 + i, y0, 1, h, '#6b7088');
         return;
     }
-    const left = Math.max(0, Math.min(100, q.left));
+    const left = Math.max(0, Math.min(100, value));
     const fill = Math.round(w * left / 100);
     px(x0, y0, w, h, '#22263a');
-    if (fill > 0) px(x0, y0, fill, h, hpColor(left));
+    if (fill > 0) px(x0, y0, fill, h, colorOf(left));
     // Nearly out: it pulses, the way a game says "careful".
     if (left <= 15 && (T >> 4) % 2) px(x0, y0, Math.max(1, fill), h, '#ff8a80');
 }
@@ -3799,17 +4052,25 @@ function renderQuota() {
     const key = JSON.stringify(QUOTA);
     if (key === QUOTA_KEY) return;
     QUOTA_KEY = key;
-    box.innerHTML = '<div class="qh">โควตาคงเหลือ</div>' + ids.map(id => {
+    box.innerHTML = '<div class="qh">โควตาคงเหลือ <b>HP</b> สัปดาห์ · <b class="sp">SP</b> รอบ 5 ชม.</div>' + ids.map(id => {
         const q = QUOTA[id] || {};
         const known = q.left != null;
         const left = known ? Math.max(0, Math.min(100, Math.round(q.left))) : 0;
-        const tip = known
-            ? `${id}: เหลือ ${left}%${q.window ? ` ของรอบ ${q.window}` : ''}${q.resets ? ` · รีเซ็ต ${q.resets}` : ''}${q.source ? ` · จาก ${q.source}` : ''}${q.asOf ? ` · ข้อมูลเมื่อ ${q.asOf}` : ''}`
-            : `${id}: ไม่มีข้อมูลโควตาในเครื่องนี้`;
+        const sp = q.sp && q.sp.left != null ? Math.max(0, Math.min(100, Math.round(q.sp.left))) : null;
+        const tip = (known
+            ? `${id} HP: เหลือ ${left}% ของโควตารายสัปดาห์${q.resets ? ` · รีเซ็ต ${q.resets}` : ''}`
+            : `${id} HP: ไม่มีข้อมูลโควตารายสัปดาห์ในเครื่องนี้`)
+            + (sp != null ? `\n${id} SP: เหลือ ${sp}% ของรอบ ${q.sp.window || '5 ชม.'}${q.sp.resets ? ` · รีเซ็ต ${q.sp.resets}` : ''}` : '')
+            + `${q.source && q.source !== 'none' ? `\nจาก ${q.source}` : ''}${q.asOf ? ` · ข้อมูลเมื่อ ${q.asOf}` : ''}`
+            + (q.resting ? `\nพักอยู่ (บอสพักไว้เพราะติดลิมิต) — กลับมาทำงานได้ ${q.resting}` : '');
         return `<div class="qrow${known && left <= 15 ? ' crit' : ''}" title="${esc(tip)}">`
             + `<span class="qn" style="--pc:${agentColor(id)}">${esc(label(id))}</span>`
-            + `<span class="qbar${known ? '' : ' unknown'}"><i style="width:${left}%;background:${hpColor(known ? left : null)}"></i></span>`
-            + `<span class="qp" style="color:${hpColor(known ? left : null)}">${known ? left + '%' : '?'}</span></div>`;
+            + `<span class="qbars"><span class="qbar${known ? '' : ' unknown'}"><i style="width:${left}%;background:${hpColor(known ? left : null)}"></i></span>`
+            + (sp != null ? `<span class="qbar sp"><i style="width:${sp}%;background:${spColor(sp)}"></i></span>` : '')
+            + `</span>`
+            + `<span class="qp"><span style="color:${hpColor(known ? left : null)}">${known ? left + '%' : '?'}</span>`
+            + (sp != null ? `<span class="qsp" style="color:${spColor(sp)}">${sp}%</span>` : '')
+            + `${q.resting ? ' 💤' : ''}</span></div>`;
     }).join('');
 }
 
@@ -4000,10 +4261,10 @@ function demo() {
     ];
     const runs = [{ agent: 'codex', since: now - 7 * 60e3, model: 'gpt-6-astra', effort: 'xhigh' }];
     const quota = {
-        claude: { left: 72, window: '5 ชม.', resets: '16:00', source: 'claude.ai' },
-        codex: { left: 28, window: 'สัปดาห์', resets: '13 Oct 09:30', source: 'codex' },
+        claude: { left: 72, window: 'สัปดาห์', resets: '9 Oct 16:00', source: 'claude.ai', sp: { left: 41, window: '5 ชม.', resets: '16:00' } },
+        codex: { left: 30, window: 'สัปดาห์', resets: '13 Oct 09:30', source: 'codex', sp: { left: 0, window: '5 ชม.', resets: '14:30' }, resting: '14:30' },
         cluadex: { left: null, source: 'none' },
-        gemini: { left: 9, window: '5 ชม.', resets: '14:20', source: 'demo' },
+        grok: { left: 7, window: 'สัปดาห์', resets: '8 Oct 12:09', source: 'grok', asOf: '6 Oct 13:25' },
     };
     const models = [
         { agent: 'claude', canChoose: true, chosen: 'claude-sonnet-5-5', configured: '', cliDefault: '', onCall: true, running: '',

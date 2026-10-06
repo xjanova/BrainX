@@ -158,6 +158,113 @@ body {
 }
 #room-work:hover, #room-work[aria-expanded="true"] { border-color: rgba(216,185,120,0.55); color: var(--ink); }
 #room-work.busy { border-color: rgba(111,207,151,0.45); color: var(--ink); }
+#room-history {
+    appearance: none;
+    border: 1px solid rgba(242, 239, 230, 0.12);
+    background: linear-gradient(180deg, rgba(34,39,50,0.88), rgba(16,19,26,0.88));
+    color: var(--ink-dim);
+    font: inherit;
+    letter-spacing: 1px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    cursor: pointer;
+    align-self: center;
+}
+#room-history:hover, #room-history[aria-expanded="true"] { border-color: rgba(216,185,120,0.55); color: var(--ink); }
+
+/* The history: projects down the left, the chosen one's story on the right. */
+#history-panel {
+    position: absolute;
+    top: 34px;
+    left: 10px;
+    right: 10px;
+    max-width: 1000px;
+    height: calc(100% - 50px);
+    z-index: 31;
+    display: flex;
+    flex-direction: column;
+    padding: 10px 12px;
+    border: 1px solid var(--stroke);
+    border-radius: 10px;
+    background: var(--panel);
+    backdrop-filter: blur(10px);
+    box-shadow: var(--bevel), 0 12px 30px rgba(0,0,0,0.55);
+    color: var(--ink-dim);
+    font-size: 11px;
+    line-height: 1.45;
+}
+#history-panel[hidden] { display: none; }
+#history-panel > header { display: flex; align-items: baseline; gap: 6px; color: var(--ink); font-weight: 600; margin-bottom: 8px; }
+#history-panel > header span { color: var(--ink-faint); font-weight: 400; flex: 1; }
+#hist-close { appearance: none; border: none; background: none; color: var(--ink-dim); font-size: 16px; line-height: 1; cursor: pointer; padding: 0 4px; }
+#hist-close:hover { color: var(--ink); }
+#hist-wrap { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(170px, 250px) minmax(0, 1fr); gap: 10px; }
+#hist-projects { list-style: none; margin: 0; padding: 0 4px 0 0; overflow-y: auto; display: grid; gap: 4px; align-content: start; }
+#hist-projects .hp {
+    padding: 6px 8px;
+    border: 1px solid rgba(242, 239, 230, 0.08);
+    border-left: 2px solid rgba(242, 239, 230, 0.2);
+    border-radius: 6px;
+    background: rgba(12, 15, 21, 0.55);
+    cursor: pointer;
+}
+#hist-projects .hp:hover { border-color: rgba(216,185,120,0.35); }
+#hist-projects .hp.sel { border-color: rgba(216,185,120,0.6); border-left-color: var(--accent); background: rgba(40, 36, 26, 0.55); }
+#hist-projects .hp.live { border-left-color: rgba(111,207,151,0.8); }
+#hist-projects .hn { color: var(--ink); font-weight: 600; overflow-wrap: anywhere; }
+#hist-projects .hm, #hist-projects .hd { color: var(--ink-faint); font-size: 9.5px; }
+#hist-projects .hempty { color: var(--ink-faint); padding: 4px 2px; }
+#hist-detail { min-width: 0; overflow-y: auto; padding-right: 4px; }
+#hist-detail .hx-empty { color: var(--ink-faint); padding: 18px 4px; }
+#hist-detail .hx-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 4px; }
+#hist-detail .hx-title { color: var(--ink); font-size: 13px; font-weight: 600; flex: 1 1 auto; overflow-wrap: anywhere; }
+#hist-detail .hx-sub { color: var(--ink-faint); font-size: 9.5px; margin-bottom: 8px; }
+#hist-detail .hx-tabs { display: inline-flex; gap: 2px; }
+#history-panel .hbtn {
+    font: inherit;
+    font-size: 9.5px;
+    padding: 2px 9px;
+    border-radius: 999px;
+    cursor: pointer;
+    color: var(--ink);
+    background: rgba(34,39,50,0.95);
+    border: 1px solid rgba(242, 239, 230, 0.18);
+}
+#history-panel .hbtn:hover:not(:disabled) { border-color: rgba(216,185,120,0.7); }
+#history-panel .hbtn.on { border-color: var(--accent); color: var(--accent); }
+#history-panel .hbtn.danger { color: #e0938c; border-color: rgba(224,115,107,0.35); }
+#history-panel .hbtn:disabled { opacity: .45; cursor: default; }
+#hist-detail ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; }
+#hist-detail .ht {
+    padding: 6px 8px;
+    border: 1px solid rgba(242, 239, 230, 0.08);
+    border-left: 2px solid rgba(242, 239, 230, 0.25);
+    border-radius: 6px;
+    background: rgba(12, 15, 21, 0.5);
+}
+#hist-detail .ht.st-done { border-left-color: rgba(111,207,151,0.75); }
+#hist-detail .ht.st-dropped { border-left-color: rgba(224,115,107,0.6); opacity: .85; }
+#hist-detail .ht.st-doing { border-left-color: var(--accent); }
+#hist-detail .ht.st-blocked { border-left-color: var(--bad); }
+#hist-detail .ht-top { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto auto; gap: 6px; align-items: center; }
+#hist-detail .ht-top .tt { color: var(--ink); overflow-wrap: anywhere; cursor: pointer; }
+#hist-detail .ht-top .tt:hover { text-decoration: underline dotted; }
+#hist-detail .who { color: var(--pc, var(--ink)); font-weight: 600; font-size: 10px; }
+#hist-detail .ht-sub { color: var(--ink-faint); font-size: 9.5px; padding-left: 20px; }
+#hist-detail .ht-more { padding: 6px 0 2px 20px; display: grid; gap: 4px; }
+#hist-detail .ht-detail { color: var(--ink-dim); white-space: pre-wrap; overflow-wrap: anywhere; }
+#hist-detail .ev { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 6px; font-size: 10px; }
+#hist-detail .ev .when { color: var(--ink-faint); font-size: 9.5px; white-space: nowrap; }
+#hist-detail .ev .what { color: var(--ink-dim); white-space: pre-wrap; overflow-wrap: anywhere; }
+#hist-detail .ev.line .what { color: var(--ink); }
+#hist-detail .ev .tag { color: var(--accent); font-size: 9px; margin-right: 4px; }
+#hist-detail .day { color: var(--ink); font-weight: 600; font-size: 10px; margin: 8px 0 2px; border-bottom: 1px solid rgba(242,239,230,0.08); }
+#hist-note { margin: 6px 0 0; color: #e0b98a; min-height: 1em; }
+#history-panel .hist-foot { margin: 4px 0 0; color: var(--ink-faint); font-size: 9.5px; }
+@media (max-width: 640px) {
+    #hist-wrap { grid-template-columns: 1fr; grid-template-rows: minmax(0, 30%) minmax(0, 1fr); }
+    #hist-detail .ev { grid-template-columns: 1fr; gap: 0; }
+}
 
 /* The service chip — same chip as the boss, coloured by the one fact that
    matters at a glance: is anything going to carry on when the app closes. */
@@ -216,12 +323,17 @@ body {
 }
 #quota-hud[hidden] { display: none; }
 #quota-hud .qh { color: var(--ink-faint); font-size: 9.5px; letter-spacing: 0.5px; margin-bottom: 4px; }
-#quota-hud .qrow { display: grid; grid-template-columns: 52px 1fr 34px; align-items: center; gap: 6px; line-height: 1.6; }
+#quota-hud .qrow { display: grid; grid-template-columns: 52px 1fr 40px; align-items: center; gap: 6px; line-height: 1.6; }
 #quota-hud .qn { color: var(--pc, var(--ink)); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#quota-hud .qh b { color: #5fd38d; font-weight: 700; }
+#quota-hud .qh b.sp { color: #f0c45a; }
+#quota-hud .qbars { display: grid; gap: 2px; align-content: center; }
 #quota-hud .qbar { height: 5px; border-radius: 3px; background: #22263a; overflow: hidden; }
+#quota-hud .qbar.sp { height: 3px; }
 #quota-hud .qbar i { display: block; height: 100%; border-radius: 3px; }
 #quota-hud .qbar.unknown { background: repeating-linear-gradient(90deg, #4a4f66 0 3px, transparent 3px 6px); }
-#quota-hud .qp { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+#quota-hud .qp { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
+#quota-hud .qsp { display: block; font-size: 8.5px; font-weight: 500; line-height: 1.1; }
 #quota-hud .qrow.crit .qp { animation: quota-blink 1s steps(2, start) infinite; }
 @keyframes quota-blink { to { visibility: hidden; } }
 

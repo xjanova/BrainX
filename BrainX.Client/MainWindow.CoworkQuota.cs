@@ -13,20 +13,26 @@ namespace BrainX.Client;
 // Owner (2026-10-06): "ให้โชว์ user คงเหลือเป็น หลอด HP ของ อวต้าแต่ละตัว ด้วย
 // คือโควต้าคือ HP ใกล้หมด ก็แดง เปลี่ยนสีตามด้วย บอกเป็นเปอร์เซ็นในห้อง มุมขวาบน".
 //
-// HP is what is LEFT of the tightest limit the agent is under right now —
-// a fresh weekly allowance means nothing while the five-hour window is spent.
-// Read from what each vendor's own tools already record, never guessed:
+// HP is what is LEFT of each agent's WEEKLY limit. Owner (2026-10-06): "หลอด
+// hp ใช้ โควต้าลิมิต รายสัปดาห์ทั้งหมดนะ" — the same yardstick for everyone,
+// and the one that says how much of the week's work is left; the five-hour
+// window refills on its own. Then: "Hp เป็นรายสัปดาห์ SP คือสตามิน่า ราย
+// ชั่วโมงรอบ" — that round is the second bar, SP (stamina), under the HP.
+// Read from what each vendor's own tools already record:
 //
-//   claude  claude.ai's usage page, scraped by ClaudeUsageProbe (5-hour
-//           session + weekly), when BrainX is signed in there.
+//   claude  claude.ai's usage page, scraped by ClaudeUsageProbe every minute
+//           when BrainX is signed in there: weekly (all models) = HP, the
+//           5-hour session = SP.
 //   codex   the `rate_limits` codex writes into its own session rollouts
-//           (~/.codex/sessions/**/rollout-*.jsonl) on every turn.
+//           (~/.codex/sessions/**/rollout-*.jsonl) on every turn: the
+//           10080-minute window = HP, the 300-minute one = SP.
 //   grok    the credits config Grok Build fetches for its own prompt footer
 //           ("Weekly limit left: 7%") and logs to ~/.grok/logs/unified.jsonl
 //           as "billing: fetched credits config" — creditUsagePercent of the
-//           weekly period. Read from the log, never with Grok's login.
-//   anyone  out of quota by the broker's own record (quotaResumeUtc in the
-//           future) is at 0 until then, whatever else says.
+//           weekly period = HP. Read from the log, never with Grok's login.
+//           Grok publishes no shorter round, so it has no SP bar.
+//   anyone  resting on the broker's record (quotaResumeUtc in the future)
+//           keeps its weekly HP and carries the time it is back as a note.
 // ─────────────────────────────────────────────────────────────────────────
 
 public partial class MainWindow
@@ -59,16 +65,13 @@ public partial class MainWindow
             }
             catch { row = null; }
 
-            // The broker's own record beats everything: it stopped the agent
-            // on a usage limit and knows when it comes back.
+            // The broker stopped it on a usage limit — usually the five-hour
+            // one. The weekly HP stays what it is; when it is back is a note.
             if (BrokerRestingUntil(agent) is DateTime until)
-                row = new JObject
-                {
-                    ["left"] = 0,
-                    ["window"] = "หมดโควตา",
-                    ["resets"] = until.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture),
-                    ["source"] = "broker",
-                };
+            {
+                row ??= new JObject { ["left"] = null, ["source"] = "none" };
+                row["resting"] = until.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture);
+            }
 
             o[agent] = row ?? new JObject { ["left"] = null, ["source"] = "none" };
         }
@@ -79,18 +82,21 @@ public partial class MainWindow
     {
         var u = _hudUsage;
         if (u == null || !u.Authenticated) return null;
-        var rows = new[] { ("5 ชม.", u.Session), ("สัปดาห์", u.WeeklyAll) }
-            .Where(r => r.Item2 is { Percent: >= 0 })
-            .ToList();
-        if (rows.Count == 0) return null;
-        var (name, tight) = rows.OrderByDescending(r => r.Item2!.Percent).First();
-        return new JObject
+        var row = new JObject { ["left"] = null, ["source"] = "claude.ai" };
+        if (u.WeeklyAll is { Percent: >= 0 } week)
         {
-            ["left"] = Math.Round(Math.Clamp(100 - tight!.Percent, 0, 100)),
-            ["window"] = name,
-            ["resets"] = tight.ResetLabel ?? "",
-            ["source"] = "claude.ai",
-        };
+            row["left"] = Math.Round(Math.Clamp(100 - week.Percent, 0, 100));
+            row["window"] = "สัปดาห์";
+            row["resets"] = week.ResetLabel ?? "";
+        }
+        if (u.Session is { Percent: >= 0 } session)
+            row["sp"] = new JObject
+            {
+                ["left"] = Math.Round(Math.Clamp(100 - session.Percent, 0, 100)),
+                ["window"] = "5 ชม.",
+                ["resets"] = session.ResetLabel ?? "",
+            };
+        return row["left"]!.Type == JTokenType.Null && row["sp"] == null ? null : row;
     }
 
     /// <summary>The rate limits codex recorded last — read off the newest
@@ -106,28 +112,46 @@ public partial class MainWindow
         var lim = _codexLimitsCache.Limits;
         if (lim == null) return null;
 
-        double? used = null; string window = ""; string resets = "";
+        // Each window, whichever slot codex put it in: the 10080-minute one
+        // is the week (HP), the shorter one the round (SP).
+        JObject? week = null, round = null;
         foreach (var key in new[] { "primary", "secondary" })
+            if (lim[key] is JObject w)
+            {
+                if ((w["window_minutes"]?.ToObject<int?>() ?? 0) >= 10080) week ??= w;
+                else round ??= w;
+            }
+
+        var row = new JObject { ["left"] = null, ["source"] = "codex" };
+        if (CodexWindowLeft(week) is (double weekLeft, string weekResets))
         {
-            if (lim[key] is not JObject w || w["used_percent"]?.ToObject<double?>() is not double p) continue;
-            if (used is double u && u >= p) continue;
-            used = p;
-            var mins = w["window_minutes"]?.ToObject<int?>() ?? 0;
-            window = mins >= 10080 ? "สัปดาห์" : mins >= 60 ? $"{mins / 60} ชม." : $"{mins} นาที";
-            resets = w["resets_at"]?.ToObject<long?>() is long at
-                ? DateTimeOffset.FromUnixTimeSeconds(at).LocalDateTime.ToString("d MMM HH:mm", CultureInfo.InvariantCulture)
-                : "";
+            row["left"] = weekLeft;
+            row["window"] = "สัปดาห์";
+            row["resets"] = weekResets;
         }
-        if (used is not double usedPct) return null;
-        // Hit outright: whatever the percentages say, there is nothing left.
-        var reached = lim["rate_limit_reached_type"] is JToken r && r.Type != JTokenType.Null;
-        return new JObject
+        if (CodexWindowLeft(round) is (double roundLeft, string roundResets))
         {
-            ["left"] = reached ? 0 : Math.Round(Math.Clamp(100 - usedPct, 0, 100)),
-            ["window"] = window,
-            ["resets"] = resets,
-            ["source"] = "codex",
-        };
+            var mins = round!["window_minutes"]?.ToObject<int?>() ?? 300;
+            row["sp"] = new JObject
+            {
+                ["left"] = roundLeft,
+                ["window"] = mins >= 60 ? $"{mins / 60} ชม." : $"{mins} นาที",
+                ["resets"] = roundResets,
+            };
+        }
+        return row["left"]!.Type == JTokenType.Null && row["sp"] == null ? null : row;
+    }
+
+    /// <summary>What is left of one codex window. Codex only writes these on
+    /// a turn, so a window whose reset time has passed since is full again —
+    /// not stuck at whatever it was when codex last ran.</summary>
+    private static (double Left, string Resets)? CodexWindowLeft(JObject? w)
+    {
+        if (w?["used_percent"]?.ToObject<double?>() is not double used) return null;
+        var at = w["resets_at"]?.ToObject<long?>();
+        if (at is long t && DateTimeOffset.FromUnixTimeSeconds(t) <= DateTimeOffset.UtcNow) return (100, "");
+        return (Math.Round(Math.Clamp(100 - used, 0, 100)),
+                at is long r ? DateTimeOffset.FromUnixTimeSeconds(r).LocalDateTime.ToString("d MMM HH:mm", CultureInfo.InvariantCulture) : "");
     }
 
     private void RefreshCodexLimits()
