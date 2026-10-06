@@ -134,7 +134,9 @@ public partial class MindWindow : Window
             Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "brainx-mcp.exe"),
         }.FirstOrDefault(File.Exists) ?? "";
 
-        _svc = new AssistantService(_vault, mcp);
+        // One brain with Mind in the GigGok phone app, through this PC's
+        // BrainX Cloud sign-in (nothing happens when there is none).
+        _svc = AssistantService.WithCloud(_vault, mcp);
     }
 
     private void RestorePlacement()

@@ -100,11 +100,22 @@ public sealed class AssistantService
     private readonly string _mcpExe;
     private string? _model;
 
-    public AssistantService(string vaultPath, string mcpExePath)
+    /// <summary>
+    /// The brain she shares with Mind in the GigGok phone app (BrainX Cloud).
+    /// Null in tests that build her without one.
+    /// </summary>
+    private readonly Cloud.MindCloudBridge? _bridge;
+
+    public AssistantService(string vaultPath, string mcpExePath, Cloud.MindCloudBridge? bridge = null)
     {
         _vault = vaultPath;
         _mcpExe = mcpExePath;
+        _bridge = bridge;
     }
+
+    /// <summary>The app's own instance: her talks shared with the phone through this PC's cloud sign-in.</summary>
+    public static AssistantService WithCloud(string vaultPath, string mcpExePath)
+        => new(vaultPath, mcpExePath, new Cloud.MindCloudBridge(vaultPath));
 
     // ── config ────────────────────────────────────────────────────────────
 
@@ -395,6 +406,16 @@ public sealed class AssistantService
     public async Task<string> AskAsync(string question, CancellationToken ct = default)
     {
         var cfg = LoadConfig();
+
+        // Bring down what was said to her on the phone, so the notes she is
+        // about to search include it. Bounded: a slow network costs this answer
+        // four seconds at most, and at most once every two minutes.
+        if (_bridge != null)
+        {
+            try { await _bridge.SyncIfDueAsync(TimeSpan.FromMinutes(2), ct).WaitAsync(TimeSpan.FromSeconds(4), ct); }
+            catch (TimeoutException) { /* answer from what is here; the sync finishes in the background */ }
+        }
+
         var context = await ContextAsync(question, ct);
 
         var sys = new StringBuilder();
@@ -473,6 +494,13 @@ public sealed class AssistantService
             History.Add(("assistant", answer));
             while (History.Count > MaxTurns * 2) History.RemoveRange(0, 2);
             if (++_sinceLearn >= 3) { _sinceLearn = 0; _ = LearnAboutOwnerAsync(); }
+
+            // The talk outlives the window, and the phone's Mind can find it.
+            if (_bridge != null)
+            {
+                _bridge.Record(question, answer, cfg.Name);
+                _ = _bridge.PushTodayAsync();
+            }
         }
         return answer;
     }

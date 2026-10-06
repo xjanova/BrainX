@@ -73,6 +73,7 @@ internal static partial class Program
         RegisterLiveIndexChecks(sshChecks);
         RegisterCloudChecks(sshChecks);
         RegisterCloudFollowupChecks(sshChecks);
+        RegisterMindBridgeChecks(sshChecks);
         RegisterHardeningChecks(sshChecks);
         RegisterMySqlChecks(sshChecks);
         foreach (var (name, check) in sshChecks) await Run(name, check);
