@@ -646,6 +646,21 @@ internal static partial class Program
             var said = program.GetMethod("RunnerTroubleTh", any)!.Invoke(null, ["claude",
                 "API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Claude Code 2.1.50 does not support this model; version 2.1.280 or newer is required.\",\"details\":{\"error_code\":\"claude_code_version_too_old\"}}}"]) as string;
             Check("a CLI too old for its model is told to the owner as exactly that", said?.Contains("เก่าเกินไป") == true, said);
+
+            // 2026-10-06: grok's account ran dry, the broker kept "}" as the
+            // reason and called it into the same wall every five minutes.
+            var log = Path.Combine(root, "grok.log");
+            const string json = "{\n  \"message\": \"API error (status 402 Payment Required): Grok Build usage balance exhausted\",\n  \"http_status\": 402\n}\n";
+            File.WriteAllText(log, "Internal error: " + json + "Error: Internal error: " + json);
+            var fatal = program.GetMethod("FatalComplaint", any)!.Invoke(null, [log, true]) as string;
+            Check("a 402 spread over JSON lines is a fatal complaint, read from the line that says it",
+                fatal?.Contains("usage balance exhausted") == true, fatal);
+            var last = program.GetMethod("LastLineOf", any)!.Invoke(null, [log]) as string;
+            Check("…and the last line that says something is not a bare \"}\"", last == "\"http_status\": 402", last);
+            var kind = program.GetMethod("FailureClass", any)!.Invoke(null, [fatal]) as string;
+            Check("…it is the credit wall, which does not pause as a quota that resets", kind == "credit", kind);
+            var told = program.GetMethod("RunnerTroubleTh", any)!.Invoke(null, ["grok", fatal!]) as string;
+            Check("…and the owner is told the account is out of credit", told?.Contains("เครดิตหมด") == true, told);
         }
         finally
         {

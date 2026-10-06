@@ -1195,6 +1195,16 @@ internal static partial class Program
     private static readonly TimeSpan RunTooFastToBeReal = TimeSpan.FromSeconds(45);
 
     /// <summary>
+    /// The account behind the runner has run out of money, and waiting will
+    /// not refill it. Grok Build says it as a 402 spread over a JSON object
+    /// (2026-10-06): the broker read only its closing "}", did not know the
+    /// wall, and called grok into it every five minutes. Not "payment
+    /// required" itself: these are read at any point in a run, and an agent
+    /// working on a checkout prints that as part of the work.
+    /// </summary>
+    private static readonly string[] CreditSigns = { "credit balance", "usage balance" };
+
+    /// <summary>
     /// Things a runner says when it is not going to work THIS TIME no matter
     /// how often it is asked.
     ///
@@ -1203,7 +1213,7 @@ internal static partial class Program
     /// the owner needs the sentence rather than a hop count — "codex has hit
     /// its usage limit, resets at 2:12 AM" is actionable, "12 hops" is not.
     /// </summary>
-    private static readonly string[] QuotaSigns = { "usage limit", "credit balance", "quota", "rate limit" };
+    private static readonly string[] QuotaSigns = CreditSigns.Concat(new[] { "usage limit", "quota", "rate limit" }).ToArray();
 
     /// <summary>A CLI too old for the model it was started on refuses at any
     /// point and says so — reported as "left without a word" before, after a
@@ -1902,12 +1912,12 @@ internal static partial class Program
     {
         var low = failure.ToLowerInvariant();
         var clip = failure.Length > 160 ? failure[..160] + "…" : failure;
-        if (low.Contains("credit balance"))
+        if (CreditSigns.Any(low.Contains))
             return agent.Equals("claude", StringComparison.OrdinalIgnoreCase)
                 ? "Claude CLI บนเครื่องนี้คิดเงินกับ API key ของ Console ที่เครดิตหมด ไม่ได้ใช้ subscription — "
                 + "รัน `claude setup-token` แล้วตั้ง token ที่ได้เป็นตัวแปรผู้ใช้ CLAUDE_CODE_OAUTH_TOKEN "
                 + "(หรือเปิด `claude` แล้ว /login ด้วยบัญชี subscription)"
-                : $"บัญชีที่ {agent} ใช้เครดิตหมด ({clip})";
+                : $"บัญชีที่ {agent} ใช้เครดิตหมด — เติมเครดิตหรือรอรอบใหม่ของแพ็กเกจ แล้ว broker จะลองเรียกใหม่เอง ({clip})";
         if (low.Contains("version_too_old") || low.Contains("or newer is required") || low.Contains("does not support this model"))
             return $"โปรแกรม {agent} ที่ broker เปิดเก่าเกินไปสำหรับโมเดลที่เลือกไว้ — ชี้ exe ใน runners.json ไปที่ตัวใหม่ "
                  + $"หรืออัปเดตโปรแกรม (เช่น `claude update`) หรือเปลี่ยนโมเดลในห้อง ({clip})";
@@ -1995,13 +2005,15 @@ internal static partial class Program
         try { File.Delete(OwnerStopPath(agent)); } catch { }
     }
 
-    /// <summary>The last non-empty line a run printed — its complaint.</summary>
+    /// <summary>The last line a run printed that says something — its
+    /// complaint. A line of bare punctuation is the tail of a JSON error, and
+    /// "}" was all the owner was told when grok ran out of credit.</summary>
     private static string? LastLineOf(string path)
     {
         try
         {
             if (!File.Exists(path)) return null;
-            var line = File.ReadLines(path).LastOrDefault(l => !string.IsNullOrWhiteSpace(l));
+            var line = File.ReadLines(path).LastOrDefault(l => l.Any(char.IsLetterOrDigit));
             return line?.Trim() is { Length: > 0 } t ? (t.Length > 300 ? t[..300] : t) : null;
         }
         catch { return null; }
@@ -2095,7 +2107,7 @@ internal static partial class Program
     private static string FailureClass(string? failure)
     {
         var low = (failure ?? "").ToLowerInvariant();
-        if (low.Contains("credit balance")) return "credit";
+        if (CreditSigns.Any(low.Contains)) return "credit";
         if (VersionSigns.Any(low.Contains)) return "version";
         if (QuotaSigns.Any(low.Contains)) return "quota";
         if (low.Contains("inside another claude code session")) return "nested";
