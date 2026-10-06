@@ -110,6 +110,18 @@ internal static partial class Program
         Check("claude Opus 5.5: five levels", ArgLine(opus.Select(o => o.Id)) == "low medium high xhigh max", ArgLine(opus.Select(o => o.Id)));
         var haiku = RunnerModels.SupportedEfforts("claude", "claude", "claude-haiku-4-5", null, out var haikuDefault);
         Check("claude Haiku 4.5: no effort at all", haiku.Count == 0 && haikuDefault == null);
+        var grokExe = @"%USERPROFILE%\.grok\bin\grok.exe";
+        line = ArgLine(RunnerModels.ApplyEffortToArgs(
+            RunnerModels.ApplyToArgs(new[] { "-p", "{prompt}", "--cwd", "{cwd}", "--always-approve" }, "grok-4.7", RunnerModels.DefaultFlag),
+            "xhigh", RunnerModels.DefaultEffortArgs("grok", grokExe)));
+        Check("grok: --reasoning-effort and --model both go before -p",
+            line == "--reasoning-effort xhigh --model grok-4.7 -p {prompt} --cwd {cwd} --always-approve", line);
+        var grok = RunnerModels.SupportedEfforts("grok", grokExe, "grok-4.7", null, out _);
+        Check("grok: the four levels the CLI takes, and not max",
+            ArgLine(grok.Select(o => o.Id)) == "low medium high xhigh", ArgLine(grok.Select(o => o.Id)));
+        Check("grok: its models are offered",
+            RunnerModels.Supported("grok", grokExe, null, out _).Any(m => m.Id == "grok-4.7"));
+
         var mine = RunnerModels.SupportedEfforts("gemini", "gemini", null, JArray.Parse("[\"low\",\"-x\",\"high\"]"), out _);
         Check("runners.json's own levels, bad ones skipped", ArgLine(mine.Select(o => o.Id)) == "low high", ArgLine(mine.Select(o => o.Id)));
         return Task.CompletedTask;

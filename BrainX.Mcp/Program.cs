@@ -586,6 +586,11 @@ internal static partial class Program
             // letters are transposed — but leaning on that near-miss would be a
             // trap for whoever renames the binary next.
             if (ancestor.Contains("cluadex", StringComparison.OrdinalIgnoreCase)) return "cluadex";
+            // grok.exe (Grok Build) announces itself as "grok-shell-brainx-brain"
+            // — our own server name — so it reaches here; before this line a
+            // Grok run started from a Claude terminal walked on up and was
+            // filed as claude.
+            if (ancestor.Contains("grok", StringComparison.OrdinalIgnoreCase)) return "grok";
             if (ancestor.Contains("codex", StringComparison.OrdinalIgnoreCase)) return "codex";
             if (ancestor.Contains("claude", StringComparison.OrdinalIgnoreCase)) return "claude";
         }

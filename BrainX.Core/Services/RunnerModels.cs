@@ -221,6 +221,7 @@ public static class RunnerModels
     {
         "claude" => new[] { "--effort", EffortPlaceholder },
         "codex" => new[] { "-c", "model_reasoning_effort=" + EffortPlaceholder },
+        "grok" => new[] { "--reasoning-effort", EffortPlaceholder },
         _ => Array.Empty<string>(),
     };
 
@@ -300,6 +301,12 @@ public static class RunnerModels
             return (known?.Levels ?? ClaudeLevels).Select(l => EffortOption(l)).ToList();
         }
 
+        if (vendor == "grok")
+        {
+            var mine = ParseDeclared(declared, IsValidEffort);
+            return mine.Count > 0 ? mine : GrokLevels.Select(l => EffortOption(l)).ToList();
+        }
+
         return ParseDeclared(declared, IsValidEffort);
     }
 
@@ -336,15 +343,22 @@ public static class RunnerModels
     }
 
     /// <summary>
-    /// What `grok models` lists (Grok Build 1.0.46, 2026-10-06); its default
-    /// is the first. Like Claude's, a list kept here because the CLI keeps no
-    /// catalogue on disk to read; runners.json's `models` replaces it.
+    /// What `grok models` lists once signed in with SuperGrok (Grok Build
+    /// 1.0.46, 2026-10-06); its default is the first. Like Claude's, a list
+    /// kept here because the CLI keeps no catalogue on disk to read;
+    /// runners.json's `models` replaces it.
     /// </summary>
     public static readonly IReadOnlyList<Option> GrokModels = new[]
     {
-        new Option("grok-4.6", "Grok 4.6", "รุ่นล่าสุด — ค่าเริ่มต้นของ Grok Build"),
-        new Option("grok-4.5", "Grok 4.5", "รุ่นก่อนหน้า"),
+        new Option("grok-4.7", "Grok 4.7", "รุ่นล่าสุด — ค่าเริ่มต้นของ Grok Build"),
+        new Option("grok-4.7-build-fast", "Grok 4.7 Build Fast", "เร็ว — งานโค้ดประจำวัน"),
+        new Option("grok-4.6", "Grok 4.6", "รุ่นก่อนหน้า"),
+        new Option("grok-4.5", "Grok 4.5", "รุ่นเก่า"),
     };
+
+    /// <summary>The levels `grok --reasoning-effort` takes — tried one by one
+    /// on 2026-10-06: these four ran, "max" was refused by name.</summary>
+    private static readonly string[] GrokLevels = { "low", "medium", "high", "xhigh" };
 
     private static string Vendor(string agent, string exe)
     {
