@@ -3804,7 +3804,7 @@ function renderQuota() {
         const known = q.left != null;
         const left = known ? Math.max(0, Math.min(100, Math.round(q.left))) : 0;
         const tip = known
-            ? `${id}: เหลือ ${left}%${q.window ? ` ของรอบ ${q.window}` : ''}${q.resets ? ` · รีเซ็ต ${q.resets}` : ''}${q.source ? ` · จาก ${q.source}` : ''}`
+            ? `${id}: เหลือ ${left}%${q.window ? ` ของรอบ ${q.window}` : ''}${q.resets ? ` · รีเซ็ต ${q.resets}` : ''}${q.source ? ` · จาก ${q.source}` : ''}${q.asOf ? ` · ข้อมูลเมื่อ ${q.asOf}` : ''}`
             : `${id}: ไม่มีข้อมูลโควตาในเครื่องนี้`;
         return `<div class="qrow${known && left <= 15 ? ' crit' : ''}" title="${esc(tip)}">`
             + `<span class="qn" style="--pc:${agentColor(id)}">${esc(label(id))}</span>`

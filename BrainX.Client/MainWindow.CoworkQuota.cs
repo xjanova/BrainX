@@ -21,15 +21,22 @@ namespace BrainX.Client;
 //           session + weekly), when BrainX is signed in there.
 //   codex   the `rate_limits` codex writes into its own session rollouts
 //           (~/.codex/sessions/**/rollout-*.jsonl) on every turn.
+//   grok    the credits config Grok Build fetches for its own prompt footer
+//           ("Weekly limit left: 7%") and logs to ~/.grok/logs/unified.jsonl
+//           as "billing: fetched credits config" — creditUsagePercent of the
+//           weekly period. Read from the log, never with Grok's login.
 //   anyone  out of quota by the broker's own record (quotaResumeUtc in the
 //           future) is at 0 until then, whatever else says.
-//   grok    keeps nothing on disk to read — shown as unknown, not as full.
 // ─────────────────────────────────────────────────────────────────────────
 
 public partial class MainWindow
 {
     private (string Path, DateTime Stamp, JObject? Limits) _codexLimitsCache;
     private DateTime _codexLimitsCheckedUtc;
+    private long _grokLogPos;
+    private JObject? _grokCredits;
+    private DateTime _grokCreditsAt;
+    private DateTime _grokCheckedUtc;
 
     /// <summary>{agent: {left, window, resets, source}} for the room; `left`
     /// null when nothing on this machine says.</summary>
@@ -46,6 +53,7 @@ public partial class MainWindow
                 {
                     "claude" => ClaudeQuota(),
                     "codex" => CodexQuota(),
+                    "grok" => GrokQuota(),
                     _ => null,
                 };
             }
@@ -171,6 +179,75 @@ public partial class MainWindow
             catch { /* the first line of the tail is cut in half */ }
         }
         return null;
+    }
+
+    /// <summary>What Grok Build last said is left of its weekly credits.
+    /// Its log only grows, so each look reads just what was added since the
+    /// last one; a log that shrank was rotated and is read again from the top.</summary>
+    private JObject? GrokQuota()
+    {
+        if ((DateTime.UtcNow - _grokCheckedUtc).TotalSeconds >= 30)
+        {
+            _grokCheckedUtc = DateTime.UtcNow;
+            try { RefreshGrokCredits(); } catch { }
+        }
+        var c = _grokCredits;
+        if (c?["creditUsagePercent"]?.ToObject<double?>() is not double used) return null;
+
+        var end = CoworkUtc(c.SelectToken("currentPeriod.end") ?? c["billingPeriodEnd"]);
+        // The period it describes is over: the allowance has reset since, and
+        // what it is now nobody has asked Grok yet.
+        if (end is DateTime e && e <= DateTime.UtcNow) return null;
+        var weekly = (c.SelectToken("currentPeriod.type")?.ToString() ?? "").Contains("WEEK", StringComparison.OrdinalIgnoreCase);
+        return new JObject
+        {
+            ["left"] = Math.Round(Math.Clamp(100 - used, 0, 100)),
+            ["window"] = weekly ? "สัปดาห์" : "รอบบิล",
+            ["resets"] = end is DateTime r ? r.ToLocalTime().ToString("d MMM HH:mm", CultureInfo.InvariantCulture) : "",
+            ["asOf"] = _grokCreditsAt.ToLocalTime().ToString("d MMM HH:mm", CultureInfo.InvariantCulture),
+            ["source"] = "grok",
+        };
+    }
+
+    private void RefreshGrokCredits()
+    {
+        var home = Environment.GetEnvironmentVariable("GROK_HOME") is { Length: > 0 } h
+            ? h : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".grok");
+        var log = Path.Combine(home, "logs", "unified.jsonl");
+        if (!File.Exists(log)) return;
+
+        using var fs = new FileStream(log, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        if (fs.Length < _grokLogPos) _grokLogPos = 0;
+        // A first look at a long log only needs its recent end.
+        if (fs.Length - _grokLogPos > 8 * 1024 * 1024) _grokLogPos = fs.Length - 8 * 1024 * 1024;
+        if (fs.Length == _grokLogPos) return;
+
+        fs.Seek(_grokLogPos, SeekOrigin.Begin);
+        var buf = new byte[fs.Length - _grokLogPos];
+        var read = 0;
+        while (read < buf.Length && fs.Read(buf, read, buf.Length - read) is var n && n > 0) read += n;
+        // Complete lines only: the last one may still be being written, and
+        // is read whole next time instead of being skipped half-way through.
+        if (read == 0) return;
+        var lastNl = Array.LastIndexOf(buf, (byte)'\n', read - 1);
+        if (lastNl < 0) return;
+        var text = System.Text.Encoding.UTF8.GetString(buf, 0, lastNl);
+        _grokLogPos += lastNl + 1;
+
+        foreach (var line in text.Split('\n'))
+        {
+            if (!line.Contains("billing: fetched credits config", StringComparison.Ordinal)) continue;
+            try
+            {
+                var o = JObject.Parse(line);
+                if (o.SelectToken("ctx.config") is JObject cfg)
+                {
+                    _grokCredits = cfg;
+                    _grokCreditsAt = CoworkUtc(o["ts"]) ?? DateTime.UtcNow;
+                }
+            }
+            catch { /* the first line after a jump into the middle is cut in half */ }
+        }
     }
 
     /// <summary>When the broker paused this agent on a usage limit, if it is
