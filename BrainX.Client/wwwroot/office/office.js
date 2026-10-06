@@ -249,6 +249,7 @@ let MESSAGES = [];      // newest last
 let DECISIONS = [];
 let TASKS = [];         // the board: [{id,title,status,assignee,createdBy,note,at,paused,droppedBy}]
 let RUNS = [];          // runs the boss started, still going: [{agent,since,model,effort}]
+let QUOTA = {};         // agent → {left (0–100, or null = unknown), window, resets, source}
 let ROSTER = [];        // everyone with a desk, lit room or not — who a line can be for
 let BROKER = null;      // {state,tail} — the boss: running / adopted / stopped / failed
 let MODELS = [];        // [{agent,canChoose,chosen,configured,cliDefault,onCall,running,options:[{id,label,note}],
@@ -978,7 +979,7 @@ function drawDesk(g) {
     px(seat.x + 7, seat.y - 10, 1, 9, '#1a1b22');
     if (!here) px(seat.x - 7, seat.y - 2, 14, 2, '#30333f');     // the empty cushion
 
-    if (here) drawPerson(seat.x, seat.y, c, a);
+    if (here) { drawPerson(seat.x, seat.y, c, a); drawHp(seat.x, seat.y - 22, a.id); }
 
     // The desk: walnut lid, a lit front face, the near end in shade.
     poly([lid[0], lid[1], fl[1], fl[0]], '#5a3d28');     // front face
@@ -1790,6 +1791,7 @@ function drawWalker(a) {
 
     castShadow(p.x, p.y + 1, 7);
     drawStanding(p.x, p.y, a, walking, B.x < A.x);
+    drawHp(p.x, p.y - 35, a.id);
 
     // While they are over there, they are talking to whoever sits there.
     if (!walking && !BUBBLES.some(b => b.agent === a.id))
@@ -3258,6 +3260,8 @@ function apply(p) {
 
     MODELS = Array.isArray(p.models) ? p.models : [];
     RUNS = Array.isArray(p.runs) ? p.runs : [];
+    QUOTA = p.quota && typeof p.quota === 'object' ? p.quota : {};
+    renderQuota();
 
     renderLog();
     renderDecisions();
@@ -3747,6 +3751,68 @@ function renderService(svc) {
 }
 
 /** Below the header row, wherever it wrapped to on a narrow window. */
+// ── quota as HP ──────────────────────────────────────────────────────
+//
+// Owner (2026-10-06): "ให้โชว์ user คงเหลือเป็น หลอด HP ของ อวต้าแต่ละตัว ด้วย
+// คือโควต้าคือ HP ใกล้หมด ก็แดง เปลี่ยนสีตามด้วย บอกเป็นเปอร์เซ็นในห้อง มุมขวาบน".
+// What is LEFT of the tightest limit each agent is under (the host reads it
+// from claude.ai, codex's own records, and the broker's quota pauses). An
+// agent nothing on this machine reports for gets a grey, dotted bar and "?":
+// unknown is not the same as full.
+
+function hpColor(left) {
+    if (left == null) return '#6b7088';
+    if (left > 60) return '#5fd38d';
+    if (left > 35) return '#e8c547';
+    if (left > 15) return '#e8893a';
+    return '#e0564f';
+}
+
+/** A game HP bar over a head, on the sprite grid. */
+function drawHp(x, yTop, id) {
+    const q = QUOTA[id];
+    if (!q) return;
+    const w = 16, h = 2;
+    const x0 = Math.round(x - w / 2), y0 = Math.round(yTop);
+    px(x0 - 1, y0 - 1, w + 2, h + 2, 'rgba(5,6,15,0.85)');
+    if (q.left == null) {
+        for (let i = 0; i < w; i += 2) px(x0 + i, y0, 1, h, '#6b7088');
+        return;
+    }
+    const left = Math.max(0, Math.min(100, q.left));
+    const fill = Math.round(w * left / 100);
+    px(x0, y0, w, h, '#22263a');
+    if (fill > 0) px(x0, y0, fill, h, hpColor(left));
+    // Nearly out: it pulses, the way a game says "careful".
+    if (left <= 15 && (T >> 4) % 2) px(x0, y0, Math.max(1, fill), h, '#ff8a80');
+}
+
+let QUOTA_KEY = '';
+
+/** The same numbers as percentages, top right of the room. */
+function renderQuota() {
+    const box = document.getElementById('quota-hud');
+    if (!box) return;
+    const ids = Object.keys(QUOTA).sort();
+    box.hidden = ids.length === 0;
+    placeUnderHead(box);
+    const key = JSON.stringify(QUOTA);
+    if (key === QUOTA_KEY) return;
+    QUOTA_KEY = key;
+    box.innerHTML = '<div class="qh">โควตาคงเหลือ</div>' + ids.map(id => {
+        const q = QUOTA[id] || {};
+        const known = q.left != null;
+        const left = known ? Math.max(0, Math.min(100, Math.round(q.left))) : 0;
+        const tip = known
+            ? `${id}: เหลือ ${left}%${q.window ? ` ของรอบ ${q.window}` : ''}${q.resets ? ` · รีเซ็ต ${q.resets}` : ''}${q.source ? ` · จาก ${q.source}` : ''}`
+            : `${id}: ไม่มีข้อมูลโควตาในเครื่องนี้`;
+        return `<div class="qrow${known && left <= 15 ? ' crit' : ''}" title="${esc(tip)}">`
+            + `<span class="qn" style="--pc:${agentColor(id)}">${esc(label(id))}</span>`
+            + `<span class="qbar${known ? '' : ' unknown'}"><i style="width:${left}%;background:${hpColor(known ? left : null)}"></i></span>`
+            + `<span class="qp" style="color:${hpColor(known ? left : null)}">${known ? left + '%' : '?'}</span></div>`;
+    }).join('');
+}
+
 function placeUnderHead(panel) {
     const head = document.getElementById('room-head');
     if (head && panel) panel.style.top = (head.offsetTop + head.offsetHeight + 6) + 'px';
@@ -3933,6 +3999,12 @@ function demo() {
           note: '⏸ บอสพักงานนี้ไว้ — รอบอสสั่งทำต่อ', paused: 'owner', at: now - 20 * 60e3 },
     ];
     const runs = [{ agent: 'codex', since: now - 7 * 60e3, model: 'gpt-6-astra', effort: 'xhigh' }];
+    const quota = {
+        claude: { left: 72, window: '5 ชม.', resets: '16:00', source: 'claude.ai' },
+        codex: { left: 28, window: 'สัปดาห์', resets: '13 Oct 09:30', source: 'codex' },
+        cluadex: { left: null, source: 'none' },
+        gemini: { left: 9, window: '5 ชม.', resets: '14:20', source: 'demo' },
+    };
     const models = [
         { agent: 'claude', canChoose: true, chosen: 'claude-sonnet-5-5', configured: '', cliDefault: '', onCall: true, running: '',
           options: [
@@ -3963,7 +4035,7 @@ function demo() {
               { id: 'ultra', label: 'อัลตรา (ultra)', note: 'คิดเต็มที่และแตกงานให้ agent ย่อยเอง — แพงที่สุด' },
           ] },
     ];
-    apply({ agents, messages, decisions, tasks, models, runs });
+    apply({ agents, messages, decisions, tasks, models, runs, quota });
 
     // A message every few seconds, so the bubbles and the packets can be seen
     // doing what they do on a live vault.
@@ -3973,7 +4045,7 @@ function demo() {
         const to = ['codex', 'claude', 'claude'][i % 3];
         messages.push(mk(i, from, to, 'ทดสอบห้อง — ข้อความที่ ' + i, { topic: 'demo' }));
         if (messages.length > 40) messages.shift();
-        apply({ agents, messages: messages.slice(), decisions, tasks, models, runs });
+        apply({ agents, messages: messages.slice(), decisions, tasks, models, runs, quota });
         i++;
     }, 4200);
 }

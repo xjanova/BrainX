@@ -198,6 +198,33 @@ body {
 #service-panel header, #model-panel header, #work-panel header { color: var(--ink); font-weight: 600; margin-bottom: 8px; }
 #service-panel header span, #model-panel header span, #work-panel header span { color: var(--ink-faint); font-weight: 400; }
 
+/* Quota as HP, top right of the room. */
+#quota-hud {
+    position: absolute;
+    top: 40px;
+    right: 10px;
+    z-index: 20;
+    min-width: 150px;
+    padding: 6px 9px 7px;
+    border: 1px solid var(--stroke);
+    border-radius: 9px;
+    background: rgba(10, 12, 24, 0.78);
+    backdrop-filter: blur(6px);
+    color: var(--ink-dim);
+    font-size: 10.5px;
+    pointer-events: auto;
+}
+#quota-hud[hidden] { display: none; }
+#quota-hud .qh { color: var(--ink-faint); font-size: 9.5px; letter-spacing: 0.5px; margin-bottom: 4px; }
+#quota-hud .qrow { display: grid; grid-template-columns: 52px 1fr 34px; align-items: center; gap: 6px; line-height: 1.6; }
+#quota-hud .qn { color: var(--pc, var(--ink)); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#quota-hud .qbar { height: 5px; border-radius: 3px; background: #22263a; overflow: hidden; }
+#quota-hud .qbar i { display: block; height: 100%; border-radius: 3px; }
+#quota-hud .qbar.unknown { background: repeating-linear-gradient(90deg, #4a4f66 0 3px, transparent 3px 6px); }
+#quota-hud .qp { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+#quota-hud .qrow.crit .qp { animation: quota-blink 1s steps(2, start) infinite; }
+@keyframes quota-blink { to { visibility: hidden; } }
+
 /* The work window: who is working right now, then every piece of work with
    the owner's buttons on it. Wider than the other panels — titles are long. */
 #work-panel { width: min(470px, calc(100% - 20px)); max-height: calc(100% - 50px); overflow-y: auto; }

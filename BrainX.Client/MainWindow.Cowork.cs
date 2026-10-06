@@ -136,6 +136,7 @@ public partial class MainWindow
     {
         try
         {
+            var agents = CoworkAgents();
             var payload = new JObject
             {
                 ["busUrl"] = "https://bus.local/",
@@ -144,7 +145,11 @@ public partial class MainWindow
                 // should be working. Owner (2026-09-20): "บอสก็คือ โบรกเกอร์
                 // จัดสรร คอยจี้นั่นแหละ".
                 ["broker"] = CoworkBrokerState(),
-                ["agents"] = CoworkAgents(),
+                ["agents"] = agents,
+                // What each agent has left of its usage limits — its HP.
+                ["quota"] = CoworkQuota(agents.OfType<JObject>()
+                    .Where(a => a["bridge"]?.ToObject<bool?>() != true)
+                    .Select(a => a["id"]?.ToString() ?? "").Where(s => s.Length > 0)),
                 ["messages"] = CoworkMessages(),
                 ["decisions"] = CoworkDecisions(),
                 // Who is doing what. Built from the task files the agents
