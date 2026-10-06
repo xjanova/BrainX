@@ -57,7 +57,7 @@ public partial class MainWindow
         }
         try
         {
-            await CoworkWebView.EnsureCoreWebView2Async().ConfigureAwait(true);
+            await CoworkWebView.EnsureCoreWebView2Async(await GetAppWebViewEnvAsync()).ConfigureAwait(true);
             var core = CoworkWebView.CoreWebView2;
             if (core == null) return;
 

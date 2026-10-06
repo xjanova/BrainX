@@ -46,7 +46,7 @@ public partial class MainWindow
             w.MarkOpen();
             ShowCoworkPoppedOut(true);
 
-            await w.Web.EnsureCoreWebView2Async().ConfigureAwait(true);
+            await w.Web.EnsureCoreWebView2Async(await GetAppWebViewEnvAsync()).ConfigureAwait(true);
             var core = w.Web.CoreWebView2;
             if (core == null || _coworkWindow != w) return;
 

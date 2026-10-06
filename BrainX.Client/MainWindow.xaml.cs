@@ -902,7 +902,7 @@ public partial class MainWindow : Window
             if (hwnd == IntPtr.Zero) { ReportWp("FAILED — couldn't get HWND"); return; }
 
             ReportWp("setup 4/4 — initialising WebView2 with ?mode=wallpaper-setup");
-            await webView.EnsureCoreWebView2Async();
+            await webView.EnsureCoreWebView2Async(await GetAppWebViewEnvAsync());
             var core = webView.CoreWebView2;
             var wwwroot = Path.Combine(AppContext.BaseDirectory, "wwwroot");
             core.SetVirtualHostNameToFolderMapping(
@@ -1439,7 +1439,7 @@ public partial class MainWindow : Window
             var ex = GetWindowLong(hwnd, GWL_EXSTYLE);
             SetWindowLong(hwnd, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
 
-            await webView.EnsureCoreWebView2Async();
+            await webView.EnsureCoreWebView2Async(await GetAppWebViewEnvAsync());
             var core = webView.CoreWebView2;
             var wwwroot = Path.Combine(AppContext.BaseDirectory, "wwwroot");
             core.SetVirtualHostNameToFolderMapping(
@@ -6399,8 +6399,10 @@ public partial class MainWindow : Window
         // processes with handles under the install directory, and those are
         // exactly what a rename of `current` trips over.
         try { _updateRecheckTimer?.Stop(); } catch { }
-        foreach (var wv in new[] { UniverseWebView, DashUniverseWebView, DashClaudeProbeWebView })
+        foreach (var wv in new[] { UniverseWebView, DashUniverseWebView, DashClaudeProbeWebView, CoworkWebView, MindWebView })
             try { wv?.Dispose(); } catch { }
+        // The room in its own window holds a browser of its own.
+        try { _coworkWindow?.Web?.Dispose(); } catch { }
         try { Application.Current.Shutdown(); } catch { Environment.Exit(0); }
     }
 
@@ -8700,6 +8702,31 @@ public partial class MainWindow : Window
     // (+ same universe.local origin) or their cross-view `storage` event sync
     // breaks — see [[Dashboard universe inherits wallpaper appearance via storage event]].
     private Task<CoreWebView2Environment>? _universeEnvTask;
+
+    /// <summary>
+    /// The profile every other WebView here uses — the cowork room (in the
+    /// dashboard and popped out), Mind's view, the wallpaper.
+    ///
+    /// Without an environment of its own a WebView2 keeps its profile next to
+    /// the exe: %LOCALAPPDATA%\BrainX\current\BrainX.Client.exe.WebView2 —
+    /// INSIDE the install directory. Its browser process holds files there
+    /// for as long as it lives, and Velopack applies a release by renaming
+    /// `current`. On 2026-10-06 every apply after the room was opened failed
+    /// ("being used by another process", 2.0.468 and 2.0.471, six tries) and
+    /// the app came back on 2.0.462. Out here, an update never touches it.
+    /// </summary>
+    private Task<CoreWebView2Environment>? _appEnvTask;
+    private Task<CoreWebView2Environment> GetAppWebViewEnvAsync()
+        => _appEnvTask ??= CreateAppWebViewEnvAsync();
+
+    private static async Task<CoreWebView2Environment> CreateAppWebViewEnvAsync()
+    {
+        var userData = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "BrainX", "WebView2", "App");
+        Directory.CreateDirectory(userData);
+        return await CoreWebView2Environment.CreateAsync(null, userData);
+    }
     private Task<CoreWebView2Environment> GetUniverseWebViewEnvAsync()
         => _universeEnvTask ??= CreateUniverseWebViewEnvAsync();
 

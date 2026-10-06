@@ -58,7 +58,7 @@ public partial class MainWindow
                 _mindPage = new MindPage(MindWebView, AssistantSvc, _vaultPath, embedded: true);
                 _mindPage.WindowAction += OnMindWindowAction;
             }
-            await _mindPage.StartAsync();
+            await _mindPage.StartAsync(await GetAppWebViewEnvAsync());
         }
         catch (Exception ex)
         {
