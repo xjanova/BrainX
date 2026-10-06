@@ -175,11 +175,12 @@ internal static partial class Program
     }
 
     // Thai has no spaces, so these are substrings — chosen not to sit inside
-    // common words: "ขอ" only when it is not "ของ", no bare "กี่" (it is
-    // inside "เกี่ยว").
+    // common words: "ขอ" only when it is not "ของ" nor "ขอบ" (ขอบคุณ, the
+    // edge of a picture — 13 of the 16 "asks" the room made on 2026-10-06
+    // were one of those), no bare "กี่" (it is inside "เกี่ยว").
     private static readonly Regex AsksPattern = new(
         @"[?？]|ไหม|มั้ย|หรือยัง|หรือเปล่า|รึเปล่า|อะไร|ยังไง|อย่างไร|เมื่อไร|เมื่อไหร่|ถึงไหน|ใคร|ที่ไหน|ทำไม|"
-        + @"ช่วย|ขอ(?!ง)|ฝาก|รบกวน|ต้องการ|รอ(?:คุณ|ของคุณ|ภาพ|ไฟล์)|"
+        + @"ช่วย|ขอ(?![งบ])|ฝาก|รบกวน|ต้องการ|รอ(?:คุณ|ของคุณ|ภาพ|ไฟล์)|"
         + @"\b(?:can you|could you|please|waiting on|what|when|where|which|who|why|how)\b",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 

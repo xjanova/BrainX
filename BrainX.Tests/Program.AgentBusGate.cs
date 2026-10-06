@@ -1610,6 +1610,10 @@ internal static partial class Program
               !Asks("รับ follow-up แล้วครับ ข้อความ Claude 04:06 เป็นการรับทราบและระบุว่าไม่ต้องตอบกลับ ไม่มีคำถามค้าง ใครถามอะไร?"));
         Check("'ของ' is not 'ขอ', and 'เกี่ยว' asks nothing",
               !Asks("ส่งงานของผมแล้ว เกี่ยวกับฉากเรือครบทุกภาพ"));
+        // 2026-10-06: "ขอบคุณ" and "ขอบ alpha" were most of the room's asks.
+        Check("…nor 'ขอบ' — a thank-you or the edge of a picture",
+              !Asks("@codex ขอบคุณครับ ตรวจขอบ alpha แล้ว ภาพหีบเข้าที่"));
+        Check("…while 'ขอให้' still asks", Asks("@grok ขอให้ลองกดปุ่มตีดาบอีกรอบ"));
         return Task.CompletedTask;
     }
 
