@@ -64,6 +64,9 @@ public static class McpRemotePolicy
         "brain_import_path",
         "brain_apply_audit_fix",
         "bridge_status",
+        // Start a local Grok process on the owner's subscription.
+        "media_generate",
+        "media_status",
     };
 
     /// <summary>Read-only tools — available to any valid token.</summary>

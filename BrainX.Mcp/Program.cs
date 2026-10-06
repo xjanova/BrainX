@@ -504,6 +504,12 @@ internal static partial class Program
     /// </summary>
     private static string SourceTag(string suffix = "")
     {
+        // Mind on the local model is started by the broker AS codex (--oss);
+        // the run tells its brain who it really is (Program.Broker
+        // MindCoderRunner). Only this one name, so the variable cannot be
+        // used to pass as claude or codex.
+        if (string.Equals(Environment.GetEnvironmentVariable("BRAINX_AS_AGENT"), "mind", StringComparison.OrdinalIgnoreCase))
+            return "mind-mcp" + suffix;
         var name = _clientName;
         string bas;
         if (name != null && name.Contains("claude", StringComparison.OrdinalIgnoreCase)) bas = "claude-mcp";
@@ -1038,6 +1044,39 @@ internal static partial class Program
                         ["limit"] = new JObject { ["type"] = "integer", ["default"] = 30, ["description"] = "max lines per call (1-100)" },
                         ["history"] = new JObject { ["type"] = "boolean", ["default"] = false, ["description"] = "true = the last N lines whether or not you have seen them; false = only what is new to you" }
                     }
+                }),
+            Tool("media_generate",
+                "MAKE AN IMAGE OR A SHORT VIDEO — no browser needed. Runs Grok Imagine through the owner's Grok " +
+                "login on this machine (Program.GrokMedia). kind:'image' {prompt, aspect_ratio?} or kind:'video' " +
+                "{prompt, resolution? '480p'|'720p' (default 480p), duration? 6|10, image? absolute path of a frame " +
+                "to animate — without it a frame is generated first}. Returns a job id AT ONCE (a video takes " +
+                "minutes); poll media_status {job}. Files land in agent-bus/outbox/media/<job>/ — attach them with " +
+                "cowork_say. Costs the owner's Grok quota (about 30k tokens an image); the owner's order to make it is the " +
+                "permission. Video needs Grok's privacy mode off; media_status says so if it is on.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["kind"] = new JObject { ["type"] = "string", ["enum"] = new JArray("image", "video"), ["default"] = "image" },
+                        ["prompt"] = new JObject { ["type"] = "string", ["description"] = "what to make, in plain words (any language)" },
+                        ["aspect_ratio"] = new JObject { ["type"] = "string", ["description"] = "image: auto, 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, 2:3" },
+                        ["resolution"] = new JObject { ["type"] = "string", ["enum"] = new JArray("480p", "720p"), ["default"] = "480p" },
+                        ["duration"] = new JObject { ["type"] = "integer", ["enum"] = new JArray(6, 10), ["default"] = 6 },
+                        ["image"] = new JObject { ["type"] = "string", ["description"] = "video only: absolute path of the image to animate" }
+                    },
+                    ["required"] = new JArray("prompt")
+                }),
+            Tool("media_status",
+                "Where a media_generate job is: running, done (with the files' paths) or failed (with Grok's reason).",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["job"] = new JObject { ["type"] = "string", ["description"] = "the id media_generate returned" }
+                    },
+                    ["required"] = new JArray("job")
                 }),
             Tool("cowork_who",
                 "WHO IS GOOD AT WHAT in the cowork room — ask this before deciding a job is yours, and before " +
@@ -1760,6 +1799,8 @@ internal static partial class Program
                 "cowork_join"               => CoworkJoin(args),
                 "cowork_read"               => CoworkRead(args),
                 "cowork_who"                => CoworkWho(args),
+                "media_generate"            => MediaGenerate(args),
+                "media_status"              => MediaStatus(args),
                 "cowork_task"               => CoworkTask(args),
                 "cowork_say"                => CoworkSay(args),
                 "cowork_leave"              => CoworkLeave(),
