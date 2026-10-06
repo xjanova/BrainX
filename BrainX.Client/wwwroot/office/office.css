@@ -497,6 +497,20 @@ body {
 }
 #board-head strong { color: var(--ink); }
 #board-sum { margin-left: auto; color: var(--ink-faint); }
+#board-manage {
+    font: inherit;
+    font-size: 9.5px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    cursor: pointer;
+    color: var(--ink);
+    background: rgba(34,39,50,0.95);
+    border: 1px solid rgba(216,185,120,0.45);
+}
+#board-manage:hover { border-color: rgba(216,185,120,0.85); }
+#board-list .task { cursor: pointer; }
+#board-list .task:hover { background: rgba(26, 30, 52, 0.75); }
+#work-list .wtask.flash { outline: 1px solid rgba(216,185,120,0.9); }
 #board-list {
     list-style: none;
     margin: 0;

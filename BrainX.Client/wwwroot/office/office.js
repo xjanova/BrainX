@@ -2958,7 +2958,8 @@ function renderBoard() {
               + (held ? ' disabled' : '')
               + ` title="${esc(who)} ไม่อยู่ในห้อง — ส่งคำสั่งเรียกเข้ามารับงานนี้">${held ? 'เรียกแล้ว' : 'เรียก'}</button>`
             : '';
-        return `<li class="task st-${esc(t.paused === 'owner' ? 'paused' : t.status)}" title="${esc(t.id)} · ${esc(st.th)} · สร้างโดย ${esc(t.createdBy || '?')}">`
+        return `<li class="task st-${esc(t.paused === 'owner' ? 'paused' : t.status)}" data-id="${esc(t.id)}" tabindex="0"`
+            + ` title="${esc(t.id)} · ${esc(st.th)} · สร้างโดย ${esc(t.createdBy || '?')} — คลิกเพื่อพัก / ทำต่อ / เลิก / โฟกัส">`
             + `<span class="ico">${st.ico}</span>`
             + `<span class="tt">${esc(t.title)}${t.note ? `<em>${esc(t.note)}</em>` : ''}</span>`
             + `<span class="who" style="--pc:${who ? agentColor(who) : 'var(--ink-faint)'}">${esc(who ? label(who) : 'ว่าง')}</span>`
@@ -2990,9 +2991,15 @@ document.getElementById('board-list')?.addEventListener('click', (e) => {
         renderBoard();
         return;
     }
-    if (e.target.closest('.done-toggle')) { BOARD_SHOW_DONE = !BOARD_SHOW_DONE; renderBoard(); }
+    if (e.target.closest('.done-toggle')) { BOARD_SHOW_DONE = !BOARD_SHOW_DONE; renderBoard(); return; }
+    // Any other press on a piece of work opens the work window at it — the
+    // board is where the owner looks, so it is where the controls are reached.
+    const row = e.target.closest('.task[data-id]');
+    if (row) openWorkPanel(row.dataset.id);
 });
 document.getElementById('board-list')?.addEventListener('keydown', (e) => {
+    const row = e.target.closest('.task[data-id]');
+    if (row && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openWorkPanel(row.dataset.id); return; }
     if ((e.key === 'Enter' || e.key === ' ') && e.target.closest('.done-toggle')) {
         e.preventDefault();
         BOARD_SHOW_DONE = !BOARD_SHOW_DONE;
@@ -3526,7 +3533,7 @@ function renderWork() {
                            : btn('focus', '🎯 โฟกัส', 'ทำงานนี้ก่อน — งานอื่นทั้งหมดจะถูกพักไว้'))
                   + btn('pause', '⏸ พัก', 'หยุดไว้ชั่วคราว — กดทำต่อทีหลังได้')
                   + btn('drop', '✖ เลิก', 'ยกเลิกงานนี้ — ย้อนกลับไม่ได้', 'danger');
-        return `<li class="wtask st-${esc(isPaused(t) ? 'paused' : t.status)}">`
+        return `<li class="wtask st-${esc(isPaused(t) ? 'paused' : t.status)}" data-id="${esc(t.id)}">`
             + `<div class="wt-top"><span class="ico">${st.ico}</span><span class="tt">${esc(t.title)}</span>`
             + `<span class="who" style="--pc:${who ? agentColor(who) : 'var(--ink-faint)'}">${esc(who ? label(who) : 'ว่าง')}</span>`
             + `<span class="age">${esc(ago(t.at))}</span></div>`
@@ -3582,18 +3589,33 @@ function closeWorkPanel() {
     panel.hidden = true;
     document.getElementById('room-work')?.setAttribute('aria-expanded', 'false');
 }
-document.getElementById('room-work')?.addEventListener('click', (e) => {
+/** Open the work window — from its chip, from the board's button, or from a
+ *  row on the board, which it then shows and marks. */
+function openWorkPanel(taskId) {
     const panel = document.getElementById('work-panel');
     if (!panel) return;
-    const open = panel.hidden;
-    panel.hidden = !open;
-    e.currentTarget.setAttribute('aria-expanded', String(open));
-    if (open) { placeUnderHead(panel); WORK_NOTE = ''; WORK_KEY = ''; renderWork(); }
+    panel.hidden = false;
+    document.getElementById('room-work')?.setAttribute('aria-expanded', 'true');
+    placeUnderHead(panel);
+    WORK_NOTE = ''; WORK_KEY = '';
+    renderWork();
+    if (!taskId) return;
+    const li = document.querySelector(`#work-list .wtask[data-id="${CSS.escape(taskId)}"]`);
+    if (!li) return;
+    li.scrollIntoView({ block: 'nearest' });
+    li.classList.add('flash');
+    setTimeout(() => li.classList.remove('flash'), 1600);
+}
+document.getElementById('room-work')?.addEventListener('click', () => {
+    const panel = document.getElementById('work-panel');
+    if (panel && !panel.hidden) closeWorkPanel();
+    else openWorkPanel();
 });
+document.getElementById('board-manage')?.addEventListener('click', () => openWorkPanel());
 document.addEventListener('click', (e) => {
     // A confirm() dialog's click lands nowhere in the page; only a real click
-    // outside closes the window.
-    if (!e.target.closest('#work-panel, #room-work')) closeWorkPanel();
+    // outside closes the window — and the board's own ways in are not outside.
+    if (!e.target.closest('#work-panel, #room-work, #board-manage, #board-list .task')) closeWorkPanel();
 });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeWorkPanel(); });
 

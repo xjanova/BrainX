@@ -117,7 +117,11 @@
          write with cowork_task, so an assignment is something the owner can
          look at, not a sentence to find in the transcript. -->
     <section id="board" hidden aria-label="Who is doing what">
-      <header id="board-head"><strong>บอร์ดงาน</strong><span id="board-sum"></span></header>
+      <header id="board-head"><strong>บอร์ดงาน</strong><span id="board-sum"></span>
+        <!-- The way into the work window from the board itself: pausing,
+             resuming, cancelling and focusing all live there. -->
+        <button id="board-manage" type="button" aria-controls="work-panel"
+                title="ดูสถานะงาน — พัก / ทำต่อ / เลิก / โฟกัส / หยุดรอบที่กำลังรัน">⏯ จัดการงาน</button></header>
       <ol id="board-list"></ol>
     </section>
 
