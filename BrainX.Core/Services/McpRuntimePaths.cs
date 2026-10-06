@@ -66,9 +66,10 @@ public static class McpRuntimePaths
     /// <summary>
     /// Every process that would make a Velopack apply fail.
     ///
-    /// Deliberately narrow: only brainx-mcp servers and OTHER BrainX.Client
-    /// instances are enumerated, because those are the only things that ever
-    /// run out of `current` unattended. The caller's own process is skipped -
+    /// Two kinds: brainx-mcp servers and OTHER BrainX.Client instances running
+    /// out of `current`, and any process whose working directory is inside it
+    /// (something BrainX opened, inheriting its folder). The caller's own
+    /// process is skipped -
     /// Velopack waits for it to exit before renaming anything, so its handle is
     /// expected and is not a blocker.
     /// </summary>
@@ -101,7 +102,67 @@ public static class McpRuntimePaths
             }
         }
 
+        // Anything STANDING in the folder: a process whose working directory
+        // is inside `current` holds it as surely as one running from it, and
+        // is invisible to the image check above and to the Restart Manager.
+        // On 2026-10-06 it was the Photos app, opened from the room.
+        foreach (var p in Process.GetProcesses())
+        {
+            try
+            {
+                if (p.Id == self || found.Any(h => h.Pid == p.Id)) continue;
+                var cwd = WorkingDirectoryOf(p.Id);
+                if (!IsInsideManagedCurrent(cwd)) continue;
+                found.Add(new Holder(p.Id, p.ProcessName, cwd!, ""));
+            }
+            catch { /* not ours to look into */ }
+            finally { p.Dispose(); }
+        }
+
         return found;
+    }
+
+    [System.Runtime.InteropServices.DllImport("ntdll.dll")]
+    private static extern int NtQueryInformationProcess(IntPtr h, int cls, byte[] info, int len, out int ret);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr h);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool ReadProcessMemory(IntPtr h, IntPtr addr, byte[] buf, IntPtr size, out IntPtr read);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern bool IsWow64Process(IntPtr h, out bool wow);
+
+    /// <summary>
+    /// Another process's working directory, read from its PEB (64-bit
+    /// processes; RTL_USER_PROCESS_PARAMETERS.CurrentDirectory). Null when it
+    /// cannot be read — another user's process, a 32-bit one, or not Windows.
+    /// </summary>
+    public static string? WorkingDirectoryOf(int pid)
+    {
+        if (!OperatingSystem.IsWindows() || !Environment.Is64BitProcess) return null;
+        var h = OpenProcess(0x0400 | 0x0010, false, pid);   // QUERY_INFORMATION | VM_READ
+        if (h == IntPtr.Zero) return null;
+        try
+        {
+            if (IsWow64Process(h, out var wow) && wow) return null;
+            var pbi = new byte[48];
+            if (NtQueryInformationProcess(h, 0, pbi, pbi.Length, out _) != 0) return null;
+            var peb = BitConverter.ToInt64(pbi, 8);
+            var b8 = new byte[8];
+            if (!ReadProcessMemory(h, new IntPtr(peb + 0x20), b8, new IntPtr(8), out _)) return null;
+            var parameters = BitConverter.ToInt64(b8, 0);
+            var us = new byte[16];
+            if (!ReadProcessMemory(h, new IntPtr(parameters + 0x38), us, new IntPtr(16), out _)) return null;
+            int len = BitConverter.ToUInt16(us, 0);
+            var buf = BitConverter.ToInt64(us, 8);
+            if (len <= 0 || len > 4096) return null;
+            var s = new byte[len];
+            if (!ReadProcessMemory(h, new IntPtr(buf), s, new IntPtr(len), out _)) return null;
+            return System.Text.Encoding.Unicode.GetString(s);
+        }
+        catch { return null; }
+        finally { CloseHandle(h); }
     }
 
     /// <summary>
