@@ -30,6 +30,12 @@ let SCALE = 2;
  *  head 30 above the soles, plus the sole row). The one measurement the
  *  grid is sized from. */
 const AGENT_STAND_H = 31;
+
+/** How tall an agent stands against the boss. Owner (2026-10-06): "ควรให้
+ *  ขนาดของ อวาต้า cluade codex grok สัดส่วน เล็กลงกว่า บอส 3/4 — อวาต้าตัว
+ *  อื่นๆก็เช่นกัน". Every sprite (agents, desks, the engines) is on the same
+ *  grid, so this one number sizes all of them. */
+const AGENT_TO_BOSS = 0.75;
 const TILE_W = 32, TILE_H = 16;     // isometric tile, 2:1 like every iso game
 
 /* The picture is built in two passes, and that split is what separates
@@ -168,7 +174,10 @@ function resize() {
     // pixels put the agents anywhere from 80% to 120% of him.
     const iw = ROOM_PLATE.naturalWidth || 1448, ih = ROOM_PLATE.naturalHeight || 1086;
     const plateH = ih * Math.min(r.width / iw, r.height / ih);
-    SCALE = Math.max(1, (plateH * BOSS_FILL) / AGENT_STAND_H);
+    // No floor at one screen pixel per grid pixel: in a very small pane that
+    // floor made the agents twice the boss. Below one the sprites get soft,
+    // but they stay the size the boss says they are.
+    SCALE = Math.max(0.5, (plateH * BOSS_FILL * AGENT_TO_BOSS) / AGENT_STAND_H);
     CW = Math.max(160, Math.round(r.width / SCALE));
     CH = Math.max(100, Math.round(r.height / SCALE));
     scene.width = CW;
@@ -3807,6 +3816,26 @@ document.getElementById('room-light')?.addEventListener('click', () => {
     if (!on && !confirm('ปิดไฟปิดห้อง?\n\nทุกคนจะออกจากห้อง ไม่มีใครถูกเรียกและไม่มีใครพูดได้จนกว่าจะเปิดไฟใหม่')) return;
     post({ type: 'officeRoomLight', on });
 });
+
+// ── the room in a window of its own ─────────────────────────────────
+//
+// Owner (2026-10-06): "ทำให้ห้อง cowork room สามารถ กดเพื่อแยกหน้าต่างออกมาต่าง
+// หาก ได้เหมือน อวาต้าร์น้องมายด์". The host opens the window and moves the room
+// into it; this copy of the page is told it IS that window by ?popout, kept in
+// sessionStorage so a trip to the map painter and back still knows.
+const POPOUT = (() => {
+    const q = new URLSearchParams(location.search).has('popout');
+    try { if (q) sessionStorage.setItem('brainx.office.popout', '1'); return q || sessionStorage.getItem('brainx.office.popout') === '1'; }
+    catch { return q; }
+})();
+{
+    const b = document.getElementById('room-popout');
+    if (b) {
+        b.textContent = POPOUT ? '⇲ รวมกลับ' : '⧉ แยกหน้าต่าง';
+        b.title = POPOUT ? 'รวมห้องกลับเข้าไปในหน้าต่างหลักของ BrainX' : 'แยกห้องออกเป็นหน้าต่างของตัวเอง — ย้ายไปจอไหนก็ได้ จำตำแหน่งไว้ให้';
+        b.addEventListener('click', () => post({ type: POPOUT ? 'officeDock' : 'officePopOut' }));
+    }
+}
 
 document.getElementById('room-map')?.addEventListener('click', () => {
     // The stamp travels with it so coming back loads this build, not a cached one.

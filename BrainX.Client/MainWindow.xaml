@@ -4899,6 +4899,22 @@
                             <Border Background="#FF05060E" ClipToBounds="True">
                                 <wv2:WebView2 x:Name="CoworkWebView" DefaultBackgroundColor="#FF05060E"/>
                             </Border>
+                            <!-- While the room is popped out into its own window
+                                 (MainWindow.CoworkPopout): where it went, and the
+                                 way to bring it back. -->
+                            <Border x:Name="CoworkPoppedPanel" Visibility="Collapsed" Background="#FF05060E">
+                                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="460">
+                                    <TextBlock Text="⧉" FontSize="44" Foreground="#FFD8B978" HorizontalAlignment="Center"/>
+                                    <TextBlock Text="ห้องทำงานเปิดอยู่ในหน้าต่างแยก" FontSize="18" FontWeight="SemiBold"
+                                               Foreground="#FFF2EFE6" HorizontalAlignment="Center" Margin="0,10,0,6"/>
+                                    <TextBlock Text="ทุกอย่างในห้องทำงานต่อตามปกติ — สั่งงาน ดูบอร์ด พัก/เลิกงาน ได้จากหน้าต่างนั้น"
+                                               FontSize="12" Foreground="#FF9AA0B8" TextWrapping="Wrap" TextAlignment="Center"/>
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,18,0,0">
+                                        <Button Content="ไปที่หน้าต่างห้อง" Click="CoworkPoppedFocus_Click" Padding="14,6" Margin="0,0,8,0"/>
+                                        <Button Content="⇲ รวมกลับมาไว้ที่นี่" Click="CoworkPoppedDock_Click" Padding="14,6"/>
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
                         </Grid>
 
                         <Grid x:Name="UniverseView" Visibility="Visible">

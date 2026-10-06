@@ -47,6 +47,14 @@ public partial class MainWindow
 
     private async Task InitializeCoworkAsync()
     {
+        // Popped out: the room is live in its own window, and the dashboard's
+        // view only says where it went (MainWindow.CoworkPopout).
+        if (CoworkPoppedOut)
+        {
+            ShowCoworkPoppedOut(true);
+            EnsureCoworkTimer();
+            return;
+        }
         try
         {
             await CoworkWebView.EnsureCoreWebView2Async().ConfigureAwait(true);
@@ -81,20 +89,30 @@ public partial class MainWindow
                 _coworkWired = true;
             }
 
-            _coworkTimer ??= new DispatcherTimer { Interval = CoworkPoll };
-            if (_coworkTimer.Tag is not bool)
-            {
-                _coworkTimer.Tick += (_, _) => PostCowork();
-                _coworkTimer.Tag = true;
-            }
-            _coworkTimer.Start();
+            EnsureCoworkTimer();
             PostCowork();
         }
         catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"Cowork init: {ex.Message}"); }
     }
 
-    /// <summary>The room is only worth reading while it is on screen.</summary>
-    private void StopCowork() => _coworkTimer?.Stop();
+    private void EnsureCoworkTimer()
+    {
+        _coworkTimer ??= new DispatcherTimer { Interval = CoworkPoll };
+        if (_coworkTimer.Tag is not bool)
+        {
+            _coworkTimer.Tick += (_, _) => PostCowork();
+            _coworkTimer.Tag = true;
+        }
+        _coworkTimer.Start();
+    }
+
+    /// <summary>The room is only worth reading while it is on screen — and a
+    /// room in its own window is on screen whatever the dashboard shows.</summary>
+    private void StopCowork()
+    {
+        if (CoworkPoppedOut) return;
+        _coworkTimer?.Stop();
+    }
 
     /// <summary>Newest write time under office/, as a compact stamp. Cheap:
     /// a dozen files, read once per session when the room is first opened.</summary>
@@ -139,7 +157,9 @@ public partial class MainWindow
                 // work window can stop.
                 ["runs"] = CoworkRuns(),
             };
-            CoworkWebView.CoreWebView2?.PostWebMessageAsJson(
+            // To wherever the room is showing: its own window when popped out,
+            // the dashboard's view otherwise — never both.
+            CoworkSurface?.PostWebMessageAsJson(
                 new JObject { ["type"] = "officeState", ["payload"] = payload }.ToString());
         }
         catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"PostCowork: {ex.Message}"); }
@@ -519,7 +539,7 @@ public partial class MainWindow
                     catch (Exception ex)
                     {
                         System.Diagnostics.Debug.WriteLine($"CoworkSay: {ex.Message}");
-                        CoworkWebView.CoreWebView2?.PostWebMessageAsJson(new JObject
+                        CoworkSurface?.PostWebMessageAsJson(new JObject
                         {
                             ["type"] = "officeSayFailed",
                             ["text"] = m["text"]?.ToString() ?? "",
@@ -563,6 +583,11 @@ public partial class MainWindow
                 // work, or stop a run the boss started (MainWindow.CoworkControl).
                 case "officeTask": CoworkTaskControl(m["task"]?.ToString(), m["action"]?.ToString()); break;
                 case "officeStopRun": CoworkStopRunFromRoom(m["agent"]?.ToString()); break;
+                // The room in a window of its own, and back (MainWindow.CoworkPopout).
+                case "officePopOut": _ = OpenCoworkWindowAsync(); break;
+                // Posted from inside the window being closed: let this event
+                // return before its WebView goes away.
+                case "officeDock": Dispatcher.BeginInvoke(new Action(DockCoworkWindow)); break;
             }
         }
         catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"Cowork msg: {ex.Message}"); }

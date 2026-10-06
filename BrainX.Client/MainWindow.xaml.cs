@@ -2699,6 +2699,8 @@ public partial class MainWindow : Window
         // this hands off to another process and returns, and we have no signal
         // for when SHE is ready — see the note in MaybeAutoStartMind.
         MaybeAutoStartMind();
+        // The cowork room comes back in its own window if that is where it was.
+        MaybeRestoreCoworkWindow();
 
         // An update that landed while Claude was open leaves Claude talking to
         // the previous MCP. Check right after startup, when it matters most:
@@ -8623,6 +8625,10 @@ public partial class MainWindow : Window
         // running with nothing supervising it is the part that matters here,
         // not the tidiness of the process list.
         try { StopBrokerHost(); } catch (Exception ex) { Debug.WriteLine($"broker teardown: {ex.Message}"); }
+
+        // The room's own window goes with the app — remembered as open, so it
+        // comes back where it was next time.
+        try { CloseCoworkWindowWithApp(); } catch { }
 
         // A BrainX Cloud sync in flight stops now; its finished batches are
         // already saved and the next launch resumes the rest.
