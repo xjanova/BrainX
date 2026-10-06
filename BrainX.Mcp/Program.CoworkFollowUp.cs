@@ -85,6 +85,11 @@ internal static partial class Program
             // it is over. This is what switching the room's light off used to
             // do — without also stopping the room's real work.
             if (study is { } sw && at > sw.Open && at <= sw.Close) continue;
+            // Only a line that ASKS something calls the one it names. "Got it",
+            // "done, nothing to answer", a closure for the broker: answering
+            // those started whole runs to say "noted" back, in a loop
+            // (2026-10-06: 10:31, 10:34, 11:09 — and a board task each time).
+            if (!CoworkLineAsks(o["body"]?.ToString())) continue;
             foreach (var target in CoworkRecipients(o["to"]))
             {
                 if (target.Equals(speaker, StringComparison.OrdinalIgnoreCase) || IsReservedIdentity(target)) continue;
@@ -167,6 +172,29 @@ internal static partial class Program
             }
         }
         catch (Exception ex) { BrokerLog("expiring moot cards — " + Redact(ex.Message)); }
+    }
+
+    // Thai has no spaces, so these are substrings — chosen not to sit inside
+    // common words: "ขอ" only when it is not "ของ", no bare "กี่" (it is
+    // inside "เกี่ยว").
+    private static readonly Regex AsksPattern = new(
+        @"[?？]|ไหม|มั้ย|หรือยัง|หรือเปล่า|รึเปล่า|อะไร|ยังไง|อย่างไร|เมื่อไร|เมื่อไหร่|ถึงไหน|ใคร|ที่ไหน|ทำไม|"
+        + @"ช่วย|ขอ(?!ง)|ฝาก|รบกวน|ต้องการ|รอ(?:คุณ|ของคุณ|ภาพ|ไฟล์)|"
+        + @"\b(?:can you|could you|please|waiting on|what|when|where|which|who|why|how)\b",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    private static readonly Regex NothingToAnswerPattern = new(
+        @"ไม่ต้องตอบ|ไม่มีคำถาม|ไม่ต้องตอบกลับ|no reply needed|nothing to answer|no questions?",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    /// <summary>Does this room line ask its addressee for something — a
+    /// question, a request, something it is waiting on? A line that says
+    /// there is nothing to answer never does, whatever else it contains.</summary>
+    internal static bool CoworkLineAsks(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return false;
+        if (NothingToAnswerPattern.IsMatch(body)) return false;
+        return AsksPattern.IsMatch(body);
     }
 
     /// <summary>When the last idle study was talking: from its opening to its

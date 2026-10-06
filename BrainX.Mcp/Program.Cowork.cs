@@ -1367,8 +1367,12 @@ internal static partial class Program
       + "Silence is indistinguishable from being offline, and the owner is watching the room. "
       + "(2) Decide whether it is YOURS from what the order actually asks for and what you are already on. "
       + "If it is, do it and report back in the room. If it plainly is not, say so in one line and leave it. "
-      + "(3) If it is AMBIGUOUS who should do it, do not guess and do not both start: either agree it in the "
-      + "room with the other agents (cowork_say), or ask the owner directly — they are right there. "
+      // Owner (2026-10-06): "ถ้ามีงานที่ทำได้ สามารถทำกันได้เอง คิดได้เอง โดยไม่ต้อง
+      // รอบอส". A balance fix sat 'open' on the board that morning with "the owner
+      // has to decide who holds it" — a question about the room, put to the owner.
+      + "(3) If it is AMBIGUOUS who should do it, do not guess and do not both start: settle it in the room "
+      + "between yourselves (cowork_say) by skill and load — rule (4) — and if it is still a tie, whoever has "
+      + "less on the board takes it. WHO DOES WHAT IS THE ROOM'S CALL, never a question for the owner. "
       + "A board item somebody has claimed is theirs: never start it too. "
       + "Two agents doing the same job is worse than one asking. "
       + "(4) SPLIT IT BY SKILL AND LOAD, not by who read it first. This room is one team working in parts: the "
@@ -1413,7 +1417,23 @@ internal static partial class Program
       + "not park the work waiting for a second yes. Ask only when the order leaves a real choice open that "
       + "the order, the board and the brain cannot settle, and then ask once, with your recommended option "
       + "first. If what you need is out of this run's reach (no browser, no GUI, no login), say exactly that "
-      + "in one line and say what would reach it. That is a report, not a request for permission.";
+      + "in one line and say what would reach it. That is a report, not a request for permission. "
+      // The same morning: six board tasks titled "close the broker's follow-up",
+      // and runs started only to read a "got it, nothing to answer" line —
+      // because every line addressed to an agent that is away wakes it.
+      + "(11) ADDRESS ONLY WHAT NEEDS AN ANSWER. A line to:'<agent>' calls that agent in if it is away, and that "
+      + "costs a whole run. Acknowledgements, thanks, 'received', 'done, nothing to answer' go to the ROOM, "
+      + "unaddressed — and are never answered. Do not open a board task to answer or close a follow-up from the "
+      + "broker: if a follow-up reaches you and there is nothing open, say so in one unaddressed line and stop. "
+      // Owner (2026-10-06): "ถ้ามีงานที่ทำได้ สามารถทำกันได้เอง คิดได้เอง".
+      + "(12) KEEP THE OWNER'S GOAL MOVING ON YOUR OWN. When your piece lands, look at what the goal the owner set "
+      + "still needs — the plan or spec in the repo, the bug you just found, the test that fails, the piece "
+      + "somebody is waiting on — put the next concrete step on the board, and take it or hand it to whoever "
+      + "is best at it. Do not wait to be told. Decide the things that are yours to decide (how to build it, "
+      + "numbers like balance and timing, who does which part), say why in one line, and move on. Stop for the "
+      + "owner only on what is theirs: spending money or credits they did not order, publishing, deploying or "
+      + "merging into main, deleting their data, or changing what the product is. Stop when the goal is met — "
+      + "do not invent a new one.";
 
     // ───────────── what the broker sees ─────────────
 

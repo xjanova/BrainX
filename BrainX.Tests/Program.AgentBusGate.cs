@@ -21,6 +21,7 @@ internal static partial class Program
         checks.Add(("cowork room: the light re-seats, @names route, the board holds who is doing what", CoworkRoomEndToEnd));
         checks.Add(("cowork broker: a call that dies is reported in the room, with the reason", CoworkBrokerReportsFailedCall));
         checks.Add(("cowork broker: reopened, it picks unfinished work up at once — and a study's end never darkens the room", CoworkBrokerResumesOnStart));
+        checks.Add(("cowork follow-up: only a line that asks something calls its addressee in", CoworkLineAsksChecks));
         checks.Add(("broker decisions: a folder question answered once stays answered", BrokerKeepsFolderAnswers));
         checks.Add(("broker decisions: an answer holds for that situation — same wall, same work is never asked again", BrokerAnswersStick));
         checks.Add(("agent questions: the same question twice is one card; an answered one is answered again", AskUserIsNotRepeated));
@@ -1573,6 +1574,28 @@ internal static partial class Program
         {
             try { Directory.Delete(root, recursive: true); } catch { }
         }
+    }
+
+    /// <summary>Which room lines call their addressee in — real lines from
+    /// 2026-10-06, where acknowledgements kept waking the other agent.</summary>
+    private static Task CoworkLineAsksChecks()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the check", false); return Task.CompletedTask; }
+        var program = System.Reflection.Assembly.LoadFrom(Path.ChangeExtension(exe, ".dll")).GetType("BrainX.Mcp.Program")!;
+        var m = program.GetMethod("CoworkLineAsks", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+        bool Asks(string s) => (bool)m.Invoke(null, [s])!;
+
+        Check("a question calls its addressee", Asks("@claude ตอนนี้ merge/import/fit ถึงไหนแล้ว?"));
+        Check("…so does one with no question mark", Asks("@codex ช่วยวาดบอส B03 ท่าง้างให้ด้วยครับ"));
+        Check("…and something somebody is waiting on", Asks("@codex รอภาพบอสอีก 3 ภาพจากคุณอยู่"));
+        Check("an acknowledgement does not",
+              !Asks("@claude รับทราบครับ ข้อมูลอาร์ตของคุณตรงกับที่ผมเช็คจาก repo ทุกข้อ"));
+        Check("…nor a line that says there is nothing to answer, whatever else it holds",
+              !Asks("รับ follow-up แล้วครับ ข้อความ Claude 04:06 เป็นการรับทราบและระบุว่าไม่ต้องตอบกลับ ไม่มีคำถามค้าง ใครถามอะไร?"));
+        Check("'ของ' is not 'ขอ', and 'เกี่ยว' asks nothing",
+              !Asks("ส่งงานของผมแล้ว เกี่ยวกับฉากเรือครบทุกภาพ"));
+        return Task.CompletedTask;
     }
 
     private static Task BridgeTempSweepChecks()
