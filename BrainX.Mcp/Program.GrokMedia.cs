@@ -24,11 +24,16 @@ namespace BrainX.Mcp;
 //
 // Measured: an image takes ~20 s and ~30k tokens of the owner's Grok quota
 // with only the Imagine tools allowed (152k with Grok's full tool list —
-// hence --tools). Video under zero data retention — this account's team has
-// it, and only a team admin can lift it — needs the owner's own S3-compatible
-// bucket in ~/.grok/config.toml ([tools.zdr_video_output_s3]): xAI uploads
-// the video straight there and keeps nothing, Grok downloads it back into
-// its session folder, and CollectGrokMedia copies it from there as before.
+// hence --tools).
+//
+// Video and privacy, as measured 2026-10-06 on Grok 1.0.46: the account is a
+// personal one with coding-data retention opted out (`is_zdr:false`,
+// `coding_data_retention_opt_out:true` in Grok's own auth reply). xAI's video
+// API treats that as zero data retention and wants `output.upload_url`; Grok
+// only presigns one from [tools.zdr_video_output_s3] for ZDR TEAMS, so with a
+// valid bucket configured (Grok parses it — a bad value stops it starting)
+// it still sends none and the call is refused. Until Grok fixes that, video
+// needs /privacy → opt in, which is the owner's call, not this tool's.
 // ─────────────────────────────────────────────────────────────────────────
 
 internal static partial class Program
@@ -147,9 +152,9 @@ internal static partial class Program
             {
                 status = "failed";
                 job["error"] = log.Contains("zero data retention", StringComparison.OrdinalIgnoreCase)
-                    ? "Grok is under zero data retention, and xAI makes no video there without the owner's own bucket. "
-                      + "Add [tools.zdr_video_output_s3] (bucket, endpoint, region, read_write keys) to ~/.grok/config.toml "
-                      + "and restart Grok — see docs.x.ai/build/settings/zdr-video-storage. Images still work."
+                    ? "xAI makes no video while this Grok account keeps its coding data private (/privacy opted out = zero "
+                      + "data retention). A bucket in [tools.zdr_video_output_s3] would carry it, but Grok 1.0.46 only uses "
+                      + "that for ZDR team accounts. Opting in with /privacy is the owner's decision. Images still work."
                     : Tail(log, 600);
             }
             job["status"] = status;

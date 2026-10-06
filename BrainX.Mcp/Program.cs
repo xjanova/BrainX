@@ -1055,7 +1055,8 @@ internal static partial class Program
                 "to animate — without it a frame is generated first}. Returns a job id AT ONCE (a video takes " +
                 "minutes); poll media_status {job}. Files land in agent-bus/outbox/media/<job>/ — attach them with " +
                 "cowork_say. Costs the owner's Grok quota (about 30k tokens an image); the owner's order to make it is the " +
-                "permission. Video needs Grok's privacy mode off; media_status says so if it is on.",
+                "permission. Video is refused while the Grok account keeps its data private (zero data retention); " +
+                "media_status says so — images are unaffected.",
                 new JObject
                 {
                     ["type"] = "object",
