@@ -318,6 +318,26 @@ internal static partial class Program
         BrokerLog($"broker up · vault={_vaultPath} · runners={string.Join(", ", cfg.Runners.Keys)}"
                   + (dryRun ? " · DRY RUN" : ""));
 
+        // Owner (2026-10-06): "ระบบ cowork ตอนนี้ต้องต่องานได้ทันทีเมื่อเปิด
+        // โปรแกรมมาใหม่ ไม่ต้องมาสั่ง". A run still on record whose process is
+        // gone was cut off when the last broker went (the app closed, or
+        // updated itself — four times one morning): its holder's unfinished
+        // work is picked up on the first tick, without waiting for it to look
+        // quiet. Read now, before anything clears those records.
+        CoworkInterruptedRuns = FindInterruptedRuns(cfg);
+        foreach (var a in CoworkInterruptedRuns)
+            BrokerLog($"{a}: its run was cut off when the broker last stopped — its unfinished work is picked up now");
+        // A room the BROKER darkened is not the owner's "stop". A finished idle
+        // study used to switch the light off, and with it every follow-up, call
+        // and notice, until the owner happened to type something: on
+        // 2026-10-05 23:06 one did, and the app was opened twice the next
+        // morning with nothing picking up. The owner's own switch is left alone.
+        if (!dryRun && CoworkRoomClosedByBroker())
+        {
+            CoworkOpenRoom("broker", "the broker had closed it after a study; reopened at start");
+            BrokerLog("room was dark from a study's end — light back on, so unfinished work is picked up");
+        }
+
         // Children this broker started, so a Ctrl-C or a service stop does not
         // leave headless agents running against the owner's repos with nobody
         // watching them. A spawned agent is a process with write access; it
@@ -1932,6 +1952,30 @@ internal static partial class Program
 
         ClearRunRecord(agent);
         return false;
+    }
+
+    /// <summary>
+    /// Agents whose run is on record but whose process is no longer that run:
+    /// started by a broker that went away before it could reap them. A run
+    /// that ends while its broker is alive is always reaped (and `--once`
+    /// waits for its own), so a record left behind means cut off.
+    /// </summary>
+    private static HashSet<string> FindInterruptedRuns(BrokerConfig cfg)
+    {
+        var cut = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var agent in cfg.Runners.Keys)
+        {
+            var st = ReadRunnerState(agent);
+            if (st.RunPid is not int pid || st.RunStartedUtc is not DateTime started) continue;
+            try
+            {
+                using var p = Process.GetProcessById(pid);
+                if (!p.HasExited && Math.Abs((p.StartTime.ToUniversalTime() - started).TotalSeconds) < 2) continue;   // still going: adopted, not cut off
+            }
+            catch { /* gone */ }
+            cut.Add(agent);
+        }
+        return cut;
     }
 
     private static void ClearRunRecord(string agent)

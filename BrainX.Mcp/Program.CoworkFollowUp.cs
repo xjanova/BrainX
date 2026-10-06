@@ -42,6 +42,11 @@ internal static partial class Program
     // work, so a long job would have been stopped half done. Now the gap is
     // short and only chasing that moves nothing is capped.
     private static readonly TimeSpan FollowUpIdle = TimeSpan.FromMinutes(5);
+
+    /// <summary>Agents whose run was cut off when the last broker stopped
+    /// (FindInterruptedRuns, at start). Their unfinished work is picked up on
+    /// the first follow-up pass without waiting for it to go quiet; one-shot.</summary>
+    internal static HashSet<string> CoworkInterruptedRuns = new(StringComparer.OrdinalIgnoreCase);
     private static readonly TimeSpan FollowUpEvery = TimeSpan.FromMinutes(10);
     private const int FollowUpMaxWithoutProgress = 3;
 
@@ -64,6 +69,7 @@ internal static partial class Program
     {
         var asks = new Dictionary<string, (DateTime, SortedSet<string>)>(StringComparer.OrdinalIgnoreCase);
         var floor = sinceUtc.Ticks.ToString("D19", CultureInfo.InvariantCulture);
+        var study = StudyWindow();
         foreach (var f in CoworkMessageFiles())
         {
             var name = Path.GetFileName(f);
@@ -74,6 +80,11 @@ internal static partial class Program
             if (o == null || string.Equals(o["topic"]?.ToString(), "task", StringComparison.Ordinal)) continue;
             if (!long.TryParse(name.AsSpan(0, Math.Min(19, name.Length)), NumberStyles.None, CultureInfo.InvariantCulture, out var ticks)) continue;
             var at = new DateTime(ticks, DateTimeKind.Utc);
+            // An idle study's talk calls nobody in: it is the conversation the
+            // study's own spawn cap keeps to one session, and after it ends
+            // it is over. This is what switching the room's light off used to
+            // do — without also stopping the room's real work.
+            if (study is { } sw && at > sw.Open && at <= sw.Close) continue;
             foreach (var target in CoworkRecipients(o["to"]))
             {
                 if (target.Equals(speaker, StringComparison.OrdinalIgnoreCase) || IsReservedIdentity(target)) continue;
@@ -156,6 +167,17 @@ internal static partial class Program
             }
         }
         catch (Exception ex) { BrokerLog("expiring moot cards — " + Redact(ex.Message)); }
+    }
+
+    /// <summary>When the last idle study was talking: from its opening to its
+    /// end (or now, while it still is). Null when there has never been one.</summary>
+    private static (DateTime Open, DateTime Close)? StudyWindow()
+    {
+        var st = ReadJsonOrNull(StudyStatePath);
+        if (st == null || Utc(st["lastUtc"]) is not DateTime open) return null;
+        // A minute past its end: a "done" typed as the circle closed is still the circle.
+        var close = Utc(st["closedUtc"]) is DateTime c ? c.AddMinutes(1) : DateTime.UtcNow;
+        return (open, close);
     }
 
     /// <summary>Has this agent a question in front of the owner right now?</summary>
@@ -255,12 +277,17 @@ internal static partial class Program
                 // Out of quota: its work waits for the reset, it is not chased.
                 if (st.QuotaResumeUtc is DateTime qr && qr > now) continue;
 
+                // Owner (2026-10-06): "ต้องต่องานได้ทันทีเมื่อเปิดโปรแกรมมาใหม่
+                // ไม่ต้องมาสั่ง". Its holder's run was cut off when the last
+                // broker stopped: nobody is quietly doing this, so it is not
+                // left five minutes to "go quiet" or ten since the last chase.
+                var cutOff = CoworkInterruptedRuns.Contains(agent);
                 var updated = CoworkUtc(t["updatedUtc"]) ?? DateTime.MinValue;
-                if (now - updated < FollowUpIdle || CoworkSpokeSince(agent, now - FollowUpIdle)) continue;
+                if (!cutOff && (now - updated < FollowUpIdle || CoworkSpokeSince(agent, now - FollowUpIdle))) continue;
 
                 var rec = ledger[id] as JObject;
                 var last = CoworkUtc(rec?["lastUtc"]);
-                if (last is DateTime l && now - l < FollowUpEvery) continue;
+                if (!cutOff && last is DateTime l && now - l < FollowUpEvery) continue;
                 // The task moved since the last chase (a checkpoint, a note, a
                 // status): that chase worked, so the count starts again. Only
                 // chases that change nothing add up.
@@ -283,6 +310,10 @@ internal static partial class Program
                     changed = true;
                 }
             }
+
+            // Cut-off runs are picked up once, on this first pass; from here on
+            // their holders' work is followed like anybody else's.
+            if (!dryRun) CoworkInterruptedRuns.Clear();
 
             // A teammate asked, and the one asked is not here to hear it.
             var peerLines = new List<(string Target, string From, int Minutes)>();

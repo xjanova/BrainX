@@ -179,6 +179,19 @@ internal static partial class Program
         catch { return true; }
     }
 
+    /// <summary>Dark because the broker switched it off (a study's end, before
+    /// that stopped doing so) — not because the owner did.</summary>
+    internal static bool CoworkRoomClosedByBroker()
+    {
+        try
+        {
+            var o = ReadJsonOrNull(CoworkRoomStatePath);
+            return o != null && o["open"]?.ToObject<bool?>() == false
+                && string.Equals(o["by"]?.ToString(), "broker", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
     /// <summary>Lights on. Seats nobody: the owner is first through the door,
     /// and everybody else takes a chair when they next say hello.</summary>
     internal static void CoworkOpenRoom(string by, string? reason = null)

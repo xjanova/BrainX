@@ -57,9 +57,8 @@ internal static partial class Program
 
         if (!CoworkRoomIsOpen())
         {
-            // The owner turned the light off, or the last circle closed
-            // itself. Either way the room is shut and a study would be the
-            // one thing reopening it behind their back.
+            // The owner turned the light off. The room is shut and a study
+            // would be the one thing reopening it behind their back.
             Why("the room is dark — it reopens when the owner opens it");
             return;
         }
@@ -94,10 +93,8 @@ internal static partial class Program
             return;
         }
 
-        // The study opens the room and, when it is over, closes it again. One
-        // owner for the light, so it can never be left on by whoever was last
-        // to speak.
-        CoworkOpenRoom("broker", "study: " + topic.Question);
+        // No light switching: a study only ever starts in a lit room (above),
+        // and when it is over the circle ends, not the room.
 
         // Who has already been near this. Not an assignment — the room decides
         // that between themselves — but "you wrote three of the notes that
@@ -259,12 +256,19 @@ internal static partial class Program
             return;
         }
 
-        if (dryRun) { BrokerLog($"study: would close the room — {why} ({lines} line(s))"); return; }
+        if (dryRun) { BrokerLog($"study: would end the circle — {why} ({lines} line(s))"); return; }
 
-        CoworkSystemLine($"🔌 ปิดไฟปิดห้อง — {why} ({lines} บรรทัด) ทุกคนออกจากห้องแล้ว "
-                       + "ไม่มีใครถูกเรียกและไม่มีใครพูดได้จนกว่าบอสจะเปิดไฟอีกครั้ง");
-        CoworkCloseRoom("broker", why);
-        BrokerLog($"study: room closed — {why} ({lines} line(s), {speakers.Count} speaker(s))");
+        // The CIRCLE ends; the room stays lit. Switching the light off here
+        // was the stop for agents talking each other round in circles, and it
+        // stopped everything else with it: a dark room chases no unfinished
+        // work, calls nobody and tells nobody anything, so after a study at
+        // night the owner reopened the app to a room that would not pick up
+        // its own work until they typed. Its lines no longer wake anybody
+        // instead (CoworkPeerAsks skips the study's window), and the light is
+        // the owner's switch alone.
+        CoworkSystemLine($"📚 จบวงคุยช่วงว่างแล้ว — {why} ({lines} บรรทัด) ไม่ต้องตอบต่อ "
+                       + "งานที่ค้างบนบอร์ดเดินต่อตามปกติ", topic: "study-end");
+        BrokerLog($"study: circle ended — {why} ({lines} line(s), {speakers.Count} speaker(s)); room stays open");
 
         try
         {

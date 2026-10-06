@@ -20,6 +20,7 @@ internal static partial class Program
         checks.Add(("cowork room: the owner's @names become who the order is for", CoworkAddressingChecks));
         checks.Add(("cowork room: the light re-seats, @names route, the board holds who is doing what", CoworkRoomEndToEnd));
         checks.Add(("cowork broker: a call that dies is reported in the room, with the reason", CoworkBrokerReportsFailedCall));
+        checks.Add(("cowork broker: reopened, it picks unfinished work up at once — and a study's end never darkens the room", CoworkBrokerResumesOnStart));
         checks.Add(("broker decisions: a folder question answered once stays answered", BrokerKeepsFolderAnswers));
         checks.Add(("broker decisions: an answer holds for that situation — same wall, same work is never asked again", BrokerAnswersStick));
         checks.Add(("agent questions: the same question twice is one card; an answered one is answered again", AskUserIsNotRepeated));
@@ -1460,6 +1461,113 @@ internal static partial class Program
                   second.Any(l => l.Contains("ยังเรียกเข้าห้องไม่ได้") && l.Contains("claude:") && l.Contains("API key")),
                   string.Join(" | ", second) + " || " + log2);
             Check("…and does not start another run that will die the same way", !second.Any(l => l.Contains("กำลังเรียก claude")), string.Join(" | ", second));
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// Owner (2026-10-06): "ระบบ cowork ตอนนี้ต้องต่องานได้ทันทีเมื่อเปิด
+    /// โปรแกรมมาใหม่ ไม่ต้องมาสั่ง". A room a finished study had darkened stayed
+    /// dark through two app starts, and a dark room chases nothing.
+    /// </summary>
+    private static async Task CoworkBrokerResumesOnStart()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the check", false); return; }
+
+        var root = Path.Combine(Path.GetTempPath(), "brainx-resume-e2e-" + Guid.NewGuid().ToString("N"));
+        var vault = Path.Combine(root, "vault");
+        var bus = Path.Combine(vault, ".obsidianx", "agent-bus");
+        var room = Path.Combine(bus, "cowork", "messages");
+        var tasks = Path.Combine(bus, "cowork", "tasks");
+        var key = Path.Combine(root, "bus-seal.key");
+        Directory.CreateDirectory(room);
+        Directory.CreateDirectory(tasks);
+        Directory.CreateDirectory(Path.Combine(vault, "Notes"));
+        BusSeal.EnsureKey(key);
+        File.WriteAllText(Path.Combine(bus, "runners.json"), new JObject
+        {
+            ["pollSeconds"] = 5,
+            ["idleStudy"] = false,
+            ["escalation"] = new JObject { ["toast"] = false, ["chatCard"] = false, ["telegram"] = new JObject { ["botToken"] = "", ["chatId"] = "" } },
+            ["runners"] = new JObject
+            {
+                ["claude"] = new JObject { ["exe"] = "cmd", ["args"] = new JArray("/c", "exit /b 0"), ["cwd"] = root, ["onCall"] = true },
+            },
+        }.ToString(), new UTF8Encoding(false));
+
+        void Room(bool open, string by) => File.WriteAllText(Path.Combine(bus, "cowork", "room.json"),
+            new JObject { ["open"] = open, ["sinceUtc"] = DateTime.UtcNow.AddHours(-8).ToString("o"), ["by"] = by }.ToString(),
+            new UTF8Encoding(false));
+        bool RoomOpen() => JObject.Parse(File.ReadAllText(Path.Combine(bus, "cowork", "room.json")))["open"]?.Value<bool>() != false;
+        List<string> FollowUps() => Directory.GetFiles(room, "*.json")
+            .Select(f => JObject.Parse(File.ReadAllText(f)))
+            .Where(o => o["from"]?.ToString() == "broker" && o["topic"]?.ToString() == "follow-up")
+            .Select(o => o["body"]?.ToString() ?? "").ToList();
+
+        // Work that was moving a minute before the app went away — "recently
+        // updated", by the old rule, and so left alone for five more minutes —
+        // and the run that was moving it, still on record, its process gone.
+        var minuteAgo = DateTime.UtcNow.AddMinutes(-1).ToString("o");
+        File.WriteAllText(Path.Combine(tasks, "t-abc123.json"), new JObject
+        {
+            ["id"] = "t-abc123", ["title"] = "finish the shop screen", ["status"] = "doing", ["assignee"] = "claude",
+            ["createdBy"] = "owner", ["createdUtc"] = minuteAgo, ["updatedBy"] = "claude", ["updatedUtc"] = minuteAgo,
+        }.ToString(), new UTF8Encoding(false));
+        Directory.CreateDirectory(Path.Combine(bus, "broker"));
+        void CutOffRun() => File.WriteAllText(Path.Combine(bus, "broker", "claude.state.json"), new JObject
+        {
+            ["runPid"] = 999999, ["runStartedUtc"] = DateTime.UtcNow.AddMinutes(-3).ToString("o"),
+        }.ToString(), new UTF8Encoding(false));
+        CutOffRun();
+
+        async Task<string> BrokerOnce()
+        {
+            var psi = new ProcessStartInfo(exe, $"broker --vault \"{vault}\" --once")
+            {
+                RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false,
+                StandardOutputEncoding = new UTF8Encoding(false),
+            };
+            psi.Environment["BRAINX_BUS_SEAL_KEY"] = key;
+            psi.Environment["BRAINX_SANDBOX"] = "1";
+            psi.Environment.Remove(StubMcpServer.EnvFlag);
+            using var p = Process.Start(psi)!;
+            var outTask = p.StandardOutput.ReadToEndAsync();
+            _ = p.StandardError.ReadToEndAsync();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+            await p.WaitForExitAsync(cts.Token);
+            return await outTask;
+        }
+
+        try
+        {
+            // The owner's own switch is the owner's: nothing reopens it.
+            Room(open: false, by: "owner");
+            var log0 = await BrokerOnce();
+            Check("a room the owner switched off stays off when the broker starts", !RoomOpen(), log0);
+            Check("…and nothing is chased in it", FollowUps().Count == 0, string.Join(" | ", FollowUps()));
+
+            // A room a study's end switched off is not anybody's stop.
+            Room(open: false, by: "broker");
+            CutOffRun();     // the dark start above already cleared it
+            var log1 = await BrokerOnce();
+            Check("a room the broker darkened is lit again when it starts", RoomOpen(), log1);
+            var chased = FollowUps();
+            Check("…and work whose run was cut off is picked up on the first tick, not five minutes in",
+                  chased.Any(l => l.Contains("t-abc123")), string.Join(" | ", chased) + " || " + log1);
+
+            // Without a cut-off run, a task touched a minute ago is somebody's
+            // work in progress and is left alone — the ordinary rule.
+            File.WriteAllText(Path.Combine(bus, "cowork", "followups.json"), "{}");
+            var t = JObject.Parse(File.ReadAllText(Path.Combine(tasks, "t-abc123.json")));
+            t["updatedUtc"] = DateTime.UtcNow.AddMinutes(-1).ToString("o");
+            File.WriteAllText(Path.Combine(tasks, "t-abc123.json"), t.ToString(), new UTF8Encoding(false));
+            var before = FollowUps().Count;
+            var log2 = await BrokerOnce();
+            Check("…while a task touched a minute ago with no run cut off waits to go quiet", FollowUps().Count == before, log2);
         }
         finally
         {
