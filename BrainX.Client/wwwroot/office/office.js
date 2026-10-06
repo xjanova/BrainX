@@ -260,6 +260,16 @@ const EMOTES_PLAYED = new Set();  // agent|atUtc, so one emote sounds once
 let PRIMED = false;       // first payload is backlog: show it, don't perform it
 /** Mind as the room's secretary — from the host's payload (see renderMindPanel). */
 let SECRETARY = null;
+
+/** Mind, standing in the room while she is on: her real VRM, rendered small
+ *  and pixelated by mindfigure.js, drawn at device resolution like the boss.
+ *  Owner (2026-10-06): "ในโมเดล 3d ของ มายด์ไปยืนในห้อง ได้เลยไหม". Where she
+ *  stands is a spot on the plate (normalized, like BOSS_DOOR): the open floor
+ *  left of the rug, clear of the desks and the walk to the door. */
+const MIND_SPOT = { x: 0.265, y: 0.565 };
+let MIND_FIG = null;
+let MIND_FIG_STATE = '';        // '' | 'loading' | 'ready' | 'failed'
+let MIND_BUSY = '';
 const BUBBLES = [];       // {agent,text,color,until} — `until` in performance.now() ms
 /** How long a line stays up, in milliseconds. It used to be counted in FRAMES
  *  (T + 240): four seconds at 60 Hz, under two on a 144 Hz screen, and frozen
@@ -937,6 +947,12 @@ function drawRoom() {
         });
     }
 
+    // Mind's own pool of light where she stands.
+    if (MIND_FIG) {
+        const m = mindAt();
+        LIGHTS.push({ x: m.x, y: m.y - 12, r: 26, c: [190, 165, 255], i: MIND_BUSY ? 0.42 : 0.28 });
+    }
+
     // Only while the pack is still loading: the painted boss is drawn at
     // device resolution in present(), not here on the sprite grid.
     if (!BOSS_AV && BOSS && nowMs() < BOSS.until) drawBoss();
@@ -981,7 +997,7 @@ function drawDesk(g) {
     px(seat.x + 7, seat.y - 10, 1, 9, '#1a1b22');
     if (!here) px(seat.x - 7, seat.y - 2, 14, 2, '#30333f');     // the empty cushion
 
-    if (here) { drawPerson(seat.x, seat.y, c, a); drawHp(seat.x, seat.y - 22, a.id); }
+    if (here) drawPerson(seat.x, seat.y, c, a);
 
     // The desk: walnut lid, a lit front face, the near end in shade.
     poly([lid[0], lid[1], fl[1], fl[0]], '#5a3d28');     // front face
@@ -1793,7 +1809,6 @@ function drawWalker(a) {
 
     castShadow(p.x, p.y + 1, 7);
     drawStanding(p.x, p.y, a, walking, B.x < A.x);
-    drawHp(p.x, p.y - 35, a.id);
 
     // While they are over there, they are talking to whoever sits there.
     if (!walking && !BUBBLES.some(b => b.agent === a.id))
@@ -2594,6 +2609,7 @@ function present() {
     // The boss, at his own resolution, before the light is cut — so the room's
     // darkness falls on him the same way it falls on everybody else.
     drawBossSprite();
+    drawMindFigure();
     // …and whatever he is standing behind, painted back over him.
     drawOccluders();
     drawDesksOverBoss();
@@ -2762,10 +2778,19 @@ function drawOverlay() {
     for (const b of BUBBLES) {
         if (now >= b.until) continue;
         const d = DESKS.get(b.agent);
-        if (!d) continue;
+        const at = d ? d.screen : (b.agent === 'mind' && MIND_FIG ? mindHead() : null);
+        if (!at) continue;
         overlayPut(seen, `b:${b.agent}:${b.until}`, 'bubble',
-            `--bc:${b.color};left:${(d.screen.x * sx).toFixed(1)}px;top:${((d.screen.y - 6) * sy).toFixed(1)}px`,
+            `--bc:${b.color};left:${(at.x * sx).toFixed(1)}px;top:${((at.y - 6) * sy).toFixed(1)}px`,
             esc(b.text));
+    }
+
+    // Her name plate, under her feet like everybody's.
+    if (MIND_FIG) {
+        const m = mindAt();
+        overlayPut(seen, 'p:mind', 'plate is-mind',
+            `--pc:#b9a5ff;left:${(m.x * sx).toFixed(1)}px;top:${((m.y + 4) * sy).toFixed(1)}px`,
+            `<span class="who">มาย</span><span class="doing">${esc(MIND_BUSY || 'เลขาห้อง')}</span>`);
     }
 
     if (BOSS && now < BOSS.until) {
@@ -3204,6 +3229,7 @@ function apply(p) {
                 try { BOSS_AV?.play('instruct', { loop: false }); } catch { /* pack still loading */ }
             } else {
                 BUBBLES.push({ agent: m.from, text: firstLine(m.body), color: c, until: nowMs() + SAY_MS });
+                if (m.from === 'mind') try { MIND_FIG?.setState('talking'); } catch { /* still loading */ }
             }
             if (DESKS.has(m.from) && DESKS.has(m.to)) {
                 PACKETS.push({ from: m.from, to: m.to, color: c, t0: performance.now(), ms: 900 });
@@ -3278,6 +3304,7 @@ function apply(p) {
     QUOTA = p.quota && typeof p.quota === 'object' ? p.quota : {};
     renderQuota();
     if (p.secretary && typeof p.secretary === 'object') { SECRETARY = p.secretary; renderMindPanel(); }
+    ensureMindFigure();
 
     renderLog();
     renderDecisions();
@@ -4159,65 +4186,60 @@ function spColor(left) {
     return '#e0564f';
 }
 
-/** A game HP bar over a head, on the sprite grid — and the SP bar under it
- *  when the agent's round is known. */
-function drawHp(x, yTop, id) {
-    const q = QUOTA[id];
-    if (!q) return;
-    const w = 16, h = 2;
-    const sp = q.sp && q.sp.left != null ? q.sp : null;
-    const x0 = Math.round(x - w / 2), y0 = Math.round(yTop) - (sp ? 2 : 0);
-    px(x0 - 1, y0 - 1, w + 2, (sp ? h * 2 + 1 : h) + 2, 'rgba(5,6,15,0.85)');
-    meter(x0, y0, w, h, q.left, hpColor);
-    if (sp) meter(x0, y0 + h + 1, w, h - 1, sp.left, spColor);
-}
-
-function meter(x0, y0, w, h, value, colorOf) {
-    if (value == null) {
-        for (let i = 0; i < w; i += 2) px(x0 + i, y0, 1, h, '#6b7088');
-        return;
-    }
-    const left = Math.max(0, Math.min(100, value));
-    const fill = Math.round(w * left / 100);
-    px(x0, y0, w, h, '#22263a');
-    if (fill > 0) px(x0, y0, fill, h, colorOf(left));
-    // Nearly out: it pulses, the way a game says "careful".
-    if (left <= 15 && (T >> 4) % 2) px(x0, y0, Math.max(1, fill), h, '#ff8a80');
-}
-
 let QUOTA_KEY = '';
 
-/** The same numbers as percentages, top right of the room. */
+/** Quota as a game's party frames, top right of the room.
+ *
+ *  Owner (2026-10-06): "แถบ hp sp อย่าใหญ่เกินบนหัวตัวละคร ให้เอาไว้บนขวาแบบเกม
+ *  มีเยอะก็จัดสรร ให้ดี". So the bars left the heads, and live here only: one
+ *  small frame per agent — name, HP (the week), SP (the 5-hour round) —
+ *  in one column for a few agents, two or three when there are many, and
+ *  folded to bare bars with a click on the header. */
+let QUOTA_FOLDED = (() => { try { return localStorage.getItem('brainx.office.quotaFolded') === '1'; } catch { return false; } })();
 function renderQuota() {
     const box = document.getElementById('quota-hud');
     if (!box) return;
     const ids = Object.keys(QUOTA).sort();
     box.hidden = ids.length === 0;
     placeUnderHead(box);
-    const key = JSON.stringify(QUOTA);
+    const cols = ids.length > 8 ? 3 : ids.length > 4 ? 2 : 1;
+    const key = JSON.stringify([QUOTA, cols, QUOTA_FOLDED]);
     if (key === QUOTA_KEY) return;
     QUOTA_KEY = key;
-    box.innerHTML = '<div class="qh">โควตาคงเหลือ <b>HP</b> สัปดาห์ · <b class="sp">SP</b> รอบ 5 ชม.</div>' + ids.map(id => {
-        const q = QUOTA[id] || {};
-        const known = q.left != null;
-        const left = known ? Math.max(0, Math.min(100, Math.round(q.left))) : 0;
-        const sp = q.sp && q.sp.left != null ? Math.max(0, Math.min(100, Math.round(q.sp.left))) : null;
-        const tip = (known
-            ? `${id} HP: เหลือ ${left}% ของโควตารายสัปดาห์${q.resets ? ` · รีเซ็ต ${q.resets}` : ''}`
-            : `${id} HP: ไม่มีข้อมูลโควตารายสัปดาห์ในเครื่องนี้`)
-            + (sp != null ? `\n${id} SP: เหลือ ${sp}% ของรอบ ${q.sp.window || '5 ชม.'}${q.sp.resets ? ` · รีเซ็ต ${q.sp.resets}` : ''}` : '')
-            + `${q.source && q.source !== 'none' ? `\nจาก ${q.source}` : ''}${q.asOf ? ` · ข้อมูลเมื่อ ${q.asOf}` : ''}`
-            + (q.resting ? `\nพักอยู่ (บอสพักไว้เพราะติดลิมิต) — กลับมาทำงานได้ ${q.resting}` : '');
-        return `<div class="qrow${known && left <= 15 ? ' crit' : ''}" title="${esc(tip)}">`
-            + `<span class="qn" style="--pc:${agentColor(id)}">${esc(label(id))}</span>`
-            + `<span class="qbars"><span class="qbar${known ? '' : ' unknown'}"><i style="width:${left}%;background:${hpColor(known ? left : null)}"></i></span>`
-            + (sp != null ? `<span class="qbar sp"><i style="width:${sp}%;background:${spColor(sp)}"></i></span>` : '')
-            + `</span>`
-            + `<span class="qp"><span style="color:${hpColor(known ? left : null)}">${known ? left + '%' : '?'}</span>`
-            + (sp != null ? `<span class="qsp" style="color:${spColor(sp)}">${sp}%</span>` : '')
-            + `${q.resting ? ' 💤' : ''}</span></div>`;
-    }).join('');
+    box.style.setProperty('--cols', String(cols));
+    box.classList.toggle('folded', QUOTA_FOLDED);
+    const pct = v => Math.max(0, Math.min(100, Math.round(v)));
+    box.innerHTML = `<button type="button" class="qh" title="${QUOTA_FOLDED ? 'กางออก' : 'พับให้เหลือแต่หลอด'}">`
+        + `<b>HP</b> สัปดาห์ · <b class="sp">SP</b> รอบ 5 ชม. <span class="qf">${QUOTA_FOLDED ? '▸' : '▾'}</span></button>`
+        + ids.map(id => {
+            const q = QUOTA[id] || {};
+            const known = q.left != null;
+            const hp = known ? pct(q.left) : null;
+            const sp = q.sp && q.sp.left != null ? pct(q.sp.left) : null;
+            const tip = (known
+                ? `${id} HP: เหลือ ${hp}% ของโควตารายสัปดาห์${q.resets ? ` · รีเซ็ต ${q.resets}` : ''}`
+                : `${id} HP: ไม่มีข้อมูลโควตารายสัปดาห์ในเครื่องนี้`)
+                + (sp != null ? `\n${id} SP: เหลือ ${sp}% ของรอบ ${q.sp.window || '5 ชม.'}${q.sp.resets ? ` · รีเซ็ต ${q.sp.resets}` : ''}` : '')
+                + `${q.source && q.source !== 'none' ? `\nจาก ${q.source}` : ''}${q.asOf ? ` · ข้อมูลเมื่อ ${q.asOf}` : ''}`
+                + (q.resting ? `\nพักอยู่ (บอสพักไว้เพราะติดลิมิต) — กลับมาทำงานได้ ${q.resting}` : '');
+            const bar = (name, v, color, cls) =>
+                `<span class="ql${cls}"><b>${name}</b><span class="qbar${v == null ? ' unknown' : ''}">`
+                + `<i style="width:${v ?? 0}%;background:${color}"></i></span>`
+                + `<span class="qv" style="color:${color}">${v == null ? '?' : v}</span></span>`;
+            return `<div class="qcard${known && hp <= 15 ? ' crit' : ''}" title="${esc(tip)}">`
+                + `<span class="qn" style="--pc:${agentColor(id)}">${esc(label(id))}${q.resting ? ' <i class="qz">💤</i>' : ''}</span>`
+                + bar('HP', hp, hpColor(hp), '')
+                + (sp != null ? bar('SP', sp, spColor(sp), ' sp') : '')
+                + `</div>`;
+        }).join('');
 }
+document.getElementById('quota-hud')?.addEventListener('click', (e) => {
+    if (!e.target.closest('.qh')) return;
+    QUOTA_FOLDED = !QUOTA_FOLDED;
+    try { localStorage.setItem('brainx.office.quotaFolded', QUOTA_FOLDED ? '1' : '0'); } catch { /* private window */ }
+    QUOTA_KEY = '';
+    renderQuota();
+});
 
 function placeUnderHead(panel) {
     const head = document.getElementById('room-head');
@@ -4459,6 +4481,80 @@ function demo() {
         apply({ agents, messages: messages.slice(), decisions, tasks, models, runs, quota, secretary });
         i++;
     }, 4200);
+}
+
+// ── Mind in the room ────────────────────────────────────────────────
+
+/** Load her body when the secretary is on and the light is on; put it away
+ *  when either goes off. One try per page: a machine without her model just
+ *  does not get her. */
+function ensureMindFigure() {
+    const want = !!SECRETARY?.enabled && ROOM_OPEN;
+    const busy = (SECRETARY?.busy || '').toString();
+    if (busy !== MIND_BUSY) {
+        MIND_BUSY = busy;
+        if (busy) try { MIND_FIG?.setState('thinking', 8000); } catch { /* loading */ }
+    }
+    if (!want) {
+        if (MIND_FIG) { try { MIND_FIG.dispose(); } catch { /* gone */ } MIND_FIG = null; }
+        if (MIND_FIG_STATE === 'ready') MIND_FIG_STATE = '';
+        return;
+    }
+    if (MIND_FIG_STATE) return;
+    MIND_FIG_STATE = 'loading';
+    import('./mindfigure.js?v=' + encodeURIComponent(window.OFFICE_ASSET_V || '0'))
+        .then(async (mod) => {
+            const fig = new mod.MindFigure({ base: window.__mindAvatarBase ?? '../universe/avatar/', width: 44, height: 84 });
+            await fig.ready;
+            if (!SECRETARY?.enabled || !ROOM_OPEN) { fig.dispose(); MIND_FIG_STATE = ''; return; }
+            fig.setFacing('se');
+            fig.setState('wave');           // she says hello once, when she arrives
+            MIND_FIG = fig;
+            MIND_FIG_STATE = 'ready';
+        })
+        .catch((err) => { MIND_FIG_STATE = 'failed'; console.warn('mind figure:', err); });
+}
+
+/** Where she stands, in logical pixels: MIND_SPOT, or the nearest walkable
+ *  floor to it if a repainted map ever puts furniture there. */
+function mindAt() {
+    let at = MIND_SPOT;
+    try { if (!ROOM_MAP.isWalkable(at.x, at.y)) at = ROOM_MAP.nearestWalkable(at.x, at.y) || at; } catch { /* map loading */ }
+    return spotPt(at);
+}
+
+/** Her scale: her body as tall as an agent on its feet (the grid's
+ *  AGENT_STAND_H), at device resolution. */
+function mindK() {
+    return (AGENT_STAND_H * SCALE) / Math.max(1, MIND_FIG.anchor.y - 2);
+}
+
+/** Above her head, in logical pixels — where her bubble goes. */
+function mindHead() {
+    const m = mindAt();
+    return { x: m.x, y: m.y - AGENT_STAND_H - 4 };
+}
+
+function drawMindFigure() {
+    if (!MIND_FIG) return;
+    try {
+        MIND_FIG.update(performance.now());
+        const m = mindAt();
+        const k = mindK();
+        const c = MIND_FIG.canvas;
+        const w = Math.round(c.width * k), h = Math.round(c.height * k);
+        const x = Math.round(m.x * SCALE - MIND_FIG.anchor.x * k);
+        const y = Math.round(m.y * SCALE - MIND_FIG.anchor.y * k);
+        // A soft contact shadow, so she stands ON the floor.
+        vctx.fillStyle = 'rgba(5,6,15,0.35)';
+        vctx.beginPath();
+        vctx.ellipse(m.x * SCALE, m.y * SCALE, 8 * SCALE, 2.5 * SCALE, 0, 0, Math.PI * 2);
+        vctx.fill();
+        vctx.imageSmoothingEnabled = false;
+        vctx.drawImage(c, x, y, w, h);
+    } catch (err) {
+        if (!drawMindFigure.reported) { drawMindFigure.reported = true; console.warn('mind figure draw:', err); }
+    }
 }
 
 // ── main loop ───────────────────────────────────────────────────────

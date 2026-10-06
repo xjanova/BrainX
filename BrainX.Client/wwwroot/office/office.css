@@ -184,6 +184,8 @@ body {
     align-self: center;
 }
 #room-mind:hover, #room-mind[aria-expanded="true"] { border-color: rgba(216,185,120,0.55); color: var(--ink); }
+.plate.is-mind .who { color: #d9ccff; }
+.plate.is-mind .doing { color: #b9a5ff; }
 #room-mind.on { border-color: rgba(53,224,138,0.55); color: #bff5d6; }
 #room-mind.busy { animation: mind-think 1.2s ease-in-out infinite; }
 @keyframes mind-think { 0%,100% { box-shadow: 0 0 0 0 rgba(53,224,138,0.0); } 50% { box-shadow: 0 0 0 3px rgba(53,224,138,0.25); } }
@@ -386,30 +388,44 @@ body {
     top: 40px;
     right: 10px;
     z-index: 20;
-    min-width: 150px;
-    padding: 6px 9px 7px;
+    display: grid;
+    grid-template-columns: repeat(var(--cols, 1), minmax(112px, 132px));
+    gap: 3px 8px;
+    padding: 5px 7px 6px;
     border: 1px solid var(--stroke);
-    border-radius: 9px;
-    background: rgba(10, 12, 24, 0.78);
+    border-radius: 8px;
+    background: rgba(10, 12, 24, 0.72);
     backdrop-filter: blur(6px);
     color: var(--ink-dim);
-    font-size: 10.5px;
+    font-size: 9.5px;
+    line-height: 1.25;
     pointer-events: auto;
 }
 #quota-hud[hidden] { display: none; }
-#quota-hud .qh { color: var(--ink-faint); font-size: 9.5px; letter-spacing: 0.5px; margin-bottom: 4px; }
-#quota-hud .qrow { display: grid; grid-template-columns: 52px 1fr 40px; align-items: center; gap: 6px; line-height: 1.6; }
-#quota-hud .qn { color: var(--pc, var(--ink)); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#quota-hud .qh {
+    grid-column: 1 / -1;
+    appearance: none; border: none; background: none; padding: 0 0 2px; cursor: pointer;
+    font: inherit; font-size: 8.5px; color: var(--ink-faint); letter-spacing: 0.4px; text-align: left;
+}
 #quota-hud .qh b { color: #5fd38d; font-weight: 700; }
 #quota-hud .qh b.sp { color: #f0c45a; }
-#quota-hud .qbars { display: grid; gap: 2px; align-content: center; }
-#quota-hud .qbar { height: 5px; border-radius: 3px; background: #22263a; overflow: hidden; }
-#quota-hud .qbar.sp { height: 3px; }
-#quota-hud .qbar i { display: block; height: 100%; border-radius: 3px; }
+#quota-hud .qh .qf { float: right; }
+#quota-hud .qcard { display: grid; gap: 1px; min-width: 0; }
+#quota-hud .qn { color: var(--pc, var(--ink)); font-weight: 600; font-size: 9.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#quota-hud .qn .qz { font-style: normal; font-size: 8px; }
+#quota-hud .ql { display: grid; grid-template-columns: 13px minmax(0, 1fr) 18px; align-items: center; gap: 3px; }
+#quota-hud .ql b { font-size: 7.5px; font-weight: 700; color: #5fd38d; letter-spacing: 0.3px; }
+#quota-hud .ql.sp b { color: #f0c45a; }
+#quota-hud .qbar { height: 4px; border-radius: 2px; background: #22263a; overflow: hidden; }
+#quota-hud .ql.sp .qbar { height: 3px; }
+#quota-hud .qbar i { display: block; height: 100%; border-radius: 2px; }
 #quota-hud .qbar.unknown { background: repeating-linear-gradient(90deg, #4a4f66 0 3px, transparent 3px 6px); }
-#quota-hud .qp { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
-#quota-hud .qsp { display: block; font-size: 8.5px; font-weight: 500; line-height: 1.1; }
-#quota-hud .qrow.crit .qp { animation: quota-blink 1s steps(2, start) infinite; }
+#quota-hud .qv { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; font-size: 8.5px; }
+#quota-hud .qcard.crit .ql:not(.sp) .qv { animation: quota-blink 1s steps(2, start) infinite; }
+/* Folded: the name and the bars, nothing else. */
+#quota-hud.folded .ql b, #quota-hud.folded .qv { display: none; }
+#quota-hud.folded .ql { grid-template-columns: minmax(0, 1fr); }
+#quota-hud.folded { grid-template-columns: repeat(var(--cols, 1), minmax(72px, 90px)); }
 @keyframes quota-blink { to { visibility: hidden; } }
 
 /* The work window: who is working right now, then every piece of work with
