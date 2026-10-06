@@ -17,6 +17,7 @@ internal static partial class Program
         checks.Add(("remote policy: agent_send may not name local files", RemoteArgumentChecks));
         checks.Add(("agent bus end to end: forged owner lines demoted, attachments confined", AgentBusEndToEnd));
         checks.Add(("bridge files: scratch copies a failed move left behind are swept, live ones never", BridgeTempSweepChecks));
+        checks.Add(("bridge names: Grok sees unity_x with no '__' anywhere, every other client unity__x, and both spellings route", BridgeNamesPerClient));
         checks.Add(("cowork room: the owner's @names become who the order is for", CoworkAddressingChecks));
         checks.Add(("cowork room: the light re-seats, @names route, the board holds who is doing what", CoworkRoomEndToEnd));
         checks.Add(("cowork broker: a call that dies is reported in the room, with the reason", CoworkBrokerReportsFailedCall));
@@ -1184,8 +1185,10 @@ internal static partial class Program
     }
 
     /// <summary>A brainx-mcp on a throwaway vault, handshaken as <paramref name="client"/>
-    /// — which is also its bus identity, since the name carries no vendor.</summary>
-    private static async Task<BusSession> StartBusSession(string exe, string vault, string key, string client)
+    /// — which is also its bus identity, since the name carries no vendor.
+    /// <paramref name="bridges"/> brings up the vault's mcp-bridges.json, which a
+    /// sandbox otherwise leaves off.</summary>
+    private static async Task<BusSession> StartBusSession(string exe, string vault, string key, string client, bool bridges = false)
     {
         var psi = new ProcessStartInfo(exe, "--serve")
         {
@@ -1202,6 +1205,7 @@ internal static partial class Program
         // identity resolve to "claude" and the two seats collapse into one.
         psi.Environment.Remove("CLAUDECODE");
         psi.Environment.Remove("CLAUDE_CODE_ENTRYPOINT");
+        if (bridges) psi.Environment["BRAINX_SANDBOX_BRIDGES"] = "1";
         var server = Process.Start(psi)!;
         server.StandardInput.AutoFlush = true;
         _ = Task.Run(async () => { try { while (await server.StandardError.ReadLineAsync() != null) { } } catch { } });
@@ -1655,6 +1659,92 @@ internal static partial class Program
             try { Directory.Delete(dir, recursive: true); } catch { }
         }
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Grok Build skipped every bridged tool (2026-10-06): it qualifies a tool as
+    /// &lt;server&gt;__&lt;tool&gt;, so unity__batch_execute became the "invalid or
+    /// ambiguous" brainx-brain__unity__batch_execute. Grok is shown
+    /// unity_batch_execute; everyone else keeps the names their permission rules
+    /// and notes already hold; both spellings reach the engine from anyone.
+    /// </summary>
+    private static async Task BridgeNamesPerClient()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the check", false); return; }
+
+        var root = Path.Combine(Path.GetTempPath(), "brainx-bridge-names-" + Guid.NewGuid().ToString("N"));
+        var vault = Path.Combine(root, "vault");
+        var key = Path.Combine(root, "bus-seal.key");
+        Directory.CreateDirectory(Path.Combine(vault, "Notes"));
+        Directory.CreateDirectory(Path.Combine(vault, ".obsidianx"));
+        BusSeal.EnsureKey(key);
+
+        // Both bridges are this harness in stub mode. "unity" stands in for the
+        // engine; "brain" exists only to put a flat name — brain_stats — on top
+        // of the brain's own tool, which must stay the brain's.
+        JObject Bridge(string id, string tools) => new()
+        {
+            ["id"] = id,
+            ["enabled"] = true,
+            ["command"] = Environment.ProcessPath,
+            ["env"] = new JObject { [StubMcpServer.EnvFlag] = "1", [StubMcpServer.ToolsEnv] = tools },
+        };
+        File.WriteAllText(McpBridgeConfig.PathFor(vault), new JObject
+        {
+            ["version"] = 1,
+            ["bridges"] = new JArray { Bridge("unity", "batch_execute,manage_scene"), Bridge("brain", "stats") },
+        }.ToString(), new UTF8Encoding(false));
+
+        static List<string> Names(JObject? list) =>
+            (list?["result"]?["tools"] as JArray)?.Select(t => t["name"]!.ToString()).ToList() ?? new();
+        static bool Routed(JObject? call) =>
+            call?["result"]?["content"]?.ToString().Contains(StubMcpServer.FastPayload) == true;
+
+        BusSession? grok = null, codex = null;
+        try
+        {
+            // What Grok Build 1.0.46 calls itself in the handshake.
+            grok = await StartBusSession(exe, vault, key, "grok-shell-brainx-brain", bridges: true);
+            codex = await StartBusSession(exe, vault, key, "codex", bridges: true);
+
+            var seen = Names(await Rpc(grok.Server, 2, "tools/list", new JObject()));
+            var all = string.Join(", ", seen);
+            Check("grok is shown the bridged tools as unity_<tool>",
+                  seen.Contains("unity_batch_execute") && seen.Contains("unity_manage_scene"), all);
+            Check("…and no tool name holding '__', which Grok would skip",
+                  seen.Count > 0 && !seen.Any(n => n.Contains("__")), all);
+            Check("…every name fits ^[a-zA-Z0-9_-]{1,64}$",
+                  seen.All(n => System.Text.RegularExpressions.Regex.IsMatch(n, "^[a-zA-Z0-9_-]{1,64}$")), all);
+            Check("…and brain_stats is listed once — the brain's own, not the bridge's",
+                  seen.Count(n => n == "brain_stats") == 1, all);
+
+            var codexSees = Names(await Rpc(codex.Server, 2, "tools/list", new JObject()));
+            Check("any other client is shown unity__<tool>, as it always was",
+                  codexSees.Contains("unity__batch_execute") && codexSees.Contains("brain__stats")
+                  && !codexSees.Contains("unity_batch_execute"), string.Join(", ", codexSees));
+
+            JObject Call(string tool) => new() { ["name"] = tool, ["arguments"] = new JObject() };
+            Check("grok calling the old name unity__batch_execute still reaches the engine",
+                  Routed(await Rpc(grok.Server, 3, "tools/call", Call("unity__batch_execute"))));
+            Check("…and the name it is shown, unity_batch_execute, reaches it too",
+                  Routed(await Rpc(grok.Server, 4, "tools/call", Call("unity_batch_execute"))));
+            Check("another client may call either spelling",
+                  Routed(await Rpc(codex.Server, 3, "tools/call", Call("unity__manage_scene")))
+                  && Routed(await Rpc(codex.Server, 4, "tools/call", Call("unity_manage_scene"))));
+
+            var stats = await Rpc(grok.Server, 5, "tools/call", Call("brain_stats"));
+            Check("brain_stats is answered by the brain, never by a bridge named 'brain'",
+                  stats?["result"] != null && !Routed(stats), stats?.ToString());
+            Check("…while brain__stats still reaches that bridge",
+                  Routed(await Rpc(grok.Server, 6, "tools/call", Call("brain__stats"))));
+        }
+        finally
+        {
+            if (grok != null) await grok.DisposeAsync();
+            if (codex != null) await codex.DisposeAsync();
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
     }
 
     private static Task BusSealChecks()

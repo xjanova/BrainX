@@ -21,8 +21,10 @@ namespace BrainX.Core.Services;
 public sealed class McpBridgeDef
 {
     /// <summary>
-    /// Short namespace for this server's tools: <c>unity</c> → <c>unity__manage_scene</c>.
-    /// Lowercase, no double underscore (that's the separator).
+    /// Short namespace for this server's tools: <c>unity</c> → <c>unity__manage_scene</c>
+    /// (<c>unity_manage_scene</c> for a client that refuses '__' inside a tool
+    /// name — see <see cref="FlatPrefix"/>). Lowercase, no underscore at all, so
+    /// either separator is the first underscore in the name.
     /// </summary>
     public string Id { get; set; } = "";
 
@@ -145,6 +147,15 @@ public sealed class McpBridgeDef
     }
 
     public string Prefix => Id + "__";
+
+    /// <summary>
+    /// The single-underscore namespace, for clients that qualify an MCP tool as
+    /// <c>&lt;server&gt;__&lt;tool&gt;</c> and therefore refuse a tool whose own
+    /// name already holds '__'. Grok Build does exactly that: it skipped every
+    /// <c>unity__*</c> tool as an "invalid or ambiguous qualified name"
+    /// (2026-10-06). Unambiguous between bridges because an id holds no '_'.
+    /// </summary>
+    public string FlatPrefix => Id + "_";
 }
 
 /// <summary>

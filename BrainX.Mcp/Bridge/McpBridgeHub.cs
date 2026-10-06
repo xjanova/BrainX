@@ -126,11 +126,24 @@ public static class McpBridgeHub
 
     /// <summary>
     /// Append every enabled bridge's tools to the brain's own list, namespaced
-    /// as <c>&lt;id&gt;__&lt;tool&gt;</c>.
+    /// as <c>&lt;id&gt;__&lt;tool&gt;</c> — or <c>&lt;id&gt;_&lt;tool&gt;</c> when
+    /// <paramref name="flatNames"/> is set, for a client that refuses '__'
+    /// inside a tool name (see <see cref="McpBridgeDef.FlatPrefix"/>).
+    ///
+    /// Per client rather than for everyone: Claude Code and Codex key permission
+    /// rules, hooks and the owner's own notes on <c>mcp__brainx-brain__unity__*</c>,
+    /// and renaming those tools under them would quietly break every one.
+    /// tools/call accepts both spellings from any client.
     /// </summary>
-    public static void AppendTools(JArray tools)
+    public static void AppendTools(JArray tools, bool flatNames = false)
     {
         if (!_enabled) return;
+
+        // The brain's own names, and every bridged one appended so far. Only a
+        // flat name can land on one — "brain" + "stats" is the brain's own
+        // brain_stats — and the brain's tool always wins that.
+        var taken = new HashSet<string>(
+            tools.OfType<JObject>().Select(t => t["name"]?.ToString() ?? ""), StringComparer.OrdinalIgnoreCase);
 
         foreach (var def in _defs.Where(d => d.Enabled))
         {
@@ -155,6 +168,7 @@ public static class McpBridgeHub
             if (advertised == null) continue;
 
             var dropped = new List<string>();
+            var unlisted = new List<string>();
             foreach (var t in advertised.OfType<JObject>())
             {
                 var raw = t["name"]?.ToString();
@@ -163,7 +177,7 @@ public static class McpBridgeHub
                 if (def.ToolAllowlist.Count > 0 &&
                     !def.ToolAllowlist.Contains(raw, StringComparer.OrdinalIgnoreCase)) continue;
 
-                var name = def.Prefix + raw;
+                var name = (flatNames ? def.FlatPrefix : def.Prefix) + raw;
                 if (name.Length > MaxToolNameLength)
                 {
                     // Clients namespace again on top of ours (Claude Code shows
@@ -173,6 +187,19 @@ public static class McpBridgeHub
                     dropped.Add(raw!);
                     continue;
                 }
+
+                // A flat name is only worth sending if the client will keep it:
+                // one that still holds '__' (a server's own tool named so) or a
+                // character outside [A-Za-z0-9_-] is the same skip all over
+                // again, and one the brain already uses would shadow its tool.
+                if (flatNames && (name.Contains("__", StringComparison.Ordinal)
+                                  || !name.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-')
+                                  || taken.Contains(name)))
+                {
+                    unlisted.Add(raw!);
+                    continue;
+                }
+                taken.Add(name);
 
                 var desc = t["description"]?.ToString() ?? "";
                 tools.Add(new JObject
@@ -189,6 +216,9 @@ public static class McpBridgeHub
                 state.Dropped = dropped;
                 _log($"bridge '{def.Id}': {dropped.Count} tool(s) hidden — prefixed name over {MaxToolNameLength} chars: {string.Join(", ", dropped.Take(5))}");
             }
+            if (unlisted.Count > 0)
+                _log($"bridge '{def.Id}': {unlisted.Count} tool(s) not listed as {def.FlatPrefix}<tool> — the name holds '__', " +
+                     $"a character outside [A-Za-z0-9_-], or one the brain already uses: {string.Join(", ", unlisted.Take(5))}");
         }
     }
 
@@ -197,21 +227,50 @@ public static class McpBridgeHub
     /// <summary>
     /// Does this name belong to a CONFIGURED bridge — enabled or not? A
     /// disabled one is claimed too, so the caller gets "the unity bridge is
-    /// turned off, here's where" instead of a bare "unknown tool". No brain
-    /// tool can be shadowed: the prefix separator is '__' and no native tool
-    /// contains one.
+    /// turned off, here's where" instead of a bare "unknown tool".
+    ///
+    /// Both spellings count (see <see cref="Resolve"/>). A '__' name can never
+    /// be a brain tool; a flat one can — a bridge named "brain" would claim
+    /// brain_stats — so the caller asks this only for a name that is not one of
+    /// the brain's own.
     /// </summary>
-    public static bool IsBridgedName(string name) =>
-        _enabled && _defs.Any(d => name.StartsWith(d.Prefix, StringComparison.OrdinalIgnoreCase));
+    public static bool IsBridgedName(string name) => Resolve(name) != null;
+
+    /// <summary>
+    /// The one spelling the journal, the bus and the dashboard record —
+    /// <c>unity__manage_scene</c> — whichever one the client called.
+    /// </summary>
+    public static string CanonicalName(string name) =>
+        Resolve(name) is { } r ? r.Def.Prefix + r.RemoteTool : name;
+
+    /// <summary>
+    /// The bridge a called name belongs to and the server's own name for the
+    /// tool. <c>unity__manage_scene</c> is what every client has always been
+    /// shown; <c>unity_manage_scene</c> is what a client that refuses '__' is
+    /// shown instead (<see cref="AppendTools"/>). '__' is tried first because
+    /// <c>unity__x</c> also starts with <c>unity_</c>, and read that way the
+    /// tool would be <c>_x</c>.
+    /// </summary>
+    private static (McpBridgeDef Def, string RemoteTool)? Resolve(string name)
+    {
+        if (!_enabled) return null;
+        foreach (var d in _defs)
+            if (name.StartsWith(d.Prefix, StringComparison.OrdinalIgnoreCase))
+                return (d, name[d.Prefix.Length..]);
+        foreach (var d in _defs)
+            if (name.Length > d.FlatPrefix.Length && name.StartsWith(d.FlatPrefix, StringComparison.OrdinalIgnoreCase))
+                return (d, name[d.FlatPrefix.Length..]);
+        return null;
+    }
 
     /// <summary>
     /// Forward a call and return the server's own MCP result envelope — content
     /// blocks and isError intact, so images and structured payloads survive.
     /// </summary>
-    public static JObject CallTool(string prefixedName, JObject args)
+    public static JObject CallTool(string bridgedName, JObject args)
     {
-        var def = _defs.FirstOrDefault(d => prefixedName.StartsWith(d.Prefix, StringComparison.OrdinalIgnoreCase))
-                  ?? throw new InvalidOperationException($"unknown tool: {prefixedName}");
+        var (def, remoteTool) = Resolve(bridgedName)
+                                ?? throw new InvalidOperationException($"unknown tool: {bridgedName}");
 
         if (!def.Enabled)
             throw new InvalidOperationException(
@@ -219,7 +278,6 @@ public static class McpBridgeHub
                 $"{McpBridgeConfig.PathFor(_vaultPath)} and restart this agent" +
                 (string.IsNullOrWhiteSpace(def.Setup) ? "" : $". Setup: {def.Setup}"));
 
-        var remoteTool = prefixedName[def.Prefix.Length..];
         if (def.ToolAllowlist.Count > 0 && !def.ToolAllowlist.Contains(remoteTool, StringComparer.OrdinalIgnoreCase))
             throw new InvalidOperationException($"tool '{remoteTool}' is not in the '{def.Id}' bridge allowlist");
 

@@ -398,7 +398,14 @@ internal static partial class Program
         // extra per-client config, and every call lands in the auto-journal.
         // Started here, before the desktop courtesies below, so discovery runs
         // while the client is still handshaking. Headless ⇒ disabled outright.
-        try { McpBridgeHub.Initialize(_vaultPath, headless, Log, BusIdentity); }
+        // One exception, for the verification harness: how bridged tools are
+        // NAMED can only be proven with a bridge up, so a sandbox may opt in.
+        // By environment only — set by whoever spawns this process, never by a
+        // file in the vault — and never for a cloud vault or the remote child.
+        var bridgesInSandbox = sandbox && !cloud
+            && Environment.GetEnvironmentVariable("BRAINX_HEADLESS") != "1"
+            && Environment.GetEnvironmentVariable("BRAINX_SANDBOX_BRIDGES") == "1";
+        try { McpBridgeHub.Initialize(_vaultPath, headless && !bridgesInSandbox, Log, BusIdentity); }
         catch (Exception ex) { Log($"bridge init failed (non-fatal): {ex.Message}"); }
 
         if (!headless)
@@ -806,11 +813,25 @@ internal static partial class Program
         // Bridged tools (unity__*, unreal__*, …) ride along on the brain's own
         // list. Assembled second and wrapped in a catch on purpose: a dead
         // bridge must never cost the agent the brain itself.
-        try { McpBridgeHub.AppendTools(tools); }
+        try { McpBridgeHub.AppendTools(tools, flatNames: ClientRefusesDoubleUnderscore()); }
         catch (Exception ex) { Log($"bridge tools merge failed (non-fatal): {ex.Message}"); }
 
         return BuildResult(id, new JObject { ["tools"] = tools });
     }
+
+    /// <summary>
+    /// Grok Build qualifies an MCP tool as <c>&lt;server&gt;__&lt;tool&gt;</c> and
+    /// skips any tool whose own name already holds '__' — every unity__,
+    /// unreal__ and roblox__ tool, 78 of them, logged as "invalid or ambiguous
+    /// qualified name" (Grok Build 1.0.46, 2026-10-06). It is shown
+    /// <c>unity_manage_scene</c> instead; every other client keeps the names it
+    /// has always had.
+    /// </summary>
+    private static bool ClientRefusesDoubleUnderscore() => BusIdentity() == "grok";
+
+    /// <summary>The names <see cref="CoreTools"/> advertises — the ones no bridge may answer for.</summary>
+    private static readonly Lazy<HashSet<string>> CoreToolNames = new(() =>
+        new HashSet<string>(CoreTools().OfType<JObject>().Select(t => t["name"]!.ToString()), StringComparer.OrdinalIgnoreCase));
 
     /// <summary>The brain's own tools. Bridged ones are appended by ToolsList.</summary>
     private static JArray CoreTools() => new()
@@ -1727,7 +1748,9 @@ internal static partial class Program
             Tool("bridge_status",
                 "Diagnose the brain's OUTBOUND MCP bridges — the external MCP servers it hubs for " +
                 "(Unity Editor, Unreal Editor, …), whose tools appear here as <id>__<tool> " +
-                "(e.g. unity__manage_scene). Shows for each bridge: enabled, connected, tool count, " +
+                "(e.g. unity__manage_scene) — or <id>_<tool> (unity_manage_scene) for a client that " +
+                "refuses '__' inside a tool name, such as Grok; either spelling is accepted on call. " +
+                "Shows for each bridge: enabled, connected, tool count, " +
                 "the command it runs, the last error, and the setup steps still outstanding. " +
                 "Call this FIRST whenever a unity__/unreal__ tool is missing or failing, or when the " +
                 "user asks 'ต่อ unity/unreal ได้ไหม' — the answer is almost always a closed editor, a " +
@@ -1752,7 +1775,10 @@ internal static partial class Program
         // Bridged tool → hand the call to the engine that owns it. Its whole
         // result envelope is forwarded untouched (see BridgedCall), which the
         // brain's own path can't do because it re-serialises results to text.
-        if (name != null && McpBridgeHub.IsBridgedName(name))
+        // Either spelling, from any client — but the brain's own tools first:
+        // flat names share their separator with ours, and a bridge named
+        // "brain" would otherwise answer for brain_stats.
+        if (name != null && !CoreToolNames.Value.Contains(name) && McpBridgeHub.IsBridgedName(name))
             return BridgedCall(id, name, args);
 
         try
@@ -1906,6 +1932,9 @@ internal static partial class Program
     /// </summary>
     private static string BridgedCall(JToken? id, string name, JObject args)
     {
+        // unity_x and unity__x are one tool: journal it, and show it on the
+        // dashboard, under the one name every other session already uses.
+        name = McpBridgeHub.CanonicalName(name);
         try
         {
             var envelope = McpBridgeHub.CallTool(name, args);

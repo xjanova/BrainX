@@ -22,6 +22,9 @@ internal static class StubMcpServer
 {
     public const string EnvFlag = "BRAINX_MCP_STUB";
 
+    /// <summary>Comma-separated tool names for tools/list to advertise instead of the default two.</summary>
+    public const string ToolsEnv = "BRAINX_MCP_STUB_TOOLS";
+
     /// <summary>Sleep this many ms before answering: <c>__slow:3000__</c>.</summary>
     private const string SlowMarker = "__slow:";
     /// <summary>Emit stray stdout + a notification before the answer.</summary>
@@ -67,13 +70,18 @@ internal static class StubMcpServer
                     break;
 
                 case "tools/list":
+                    // Spawned as a BRIDGE, the stub stands in for an engine
+                    // server and advertises whatever names the check gave it.
+                    var named = Environment.GetEnvironmentVariable(ToolsEnv);
                     response = Result(id, new JObject
                     {
-                        ["tools"] = new JArray
-                        {
-                            new JObject { ["name"] = "brain_search", ["description"] = "stub" },
-                            new JObject { ["name"] = "ssh_run",      ["description"] = "stub — must never be advertised remotely" },
-                        },
+                        ["tools"] = string.IsNullOrEmpty(named)
+                            ? new JArray
+                            {
+                                new JObject { ["name"] = "brain_search", ["description"] = "stub" },
+                                new JObject { ["name"] = "ssh_run",      ["description"] = "stub — must never be advertised remotely" },
+                            }
+                            : new JArray(named.Split(',').Select(n => new JObject { ["name"] = n, ["description"] = "stub" })),
                     });
                     break;
 
