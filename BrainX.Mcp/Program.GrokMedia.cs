@@ -123,7 +123,7 @@ internal static partial class Program
             ["status"] = "running",
             ["dir"] = dir,
             ["hint"] = kind == "video"
-                ? "A video takes a few minutes. Call media_status {job} every minute or two; when done, attach the file with cowork_say attachments."
+                ? "A video takes one to two minutes. Call media_status {job} every 30 seconds; when done, attach the file with cowork_say attachments."
                 : "An image takes under a minute. Call media_status {job}; when done, attach the file with cowork_say attachments.",
         };
     }
@@ -139,26 +139,42 @@ internal static partial class Program
         var started = JobUtc(job["startedUtc"]) ?? DateTime.UtcNow;
         var status = job["status"]?.ToString() ?? "running";
 
-        if (status == "running" && !MediaJobAlive(job, started))
+        // Grok's headless run answers DONE (or the refusal) and then lingers for
+        // minutes before it exits — measured 2026-10-06: video written at 0:44,
+        // DONE at 0:49, process gone at 9:19. Waiting for the exit alone made
+        // every job look nine minutes slower than the browser.
+        var alive = status == "running" && MediaJobAlive(job, started);
+        if (status == "running")
         {
-            var files = CollectGrokMedia(dir, started);
-            var log = File.Exists(Path.Combine(dir, "run.log")) ? File.ReadAllText(Path.Combine(dir, "run.log")) : "";
-            job["files"] = new JArray(files);
-            job["finishedUtc"] = DateTime.UtcNow.ToString("o");
-            var wantVideo = job["kind"]?.ToString() == "video";
-            var gotVideo = files.Any(f => Path.GetExtension(f) is ".mp4" or ".webm" or ".mov");
-            if (files.Count > 0 && (!wantVideo || gotVideo)) status = "done";
-            else
+            var log = ReadRunLog(Path.Combine(dir, "run.log"));
+            var zdr = log.Contains("zero data retention", StringComparison.OrdinalIgnoreCase);
+            var replied = zdr || log.TrimEnd().EndsWith("DONE", StringComparison.Ordinal);
+            if (!alive || replied)
             {
-                status = "failed";
-                job["error"] = log.Contains("zero data retention", StringComparison.OrdinalIgnoreCase)
-                    ? "xAI makes no video while this Grok account keeps its coding data private (/privacy opted out = zero "
-                      + "data retention). A bucket in [tools.zdr_video_output_s3] would carry it, but Grok 1.0.46 only uses "
-                      + "that for ZDR team accounts. Opting in with /privacy is the owner's decision. Images still work."
-                    : Tail(log, 600);
+                var files = CollectGrokMedia(dir, started);
+                var wantVideo = job["kind"]?.ToString() == "video";
+                var gotVideo = files.Any(f => Path.GetExtension(f) is ".mp4" or ".webm" or ".mov");
+                var ok = files.Count > 0 && (!wantVideo || gotVideo);
+                // DONE but the file not in Grok's session folder yet: let the exit decide.
+                if (ok || zdr || !alive)
+                {
+                    job["files"] = new JArray(files);
+                    job["finishedUtc"] = DateTime.UtcNow.ToString("o");
+                    if (ok) status = "done";
+                    else
+                    {
+                        status = "failed";
+                        job["error"] = zdr
+                            ? "xAI makes no video while this Grok account keeps its coding data private (/privacy opted out = zero "
+                              + "data retention). A bucket in [tools.zdr_video_output_s3] would carry it, but Grok 1.0.46 only uses "
+                              + "that for ZDR team accounts. Opting in with /privacy is the owner's decision. Images still work."
+                            : Tail(log, 600);
+                    }
+                    job["status"] = status;
+                    File.WriteAllText(path, job.ToString(), new UTF8Encoding(false));
+                    if (alive) EndMediaJob(job);
+                }
             }
-            job["status"] = status;
-            File.WriteAllText(path, job.ToString(), new UTF8Encoding(false));
         }
 
         var r = new JObject
@@ -242,6 +258,35 @@ internal static partial class Program
             return !p.HasExited && Math.Abs((p.StartTime.ToUniversalTime() - startedUtc).TotalSeconds) < 30;
         }
         catch { return false; }
+    }
+
+    /// <summary>run.log while the job's cmd still holds it open for writing —
+    /// a plain ReadAllText throws a sharing violation there.</summary>
+    private static string ReadRunLog(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return "";
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var sr = new StreamReader(fs, Encoding.UTF8);
+            return sr.ReadToEnd();
+        }
+        catch { return ""; }
+    }
+
+    /// <summary>End a job whose Grok has already answered but not exited — the
+    /// job's own cmd and the grok.exe under it, nothing else. Only called right
+    /// after MediaJobAlive confirmed the pid is still this job's.</summary>
+    private static void EndMediaJob(JObject job)
+    {
+        try
+        {
+            if (job["pid"]?.ToObject<int?>() is not int pid) return;
+            using var p = Process.Start(new ProcessStartInfo("taskkill.exe", $"/PID {pid} /T /F")
+            { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true });
+            p?.WaitForExit(10_000);
+        }
+        catch { }
     }
 
     /// <summary>What Grok made, copied out of its session folder for this cwd
