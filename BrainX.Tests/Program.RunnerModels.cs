@@ -13,6 +13,7 @@ internal static partial class Program
     {
         checks.Add(("runner models: the model goes in front of the first option, never behind a list option", RunnerModelArgs));
         checks.Add(("runner models: a pick round-trips and a flag dressed as a model never does", RunnerModelChoices));
+        checks.Add(("runner effort: each CLI is told its level its own way, and only a plain level ever goes", RunnerEffortArgs));
         checks.Add(("bus seal: a sealed line is only the owner's under the name it was written as", SealWrittenAsChecks));
     }
 
@@ -71,6 +72,49 @@ internal static partial class Program
         return Task.CompletedTask;
     }
 
+    private static Task RunnerEffortArgs()
+    {
+        var claude = new[] { "-p", "{prompt}", "--allowedTools", "mcp__brainx-brain" };
+        var codex = new[] { "exec", "--skip-git-repo-check", "-C", "{cwd}", "{prompt}" };
+        var claudeEffort = RunnerModels.DefaultEffortArgs("claude", @"C:\x\claude.exe");
+        var codexEffort = RunnerModels.DefaultEffortArgs("codex", "codex");
+
+        var line = ArgLine(RunnerModels.ApplyEffortToArgs(
+            RunnerModels.ApplyToArgs(claude, "claude-opus-5-5", RunnerModels.DefaultFlag), "high", claudeEffort));
+        Check("claude: --effort and --model both go before -p",
+            line == "--effort high --model claude-opus-5-5 -p {prompt} --allowedTools mcp__brainx-brain", line);
+
+        line = ArgLine(RunnerModels.ApplyEffortToArgs(codex, "xhigh", codexEffort));
+        Check("codex: a config override after the exec subcommand",
+            line == "exec -c model_reasoning_effort=xhigh --skip-git-repo-check -C {cwd} {prompt}", line);
+
+        Check("no effort: the template is untouched",
+            ArgLine(RunnerModels.ApplyEffortToArgs(codex, null, codexEffort)) == ArgLine(codex));
+        line = ArgLine(RunnerModels.ApplyEffortToArgs(codex, "high,sandbox_mode=danger-full-access", codexEffort));
+        Check("a level carrying more config is not a level", line == ArgLine(codex), line);
+        Check("levels are plain lower-case words",
+            RunnerModels.IsValidEffort("xhigh") && !RunnerModels.IsValidEffort("-x") && !RunnerModels.IsValidEffort("\"high\"")
+            && !RunnerModels.IsValidEffort("High") && !RunnerModels.IsValidEffort(""));
+
+        var placed = new[] { "exec", "-c", "model_reasoning_effort={effort}", "{prompt}" };
+        line = ArgLine(RunnerModels.ApplyEffortToArgs(placed, null, codexEffort));
+        Check("{effort} as an option's value with no level: the option goes too", line == "exec {prompt}", line);
+        line = ArgLine(RunnerModels.ApplyEffortToArgs(placed, "low", Array.Empty<string>()));
+        Check("{effort} in the template: substituted where it stands", line == "exec -c model_reasoning_effort=low {prompt}", line);
+
+        Check("a CLI it does not know takes no effort until runners.json says how",
+            RunnerModels.DefaultEffortArgs("gemini", "gemini").Count == 0
+            && !RunnerModels.CanChooseEffort(claude, Array.Empty<string>()) && RunnerModels.CanChooseEffort(claude, claudeEffort));
+
+        var opus = RunnerModels.SupportedEfforts("claude", "claude", "claude-opus-5-5", null, out var opusDefault);
+        Check("claude Opus 5.5: five levels", ArgLine(opus.Select(o => o.Id)) == "low medium high xhigh max", ArgLine(opus.Select(o => o.Id)));
+        var haiku = RunnerModels.SupportedEfforts("claude", "claude", "claude-haiku-4-5", null, out var haikuDefault);
+        Check("claude Haiku 4.5: no effort at all", haiku.Count == 0 && haikuDefault == null);
+        var mine = RunnerModels.SupportedEfforts("gemini", "gemini", null, JArray.Parse("[\"low\",\"-x\",\"high\"]"), out _);
+        Check("runners.json's own levels, bad ones skipped", ArgLine(mine.Select(o => o.Id)) == "low high", ArgLine(mine.Select(o => o.Id)));
+        return Task.CompletedTask;
+    }
+
     private static Task RunnerModelChoices()
     {
         var bus = Path.Combine(Path.GetTempPath(), "brainx-models-" + Guid.NewGuid().ToString("N"));
@@ -114,6 +158,15 @@ internal static partial class Program
                 ArgLine(mine.Select(m => m.Id)));
             Check("an unknown CLI with no list offers nothing",
                 RunnerModels.Supported("gemini", "gemini", null, out _).Count == 0);
+
+            RunnerModels.WriteEffortChoice(bus, "claude", "high");
+            Check("an effort pick reads back, beside the model pick",
+                RunnerModels.ReadEffortChoice(bus, "CLAUDE") == "high" && File.Exists(RunnerModels.EffortPath(bus)));
+            threw = false;
+            try { RunnerModels.WriteEffortChoice(bus, "claude", "high --yolo"); } catch (ArgumentException) { threw = true; }
+            Check("writing more than a level is refused", threw && RunnerModels.ReadEffortChoice(bus, "claude") == "high");
+            RunnerModels.WriteEffortChoice(bus, "claude", "");
+            Check("clearing the effort pick", RunnerModels.ReadEffortChoice(bus, "claude") == null);
         }
         finally { try { Directory.Delete(bus, true); } catch { } }
         return Task.CompletedTask;

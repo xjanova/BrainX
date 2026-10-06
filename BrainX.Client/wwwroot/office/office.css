@@ -144,6 +144,20 @@ body {
 }
 #room-model:hover, #room-model[aria-expanded="true"] { border-color: rgba(216,185,120,0.55); color: var(--ink); }
 #room-model.set { border-color: rgba(111,207,151,0.4); }
+#room-work {
+    appearance: none;
+    border: 1px solid rgba(242, 239, 230, 0.12);
+    background: linear-gradient(180deg, rgba(34,39,50,0.88), rgba(16,19,26,0.88));
+    color: var(--ink-dim);
+    font: inherit;
+    letter-spacing: 1px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    cursor: pointer;
+    align-self: center;
+}
+#room-work:hover, #room-work[aria-expanded="true"] { border-color: rgba(216,185,120,0.55); color: var(--ink); }
+#room-work.busy { border-color: rgba(111,207,151,0.45); color: var(--ink); }
 
 /* The service chip — same chip as the boss, coloured by the one fact that
    matters at a glance: is anything going to carry on when the app closes. */
@@ -164,7 +178,7 @@ body {
 #room-service.warn { border-color: rgba(224,168,106,0.5); color: #e0b98a; }
 #room-service.off { border-color: rgba(224,115,107,0.35); color: var(--ink-faint); }
 
-#service-panel, #model-panel {
+#service-panel, #model-panel, #work-panel {
     position: absolute;
     top: 34px;
     left: 10px;
@@ -180,9 +194,69 @@ body {
     font-size: 11px;
     line-height: 1.45;
 }
-#service-panel[hidden], #model-panel[hidden] { display: none; }
-#service-panel header, #model-panel header { color: var(--ink); font-weight: 600; margin-bottom: 8px; }
-#service-panel header span, #model-panel header span { color: var(--ink-faint); font-weight: 400; }
+#service-panel[hidden], #model-panel[hidden], #work-panel[hidden] { display: none; }
+#service-panel header, #model-panel header, #work-panel header { color: var(--ink); font-weight: 600; margin-bottom: 8px; }
+#service-panel header span, #model-panel header span, #work-panel header span { color: var(--ink-faint); font-weight: 400; }
+
+/* The work window: who is working right now, then every piece of work with
+   the owner's buttons on it. Wider than the other panels — titles are long. */
+#work-panel { width: min(470px, calc(100% - 20px)); max-height: calc(100% - 50px); overflow-y: auto; }
+#work-panel header span { margin-left: 6px; }
+#work-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+#work-list .whead { color: var(--ink); font-weight: 600; font-size: 10.5px; margin-top: 6px; }
+#work-list .whead:first-child { margin-top: 0; }
+#work-list .wempty { color: var(--ink-faint); padding: 2px 0; }
+#work-list .who { color: var(--pc, var(--ink)); font-weight: 600; font-size: 10.5px; }
+#work-list .wrun {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 6px;
+    border-radius: 5px;
+    background: rgba(10, 12, 26, 0.55);
+    border-left: 2px solid rgba(111,207,151,0.6);
+}
+#work-list .wrun .what { color: var(--ink-dim); font-size: 10px; }
+#work-list .wtask {
+    display: grid;
+    gap: 3px;
+    padding: 5px 7px;
+    border-radius: 5px;
+    background: rgba(10, 12, 26, 0.55);
+    border-left: 2px solid var(--stroke);
+}
+#work-list .wt-top { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto auto; align-items: center; gap: 6px; }
+#work-list .ico { text-align: center; color: var(--ink-dim); }
+#work-list .tt { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#work-list .age { color: var(--ink-faint); font-size: 9px; }
+#work-list .wt-sub { color: var(--ink-faint); font-size: 9.5px; padding-left: 20px; overflow-wrap: anywhere; }
+#work-list .wt-act { display: flex; flex-wrap: wrap; gap: 4px; padding-left: 20px; }
+#work-list .st-doing { border-left-color: var(--accent); }
+#work-list .st-assigned, #work-list .st-open { border-left-color: rgba(242, 239, 230, 0.35); }
+#work-list .st-blocked { border-left-color: var(--bad); }
+#work-list .st-blocked .ico { color: var(--bad); }
+#work-list .st-paused { border-left-color: rgba(224,185,138,0.7); opacity: 0.85; }
+#work-list .st-paused .ico { color: #e0b98a; }
+#work-list .wbtn {
+    font: inherit;
+    font-size: 9.5px;
+    padding: 2px 9px;
+    border-radius: 999px;
+    cursor: pointer;
+    color: var(--ink);
+    background: rgba(34,39,50,0.95);
+    border: 1px solid rgba(242, 239, 230, 0.18);
+}
+#work-list .wbtn:hover:not(:disabled) { border-color: rgba(216,185,120,0.7); }
+#work-list .wbtn.danger { color: #e0938c; border-color: rgba(224,115,107,0.35); }
+#work-list .wbtn:disabled { opacity: .5; cursor: default; }
+#work-list .wpending { color: #e0b98a; font-size: 9.5px; }
+#work-note { margin: 8px 0 0; color: #e0938c; }
+#work-note:empty { display: none; }
+#work-panel .work-foot { margin: 8px 0 0; color: var(--ink-faint); font-size: 10px; }
+#board-list .st-paused { border-left-color: rgba(224,185,138,0.7); opacity: 0.8; }
+#board-list .st-paused .ico { color: #e0b98a; }
 #model-panel { width: min(380px, calc(100% - 20px)); max-height: calc(100% - 50px); overflow-y: auto; }
 #model-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
 #model-list li { display: grid; gap: 4px; }
@@ -199,6 +273,8 @@ body {
 }
 #model-list select:focus-visible { outline: 1px solid rgba(216,185,120,0.8); outline-offset: 1px; }
 #model-list select:disabled { opacity: 0.55; }
+#model-list .mfield { display: grid; grid-template-columns: 44px minmax(0, 1fr); align-items: center; gap: 6px; }
+#model-list .mfield > span { color: var(--ink-faint); font-size: 10px; }
 #model-list .mnote { margin: 0; color: var(--ink-faint); }
 #model-list .mnote:empty { display: none; }
 #model-list .mrun { margin: 0; color: #e0b98a; }

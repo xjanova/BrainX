@@ -53,6 +53,10 @@
            CLIENT to start or stop it — the page cannot, and must not, run a
            process that spawns agents. -->
       <button id="room-broker" type="button" title="บอสจัดสรรงาน (broker)">—</button>
+      <!-- What is being worked on, and the owner's hand on it: pause, resume,
+           cancel, focus one piece, stop a run the boss started. -->
+      <button id="room-work" type="button" aria-expanded="false" aria-controls="work-panel"
+              title="สถานะงาน — ใครทำอะไรอยู่ พัก/เลิก/โฟกัสงานได้">📋 งาน</button>
       <!-- Which model the boss starts each agent on. Only runs the broker
            starts — a session the owner opened keeps its own app's model. -->
       <button id="room-model" type="button" aria-expanded="false" aria-controls="model-panel"
@@ -73,8 +77,16 @@
       <button id="room-light" type="button" title="ไฟห้อง — ปิดแล้วทุกคนออก ไม่มีใครคุยได้จนกว่าจะเปิดใหม่">💡</button>
     </div>
 
-    <section id="model-panel" hidden aria-label="โมเดลที่บอสใช้เรียก agent">
-      <header>โมเดลของ agent <span>— ตอนบอสเรียกเข้ามาทำงาน</span></header>
+    <section id="work-panel" hidden aria-label="สถานะงาน">
+      <header>สถานะงาน <span id="work-sum"></span></header>
+      <ol id="work-list"></ol>
+      <p id="work-note" role="status"></p>
+      <p class="work-foot">⏸ พัก = หยุดไว้ชั่วคราว ไม่มีใครตามงานนี้จนกว่าจะกดทำต่อ ·
+        🎯 โฟกัส = ทำงานนี้ก่อน งานอื่นพักไว้หมด · ✖ เลิก = ยกเลิกถาวร</p>
+    </section>
+
+    <section id="model-panel" hidden aria-label="โมเดลและ effort ที่บอสใช้เรียก agent">
+      <header>โมเดลและ effort ของ agent <span>— ตอนบอสเรียกเข้ามาทำงาน</span></header>
       <ol id="model-list"></ol>
       <p id="model-note" role="status"></p>
       <p class="model-foot">มีผลกับรอบถัดไปที่บอสเรียก agent เข้ามาเอง (ห้องว่าง / รอบศึกษา) ไม่ต้องรีสตาร์ต ·

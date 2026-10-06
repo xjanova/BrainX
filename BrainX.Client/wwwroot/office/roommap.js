@@ -185,11 +185,33 @@ function pointInPoly(px, py, poly) {
     return inside;
 }
 
+// ── furniture the page draws itself ─────────────────────────────────
+//
+// The computer desks (office.js, DESK_SPOTS) are not in the plate, so neither
+// the mask nor the polygons above know they are there. Their footprints are
+// handed in here, in the same normalised plate space, and they are solid
+// whatever is painted underneath: a desk stands on walkable floor by design.
+// Recomputed whenever the desks are laid out, because a desk is drawn in the
+// figures' pixels and its share of the plate changes with the window.
+
+let EXTRA_BLOCKS = [];
+let EXTRA_KEY = '';
+
+function setExtraBlocks(polys) {
+    const list = Array.isArray(polys) ? polys : [];
+    const key = JSON.stringify(list.map(p => p.map(([x, y]) => [x.toFixed(3), y.toFixed(3)])));
+    if (key === EXTRA_KEY) return;
+    EXTRA_KEY = key;
+    EXTRA_BLOCKS = list;
+    GRID = null;     // the walk grid was built without them
+}
+
 /** Can somebody stand here? Normalised plate coordinates.
  *
  *  Painted mask first — blocked beats walkable, so a sofa painted over floor
  *  is solid without anybody having to erase the floor underneath it. */
 function isWalkable(nx, ny) {
+    for (const p of EXTRA_BLOCKS) if (pointInPoly(nx, ny, p)) return false;
     const m = maskAt(nx, ny);
     if (m) return m.walk && !m.block;
     if (!pointInPoly(nx, ny, FLOOR)) return false;
@@ -442,6 +464,7 @@ function loadRoomSeats(url = 'art/room-seats.json') {
 
 const ROOM_MAP = { FLOOR, BLOCKS, OCCLUDERS, SPOTS, GW, GH,
                    isWalkable, nearestWalkable, findPath, spotNear, buildGrid,
-                   pointInPoly, loadRoomMask, loadRoomSeats, maskAt,
+                   pointInPoly, loadRoomMask, loadRoomSeats, maskAt, setExtraBlocks,
+                   get extraBlocks() { return EXTRA_BLOCKS; },
                    get mask() { return MASK; },
                    get grid() { return GRID || buildGrid(); } };

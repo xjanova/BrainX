@@ -1224,13 +1224,13 @@ internal static partial class Program
     }
 
     /// <summary>An owner line exactly as the window writes it: `to` set, then sealed.</summary>
-    private static void OwnerSays(string room, string key, string body, string? to = null)
+    private static void OwnerSays(string room, string key, string body, string? to = null, string topic = "owner-order")
     {
         var line = new JObject
         {
             ["id"] = $"c-{DateTime.UtcNow.Ticks}-{Guid.NewGuid().ToString("N")[..6]}",
             ["ts"] = DateTime.UtcNow.ToString("o"),
-            ["from"] = "owner", ["fromClient"] = "brainx-cowork", ["topic"] = "owner-order", ["body"] = body,
+            ["from"] = "owner", ["fromClient"] = "brainx-cowork", ["topic"] = topic, ["body"] = body,
         };
         if (to != null) line["to"] = to;
         BusSeal.Seal(line, key);
@@ -1342,6 +1342,31 @@ internal static partial class Program
             Check("every board change was also said in the room",
                   Directory.GetFiles(room, "*.json").Select(f => JObject.Parse(File.ReadAllText(f)))
                            .Count(o => o["topic"]?.ToString() == "task" && o["task"]?.ToString() == coverId) >= 3);
+
+            // ── the owner pauses a piece from the work window ──
+            // What the window writes: the task on hold, then a sealed stop to its holder.
+            var linksPath = Path.Combine(bus, "cowork", "tasks", openId + ".json");
+            var linksTask = JObject.Parse(File.ReadAllText(linksPath));
+            var holder = linksTask["assignee"]?.ToString() ?? "";
+            linksTask["status"] = "blocked";
+            linksTask["paused"] = new JObject { ["reason"] = "owner", ["prevStatus"] = "doing" };
+            File.WriteAllText(linksPath, linksTask.ToString());
+            OwnerSays(room, key, $"⏸ @{holder} บอสพักงาน [{openId}] ไว้ — หยุดทำทันที", to: holder, topic: "owner-stop");
+            var holderClient = holder == "alpha" ? alpha : beta;
+            var stopSeen = CoworkNotice(await holderClient.Raw("agent_peers", new JObject()));
+            Check("the holder of paused work is told to stop it",
+                  stopSeen?["action"]?.ToString().Contains("STOP board work") == true, stopSeen?.ToString());
+            var takeBack = await holderClient.Call("cowork_task", new JObject { ["action"] = "update", ["id"] = openId, ["status"] = "doing" });
+            Check("an agent cannot take back work the owner paused",
+                  takeBack["ok"]?.Value<bool>() == false && takeBack["note"]?.ToString().Contains("paused by the owner") == true, takeBack.ToString());
+            var reclaim = await holderClient.Call("cowork_task", new JObject { ["action"] = "claim", ["id"] = openId });
+            Check("…nor claim it again", reclaim["ok"]?.Value<bool>() == false, reclaim.ToString());
+            var progress = await holderClient.Call("cowork_task", new JObject { ["action"] = "update", ["id"] = openId, ["note"] = "links 1-40 checked" });
+            Check("…but can still write down where it got to",
+                  progress["ok"]?.Value<bool>() == true && progress["task"]?["status"]?.ToString() == "blocked", progress.ToString());
+            var heldBoard = await alpha.Call("cowork_task", new JObject { ["action"] = "list" });
+            Check("the board shows it as paused by the owner",
+                  (heldBoard["board"] as JArray)?.Any(t => t["id"]?.ToString() == openId && t["paused"]?.ToString() == "owner") == true, heldBoard.ToString());
 
             // ── a dark room takes no new work ──
             SetRoomLight(bus, on: false);

@@ -135,6 +135,9 @@ public partial class MainWindow
                 ["roomOpen"] = CoworkRoomIsOpen(),
                 // Which model the boss starts each agent on, and what it can be.
                 ["models"] = CoworkModels(),
+                // The runs the boss started that are still going — what the
+                // work window can stop.
+                ["runs"] = CoworkRuns(),
             };
             CoworkWebView.CoreWebView2?.PostWebMessageAsJson(
                 new JObject { ["type"] = "officeState", ["payload"] = payload }.ToString());
@@ -555,6 +558,11 @@ public partial class MainWindow
                     break;
                 case "officeOpen": CoworkOpen(m["path"]?.ToString()); break;
                 case "officeModel": CoworkSetModel(m["agent"]?.ToString(), m["model"]?.ToString()); break;
+                case "officeEffort": CoworkSetEffort(m["agent"]?.ToString(), m["effort"]?.ToString()); break;
+                // The work window: pause / resume / drop / focus one piece of
+                // work, or stop a run the boss started (MainWindow.CoworkControl).
+                case "officeTask": CoworkTaskControl(m["task"]?.ToString(), m["action"]?.ToString()); break;
+                case "officeStopRun": CoworkStopRunFromRoom(m["agent"]?.ToString()); break;
             }
         }
         catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"Cowork msg: {ex.Message}"); }
@@ -710,6 +718,9 @@ public partial class MainWindow
                 ["createdBy"] = o["createdBy"]?.ToString() ?? "",
                 ["note"] = Trim(o["note"]?.ToString() ?? "", 300),
                 ["at"] = new DateTimeOffset(DateTime.SpecifyKind(updated, DateTimeKind.Utc)).ToUnixTimeMilliseconds(),
+                // "owner" = paused from the work window, "quota" = out of quota.
+                ["paused"] = (o["paused"] as JObject)?["reason"]?.ToString() ?? "",
+                ["droppedBy"] = o["droppedBy"]?.ToString() ?? "",
             }));
         }
         foreach (var r in rows.OrderBy(r => r.Order).ThenBy(r => r.Created)) arr.Add(r.Row);
@@ -1034,6 +1045,7 @@ public partial class MainWindow
         var runners = CoworkRunners();
         if (runners == null) return arr;
         var picks = BrainX.Core.Services.RunnerModels.ReadChoices(CoworkBusRoot);
+        var effortPicks = BrainX.Core.Services.RunnerModels.ReadEffortChoices(CoworkBusRoot);
 
         foreach (var (name, val) in runners)
         {
@@ -1051,41 +1063,61 @@ public partial class MainWindow
                 var configured = r["model"]?.Type == JTokenType.String
                                  && BrainX.Core.Services.RunnerModels.IsValidId(r["model"]!.ToString().Trim())
                     ? r["model"]!.ToString().Trim() : "";
+                var chosen = picks.TryGetValue(agent, out var pick) ? pick : "";
+
+                // The levels of the model the NEXT run starts on — the pick,
+                // else runners.json's, else the CLI's — so changing the model
+                // above changes what this list offers.
+                var effortArgs = r["effortArgs"] != null
+                    ? (r["effortArgs"] as JArray)?.Select(t => t.ToString()).ToList() ?? new List<string> { r["effortArgs"]!.ToString() }
+                    : BrainX.Core.Services.RunnerModels.DefaultEffortArgs(agent, r["exe"]?.ToString() ?? "").ToList();
+                var nextModel = chosen.Length > 0 ? chosen : configured.Length > 0 ? configured : null;
+                var efforts = BrainX.Core.Services.RunnerModels.SupportedEfforts(
+                    agent, r["exe"]?.ToString() ?? "", nextModel, r["efforts"], out var effortDefault);
+                var effortConfigured = r["effort"]?.Type == JTokenType.String
+                                       && BrainX.Core.Services.RunnerModels.IsValidEffort(r["effort"]!.ToString().Trim())
+                    ? r["effort"]!.ToString().Trim() : "";
+                var (runModel, runEffort) = CoworkRunModel(agent);
 
                 arr.Add(new JObject
                 {
                     ["agent"] = agent,
                     ["canChoose"] = BrainX.Core.Services.RunnerModels.CanChoose(args, flag),
-                    ["chosen"] = picks.TryGetValue(agent, out var pick) ? pick : "",
+                    ["chosen"] = chosen,
                     ["configured"] = configured,
                     ["cliDefault"] = cliDefault ?? "",
                     ["onCall"] = r["onCall"]?.Type == JTokenType.Boolean && r["onCall"]!.ToObject<bool>(),
-                    ["running"] = CoworkRunModel(agent) ?? "",
-                    ["options"] = new JArray(options.Select(o => new JObject
-                    {
-                        ["id"] = o.Id,
-                        ["label"] = o.Label,
-                        ["note"] = o.Note,
-                    })),
+                    ["running"] = runModel ?? "",
+                    ["options"] = Options(options),
+                    ["effortCanChoose"] = BrainX.Core.Services.RunnerModels.CanChooseEffort(args, effortArgs),
+                    ["effortChosen"] = effortPicks.TryGetValue(agent, out var effortPick) ? effortPick : "",
+                    ["effortConfigured"] = effortConfigured,
+                    ["effortCliDefault"] = effortDefault ?? "",
+                    ["effortRunning"] = runEffort ?? "",
+                    ["effortOptions"] = Options(efforts),
                 });
             }
             catch { /* one broken runner entry must not hide the others */ }
         }
         return arr;
+
+        static JArray Options(IEnumerable<BrainX.Core.Services.RunnerModels.Option> list) =>
+            new(list.Select(o => new JObject { ["id"] = o.Id, ["label"] = o.Label, ["note"] = o.Note }));
     }
 
-    /// <summary>The model a broker run still in flight was started on.</summary>
-    private string? CoworkRunModel(string agent)
+    /// <summary>The model and effort a broker run still in flight was started on.</summary>
+    private (string? Model, string? Effort) CoworkRunModel(string agent)
     {
         try
         {
             var p = Path.Combine(CoworkBusRoot, "broker", agent + ".state.json");
-            if (!File.Exists(p)) return null;
+            if (!File.Exists(p)) return (null, null);
             var o = JObject.Parse(File.ReadAllText(p));
-            if (o["runPid"] == null || o["runPid"]!.Type == JTokenType.Null) return null;
-            return o["runModel"]?.Type == JTokenType.String ? o["runModel"]!.ToString() : null;
+            if (o["runPid"] == null || o["runPid"]!.Type == JTokenType.Null) return (null, null);
+            return (o["runModel"]?.Type == JTokenType.String ? o["runModel"]!.ToString() : null,
+                    o["runEffort"]?.Type == JTokenType.String ? o["runEffort"]!.ToString() : null);
         }
-        catch { return null; }
+        catch { return (null, null); }
     }
 
     /// <summary>
@@ -1111,6 +1143,28 @@ public partial class MainWindow
                 CoworkBusRoot, row["agent"]!.ToString(), model.Length == 0 ? null : model);
         }
         catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"CoworkSetModel: {ex.Message}"); }
+        PostCowork();
+    }
+
+    /// <summary>The owner picked an effort level in the room. The same rule as
+    /// the model: only a level offered for that runner's next model is written.</summary>
+    private void CoworkSetEffort(string? agent, string? effort)
+    {
+        agent = agent?.Trim() ?? "";
+        effort = effort?.Trim() ?? "";
+        try
+        {
+            var row = CoworkModels().OfType<JObject>().FirstOrDefault(m =>
+                string.Equals(m["agent"]?.ToString(), agent, StringComparison.OrdinalIgnoreCase));
+            if (row == null || row["effortCanChoose"]?.ToObject<bool>() != true) return;
+            var offered = (row["effortOptions"] as JArray ?? new JArray())
+                .Any(o => string.Equals(o["id"]?.ToString(), effort, StringComparison.Ordinal));
+            if (effort.Length > 0 && !offered) return;
+
+            BrainX.Core.Services.RunnerModels.WriteEffortChoice(
+                CoworkBusRoot, row["agent"]!.ToString(), effort.Length == 0 ? null : effort);
+        }
+        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"CoworkSetEffort: {ex.Message}"); }
         PostCowork();
     }
 

@@ -1252,8 +1252,12 @@ internal static partial class Program
         // The model goes in BEFORE the substitutions, and can only ever be one
         // validated id (RunnerModels.IsValidId): no dash, no braces, so it can
         // neither become a flag nor smuggle a {prompt} in.
+        // The effort the same way: one level of lower-case letters, nothing else.
         var model = RunnerModelFor(agent, runner);
-        foreach (var a in RunnerModels.ApplyToArgs(runner.Args, model, runner.ModelFlag))
+        var effort = RunnerEffortFor(agent, runner, model);
+        var args = RunnerModels.ApplyEffortToArgs(
+            RunnerModels.ApplyToArgs(runner.Args, model, runner.ModelFlag), effort, runner.EffortArgs);
+        foreach (var a in args)
             psi.ArgumentList.Add(a.Replace("{prompt}", BuildSpawnPrompt(work, cfg.MaxRunSeconds))
                                   .Replace("{cwd}", psi.WorkingDirectory)
                                   .Replace("{agent}", agent));
@@ -1348,10 +1352,12 @@ internal static partial class Program
             state.RunPid = p.Id;
             state.RunStartedUtc = startedUtc;
             state.RunModel = model;
+            state.RunEffort = effort;
             SaveRunnerState(agent, state);
 
             BrokerLog($"{agent}: spawned {Path.GetFileName(exe)} pid {p.Id}"
                       + (model != null ? $" on {model}" : "")
+                      + (effort != null ? $" at effort {effort}" : "")
                       + $" for {Describe(work)} · log {Path.GetFileName(log)}");
             return true;
         }
@@ -1369,6 +1375,33 @@ internal static partial class Program
         if (runner.Model.Length == 0) return null;
         if (RunnerModels.IsValidId(runner.Model)) return runner.Model;
         BrokerLog($"{agent}: runners.json model '{Redact(runner.Model)}' is not a model id — starting on the CLI default");
+        return null;
+    }
+
+    /// <summary>
+    /// The effort this run starts at: the room's pick (cowork/efforts.json),
+    /// else the runner's own `effort`, else nothing — the CLI decides (claude:
+    /// the model's own default, codex: config.toml's model_reasoning_effort).
+    ///
+    /// A level the model about to run does not list is dropped, not passed: a
+    /// pick made for one model outlives a switch to another, and codex refuses
+    /// a level its model does not have. An unlisted level from runners.json on
+    /// a CLI whose levels cannot be read is the owner's own call and goes.
+    /// </summary>
+    private static string? RunnerEffortFor(string agent, RunnerSpec runner, string? model)
+    {
+        var picked = RunnerModels.ReadEffortChoice(BusRoot, agent);
+        var effort = picked ?? (runner.Effort.Length > 0 ? runner.Effort : null);
+        if (effort == null) return null;
+        if (!RunnerModels.IsValidEffort(effort))
+        {
+            BrokerLog($"{agent}: runners.json effort '{Redact(effort)}' is not an effort level — starting at the CLI default");
+            return null;
+        }
+
+        var levels = RunnerModels.SupportedEfforts(agent, runner.Exe, model, runner.Efforts, out _);
+        if (levels.Any(l => l.Id == effort) || (levels.Count == 0 && picked == null)) return effort;
+        BrokerLog($"{agent}: effort '{effort}' is not one {model ?? "the default model"} takes — starting at its default");
         return null;
     }
 
@@ -1705,12 +1738,15 @@ internal static partial class Program
 
             var code = run.Process.HasExited ? run.Process.ExitCode : -1;
             var elapsed = DateTime.UtcNow - run.StartedUtc;
+            // The owner stopped it from the room's work window: neither a run
+            // that failed to start nor one that finished its work.
+            var ownerStopped = !killed && TakeOwnerStop(agent, run.Process.Id);
             // Exited is not drained: the last lines can still be in the async
             // readers. Bounded, because a grandchild holding the pipe open would
             // otherwise hang the broker here.
             if (!killed)
                 try { Task.Run(() => run.Process.WaitForExit()).Wait(TimeSpan.FromSeconds(3)); } catch { }
-            BrokerLog($"{agent}: run finished, exit {code}, {elapsed.TotalSeconds:F0}s");
+            BrokerLog($"{agent}: run finished, exit {code}, {elapsed.TotalSeconds:F0}s" + (ownerStopped ? " — stopped by the owner" : ""));
             run.Process.Dispose();
             live.Remove(agent);
 
@@ -1723,11 +1759,16 @@ internal static partial class Program
             // printed "No such file" or "authentication" while working on auth
             // code did not fail to start — only a quota message means a shut
             // door at any point in a run.
-            var fatal = code != 0 && !killed
+            var fatal = code != 0 && !killed && !ownerStopped
                 ? FatalComplaint(run.LogPath, startup: elapsed < RunTooFastToBeReal)
                 : null;
-            var failed = fatal != null || (code != 0 && elapsed < RunTooFastToBeReal);
-            if (failed)
+            var failed = !ownerStopped && (fatal != null || (code != 0 && elapsed < RunTooFastToBeReal));
+            if (ownerStopped)
+            {
+                // Nothing to learn about the runner from a run cut short on
+                // purpose: its failure streak and its quota record stand.
+            }
+            else if (failed)
             {
                 st.ConsecutiveFailures++;
                 // The runner's own words beat both the timing and the exit
@@ -1757,6 +1798,7 @@ internal static partial class Program
             st.RunPid = null;
             st.RunStartedUtc = null;
             st.RunModel = null;
+            st.RunEffort = null;
             SaveRunnerState(agent, st);
 
             // Out of quota: pause its board work, save where it got to in the
@@ -1766,8 +1808,28 @@ internal static partial class Program
             var paused = fatal != null && FailureClass(fatal) == "quota"
                          && CoworkPauseForQuota(cfg, agent, fatal, run.LogPath);
 
-            if (run.ForRoom && !paused) CoworkReportRun(cfg, agent, run, failed, killed, st.LastFailure);
+            // The owner's window already said it stopped the run.
+            if (run.ForRoom && !paused && !ownerStopped) CoworkReportRun(cfg, agent, run, failed, killed, st.LastFailure);
         }
+    }
+
+    /// <summary>Where the client leaves word that the OWNER stopped this
+    /// agent's run: {pid, atUtc}. Written before the kill, so the reap that
+    /// follows always finds it.</summary>
+    internal static string OwnerStopPath(string agent) => Path.Combine(BrokerDir, agent + ".owner-stop.json");
+
+    /// <summary>Did the owner stop the run with this pid? Consumes the record.</summary>
+    private static bool TakeOwnerStop(string agent, int pid)
+    {
+        try
+        {
+            var path = OwnerStopPath(agent);
+            if (!File.Exists(path)) return false;
+            var mine = ReadJsonOrNull(path)?["pid"]?.ToObject<int?>() == pid;
+            File.Delete(path);
+            return mine;
+        }
+        catch { return false; }
     }
 
     /// <summary>
@@ -1878,7 +1940,9 @@ internal static partial class Program
         st.RunPid = null;
         st.RunStartedUtc = null;
         st.RunModel = null;
+        st.RunEffort = null;
         SaveRunnerState(agent, st);
+        try { File.Delete(OwnerStopPath(agent)); } catch { }
     }
 
     /// <summary>The last non-empty line a run printed — its complaint.</summary>
@@ -2329,6 +2393,9 @@ internal static partial class Program
         /// say "this one is on X, the next one will be on Y" after a pick.</summary>
         public string? RunModel { get; set; }
 
+        /// <summary>The effort level it was started at, for the same reason.</summary>
+        public string? RunEffort { get; set; }
+
         /// <summary>
         /// "งานนี้เดี๋ยวฉันทำเอง", "ย้ายงานให้คนอื่นเอง", "ยกเลิกงานที่ค้าง": the owner
         /// has taken everything that was waiting at this moment. Work that
@@ -2445,6 +2512,9 @@ internal static partial class Program
                 RunPid = o["runPid"]?.ToObject<int?>(),
                 RunStartedUtc = Utc(o["runStartedUtc"]),
                 RunModel = o["runModel"]?.Type == JTokenType.String ? o["runModel"]!.ToString() : null,
+                RunEffort = o["runEffort"]?.Type == JTokenType.String ? o["runEffort"]!.ToString() : null,
+                QuotaResumeUtc = Utc(o["quotaResumeUtc"]),
+                QuotaPauses = o["quotaPauses"]?.ToObject<int?>() ?? 0,
                 OwnerTookUtc = Utc(o["ownerTookUtc"]),
                 SessionCalls = o["sessionCalls"] as JObject,
                 ConsecutiveFailures = o["consecutiveFailures"]?.ToObject<int?>() ?? 0,
@@ -2471,6 +2541,11 @@ internal static partial class Program
                 ["runPid"] = s.RunPid,
                 ["runStartedUtc"] = s.RunStartedUtc,
                 ["runModel"] = s.RunModel,
+                ["runEffort"] = s.RunEffort,
+                // Without these two a quota pause lasted one tick: every reader
+                // got QuotaResumeUtc null and the backoff never grew.
+                ["quotaResumeUtc"] = s.QuotaResumeUtc,
+                ["quotaPauses"] = s.QuotaPauses,
                 ["ownerTookUtc"] = s.OwnerTookUtc,
                 ["sessionCalls"] = s.SessionCalls,
                 ["consecutiveFailures"] = s.ConsecutiveFailures,
@@ -2500,6 +2575,18 @@ internal static partial class Program
         /// it, unless the args carry a {model} placeholder. Empty = this runner
         /// takes no model, and the room offers no choice for it.</summary>
         public string ModelFlag { get; init; } = RunnerModels.DefaultFlag;
+
+        /// <summary>The effort level to start at when the owner has not picked
+        /// one in the room. Empty = the CLI's own default.</summary>
+        public string Effort { get; init; } = "";
+
+        /// <summary>How the effort is passed, with {effort} where the level
+        /// goes (default: by CLI — RunnerModels.DefaultEffortArgs). Empty =
+        /// this runner takes no effort.</summary>
+        public List<string> EffortArgs { get; init; } = new();
+
+        /// <summary>runners.json's own list of levels, when it gives one.</summary>
+        public JToken? Efforts { get; init; }
 
         /// <summary>
         /// Answers the cowork room when the owner gives an order with nobody
@@ -2645,6 +2732,11 @@ internal static partial class Program
                     OnCall = Bool(r["onCall"], false),
                     Model = r["model"]?.Type == JTokenType.String ? r["model"]!.ToString().Trim() : "",
                     ModelFlag = r["modelFlag"]?.Type == JTokenType.String ? r["modelFlag"]!.ToString().Trim() : RunnerModels.DefaultFlag,
+                    Effort = r["effort"]?.Type == JTokenType.String ? r["effort"]!.ToString().Trim() : "",
+                    EffortArgs = r["effortArgs"] != null
+                        ? Strings(r["effortArgs"])
+                        : RunnerModels.DefaultEffortArgs(key, r["exe"]?.ToString() ?? "").ToList(),
+                    Efforts = r["efforts"],
                 };
             }
 
@@ -2732,6 +2824,7 @@ internal static partial class Program
 
   "//runners": "{prompt} and {cwd} are substituted. NOTHING from a peer message is ever interpolated.",
   "//model": "Per runner: \"model\" is the default model (empty = the CLI's own), \"modelFlag\" how it is passed (default --model; empty = no model), \"models\" the list the cowork room offers. A pick made in the room (cowork/models.json) wins and needs no restart. Put {model} in args to place it yourself.",
+  "//effort": "Per runner, the same for the effort level: \"effort\" the default (empty = the CLI's own), \"effortArgs\" how it is passed with {effort} where the level goes (default claude: [\"--effort\",\"{effort}\"], codex: [\"-c\",\"model_reasoning_effort={effort}\"]; [] = no effort), \"efforts\" the levels the room offers. A pick in the room (cowork/efforts.json) wins.",
   "runners": {
     "codex": {
       "//": "--approve-for-me is REQUIRED: headless Codex auto-denies every MCP tool call through its approval gate without it.",

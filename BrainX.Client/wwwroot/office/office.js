@@ -55,29 +55,57 @@ let LIGHTS = [];
  * half it is actually good at: who is in the room, where, doing what, and
  * what is lit.
  *
- * STATIONS are the bridge. The plate has fixed furniture, so an agent cannot
- * stand anywhere - it has to stand at a desk that exists in the picture.
- * Normalised to the plate, so they survive any canvas size.
+ * The desks are the bridge (DESK_ROWS below): the plate has no workstations
+ * of its own, so the agents' desks are drawn onto its open floor, pinned to
+ * the plate so they survive any canvas size.
  */
 const ROOM_PLATE = new Image();
 let PLATE_READY = false;
 ROOM_PLATE.onload = () => { PLATE_READY = true; };
 ROOM_PLATE.src = 'art/room.webp';
 
-const STATIONS = [
-    // Measured off THIS plate, not off the reference render. The reference
-    // has a big table in the middle of the room; this plate has a rug there
-    // and its desks are all around the edges, so stations copied from the
-    // other picture put four people standing on a carpet.
-    { x: 0.800, y: 0.620, r: 34, warm: true },   // desk by the bookshelf, right
-    { x: 0.165, y: 0.235, r: 30, warm: true },   // cabinets, back left
-    { x: 0.470, y: 0.185, r: 30, warm: false },  // in front of the server racks
-    { x: 0.700, y: 0.265, r: 28, warm: false },  // the glass meeting room
-    { x: 0.205, y: 0.580, r: 30, warm: true },   // standing at the coffee bar
-    { x: 0.430, y: 0.755, r: 28, warm: true },   // the sofa
-    { x: 0.500, y: 0.520, r: 26, warm: true },   // on the rug, middle of the room
-    { x: 0.880, y: 0.430, r: 26, warm: true },   // by the whiteboard, far right
+/**
+ * The computer desks.
+ *
+ * Owner (2026-10-06): "เพิ่มเฟอนิเจอร์ โต๊ะคอมสำหรับพวกเขาทำงาน". The plate has
+ * no desks at all — the agents used to be drawn standing by the bookshelf,
+ * the racks, the coffee bar, a bust with no legs in front of furniture that
+ * was not theirs. So the desks are drawn here, on the open wood floor along
+ * the two far edges of the rug and facing it: the left row looks south-east,
+ * the right row south-west, and whoever sits at one faces the room.
+ *
+ * A desk is drawn in the figures' own logical pixels, so a desk and the person
+ * at it are always the same size as each other — and what changes with the
+ * window is how much of the ROOM a desk takes. So a row is pinned to the plate
+ * only at its first desk (`x,y`: the middle of that desk's front edge, on the
+ * floor, normalised) and the rest follow it a fixed number of pixels apart.
+ * Spacing the desks in plate units instead put them on top of each other in
+ * a small room pane and miles apart in a large one.
+ */
+const DESK_ROWS = [
+    // Along the rug's top-left edge, from the coffee bar up toward the racks.
+    { x: 0.335, y: 0.482, face: 'se', count: 3 },
+    // Under the glass room, along the rug's top-right edge.
+    // Kept clear of the window, where the boss goes to stand and think.
+    { x: 0.600, y: 0.458, face: 'sw', count: 1 },
 ];
+/** Desk to desk along a row, in logical pixels: a desk's length and a gap. */
+const DESK_STEP = 34;
+
+/** How many people the room has desks for. */
+const DESK_COUNT = DESK_ROWS.reduce((n, r) => n + r.count, 0);
+
+/** The engines are EQUIPMENT, not colleagues: they stand together on the
+ *  little rug by the cabinets, out of the way of the desks. */
+const RIG_SPOTS = [
+    { x: 0.352, y: 0.318, r: 18, warm: false },
+    { x: 0.392, y: 0.292, r: 18, warm: false },
+];
+
+/** How steep the plate's floor is: its rug edges drop ~0.43px per px across,
+ *  a little flatter than textbook 2:1, and a desk drawn at 0.5 would sit
+ *  visibly askew on the boards. */
+const ISO_K = 0.43;
 
 
 /** Plate coordinates -> logical canvas pixels. The plate is drawn to COVER,
@@ -186,10 +214,12 @@ function label(name) {
 let AGENTS = [];        // [{id,label,state,lastTool,pending,spawned}]
 let MESSAGES = [];      // newest last
 let DECISIONS = [];
-let TASKS = [];         // the board: [{id,title,status,assignee,createdBy,note,at}]
+let TASKS = [];         // the board: [{id,title,status,assignee,createdBy,note,at,paused,droppedBy}]
+let RUNS = [];          // runs the boss started, still going: [{agent,since,model,effort}]
 let ROSTER = [];        // everyone with a desk, lit room or not — who a line can be for
 let BROKER = null;      // {state,tail} — the boss: running / adopted / stopped / failed
-let MODELS = [];        // [{agent,canChoose,chosen,configured,cliDefault,onCall,running,options:[{id,label,note}]}]
+let MODELS = [];        // [{agent,canChoose,chosen,configured,cliDefault,onCall,running,options:[{id,label,note}],
+                        //   effortCanChoose,effortChosen,effortConfigured,effortCliDefault,effortRunning,effortOptions}]
 const DESKS = new Map();  // agent id → {gx,gy,seat:{x,y},screen:{x,y}}
 const SEEN = new Set();   // message ids already shown as bubbles
 const EMOTES_PLAYED = new Set();  // agent|atUtc, so one emote sounds once
@@ -236,6 +266,9 @@ let BOSS_CLOCK = 0;       // performance.now() of the last avatar update
  */
 const BOSS_SPOTS = SPOTS;                                  // roommap.js
 const BOSS_HOME = SPOTS.find(s => s.home) || SPOTS[0];     // the rug, middle of the room
+/** The way in: the doormat at the bottom right of the plate, by the shoes and
+ *  the lantern — the one gap in the front wall the painted floor reaches. */
+const BOSS_DOOR = { key: 'door', x: 0.730, y: 0.880, act: 'idle', face: 'nw', stay: [1, 2] };
 
 /** The route he is walking, as normalised plate points, and how far along it
  *  he is. A path exists because the room is a ring of furniture: a straight
@@ -303,28 +336,139 @@ let T = 0;                // frame counter, drives every idle animation
  * stable order, so nobody's chair moves when somebody else connects.
  */
 /**
- * Who gets a desk. The plate has STATIONS.length desks; seats were handed out
- * as i % STATIONS.length, so the ninth agent sat on top of the first and both
+ * Who gets a desk. The room has DESK_COUNT desks; seats used to be handed out
+ * as i % (number of places), so the ninth agent sat on top of the first and both
  * nameplates became unreadable. With more people than desks, the ones that are
  * here sit first and the empty chairs are the ones left out — everybody is
  * still on the "send to" chips. Under the limit nothing changes, and nobody's
  * chair moves.
  */
 function seated(roster) {
-    if (roster.length <= STATIONS.length) return roster;
-    const here = roster.filter(a => a.state !== 'offline');
-    const away = roster.filter(a => a.state === 'offline');
-    return here.concat(away).slice(0, STATIONS.length).sort((a, b) => a.id.localeCompare(b.id));
+    // People take desks and engines take the spots by the racks: two pools,
+    // each filled the same way — whoever is here first, then the rest.
+    const fill = (list, room) => {
+        if (list.length <= room) return list;
+        const here = list.filter(a => a.state !== 'offline');
+        const away = list.filter(a => a.state === 'offline');
+        return here.concat(away).slice(0, room);
+    };
+    const people = roster.filter(a => !a.bridge), rigs = roster.filter(a => a.bridge);
+    if (people.length <= DESK_COUNT && rigs.length <= RIG_SPOTS.length) return roster;
+    return fill(people, DESK_COUNT).concat(fill(rigs, RIG_SPOTS.length))
+        .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/** Every desk in the room, laid out for this window — sat at or not. */
+let DESK_GEO = [];
+
+/** The desks of every row, as front-edge points in logical pixels. A `se` row
+ *  climbs to the upper right, a `sw` row runs down to the lower right — both
+ *  along the floor, at the floor's own slope. */
+function deskFronts() {
+    const out = [];
+    for (const row of DESK_ROWS) {
+        const o = stationPt(row);
+        const dy = (row.face === 'sw' ? 1 : -1) * DESK_STEP * ISO_K;
+        for (let i = 0; i < row.count; i++)
+            out.push({ face: row.face, pt: { x: o.x + i * DESK_STEP, y: o.y + i * dy } });
+    }
+    return out;
 }
 
 function layoutDesks() {
     plateFit();
     DESKS.clear();
-    AGENTS.forEach((a, i) => {
-        const st = STATIONS[i % STATIONS.length];
-        const pt = stationPt(st);
-        DESKS.set(a.id, { st, desk: pt, screen: { x: pt.x, y: pt.y - 16 } });
-    });
+    DESK_GEO = deskFronts().map(deskGeometry);
+    let p = 0, r = 0;
+    for (const a of AGENTS) {
+        if (a.bridge) {
+            const st = RIG_SPOTS[r++ % RIG_SPOTS.length];
+            const pt = stationPt(st);
+            DESKS.set(a.id, { st, desk: pt, screen: { x: pt.x, y: pt.y - 16 } });
+            continue;
+        }
+        const g = DESK_GEO[p++ % DESK_GEO.length];
+        g.agent = a.id;
+        DESKS.set(a.id, {
+            st: g, desk: g.seat, screen: { x: g.seat.x, y: g.seat.y - 18 },
+            // The nameplate under the desk's front edge, and where a visitor
+            // stands to talk: on the floor in front of it, never on the lid.
+            label: { x: g.front.x, y: g.base + 3 }, stand: { x: g.front.x, y: g.base + 5 },
+        });
+    }
+    // The desks are solid. Footprint plus the chair behind it, so the boss
+    // walks round a desk rather than through whoever is sitting at it.
+    ROOM_MAP.setExtraBlocks(DESK_GEO.map(g => g.block));
+}
+
+/**
+ * One desk's geometry, in logical pixels, from its spot on the plate.
+ *
+ * Built for a desk whose front looks south-east (`se`): its long side runs
+ * along the rug's top-left edge, the person sits behind it, the monitor
+ * stands to their right. A `sw` desk is the same desk mirrored about its own
+ * centre, which in this projection is exactly the desk turned to face the
+ * other way — so every offset below is written once, as `X(dx)`.
+ */
+function deskGeometry(spot) {
+    const s = spot.face === 'sw' ? -1 : 1;
+    const F = spot.pt;                          // front edge, middle, on the floor
+    const LH = 15, DH = 5, H = 6;               // half-length, half-depth, height
+    const k = ISO_K;
+    // The lid's centre: back from the front edge by half the depth, up by the height.
+    const cx = F.x - s * DH, cy = F.y - DH * k - H;
+    const X = (dx) => cx + s * dx;
+    // u runs toward the front, v along the desk (toward its near end).
+    const at = (du, dv) => ({ x: X(du - dv), y: cy + (du + dv) * k });
+    const lid = [at(DH, -LH), at(DH, LH), at(-DH, LH), at(-DH, -LH)];  // front-far, front-near, back-near, back-far
+    const floor = (p) => ({ x: p.x, y: p.y + H });
+
+    // The person sits behind the middle of the desk, a little toward its near
+    // end so the monitor beside them does not cover the face.
+    const seatC = at(-DH - 4, 3);
+    // The lid's back edge IN THEIR COLUMN is where the desk crosses the
+    // chest: four steps back along u is matched by four along v to stay on
+    // the same x.
+    const seat = { x: seatC.x, y: at(-DH, 3 + 4).y + 1 };
+
+    // The floor the desk stands on, plus the chair's patch behind the middle
+    // of it — not a strip the whole length of the desk, which walled off the
+    // window the boss goes to stand at.
+    const toNorm = (p) => [(p.x - PLATE_FIT.x) / PLATE_FIT.w, (p.y - PLATE_FIT.y) / PLATE_FIT.h];
+    const fl = lid.map(floor);
+    const chair = [at(-DH, 12), at(-DH - 9, 12), at(-DH - 9, -6), at(-DH, -6)].map(floor);
+    const block = [fl[0], fl[1], fl[2], ...chair, fl[3]].map(toNorm);
+
+    const xs = [...lid.map(p => p.x), ...chair.map(p => p.x)];
+    const box = {
+        x0: Math.floor(Math.min(...xs)) - 3, x1: Math.ceil(Math.max(...xs)) + 3,
+        y0: Math.floor(seat.y - 22), y1: Math.ceil(Math.max(...fl.map(p => p.y))) + 2,
+    };
+    return {
+        spot, s, k, cx, cy, H, LH, DH, at, lid, fl, seat, block, box,
+        front: F,
+        base: Math.max(...fl.map(p => p.y)),           // lowest floor point — the sort key
+        monitor: at(-2, -9),                            // where the screen stands on the lid
+        lamp: at(-1, -LH + 2),
+        mug: at(2, LH - 3),
+        r: 30, warm: true,
+        agent: null,
+    };
+}
+
+/** The desk's floor line at column x, in logical pixels: below it (larger y)
+ *  is in front of the desk. -Infinity where the desk does not reach. */
+function deskBaseAt(g, x) {
+    let best = -Infinity;
+    const pts = g.fl;
+    for (let i = 0; i < pts.length; i++) {
+        const a = pts[i], b = pts[(i + 1) % pts.length];
+        const lo = Math.min(a.x, b.x), hi = Math.max(a.x, b.x);
+        if (x < lo || x > hi || hi === lo) continue;
+        const y = a.y + (b.y - a.y) * ((x - a.x) / (b.x - a.x));
+        if (y > best) best = y;
+    }
+    return best;
 }
 
 
@@ -713,9 +857,11 @@ function drawRoom() {
     // Each occupied station contributes its light, which is what the darkness
     // pass cuts holes with. A station nobody is at stays dark - that is the
     // whole reason this is a list and not a constant.
+    // A desk lights itself (its lamp, its screen) in drawDesk; the engines by
+    // the racks get the station glow they always had.
     for (const a of AGENTS) {
         const d = DESKS.get(a.id);
-        if (!d || a.state === 'offline') continue;
+        if (!d || a.state === 'offline' || !a.bridge) continue;
         LIGHTS.push({
             x: d.desk.x, y: d.desk.y - 8,
             r: d.st.r,
@@ -724,10 +870,19 @@ function drawRoom() {
         });
     }
 
-    // Back to front, so somebody nearer the viewer covers whoever is behind.
+    // Back to front, so whatever is nearer the viewer covers whatever is
+    // behind it: every desk (sat at or not) and every engine, by floor line.
+    const items = DESK_GEO.map(g => ({ y: g.base, draw: () => drawDesk(g) }));
+    for (const a of AGENTS) {
+        const d = DESKS.get(a.id);
+        if (d && a.bridge && a.state !== 'offline' && !VISITS.has(a.id))
+            items.push({ y: d.desk.y + 1, draw: () => drawSeated(a) });
+    }
+    items.sort((p, q) => p.y - q.y);
+    for (const it of items) it.draw();
+
     const deskY = (a) => DESKS.get(a.id)?.desk.y ?? 0;
     const order = [...AGENTS].sort((x, y) => deskY(x) - deskY(y));
-    for (const a of order) if (a.state !== 'offline' && !VISITS.has(a.id)) drawSeated(a);
     for (const a of order) if (!a.bridge) drawWalker(a);
 
     // The boss stands in his own light, always — he is in the room whether or
@@ -750,8 +905,122 @@ function drawRoom() {
     drawPackets();
 }
 
-/** Somebody at their station. The desk, the chair and the monitor are all in
- *  the plate already - this draws the person and nothing else. */
+/**
+ * One computer desk, and whoever works at it.
+ *
+ * Chair, then the person, then the desk over them: sitting at a desk is an
+ * overlap, not a stacking order — the lid crosses the chest, which is why the
+ * seated figure is a bust in the first place. Drawn whether anybody is at it
+ * or not; an empty desk with its screen off is furniture, and it is also how
+ * the room shows that somebody is away.
+ */
+function drawDesk(g) {
+    const a = g.agent ? AGENTS.find(x => x.id === g.agent) : null;
+    const here = !!a && a.state !== 'offline' && !VISITS.has(a.id);
+    const lit = here && a.state === 'working';
+    const c = a ? agentColor(a.id) : '#6a7299';
+    const { at, lid, fl, seat } = g;
+
+    const poly = (pts, fill) => {
+        ctx.fillStyle = fill;
+        ctx.beginPath();
+        pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+        ctx.closePath();
+        ctx.fill();
+    };
+
+    // Contact shadow: the footprint, a little wider, on the boards.
+    ctx.globalAlpha = 0.32;
+    poly(fl.map(p => ({ x: p.x + (p.x - g.front.x) * 0.08, y: p.y + 1 })), '#05060f');
+    ctx.globalAlpha = 1;
+
+    // The chair, its back showing either side of whoever sits in it — and
+    // all of it when nobody does.
+    const chair = here ? '#2a2c38' : '#24262f';
+    px(seat.x - 9, seat.y - 11, 18, 11, chair);
+    px(seat.x - 9, seat.y - 11, 18, 1, '#3a3d4c');
+    px(seat.x - 8, seat.y - 10, 1, 9, '#1a1b22');
+    px(seat.x + 7, seat.y - 10, 1, 9, '#1a1b22');
+    if (!here) px(seat.x - 7, seat.y - 2, 14, 2, '#30333f');     // the empty cushion
+
+    if (here) drawPerson(seat.x, seat.y, c, a);
+
+    // The desk: walnut lid, a lit front face, the near end in shade.
+    poly([lid[0], lid[1], fl[1], fl[0]], '#5a3d28');     // front face
+    poly([lid[1], lid[2], fl[2], fl[1]], '#3e2a1c');     // near end
+    poly(lid, '#7d5a3c');                                // lid
+    // A lit lip along the front edge, and a seam a little below it: the two
+    // lines that make a flat quad read as a slab with an edge.
+    ctx.strokeStyle = '#b08458'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(lid[0].x, lid[0].y); ctx.lineTo(lid[1].x, lid[1].y); ctx.stroke();
+    ctx.strokeStyle = 'rgba(20,12,6,0.45)';
+    ctx.beginPath(); ctx.moveTo(lid[0].x, lid[0].y + 2); ctx.lineTo(lid[1].x, lid[1].y + 2); ctx.stroke();
+
+    // Keyboard under the hands.
+    poly([at(-1.5, 6), at(-1.5, 14), at(-3.5, 14), at(-3.5, 6)], here ? '#2b2f3c' : '#24272f');
+    ctx.strokeStyle = 'rgba(160,170,200,0.25)';
+    ctx.beginPath();
+    const kA = at(-2.5, 7), kB = at(-2.5, 13);
+    ctx.moveTo(kA.x, kA.y); ctx.lineTo(kB.x, kB.y); ctx.stroke();
+
+    // Papers in front of the screen, and a mug at the near end.
+    const pp = at(3, 0);
+    px(pp.x - 3, pp.y - 1, 6, 3, '#cdd6f5');
+    px(pp.x - 2, pp.y - 2, 6, 3, '#e6ebff');
+    if (here) {
+        const m = g.mug;
+        px(m.x - 1, m.y - 4, 3, 4, shade(c, -0.1));
+        px(m.x + 2, m.y - 3, 1, 2, shade(c, -0.1));
+    }
+
+    // The monitor, standing on the lid.
+    const mb = g.monitor;
+    const mx = Math.round(mb.x), my = Math.round(mb.y);
+    ctx.globalAlpha = 0.35;
+    px(mx - 5, my, 10, 2, '#0a0c18');
+    ctx.globalAlpha = 1;
+    px(mx - 1, my - 4, 3, 5, '#1b1f2a');
+    px(mx - 3, my, 7, 1, '#2a2e3a');
+    px(mx - 6, my - 15, 13, 11, '#0f111a');
+    const screen = !here ? '#0a0b12' : lit ? c : '#1c2a4a';
+    px(mx - 5, my - 14, 11, 9, screen);
+    if (lit) {
+        // Rows that scroll. The flicker is what makes a lit screen read as
+        // "being used" rather than "switched on".
+        ctx.globalAlpha = 0.42;
+        for (let i = 0; i < 4; i++) {
+            const w = 3 + ((T / 6 + i * 3) | 0) % 8;
+            px(mx - 4, my - 13 + i * 2, w, 1, '#06121c');
+        }
+        ctx.globalAlpha = 1;
+        LIGHTS.push({ x: mx, y: my - 9, r: 30, c: hexToRgb(c), i: 0.40 });
+    } else if (here) {
+        // Idle: a cursor, blinking.
+        if ((T >> 4) % 2) px(mx - 4, my - 13, 2, 1, '#6a86c0');
+    } else {
+        px(mx + 4, my - 5, 1, 1, '#c96a3a');             // standby light
+    }
+
+    // The lamp at the far end — which is where the warm light on the floor comes from.
+    const lp = g.lamp;
+    const lx = Math.round(lp.x), ly = Math.round(lp.y);
+    px(lx, ly - 6, 1, 6, '#3b3f4f');
+    px(lx - 2, ly - 9, 5, 3, here ? '#6a5f4a' : '#3d3a35');
+    if (here) {
+        px(lx - 1, ly - 6, 3, 1, '#ffd79a');
+        LIGHTS.push({ x: lx, y: ly - 6, r: 40, c: [255, 182, 104], i: 0.48 });
+    }
+
+    // Whose desk it is, propped up at the front corner — while they are at
+    // it. A greyed mark on an empty desk read as a small grey figure sitting
+    // there; the name under the desk already says whose it is.
+    if (here) {
+        const np = at(g.DH - 1, -g.LH + 5);
+        drawPlaque(Math.round(np.x), Math.round(np.y) + 1, a.id, c);
+    }
+}
+
+/** An engine by the racks: the desk-less half of the room. */
 function drawSeated(a) {
     const d = DESKS.get(a.id);
     if (!d) return;
@@ -1476,8 +1745,8 @@ function drawWalker(a) {
     if (k >= 1) { VISITS.delete(a.id); return; }
 
     // Stand a little in FRONT of each desk rather than on it.
-    const A = { x: from.desk.x, y: from.desk.y + 16 };
-    const B = { x: to.desk.x, y: to.desk.y + 16 };
+    const A = from.stand || { x: from.desk.x, y: from.desk.y + 16 };
+    const B = to.stand || { x: to.desk.x, y: to.desk.y + 16 };
 
     let p, walking, phase;
     if (k < 0.3) { phase = k / 0.3; p = lerpPt(A, B, ease(phase)); walking = true; }
@@ -2231,6 +2500,39 @@ function hexToRgb(h) {
  * drawn on the logical canvas would be a staircase of chunky rings, and the
  * first version of this room had exactly that.
  */
+/**
+ * The desks, back over the boss when he is behind one.
+ *
+ * He is painted at device resolution after the sprite layer, so without this
+ * he would walk in FRONT of every desk, including one he is standing behind.
+ * The same per-column test the plate's occluders use: at the column he stands
+ * in, is the desk's floor line below his feet? Then the desk — and whoever sits
+ * at it, who is behind it too — is copied back from the sprite layer over him.
+ */
+function drawDesksOverBoss() {
+    if (!BOSS_AV || !DESK_GEO.length) return;
+    const n = bossDepthNorm();
+    const fx = PLATE_FIT.x + n.x * PLATE_FIT.w, fy = PLATE_FIT.y + n.y * PLATE_FIT.h;
+    const s = bossScaleLogical();
+    const halfW = 34 * s, height = 220 * s;
+    const drawnY = PLATE_FIT.y + bossNorm().y * PLATE_FIT.h;
+    vctx.imageSmoothingEnabled = false;
+    for (const g of DESK_GEO) {
+        const b = g.box;
+        if (fx + halfW < b.x0 || fx - halfW > b.x1) continue;
+        if (drawnY < b.y0 || drawnY - height > b.y1) continue;
+        // Averaged across his width, so a corner of the desk cannot flip it.
+        let sum = 0, hits = 0;
+        for (let x = Math.max(b.x0, fx - halfW); x <= Math.min(b.x1, fx + halfW); x += 2) {
+            const y = deskBaseAt(g, x);
+            if (y > -Infinity) { sum += y; hits++; }
+        }
+        if (!hits || fy >= sum / hits) continue;
+        const w = b.x1 - b.x0, h = b.y1 - b.y0;
+        vctx.drawImage(scene, b.x0, b.y0, w, h, b.x0 * SCALE, b.y0 * SCALE, w * SCALE, h * SCALE);
+    }
+}
+
 function present() {
     const W = cv.width, H = cv.height;
 
@@ -2255,6 +2557,7 @@ function present() {
     drawBossSprite();
     // …and whatever he is standing behind, painted back over him.
     drawOccluders();
+    drawDesksOverBoss();
     if (MAP_DEBUG) drawMapDebug();
 
     castDarkness();
@@ -2407,7 +2710,8 @@ function drawOverlay() {
                     : 'ว่าง';
         overlayPut(seen, 'p:' + a.id,
             `plate${a.state === 'offline' ? ' is-off' : ''}${a.bridge ? ' is-rig' : ''}`,
-            `--pc:${agentColor(a.id)};left:${(d.desk.x * sx).toFixed(1)}px;top:${((d.desk.y + 14) * sy).toFixed(1)}px`,
+            `--pc:${agentColor(a.id)};left:${((d.label?.x ?? d.desk.x) * sx).toFixed(1)}px;`
+            + `top:${((d.label?.y ?? d.desk.y + 14) * sy).toFixed(1)}px`,
             `<span class="who">${esc(label(a.label || a.id))}</span>` +
             (a.bridge ? `<span class="badge rig">เครื่องมือ</span>` : '') +
             (a.spawned ? `<span class="badge">AUTO</span>` : '') +
@@ -2590,6 +2894,11 @@ const TASK_STATE = {
     done: { ico: '✓', th: 'เสร็จ' },
     dropped: { ico: '✕', th: 'ยกเลิก' },
 };
+/** A paused task is "blocked" on disk; to the owner it is theirs, on hold. */
+const TASK_PAUSED = { owner: { ico: '⏸', th: 'บอสพักไว้' }, quota: { ico: '⏸', th: 'พัก — หมดโควตา' } };
+function taskState(t) {
+    return (t.paused && TASK_PAUSED[t.paused]) || TASK_STATE[t.status] || TASK_STATE.open;
+}
 let BOARD_SHOW_DONE = false;
 /** task id → when the owner last pressed "call" for it. The board is rebuilt
  *  every poll, and a button that comes back pressable two seconds later gets
@@ -2611,6 +2920,18 @@ function ago(ms) {
     return Math.round(s / 86400) + ' วัน';
 }
 
+/** "กำลังทำ 2 · รอคนรับ 1 · ติด 1 · พักไว้ 2" — paused work is not "stuck". */
+function workSummary(active) {
+    const paused = active.filter(t => t.paused === 'owner' || t.paused === 'quota').length;
+    const n = s => active.filter(t => t.status === s && !(t.paused === 'owner' || t.paused === 'quota')).length;
+    const parts = [];
+    if (n('doing')) parts.push(`กำลังทำ ${n('doing')}`);
+    if (n('assigned') + n('open')) parts.push(`รอคนรับ ${n('assigned') + n('open')}`);
+    if (n('blocked')) parts.push(`ติด ${n('blocked')}`);
+    if (paused) parts.push(`พักไว้ ${paused}`);
+    return parts.join(' · ');
+}
+
 function renderBoard() {
     const box = document.getElementById('board');
     const list = document.getElementById('board-list');
@@ -2621,26 +2942,23 @@ function renderBoard() {
     box.hidden = TASKS.length === 0;
     if (!TASKS.length) return;
 
-    const n = s => active.filter(t => t.status === s).length;
-    const parts = [];
-    if (n('doing')) parts.push(`กำลังทำ ${n('doing')}`);
-    if (n('assigned') + n('open')) parts.push(`รอคนรับ ${n('assigned') + n('open')}`);
-    if (n('blocked')) parts.push(`ติด ${n('blocked')}`);
-    document.getElementById('board-sum').textContent = parts.join(' · ') || 'ไม่มีงานค้าง';
+    document.getElementById('board-sum').textContent = workSummary(active) || 'ไม่มีงานค้าง';
 
     const row = t => {
-        const st = TASK_STATE[t.status] || TASK_STATE.open;
+        const st = taskState(t);
         const who = t.assignee || '';
         // A piece that is waiting on somebody who is not in the room gets a way
-        // to bring them in. Without it the board could only say "stuck".
+        // to bring them in. Without it the board could only say "stuck". Not
+        // one the owner paused: calling somebody to work they were told to
+        // leave is the opposite of the pause — resuming is in the work window.
         const calledAt = CALLED.get(t.id) || 0;
         const held = Date.now() - calledAt < CALL_HOLD_MS;
-        const call = who && ['assigned', 'blocked', 'doing'].includes(t.status) && !presentInRoom(who)
+        const call = who && ['assigned', 'blocked', 'doing'].includes(t.status) && t.paused !== 'owner' && !presentInRoom(who)
             ? `<button class="call" data-agent="${esc(who)}" data-id="${esc(t.id)}" data-title="${esc(t.title)}"`
               + (held ? ' disabled' : '')
               + ` title="${esc(who)} ไม่อยู่ในห้อง — ส่งคำสั่งเรียกเข้ามารับงานนี้">${held ? 'เรียกแล้ว' : 'เรียก'}</button>`
             : '';
-        return `<li class="task st-${esc(t.status)}" title="${esc(t.id)} · ${esc(st.th)} · สร้างโดย ${esc(t.createdBy || '?')}">`
+        return `<li class="task st-${esc(t.paused === 'owner' ? 'paused' : t.status)}" title="${esc(t.id)} · ${esc(st.th)} · สร้างโดย ${esc(t.createdBy || '?')}">`
             + `<span class="ico">${st.ico}</span>`
             + `<span class="tt">${esc(t.title)}${t.note ? `<em>${esc(t.note)}</em>` : ''}</span>`
             + `<span class="who" style="--pc:${who ? agentColor(who) : 'var(--ink-faint)'}">${esc(who ? label(who) : 'ว่าง')}</span>`
@@ -2897,12 +3215,14 @@ function apply(p) {
     document.getElementById('room-dot').classList.toggle('off', online === 0);
 
     MODELS = Array.isArray(p.models) ? p.models : [];
+    RUNS = Array.isArray(p.runs) ? p.runs : [];
 
     renderLog();
     renderDecisions();
     renderBoard();
     renderChips();
     renderModels();
+    renderWork();
 }
 
 function firstLine(s) {
@@ -2944,14 +3264,22 @@ document.getElementById('say').addEventListener('submit', (e) => {
 // pick ends up on the command line of a process that can edit the repos.
 
 let MODELS_KEY = '';
-/** Picks sent and not yet seen back in a payload: agent → {model, at}. */
+/** Picks sent and not yet seen back in a payload: "model:agent" or
+ *  "effort:agent" → {value, at}. */
 const MODEL_PENDING = new Map();
-/** Picks that just came back, for a short "saved" mark: agent → time. */
+/** Picks that just came back, for a short "saved" mark: same key → time. */
 const MODEL_SAVED = new Map();
 let MODEL_NOTE = '';
+/** Which field of a row each kind of pick comes back in. */
+const PICK_FIELD = { model: 'chosen', effort: 'effortChosen' };
 
 function modelLabel(row, id) {
     const o = (row.options || []).find(x => x.id === id);
+    return o ? o.label : id;
+}
+
+function effortLabel(row, id) {
+    const o = (row.effortOptions || []).find(x => x.id === id);
     return o ? o.label : id;
 }
 
@@ -2963,28 +3291,39 @@ function modelDefaultText(row) {
     return 'ค่าเริ่มต้นของ CLI';
 }
 
+/** The same for the effort: runners.json's level, else what the next model
+ *  starts at by itself (claude: the model's own, codex: config.toml). */
+function effortDefaultText(row) {
+    if (row.effortConfigured) return `ค่าเริ่มต้น — ${effortLabel(row, row.effortConfigured)} (runners.json)`;
+    if (row.effortCliDefault) return `ค่าเริ่มต้นของ CLI — ${effortLabel(row, row.effortCliDefault)}`;
+    return 'ค่าเริ่มต้นของ CLI';
+}
+
 function renderModels() {
     const now = Date.now();
-    for (const [agent, p] of MODEL_PENDING) {
+    for (const [key, p] of MODEL_PENDING) {
+        const kind = key.slice(0, key.indexOf(':'));
+        const agent = key.slice(key.indexOf(':') + 1);
         const row = MODELS.find(m => m.agent === agent);
-        if (row && (row.chosen || '') === p.model) {
-            MODEL_PENDING.delete(agent);
-            MODEL_SAVED.set(agent, now);
+        if (row && (row[PICK_FIELD[kind]] || '') === p.value) {
+            MODEL_PENDING.delete(key);
+            MODEL_SAVED.set(key, now);
         } else if (now - p.at > 8000) {
             // The client refused it or never got it. Say so rather than leave
             // the dropdown showing a choice that is not on disk.
-            MODEL_PENDING.delete(agent);
-            MODEL_NOTE = `บันทึกโมเดลของ ${agent} ไม่สำเร็จ — ลองเลือกใหม่อีกครั้ง`;
+            MODEL_PENDING.delete(key);
+            MODEL_NOTE = `บันทึก${kind === 'effort' ? ' effort ' : 'โมเดล'}ของ ${agent} ไม่สำเร็จ — ลองเลือกใหม่อีกครั้ง`;
         }
     }
-    for (const [agent, t] of MODEL_SAVED) if (now - t > 4000) MODEL_SAVED.delete(agent);
+    for (const [key, t] of MODEL_SAVED) if (now - t > 4000) MODEL_SAVED.delete(key);
 
     const chip = document.getElementById('room-model');
     if (chip) {
-        chip.classList.toggle('set', MODELS.some(m => m.chosen));
+        chip.classList.toggle('set', MODELS.some(m => m.chosen || m.effortChosen));
         chip.title = MODELS.length
-            ? 'โมเดลที่บอสใช้เรียก agent เข้ามาทำงาน\n' + MODELS.map(m =>
-                `${m.agent}: ${m.chosen ? modelLabel(m, m.chosen) : modelDefaultText(m)}`).join('\n')
+            ? 'โมเดลและ effort ที่บอสใช้เรียก agent เข้ามาทำงาน\n' + MODELS.map(m =>
+                `${m.agent}: ${m.chosen ? modelLabel(m, m.chosen) : modelDefaultText(m)}`
+                + ` · effort ${m.effortChosen ? effortLabel(m, m.effortChosen) : effortDefaultText(m)}`).join('\n')
             : 'ยังไม่มี agent ที่บอสเรียกได้ (runners.json)';
     }
     const note = document.getElementById('model-note');
@@ -2997,13 +3336,14 @@ function renderModels() {
     const key = JSON.stringify([MODELS, [...MODEL_PENDING], [...MODEL_SAVED.keys()]]);
     if (key === MODELS_KEY) return;
     MODELS_KEY = key;
-    const focused = document.activeElement?.closest?.('#model-list select')?.dataset.agent;
+    const focusedSel = document.activeElement?.closest?.('#model-list select');
+    const focused = focusedSel ? [focusedSel.dataset.agent, focusedSel.dataset.kind] : null;
 
     list.innerHTML = !MODELS.length
         ? '<li class="mnote">ยังไม่มี agent ที่บอสเรียกเข้ามาทำงานได้ — เพิ่ม runner ใน runners.json</li>'
         : MODELS.map(row => {
-            const pending = MODEL_PENDING.get(row.agent);
-            const value = pending ? pending.model : (row.chosen || '');
+            const pending = MODEL_PENDING.get(`model:${row.agent}`);
+            const value = pending ? pending.value : (row.chosen || '');
             const opts = Array.isArray(row.options) ? row.options : [];
             // A pick the CLI no longer offers still shows as what it is,
             // rather than silently reading as the default.
@@ -3016,28 +3356,56 @@ function renderModels() {
             const why = !row.canChoose ? 'runner นี้ไม่รับการเลือกโมเดล (modelFlag ว่างใน runners.json)'
                 : !opts.length ? 'ไม่พบรายการโมเดลของ runner นี้ — ใส่ "models" ใน runners.json'
                 : picked ? (picked.note || '') : '';
+
+            // The effort, offered for the model the NEXT run starts on. A level
+            // that model does not have shows as such — the boss drops it and
+            // starts at the default — and stays pickable so it can be cleared.
+            const epending = MODEL_PENDING.get(`effort:${row.agent}`);
+            const evalue = epending ? epending.value : (row.effortChosen || '');
+            const eopts = Array.isArray(row.effortOptions) ? row.effortOptions : [];
+            const estale = evalue && !eopts.some(o => o.id === evalue);
+            const eoptions = [`<option value="">${esc(effortDefaultText(row))}</option>`]
+                .concat(estale ? [`<option value="${esc(evalue)}" selected>${esc(evalue)} (โมเดลนี้ไม่รองรับ — จะใช้ค่าเริ่มต้น)</option>`] : [])
+                .concat(eopts.map(o => `<option value="${esc(o.id)}"${o.id === evalue ? ' selected' : ''}>${esc(o.label)}</option>`))
+                .join('');
+            const epicked = eopts.find(o => o.id === evalue);
+            const ewhy = !row.effortCanChoose ? 'runner นี้ไม่รับการตั้ง effort (effortArgs ว่างใน runners.json)'
+                : !eopts.length ? 'โมเดลนี้ไม่มีระดับ effort ให้เลือก'
+                : epicked ? (epicked.note || '') : '';
+
             const next = value || row.configured || '';
-            const run = row.running && row.running !== next
-                ? `<p class="mrun">รอบที่กำลังทำงานอยู่ใช้ ${esc(modelLabel(row, row.running))} — รอบถัดไปจะใช้ ${esc(value ? modelLabel(row, value) : modelDefaultText(row))}</p>`
+            const nextEffort = evalue || row.effortConfigured || '';
+            const run = (row.running && row.running !== next) || (row.effortRunning && row.effortRunning !== nextEffort)
+                ? `<p class="mrun">รอบที่กำลังทำงานอยู่ใช้ ${esc(row.running ? modelLabel(row, row.running) : 'โมเดลค่าเริ่มต้น')}`
+                    + `${row.effortRunning ? ` · effort ${esc(effortLabel(row, row.effortRunning))}` : ''}`
+                    + ` — รอบถัดไปจะใช้ ${esc(value ? modelLabel(row, value) : modelDefaultText(row))}`
+                    + ` · effort ${esc(evalue ? effortLabel(row, evalue) : effortDefaultText(row))}</p>`
                 : '';
-            const state = pending ? ' · กำลังบันทึก…'
-                : MODEL_SAVED.has(row.agent) ? ' · <span class="msave">✓ บันทึกแล้ว</span>' : '';
+            const state = pending || epending ? ' · กำลังบันทึก…'
+                : MODEL_SAVED.has(`model:${row.agent}`) || MODEL_SAVED.has(`effort:${row.agent}`)
+                    ? ' · <span class="msave">✓ บันทึกแล้ว</span>' : '';
             return `<li><div><span class="who" style="--pc:${agentColor(row.agent)}">${esc(label(row.agent))}</span>`
                 + `<span class="tag">${row.onCall ? 'ถูกเรียกเมื่อห้องว่าง' : ''}${state}</span></div>`
-                + `<select data-agent="${esc(row.agent)}" aria-label="โมเดลของ ${esc(row.agent)}"`
-                + `${row.canChoose && opts.length ? '' : ' disabled'}>${options}</select>`
-                + `<p class="mnote">${esc(why)}</p>${run}</li>`;
+                + `<label class="mfield"><span>โมเดล</span><select data-agent="${esc(row.agent)}" data-kind="model" aria-label="โมเดลของ ${esc(row.agent)}"`
+                + `${row.canChoose && opts.length ? '' : ' disabled'}>${options}</select></label>`
+                + `<p class="mnote">${esc(why)}</p>`
+                + `<label class="mfield"><span>effort</span><select data-agent="${esc(row.agent)}" data-kind="effort" aria-label="effort ของ ${esc(row.agent)}"`
+                + `${row.effortCanChoose && (eopts.length || estale) ? '' : ' disabled'}>${eoptions}</select></label>`
+                + `<p class="mnote">${esc(ewhy)}</p>${run}</li>`;
         }).join('');
 
-    if (focused) list.querySelector(`select[data-agent="${CSS.escape(focused)}"]`)?.focus();
+    if (focused) list.querySelector(`select[data-agent="${CSS.escape(focused[0])}"][data-kind="${CSS.escape(focused[1] || 'model')}"]`)?.focus();
 }
 
 document.getElementById('model-list')?.addEventListener('change', (e) => {
     const sel = e.target.closest('select[data-agent]');
     if (!sel) return;
+    const kind = sel.dataset.kind === 'effort' ? 'effort' : 'model';
     MODEL_NOTE = '';
-    MODEL_PENDING.set(sel.dataset.agent, { model: sel.value, at: Date.now() });
-    post({ type: 'officeModel', agent: sel.dataset.agent, model: sel.value });
+    MODEL_PENDING.set(`${kind}:${sel.dataset.agent}`, { value: sel.value, at: Date.now() });
+    post(kind === 'effort'
+        ? { type: 'officeEffort', agent: sel.dataset.agent, effort: sel.value }
+        : { type: 'officeModel', agent: sel.dataset.agent, model: sel.value });
     renderModels();
 });
 
@@ -3059,6 +3427,175 @@ document.addEventListener('click', (e) => {
     if (!e.target.closest('#model-panel, #room-model')) closeModelPanel();
 });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModelPanel(); });
+
+// ── the work window: what is being done, and the owner's hand on it ──
+//
+// Owner (2026-10-06): "อยากให้มี หน้าต่างสรุปสถานะการทำงานของงาน ว่ามีงานอะไรทำกัน
+// อยู่บ้าง และเราสามารถกด หยุดชั่วคราวหรือเลิกทำได้ เพื่อให้โฟกัสงานใดงานหนึ่งได้หาก
+// มีหลายงานที่สั่งไป". The page sends a task id and an action and nothing else;
+// the host changes the task file, tells whoever holds it (sealed, without
+// calling anybody in), and stops a run the boss started that has nothing left.
+
+let WORK_KEY = '';
+/** Pressed and not yet seen back: task id or "run:agent" → {sig, at}. */
+const WORK_PENDING = new Map();
+let WORK_NOTE = '';
+
+/** task id → when it was focused. A focus with nothing else left to pause
+ *  changes nothing the page can watch for, and pressed twice it is two sealed
+ *  calls for one piece of work — so the button rests a minute. */
+const FOCUSED = new Map();
+const FOCUS_HOLD_MS = 60e3;
+const taskSig = t => t ? `${t.status}|${t.paused || ''}` : 'gone';
+const isPaused = t => t.paused === 'owner';
+
+function runWhat(r) {
+    const row = MODELS.find(m => m.agent === r.agent);
+    const parts = [];
+    parts.push(r.model ? (row ? modelLabel(row, r.model) : r.model) : 'โมเดลค่าเริ่มต้น');
+    if (r.effort) parts.push(`effort ${row ? effortLabel(row, r.effort) : r.effort}`);
+    parts.push(`รันมา ${ago(r.since)}`);
+    return parts.join(' · ');
+}
+
+function renderWork() {
+    const now = Date.now();
+    for (const [key, p] of WORK_PENDING) {
+        const back = key.startsWith('run:')
+            ? !RUNS.some(r => r.agent === key.slice(4))
+            : taskSig(TASKS.find(t => t.id === key)) !== p.sig;
+        if (back) WORK_PENDING.delete(key);
+        else if (now - p.at > 10000) {
+            // The host refused it or never got it. Say so rather than leave the
+            // row looking as if the press did something.
+            WORK_PENDING.delete(key);
+            WORK_NOTE = 'คำสั่งล่าสุดยังไม่มีผล — ลองกดอีกครั้ง (แอปอาจหลุดจากห้องอยู่)';
+        }
+    }
+
+    const active = TASKS.filter(t => !['done', 'dropped'].includes(t.status));
+    const chip = document.getElementById('room-work');
+    if (chip) {
+        chip.textContent = active.length ? `📋 งาน ${active.length}` : '📋 งาน';
+        chip.classList.toggle('busy', RUNS.length > 0 || active.some(t => t.status === 'doing'));
+        chip.title = 'สถานะงาน — ' + (workSummary(active) || 'ไม่มีงานค้าง')
+            + (RUNS.length ? `\nกำลังรัน: ${RUNS.map(r => r.agent).join(', ')}` : '');
+    }
+    const note = document.getElementById('work-note');
+    if (note) note.textContent = WORK_NOTE;
+    const sum = document.getElementById('work-sum');
+    if (sum) sum.textContent = workSummary(active) || 'ไม่มีงานค้าง';
+
+    const list = document.getElementById('work-list');
+    if (!list) return;
+    // Rebuilt only when something changed (and once a minute for the ages):
+    // a rebuild under the cursor eats the click the owner is about to make.
+    for (const [id, at] of FOCUSED) if (now - at >= FOCUS_HOLD_MS) FOCUSED.delete(id);
+    const key = JSON.stringify([TASKS, RUNS, AGENTS.map(a => [a.id, a.state, a.inRoom]), [...WORK_PENDING.keys()],
+                                [...FOCUSED.keys()], Math.floor(now / 60e3)]);
+    if (key === WORK_KEY) return;
+    WORK_KEY = key;
+
+    // Who is working right now: runs the boss started (stoppable), and
+    // sessions the owner opened that sit in the room (told, not stopped).
+    const running = RUNS.map(r => {
+        const held = WORK_PENDING.has('run:' + r.agent);
+        return `<li class="wrun"><span class="who" style="--pc:${agentColor(r.agent)}">${esc(label(r.agent))}</span>`
+            + `<span class="what">${esc(runWhat(r))}</span>`
+            + `<button type="button" class="wbtn" data-stop="${esc(r.agent)}"${held ? ' disabled' : ''}`
+            + ` title="หยุดรอบที่บอสเรียก ${esc(r.agent)} เข้ามาทำ — งานบนบอร์ดยังอยู่">${held ? 'กำลังหยุด…' : '⏹ หยุดรอบนี้'}</button></li>`;
+    }).concat(AGENTS.filter(a => !a.bridge && a.state !== 'offline' && a.inRoom && !RUNS.some(r => r.agent === a.id)).map(a =>
+        `<li class="wrun"><span class="who" style="--pc:${agentColor(a.id)}">${esc(label(a.id))}</span>`
+        + `<span class="what">อยู่ในห้อง${a.state === 'working' ? ' · กำลังทำงาน' : ''} — session ที่เปิดเอง หยุดจากที่นี่ไม่ได้ แต่จะได้ยินคำสั่งพัก/เลิก</span></li>`));
+
+    // Work in hand first, then what waits, then what is on hold.
+    const rank = t => isPaused(t) ? 4 : t.status === 'doing' ? 0 : ['assigned', 'open'].includes(t.status) ? 1 : 2;
+    const rows = active.slice().sort((a, b) => rank(a) - rank(b)).map(t => {
+        const st = taskState(t);
+        const who = t.assignee || '';
+        const held = WORK_PENDING.has(t.id);
+        const btn = (act, text, tip, cls) =>
+            `<button type="button" class="wbtn${cls ? ' ' + cls : ''}" data-act="${act}" data-id="${esc(t.id)}"`
+            + `${held ? ' disabled' : ''} title="${esc(tip)}">${text}</button>`;
+        const focused = now - (FOCUSED.get(t.id) || 0) < FOCUS_HOLD_MS;
+        const acts = held ? '<span class="wpending">กำลังสั่ง…</span>'
+            : isPaused(t)
+                ? btn('resume', '▶ ทำต่อ', 'ปลดพัก แล้วเรียกคนที่ถืองานนี้กลับมาทำต่อ')
+                  + btn('drop', '✖ เลิก', 'ยกเลิกงานนี้ — ย้อนกลับไม่ได้', 'danger')
+                : (focused ? '<span class="wpending">🎯 โฟกัสอยู่</span>'
+                           : btn('focus', '🎯 โฟกัส', 'ทำงานนี้ก่อน — งานอื่นทั้งหมดจะถูกพักไว้'))
+                  + btn('pause', '⏸ พัก', 'หยุดไว้ชั่วคราว — กดทำต่อทีหลังได้')
+                  + btn('drop', '✖ เลิก', 'ยกเลิกงานนี้ — ย้อนกลับไม่ได้', 'danger');
+        return `<li class="wtask st-${esc(isPaused(t) ? 'paused' : t.status)}">`
+            + `<div class="wt-top"><span class="ico">${st.ico}</span><span class="tt">${esc(t.title)}</span>`
+            + `<span class="who" style="--pc:${who ? agentColor(who) : 'var(--ink-faint)'}">${esc(who ? label(who) : 'ว่าง')}</span>`
+            + `<span class="age">${esc(ago(t.at))}</span></div>`
+            + `<div class="wt-sub">${esc(t.id)} · ${esc(st.th)}${t.note ? ` — ${esc(t.note)}` : ''}</div>`
+            + `<div class="wt-act">${acts}</div></li>`;
+    });
+
+    list.innerHTML =
+        `<li class="whead">กำลังทำงานอยู่ตอนนี้</li>`
+        + (running.length ? running.join('') : '<li class="wempty">ไม่มีใครรันอยู่ — บอสจะเรียกเข้ามาเองเมื่อมีงานรอ</li>')
+        + `<li class="whead">งานที่สั่งไว้ (${active.length})</li>`
+        + (rows.length ? rows.join('') : '<li class="wempty">ไม่มีงานค้างบนบอร์ด</li>');
+}
+
+document.getElementById('work-list')?.addEventListener('click', (e) => {
+    const stop = e.target.closest('button[data-stop]');
+    if (stop && !stop.disabled) {
+        const agent = stop.dataset.stop;
+        if (!confirm(`หยุดรอบที่ ${agent} กำลังทำอยู่ตอนนี้?\n\nงานบนบอร์ดยังอยู่ตามเดิม บอสจะตามให้ทำต่อเมื่อเงียบไปสักพัก — ถ้าไม่ต้องการให้ทำต่อ ให้กด "พัก" หรือ "เลิก" ที่ตัวงาน`)) return;
+        WORK_NOTE = '';
+        WORK_PENDING.set('run:' + agent, { sig: '', at: Date.now() });
+        post({ type: 'officeStopRun', agent });
+        renderWork();
+        return;
+    }
+
+    const b = e.target.closest('button[data-act]');
+    if (!b || b.disabled) return;
+    const id = b.dataset.id, act = b.dataset.act;
+    const t = TASKS.find(x => x.id === id);
+    if (!t) return;
+    const active = TASKS.filter(x => !['done', 'dropped'].includes(x.status));
+    const stopsRun = `\n\nคนที่ถืองานจะถูกบอกให้หยุดทันที และถ้าไม่เหลืองานอื่นบนบอร์ด รอบที่บอสเรียกเข้ามาทำอยู่จะถูกหยุดด้วย`;
+
+    let watch = [t];
+    if (act === 'drop'
+        && !confirm(`เลิกทำงาน [${id}] «${t.title}»?${stopsRun}\n\nยกเลิกแล้วย้อนกลับไม่ได้`)) return;
+    if (act === 'focus') {
+        watch = active.filter(x => x.id !== id && !isPaused(x));
+        if (watch.length && !confirm(`โฟกัสงาน [${id}] «${t.title}»?\n\nงานอื่นอีก ${watch.length} งานจะถูกพักไว้ (กด ▶ ทำต่อ ทีหลังได้)${stopsRun}`)) return;
+        if (isPaused(t)) watch.push(t);
+        FOCUSED.set(id, Date.now());
+    }
+    WORK_NOTE = '';
+    for (const w of watch) WORK_PENDING.set(w.id, { sig: taskSig(w), at: Date.now() });
+    post({ type: 'officeTask', task: id, action: act });
+    renderWork();
+});
+
+function closeWorkPanel() {
+    const panel = document.getElementById('work-panel');
+    if (!panel || panel.hidden) return;
+    panel.hidden = true;
+    document.getElementById('room-work')?.setAttribute('aria-expanded', 'false');
+}
+document.getElementById('room-work')?.addEventListener('click', (e) => {
+    const panel = document.getElementById('work-panel');
+    if (!panel) return;
+    const open = panel.hidden;
+    panel.hidden = !open;
+    e.currentTarget.setAttribute('aria-expanded', String(open));
+    if (open) { placeUnderHead(panel); WORK_NOTE = ''; WORK_KEY = ''; renderWork(); }
+});
+document.addEventListener('click', (e) => {
+    // A confirm() dialog's click lands nowhere in the page; only a real click
+    // outside closes the window.
+    if (!e.target.closest('#work-panel, #room-work')) closeWorkPanel();
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeWorkPanel(); });
 
 // ── the Windows Service half of the boss ────────────────────────────
 //
@@ -3315,7 +3852,10 @@ function demo() {
         { id: 't-81b2e0', title: 'ตรวจตาราง phase บน prod ว่าตรงกับหน้าเว็บ', status: 'doing', assignee: 'claude', createdBy: 'claude', at: now - 30 * 60e3 },
         { id: 't-12aa04', title: 'ตั้งชื่อ workstream ใหม่', status: 'done', assignee: 'codex', createdBy: 'claude',
           note: 'ใช้ tpix-market', at: now - 2 * 3600e3 },
+        { id: 't-77c0de', title: 'วาดฉากเมืองชายทะเล 6 ภาพ', status: 'blocked', assignee: 'codex', createdBy: 'owner',
+          note: '⏸ บอสพักงานนี้ไว้ — รอบอสสั่งทำต่อ', paused: 'owner', at: now - 20 * 60e3 },
     ];
+    const runs = [{ agent: 'codex', since: now - 7 * 60e3, model: 'gpt-6-astra', effort: 'xhigh' }];
     const models = [
         { agent: 'claude', canChoose: true, chosen: 'claude-sonnet-5-5', configured: '', cliDefault: '', onCall: true, running: '',
           options: [
@@ -3323,14 +3863,30 @@ function demo() {
               { id: 'claude-opus-5-5', label: 'Opus 5.5', note: 'เก่งรอบด้าน สมดุลระหว่างฝีมือกับราคา' },
               { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', note: 'เร็วและคุ้ม — งานโค้ดประจำวัน' },
               { id: 'claude-haiku-4-5', label: 'Haiku 4.5', note: 'เร็วสุด ถูกสุด — งานง่าย ๆ' },
+          ],
+          effortCanChoose: true, effortChosen: 'high', effortConfigured: '', effortCliDefault: 'medium', effortRunning: '',
+          effortOptions: [
+              { id: 'low', label: 'ต่ำ (low)', note: 'เร็ว ประหยัด — งานง่าย' },
+              { id: 'medium', label: 'กลาง (medium)', note: 'สมดุลระหว่างความเร็วกับความละเอียด — งานทั่วไป' },
+              { id: 'high', label: 'สูง (high)', note: 'คิดละเอียดขึ้น — งานซับซ้อน' },
+              { id: 'xhigh', label: 'สูงมาก (xhigh)', note: 'คิดลึกมาก — งานยาก ใช้โควตาเร็วขึ้น' },
+              { id: 'max', label: 'สูงสุด (max)', note: 'คิดเต็มที่ — อาจใช้ token มากเกินจำเป็น ใช้กับงานที่ยากที่สุดเท่านั้น' },
           ] },
         { agent: 'codex', canChoose: true, chosen: '', configured: '', cliDefault: 'gpt-6.1-sol', onCall: true, running: 'gpt-6-astra',
           options: [
               { id: 'gpt-6.1-sol', label: 'GPT-6.1-Sol', note: 'Latest workhorse model for coding and everyday work.' },
               { id: 'gpt-6-astra', label: 'GPT-6-Astra', note: 'Frontier intelligence for the most demanding work.' },
+          ],
+          effortCanChoose: true, effortChosen: '', effortConfigured: '', effortCliDefault: 'high', effortRunning: 'xhigh',
+          effortOptions: [
+              { id: 'low', label: 'ต่ำ (low)', note: 'เร็ว ประหยัด — งานง่าย' },
+              { id: 'medium', label: 'กลาง (medium)', note: 'สมดุลระหว่างความเร็วกับความละเอียด — งานทั่วไป' },
+              { id: 'high', label: 'สูง (high)', note: 'คิดละเอียดขึ้น — งานซับซ้อน' },
+              { id: 'xhigh', label: 'สูงมาก (xhigh)', note: 'คิดลึกมาก — งานยาก ใช้โควตาเร็วขึ้น' },
+              { id: 'ultra', label: 'อัลตรา (ultra)', note: 'คิดเต็มที่และแตกงานให้ agent ย่อยเอง — แพงที่สุด' },
           ] },
     ];
-    apply({ agents, messages, decisions, tasks, models });
+    apply({ agents, messages, decisions, tasks, models, runs });
 
     // A message every few seconds, so the bubbles and the packets can be seen
     // doing what they do on a live vault.
@@ -3340,7 +3896,7 @@ function demo() {
         const to = ['codex', 'claude', 'claude'][i % 3];
         messages.push(mk(i, from, to, 'ทดสอบห้อง — ข้อความที่ ' + i, { topic: 'demo' }));
         if (messages.length > 40) messages.shift();
-        apply({ agents, messages: messages.slice(), decisions, tasks, models });
+        apply({ agents, messages: messages.slice(), decisions, tasks, models, runs });
         i++;
     }, 4200);
 }
@@ -3396,6 +3952,7 @@ function drawMapDebug() {
     };
     trace(ROOM_MAP.FLOOR, 'rgba(120,220,255,0.9)');
     for (const b of ROOM_MAP.BLOCKS) trace(b.poly, 'rgba(255,90,120,0.9)');
+    for (const p of ROOM_MAP.extraBlocks) trace(p, 'rgba(255,140,60,0.95)');
     for (const o of ROOM_MAP.OCCLUDERS) trace(o.poly, 'rgba(255,200,80,0.55)');
     for (const s of ROOM_MAP.SPOTS) {
         vctx.fillStyle = '#ffd166';
@@ -3440,11 +3997,20 @@ function drawMapDebug() {
         // point-in-polygon tests are cheap, but not on the frame somebody is
         // waiting to see him start moving.
         ROOM_MAP.buildGrid();
-        bossPlace(BOSS_HOME);
+        // He comes in through the front door and walks to the rug.
+        //
+        // Owner (2026-10-06): "บอสควรเดินเข้ามาทางประตูด้านล่าง แต่ทำไม มาจาก
+        // ข้างบน ไม่สมเหตุผล". He used to simply BE on the rug when the room
+        // opened, and the first thing anybody saw him do was walk in from
+        // whichever corner his wandering picked — the racks at the top, as
+        // often as not. A person arrives through the door.
+        // Scale and speed first: bossRelayout also puts him back where he
+        // last was, which before he has been anywhere is the rug.
         bossRelayout();
+        bossPlace(BOSS_DOOR);
+        BOSS_AV._norm = { x: BOSS_DOOR.x, y: BOSS_DOOR.y };
         BOSS_AV.play('idle');
-        // He starts settled rather than mid-stride, and wanders from there.
-        BOSS_PLAN = { spot: BOSS_HOME, phase: 'resting', until: performance.now() + 2500 };
+        bossGoTo(BOSS_HOME);
         // Clicking the room is how the owner plays with him: on him he reacts,
         // anywhere else he walks there. Registered only once the pack is up,
         // so a click before that does nothing rather than throwing.
