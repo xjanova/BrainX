@@ -508,6 +508,10 @@ internal static partial class Program
         string bas;
         if (name != null && name.Contains("claude", StringComparison.OrdinalIgnoreCase)) bas = "claude-mcp";
         else if (name != null && name.Contains("codex", StringComparison.OrdinalIgnoreCase)) bas = "codex-mcp";
+        // Grok Build (xAI's CLI) answers as one Grok whatever it calls the
+        // connection, so the room, the broker's runner and every peer know it
+        // by the one name the client already lists: "grok".
+        else if (name != null && name.Contains("grok", StringComparison.OrdinalIgnoreCase)) bas = "grok-mcp";
         else if (CarriesNoVendorSignal(name) && HostVendor() is { } vendor) bas = vendor + "-mcp";
         else if (string.IsNullOrWhiteSpace(name)) bas = "mcp";
         else

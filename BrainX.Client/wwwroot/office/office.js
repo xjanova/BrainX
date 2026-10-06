@@ -102,6 +102,9 @@ const DESK_ROWS = [
     { x: 0.335, y: 0.490, face: 'se', count: 2 },
     // Along its top-right edge, under the glass room toward the bookshelf.
     { x: 0.550, y: 0.460, face: 'sw', count: 2 },
+    // A second desk behind the left row, by the cabinets — the fifth seat,
+    // for Grok (2026-10-06), searched against the mask like the rest.
+    { x: 0.330, y: 0.400, face: 'se', count: 1 },
 ];
 /** Desk to desk along a row, in logical pixels: a desk's length and a gap. */
 const DESK_STEP = 34;

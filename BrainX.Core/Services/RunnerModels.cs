@@ -330,17 +330,30 @@ public static class RunnerModels
         {
             "codex" => CodexCatalogue(),
             "claude" => ClaudeModels,
+            "grok" => GrokModels,
             _ => Array.Empty<Option>(),
         };
     }
 
+    /// <summary>
+    /// What `grok models` lists (Grok Build 1.0.46, 2026-10-06); its default
+    /// is the first. Like Claude's, a list kept here because the CLI keeps no
+    /// catalogue on disk to read; runners.json's `models` replaces it.
+    /// </summary>
+    public static readonly IReadOnlyList<Option> GrokModels = new[]
+    {
+        new Option("grok-4.6", "Grok 4.6", "รุ่นล่าสุด — ค่าเริ่มต้นของ Grok Build"),
+        new Option("grok-4.5", "Grok 4.5", "รุ่นก่อนหน้า"),
+    };
+
     private static string Vendor(string agent, string exe)
     {
         var name = Path.GetFileNameWithoutExtension(exe ?? "").ToLowerInvariant();
-        if (name is "codex" or "claude") return name;
+        if (name is "codex" or "claude" or "grok") return name;
         var a = (agent ?? "").ToLowerInvariant();
         return a.StartsWith("codex", StringComparison.Ordinal) ? "codex"
              : a.StartsWith("claude", StringComparison.Ordinal) ? "claude"
+             : a.StartsWith("grok", StringComparison.Ordinal) ? "grok"
              : "";
     }
 
