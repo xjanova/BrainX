@@ -172,6 +172,12 @@
   <div id="bar">
     <span id="who">—</span>
     <span id="state"></span>
+    <!-- Where she lives. ⧉ only inside the dashboard (?embedded=1): out into
+         her own window. ⇲ only in her own window, and only while the
+         dashboard is open to take her: back into it. Min and close belong to
+         her own window — inside the dashboard, the dashboard has its own. -->
+    <button id="pop" title="แยกออกเป็นหน้าต่างของตัวเอง" hidden>⧉</button>
+    <button id="dock" title="รวมกลับเข้าแอปหลัก" hidden>⇲</button>
     <button id="min" title="ย่อ">–</button>
     <button id="close" title="ปิด">×</button>
   </div>
@@ -195,6 +201,8 @@ import { Avatar } from './avatar.js';
 
 const $ = (id) => document.getElementById(id);
 const post = (m) => { try { window.chrome?.webview?.postMessage(m); } catch {} };
+const EMBEDDED = new URLSearchParams(location.search).has('embedded');
+if (EMBEDDED) { $('pop').hidden = false; $('min').hidden = true; $('close').hidden = true; }
 
 // Her body is fetched once and cached outside the install directory, so the
 // host maps it to its own virtual origin and tells us where. Falling back to
@@ -211,7 +219,10 @@ const askParticle = () => (particle === 'ค่ะ' ? 'คะ' : particle);
 const fit = () => face.resize(innerWidth, innerHeight);
 fit(); addEventListener('resize', fit);
 // She sits left of centre so the glass has somewhere to go.
-face.loaded.then(() => { face.framing.lateral = 0.17; });
+face.loaded.then(() => { face.framing.lateral = 0.17; })
+  // Her body failed to load (no avatar pack on this machine, a 404): say so
+  // in the strip instead of leaving an empty blue window with no reason.
+  .catch(() => { $('state').textContent = 'โหลดตัวมายไม่สำเร็จ — ตรวจไฟล์ avatar ในเครื่องนี้'; });
 
 /**
  * Float what she just said beside her head.
@@ -386,8 +397,9 @@ function stopMic() {
 
 // ── host → page ─────────────────────────────────────────────────────────
 window.brainxAssistant = {
-  configure({ name, self, particle: p } = {}) {
+  configure({ name, self, particle: p, dockable } = {}) {
     if (typeof name === 'string') $('who').textContent = name;
+    if (typeof dockable === 'boolean') $('dock').hidden = EMBEDDED || !dockable;
     if (typeof self === 'string' && self) self_ = self;
     if (typeof p === 'string' && p) particle = p;
     // Greet once, in her own voice and to the hour. It also proves the wiring
@@ -427,7 +439,11 @@ window.brainxChat = {
     if (pending) { pending.textContent = text; pending.classList.remove('pending'); pending = null; }
     else bubble('her', text);
     saySoon(text);
-    if (!ok) face.setMood('sorry');
+    // Out of 'thinking' either way. Only say() used to end it, so an answer
+    // with no voice (TTS offline) or a failure left her thinking — or sad —
+    // for good.
+    face.setMood(ok ? 'neutral' : 'sorry');
+    if (!ok) setTimeout(() => { if (!busy) face.setMood('neutral'); }, 5000);
     $('log').scrollTop = $('log').scrollHeight;
     return true;
   },
@@ -445,12 +461,17 @@ $('mic').onclick = () => listening ? stopMic() : startMic();
 // Drag the frameless window by its strip. Buttons are excluded, or clicking
 // close would start a drag and swallow the click.
 $('bar').addEventListener('mousedown', (e) => {
-  if (e.button !== 0 || e.target.closest('button')) return;
+  if (EMBEDDED || e.button !== 0 || e.target.closest('button')) return;
   post({ type: 'mind.drag' });
 });
 
 $('close').onclick = () => post({ type: 'mind.window', action: 'close' });
 $('min').onclick   = () => post({ type: 'mind.window', action: 'minimize' });
+$('pop').onclick   = () => post({ type: 'mind.window', action: 'popout' });
+$('dock').onclick  = () => post({ type: 'mind.window', action: 'dock' });
+// A mic still open on a view nobody is looking at is a privacy problem: inside
+// the dashboard she is hidden, not closed, when another view is picked.
+document.addEventListener('visibilitychange', () => { if (document.hidden && listening) stopMic(); });
 
 post({ type: 'mind.ready' });
 </script>

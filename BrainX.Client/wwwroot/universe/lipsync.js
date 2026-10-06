@@ -78,21 +78,31 @@ export class LipSync {
         // that blur is precisely what makes the mouth look out of step.
         an.fftSize = 256;
         an.smoothingTimeConstant = 0.1;
-        this.ctx.createMediaElementSource(audio).connect(an);
+        const src = this.ctx.createMediaElementSource(audio);
+        src.connect(an);
         an.connect(this.ctx.destination);
+        // Kept so stop() can unplug them: every clip used to leave its source
+        // and analyser wired to the speakers for the life of the page.
+        this._nodes = [src, an];
         this.analyser = an;
         this.freq = new Uint8Array(an.frequencyBinCount);
         this.time = new Uint8Array(an.fftSize);
 
         this.speaking = true;
         try { await audio.play(); } catch (e) { this.speaking = false; throw e; }
-        await new Promise(res => { audio.onended = res; audio.onerror = res; });
-        this.speaking = false;
+        // Also settles when stop() cuts it off — a clip interrupted by the
+        // next one used to leave its caller waiting forever.
+        await new Promise(res => { this._finish = res; audio.onended = res; audio.onerror = res; });
+        if (this.audio === audio) this.speaking = false;
         return true;
     }
 
     stop() {
         try { this.audio?.pause(); } catch {}
+        const finish = this._finish; this._finish = null;
+        try { finish?.(); } catch {}
+        for (const n of this._nodes || []) { try { n.disconnect(); } catch {} }
+        this._nodes = null;
         this.speaking = false;
     }
 

@@ -545,6 +545,12 @@
                                          answers it with the conversation instead of a topology. -->
                                     <Button x:Name="NavCowork" Content="&#x1F3E2;  Cowork Room"
                                             Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Cowork"/>
+                                    <!-- Mind (มาย), here as well as in her own window. Owner,
+                                         2026-10-06: "ทำให้หน้าต่าง mide มีในเมนูด้วย และแยกได้เช่นกัน".
+                                         MainWindow.MindView hosts her; ⧉ in her strip pops
+                                         her out into BrainX.Mind, ⇲ there brings her back. -->
+                                    <Button x:Name="NavMind" Content="&#x2728;  Mind"
+                                            Style="{StaticResource NavButton}" Click="Nav_Click" Tag="Mind"/>
                                     <TextBlock Text="VAULT" Style="{StaticResource TypeNavSectionLabel}"
                                                Margin="22,18,0,8"/>
                                     <Button x:Name="NavEditor" Style="{StaticResource NavButton}"
@@ -4913,6 +4919,31 @@
                                         <Button Content="ไปที่หน้าต่างห้อง" Click="CoworkPoppedFocus_Click" Padding="14,6" Margin="0,0,8,0"/>
                                         <Button Content="⇲ รวมกลับมาไว้ที่นี่" Click="CoworkPoppedDock_Click" Padding="14,6"/>
                                     </StackPanel>
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+
+                        <!-- Mind in the dashboard: the same page as her own window,
+                             through the same host (BrainX.Mind/MindPage.cs). Only one
+                             of her runs at a time — while BrainX.Mind is open this
+                             view says so instead of starting a second voice. -->
+                        <Grid x:Name="MindView" Visibility="Collapsed">
+                            <Border Background="#FF070A1E" ClipToBounds="True">
+                                <wv2:WebView2 x:Name="MindWebView" DefaultBackgroundColor="#FF070A1E"/>
+                            </Border>
+                            <Border x:Name="MindDetachedPanel" Visibility="Collapsed" Background="#FF070A1E">
+                                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="460">
+                                    <TextBlock Text="⧉" FontSize="44" Foreground="#FF35E08A" HorizontalAlignment="Center"/>
+                                    <TextBlock Text="มายอยู่ในหน้าต่างแยก" FontSize="18" FontWeight="SemiBold"
+                                               Foreground="#FFD7E3EE" HorizontalAlignment="Center" Margin="0,10,0,6"/>
+                                    <TextBlock Text="คุยกับเธอได้ที่หน้าต่างนั้นตามปกติ — กดรวมกลับเพื่อให้เธอมาอยู่ในแอปนี้แทน"
+                                               FontSize="12" Foreground="#FF93A6BD" TextWrapping="Wrap" TextAlignment="Center"/>
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,18,0,0">
+                                        <Button Content="ไปที่หน้าต่างมาย" Click="MindDetachedFocus_Click" Padding="14,6" Margin="0,0,8,0"/>
+                                        <Button Content="⇲ รวมกลับมาไว้ที่นี่" Click="MindDetachedDock_Click" Padding="14,6"/>
+                                    </StackPanel>
+                                    <TextBlock x:Name="MindDetachedNote" FontSize="11.5" Foreground="#FFFBBF24"
+                                               TextWrapping="Wrap" TextAlignment="Center" Margin="0,12,0,0"/>
                                 </StackPanel>
                             </Border>
                         </Grid>

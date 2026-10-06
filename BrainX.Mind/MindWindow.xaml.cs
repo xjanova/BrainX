@@ -8,6 +8,7 @@
 // knows over the whole file, which silently deleted every assistant setting
 // and is exactly why "open at startup" never opened anything.
 
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
@@ -34,6 +35,8 @@ public partial class MindWindow : Window
     [DllImport("user32.dll")] private static extern IntPtr SendMessage(
         IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int vKey);
+    [DllImport("user32.dll")] private static extern bool AllowSetForegroundWindow(int processId);
+    private const int ASFW_ANY = -1;
     private const int WM_NCLBUTTONDOWN = 0x00A1;
     private const int HTCAPTION = 0x0002;
     private const int VK_LBUTTON = 0x01;
@@ -56,18 +59,19 @@ public partial class MindWindow : Window
     private AssistantService _svc = null!;
     private AssistantConfig _cfg = new();
     private string _vault = "";
-    private bool _ready;
+    private MindPage? _page;
 
     public MindWindow()
     {
         InitializeComponent();
         ResolvePaths();
         _cfg = _svc.LoadConfig();
-        // Write it back immediately so the file EXISTS on first run. Saving
-        // only on close means a crash — or a first look before the first
-        // close — leaves the owner with no file to edit and no way to see
-        // what is configurable.
-        _svc.SaveConfig(_cfg);
+        // Write it out on first run so the file EXISTS. Saving only on close
+        // means a crash — or a first look before the first close — leaves the
+        // owner with no file to edit and no way to see what is configurable.
+        // Only when it is missing: a file that failed to read is the owner's
+        // settings, and writing the defaults back over it was how they got lost.
+        if (!File.Exists(_svc.ConfigPath)) _svc.SaveConfig(_cfg);
         RestorePlacement();
         // SourceInitialized, not Loaded: the HWND has to exist before DWM will
         // take an attribute for it, and Loaded is too late to stop the light
@@ -151,21 +155,71 @@ public partial class MindWindow : Window
         Height = Math.Max(MinHeight, _cfg.H);
         Topmost = _cfg.Topmost;
 
-        if (double.IsNaN(_cfg.X) || double.IsNaN(_cfg.Y)) { Centre(); return; }
-        // A position remembered from a monitor that is now unplugged would put
-        // her off-screen with no way to drag her back.
-        double vx = SystemParameters.VirtualScreenLeft, vy = SystemParameters.VirtualScreenTop;
-        double vw = SystemParameters.VirtualScreenWidth, vh = SystemParameters.VirtualScreenHeight;
-        if (_cfg.X > vx - Width + 80 && _cfg.X < vx + vw - 80 &&
-            _cfg.Y > vy - 20 && _cfg.Y < vy + vh - 80)
-        { Left = _cfg.X; Top = _cfg.Y; }
-        else Centre();
+        // On a monitor that is actually there, inside its work area. A
+        // position remembered from a monitor now unplugged — or one that is
+        // inside the bounding box of all monitors but on none of them, which
+        // a portrait screen offset above the others leaves plenty of — put
+        // her where nobody could drag her back from; and 880x780 on a small
+        // laptop screen sank the chat box under the taskbar.
+        var placed = !double.IsNaN(_cfg.X) && !double.IsNaN(_cfg.Y);
+        var work = WorkAreaFor(placed ? new Rect(_cfg.X, _cfg.Y, Width, 36) : null);
+        if (work.IsEmpty) { placed = false; work = WorkAreaFor(null); }
+        Width = Math.Max(MinWidth, Math.Min(Width, work.Width));
+        Height = Math.Max(MinHeight, Math.Min(Height, work.Height));
+        if (!placed) { Centre(work); return; }
+        Left = Math.Clamp(_cfg.X, work.Left, Math.Max(work.Left, work.Right - Width));
+        Top = Math.Clamp(_cfg.Y, work.Top, Math.Max(work.Top, work.Bottom - Height));
     }
 
-    private void Centre()
+    [StructLayout(LayoutKind.Sequential)] private struct W32Rect { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] private struct W32MonitorInfo { public int cbSize; public W32Rect rcMonitor, rcWork; public uint dwFlags; }
+    [DllImport("user32.dll")] private static extern IntPtr MonitorFromRect(ref W32Rect r, uint flags);
+    [DllImport("user32.dll")] private static extern bool GetMonitorInfo(IntPtr hMonitor, ref W32MonitorInfo mi);
+    [DllImport("user32.dll")] private static extern uint GetDpiForSystem();
+    private const uint MONITOR_DEFAULTTONULL = 0, MONITOR_DEFAULTTOPRIMARY = 1;
+
+    /// <summary>The work area (in WPF units) of the monitor her strip would
+    /// sit on; Rect.Empty when it is on no monitor at all; the primary
+    /// monitor's when no strip is given.</summary>
+    private static Rect WorkAreaFor(Rect? strip)
     {
-        Left = SystemParameters.PrimaryScreenWidth - Width - 40;
-        Top = Math.Max(0, (SystemParameters.PrimaryScreenHeight - Height) / 2);
+        try
+        {
+            double k = 1;
+            try { k = Math.Max(1, GetDpiForSystem()) / 96.0; } catch { }
+            IntPtr mon;
+            if (strip is Rect s)
+            {
+                var px = new W32Rect { Left = (int)(s.Left * k), Top = (int)(s.Top * k),
+                                       Right = (int)(s.Right * k), Bottom = (int)(s.Bottom * k) };
+                mon = MonitorFromRect(ref px, MONITOR_DEFAULTTONULL);
+                if (mon == IntPtr.Zero) return Rect.Empty;
+            }
+            else
+            {
+                var origin = new W32Rect();
+                mon = MonitorFromRect(ref origin, MONITOR_DEFAULTTOPRIMARY);
+            }
+            if (mon != IntPtr.Zero && Info(mon) is W32Rect w)
+                return new Rect(w.Left / k, w.Top / k, (w.Right - w.Left) / k, (w.Bottom - w.Top) / k);
+        }
+        catch { }
+        return SystemParameters.WorkArea;
+
+        static W32Rect? Info(IntPtr mon)
+        {
+            var mi = new W32MonitorInfo { cbSize = Marshal.SizeOf<W32MonitorInfo>() };
+            return GetMonitorInfo(mon, ref mi) ? mi.rcWork : null;
+        }
+    }
+
+    private void Centre(Rect work)
+    {
+        if (work.IsEmpty) work = SystemParameters.WorkArea;
+        Width = Math.Max(MinWidth, Math.Min(Width, work.Width));
+        Height = Math.Max(MinHeight, Math.Min(Height, work.Height));
+        Left = Math.Max(work.Left, work.Right - Width - 40);
+        Top = Math.Max(work.Top, work.Top + (work.Height - Height) / 2);
     }
 
     private void SavePlacement()
@@ -175,8 +229,13 @@ public partial class MindWindow : Window
         // a window comes back the wrong size.
         var r = WindowState == WindowState.Normal
             ? new Rect(Left, Top, Width, Height) : RestoreBounds;
+        // Onto the file as it is NOW, not the copy read at startup: the voice
+        // and autostart are set from the dashboard while she runs, and writing
+        // the startup copy back put the old voice back on every drag and close.
+        // Placement only: Topmost and autostart are the dashboard's settings
+        // to change, and this window never changes them.
+        try { _cfg = _svc.LoadConfig(); } catch { }
         _cfg.X = r.Left; _cfg.Y = r.Top; _cfg.W = r.Width; _cfg.H = r.Height;
-        _cfg.Topmost = Topmost;
         _svc.SaveConfig(_cfg);
     }
 
@@ -184,7 +243,6 @@ public partial class MindWindow : Window
     {
         try
         {
-            var wwwroot = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "wwwroot");
             // Her own user-data folder: sharing the dashboard's would make the
             // two apps fight over the same WebView2 profile lock.
             var udf = Path.Combine(
@@ -193,83 +251,14 @@ public partial class MindWindow : Window
             Directory.CreateDirectory(udf);
 
             var env = await CoreWebView2Environment.CreateAsync(userDataFolder: udf);
-            await Web.EnsureCoreWebView2Async(env);
-            var core = Web.CoreWebView2;
-
-            core.SetVirtualHostNameToFolderMapping(
-                "universe.local", wwwroot, CoreWebView2HostResourceAccessKind.Allow);
-
-            var voiceDir = Path.Combine(_vault, ".obsidianx", "voice");
-            Directory.CreateDirectory(voiceDir);
-            core.SetVirtualHostNameToFolderMapping(
-                "voice.local", voiceDir, CoreWebView2HostResourceAccessKind.Allow);
-
-            // Her body is fetched once and kept beside `current`, not shipped
-            // inside it — see AvatarPackService for why. The folder is mapped
-            // whether or not the pack is there yet: mapping a missing folder is
-            // harmless, and doing it here means the download can finish while
-            // the page is already up rather than blocking the window on it.
-            var pack = new AvatarPackService();
-            Directory.CreateDirectory(pack.Root);
-            // Fast enough to wait for: the originals are copied off this same
-            // machine, so by the time the page asks for her body it is there.
-            await pack.EnsureLocalAsync();
-            core.SetVirtualHostNameToFolderMapping(
-                "avatar.local", pack.Root, CoreWebView2HostResourceAccessKind.Allow);
-            // Runs before any page script, so the page never has to guess.
-            await core.AddScriptToExecuteOnDocumentCreatedAsync(
-                "window.__mindAvatarBase='https://avatar.local/';");
-
-            // The mic is the point of this app, and a frameless window has
-            // nowhere sensible to show a permission prompt.
-            core.PermissionRequested += (_, e) =>
+            _page = new MindPage(Web, _svc, _vault, embedded: false)
             {
-                if (e.PermissionKind == CoreWebView2PermissionKind.Microphone &&
-                    e.Uri.StartsWith("https://universe.local", StringComparison.OrdinalIgnoreCase))
-                    e.State = CoreWebView2PermissionState.Allow;
+                // "Back into the dashboard" only means something while the
+                // dashboard is open to take her.
+                CanDock = () => Process.GetProcessesByName("BrainX.Client").Length > 0,
             };
-
-            // Her console, on request.
-            //
-            // She has no address bar, no F12 and no status line, so a page that
-            // fails to load is a blank blue window and nothing else — which
-            // is exactly how a build shipped with the vendor scripts landing at
-            // the wrong paths: 404, 404, 404, and no way to see it from
-            // outside. Set BRAINX_MIND_LOG to a file path and every console
-            // message, exception and failed request goes there.
-            if (Environment.GetEnvironmentVariable("BRAINX_MIND_LOG") is { Length: > 0 } logPath)
-            {
-                try { File.Delete(logPath); } catch { }
-                void W(string t) { try { File.AppendAllText(logPath, t + "\n"); } catch { } }
-                var rt = core.GetDevToolsProtocolEventReceiver("Runtime.consoleAPICalled");
-                rt.DevToolsProtocolEventReceived += (_, ev) => W("CONSOLE " + ev.ParameterObjectAsJson);
-                var ex2 = core.GetDevToolsProtocolEventReceiver("Runtime.exceptionThrown");
-                ex2.DevToolsProtocolEventReceived += (_, ev) => W("THROW " + ev.ParameterObjectAsJson);
-                var lg = core.GetDevToolsProtocolEventReceiver("Log.entryAdded");
-                lg.DevToolsProtocolEventReceived += (_, ev) => W("LOG " + ev.ParameterObjectAsJson);
-                await core.CallDevToolsProtocolMethodAsync("Runtime.enable", "{}");
-                await core.CallDevToolsProtocolMethodAsync("Log.enable", "{}");
-                core.WebResourceResponseReceived += (_, e) =>
-                {
-                    try
-                    {
-                        if (e.Response.StatusCode >= 400)
-                            W($"HTTP {e.Response.StatusCode} {e.Request.Uri}");
-                    }
-                    catch { }
-                };
-            }
-
-            core.WebMessageReceived += OnMessage;
-            core.Settings.AreDefaultContextMenusEnabled = false;
-            Web.Source = new Uri("https://universe.local/universe/assistant-window.html");
-
-            // Only the download half runs in the background. The copy half was
-            // awaited above, BEFORE navigation — measured at 87ms for the
-            // whole 33MB, against a reload() that has to arrive after the page
-            // has attached its bridge and would silently do nothing if it beat
-            // it there.
-            if (!pack.IsInstalled) _ = EnsureAvatarAsync(pack);
+            _page.WindowAction += OnWindowAction;
+            await _page.StartAsync(env);
         }
         catch (Exception ex)
         {
@@ -279,131 +268,64 @@ public partial class MindWindow : Window
         }
     }
 
-    /// <summary>
-    /// Fetch her body if it is not already here, telling the page how far along
-    /// it is. Silent when it is already installed — which is every run after
-    /// the first, and the entire point of the exercise.
-    /// </summary>
-    private async Task EnsureAvatarAsync(AvatarPackService pack)
+    private void OnWindowAction(string action)
     {
-        if (pack.IsInstalled) return;
-        var progress = new Progress<(string stage, double fraction)>(p =>
-            _ = Eval($"window.brainxChat?.status?.({Js(Describe(p))})"));
-        var dir = await pack.EnsureRemoteAsync(progress);
-        if (dir != null) { await Eval("window.brainxAssistant?.reload?.()"); return; }
-
-        // Nothing to reopen and nothing to retry: this machine simply does not
-        // have her model on it. The clips are Mixamo's and the model is the
-        // owner's, so neither is in the repository or in the installer — say
-        // where to put them rather than offering a retry that cannot help.
-        var here = AvatarPackService.LocalSources().First();
-        await Eval($"window.brainxChat?.status?.({Js(
-            $"ยังไม่มีไฟล์ตัวมายในเครื่องนี้ค่ะ — วางไว้ที่ {here} แล้วเปิดใหม่นะคะ")})");
+        switch (action)
+        {
+            case "close": Close(); break;
+            case "minimize": WindowState = WindowState.Minimized; break;
+            case "dock": Dock(); break;
+            case "drag": DragByStrip(); break;
+        }
     }
 
-    private static string Describe((string stage, double fraction) p) => p.stage switch
+    /// <summary>
+    /// Back into the dashboard's Mind view. The dashboard is a different
+    /// process, so she leaves a note where it looks — MindDock.RequestPath —
+    /// and closes; the dashboard sees her exit, finds the note, and opens her
+    /// view. Closing first is the point: two of her at once is two voices.
+    /// </summary>
+    private void Dock()
     {
-        "missing" => "",
-        "connecting" => "กำลังเชื่อมต่อ…",
-        "downloading" => $"กำลังโหลดตัวมาย {p.fraction * 100:0}%",
-        "unpacking" => "กำลังแตกไฟล์…",
-        "ready" => "",
-        _ => p.stage,
-    };
-
-    private static string Js(string s) => System.Text.Json.JsonSerializer.Serialize(s);
-
-    private async void OnMessage(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
-    {
+        if (Process.GetProcessesByName("BrainX.Client").Length == 0)
+        {
+            _ = _page?.Eval($"window.brainxChat?.status?.({MindPage.Json("แอปหลักไม่ได้เปิดอยู่ — เปิด BrainX ก่อนแล้วค่อยรวมกลับ")})");
+            return;
+        }
         try
         {
-            var m = Newtonsoft.Json.JsonConvert.DeserializeAnonymousType(
-                e.WebMessageAsJson, new { type = "", text = "", action = "" });
-            switch (m?.type)
+            Directory.CreateDirectory(Path.GetDirectoryName(MindDock.RequestPath)!);
+            File.WriteAllText(MindDock.RequestPath, DateTime.UtcNow.ToString("O"));
+        }
+        catch { }
+        // She has the foreground (the owner just clicked her); hand the right
+        // to it on, or Windows only flashes the dashboard's taskbar button.
+        try { AllowSetForegroundWindow(ASFW_ANY); } catch { }
+        Close();
+    }
+
+    private void DragByStrip()
+    {
+        // `-webkit-app-region: drag` is a browser/PWA feature and does not
+        // move a WebView2's host window, so the page asks. See the
+        // WM_NCLBUTTONDOWN note at the top for why this is not DragMove().
+        try
+        {
+            // Only if the button is STILL down. The page posts on mousedown
+            // and the message crosses a process boundary, so a quick click can
+            // land here after mouseup — and starting a caption drag with no
+            // button held leaves the window stuck to the cursor until the next
+            // click.
+            var h = new WindowInteropHelper(this).Handle;
+            if (h != IntPtr.Zero && (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0)
             {
-                case "mind.ready":
-                    _ready = true;
-                    // The page writes Thai of its own (greeting, mic errors),
-                    // so it needs the particle too — not just the face gender.
-                    await Eval($"window.brainxAssistant.configure({{" +
-                               $"name:{Json(_cfg.Name)}," +
-                               $"female:{(_cfg.Female ? "true" : "false")}," +
-                               $"self:{Json(_cfg.SelfWord)}," +
-                               $"particle:{Json(_cfg.EndParticle)}}})");
-                    _ = _svc.WarmAsync();      // see AssistantService.WarmAsync
-                    break;
-
-                case "mind.ask":
-                    if (!string.IsNullOrWhiteSpace(m.text)) _ = AskAsync(m.text);
-                    break;
-
-                case "mind.window":
-                    if (m.action == "close") Close();
-                    else if (m.action == "minimize") WindowState = WindowState.Minimized;
-                    break;
-
-                case "mind.drag":
-                    // `-webkit-app-region: drag` is a browser/PWA feature and
-                    // does not move a WebView2's host window, so the page asks.
-                    // See the WM_NCLBUTTONDOWN note at the top for why this is
-                    // not DragMove().
-                    try
-                    {
-                        // Only if the button is STILL down. The page posts on
-                        // mousedown and the message crosses a process boundary,
-                        // so a quick click can land here after mouseup — and
-                        // starting a caption drag with no button held leaves the
-                        // window stuck to the cursor until the next click.
-                        var h = new WindowInteropHelper(this).Handle;
-                        if (h != IntPtr.Zero && (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0)
-                        {
-                            ReleaseCapture();
-                            // Blocks for the length of the OS move loop, so
-                            // this returns exactly when the drag ends.
-                            SendMessage(h, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
-                            SavePlacement();   // survive a kill, not just a clean close
-                        }
-                    }
-                    catch { }
-                    break;
+                ReleaseCapture();
+                // Blocks for the length of the OS move loop, so this returns
+                // exactly when the drag ends.
+                SendMessage(h, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
+                SavePlacement();   // survive a kill, not just a clean close
             }
         }
         catch { }
     }
-
-    private async Task AskAsync(string question)
-    {
-        try
-        {
-            var answer = await _svc.AskAsync(question);
-            if (string.IsNullOrWhiteSpace(answer))
-            {
-                // Her own words, so they carry her own particle. A male voice
-                // apologising with ค่ะ is the wrong person talking.
-                await Eval($"window.brainxChat.reply({Json($"ยังตอบไม่ได้{_cfg.EndParticle} — ตรวจว่า Ollama เปิดอยู่ที่ 11434")},false)");
-                return;
-            }
-            // Text first, voice second: reading is faster than listening, and
-            // an answer that exists only as audio cannot be re-read or copied.
-            await Eval($"window.brainxChat.reply({Json(answer)},true)");
-
-            var mp3 = await _svc.SpeakAsync(answer);
-            if (mp3 != null)
-                await Eval($"window.brainxAssistant.say('https://voice.local/{Uri.EscapeDataString(mp3)}')");
-        }
-        catch (Exception ex)
-        {
-            await Eval($"window.brainxChat.reply({Json($"ผิดพลาด{_cfg.EndParticle}: " + ex.Message)},false)");
-        }
-    }
-
-    private async Task Eval(string js)
-    {
-        if (!_ready || Web?.CoreWebView2 == null) return;
-        try { await Web.CoreWebView2.ExecuteScriptAsync(js); } catch { }
-    }
-
-    /// <summary>JSON-encode for a script string — a name or an answer with a
-    /// quote in it would otherwise be a syntax error in the page.</summary>
-    private static string Json(string s) => System.Text.Json.JsonSerializer.Serialize(s);
 }

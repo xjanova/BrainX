@@ -45,6 +45,12 @@
     <Resource Include="Assets\Fonts\JetBrainsMono-Bold.ttf" />
   </ItemGroup>
 
+  <!-- Mind's page host, shared with her own exe (BrainX.Mind owns the file):
+       the dashboard's Mind view and her window are one implementation. -->
+  <ItemGroup>
+    <Compile Include="..\BrainX.Mind\MindPage.cs" Link="Mind\MindPage.cs" />
+  </ItemGroup>
+
   <!-- Universe view (WebView2 host) — html/js/css copied to bin so the
        app can serve them via SetVirtualHostNameToFolderMapping. -->
   <ItemGroup>

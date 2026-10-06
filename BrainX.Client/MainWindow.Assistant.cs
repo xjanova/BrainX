@@ -164,24 +164,41 @@ public partial class MainWindow
     {
         try
         {
-            // Already up? Bring nothing up. A second copy would fight the first
-            // for the same config file and the last one closed would win.
-            if (Process.GetProcessesByName("BrainX.Mind").Length > 0) return null;
+            // Already up? Bring HER up — to the front, restored if minimised —
+            // not a second copy, which would fight the first for the same
+            // config file (and is refused by her own single-instance lock).
+            if (FindMindProcess() is Process running)
+            {
+                MindWentOut(running);
+                FocusMindWindow(running);
+                return null;
+            }
 
             var baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            var current = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                                       "BrainX", "current");
             var exe = new[]
             {
                 Path.Combine(baseDir, "BrainX.Mind.exe"),
                 Path.Combine(baseDir, "Mind", "BrainX.Mind.exe"),
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                             "BrainX", "current", "BrainX.Mind.exe"),
+                // Where the installer actually puts her. A dashboard run from a
+                // build folder only finds her here.
+                Path.Combine(current, "Mind", "BrainX.Mind.exe"),
+                Path.Combine(current, "BrainX.Mind.exe"),
             }.FirstOrDefault(File.Exists);
 
             if (exe == null) return "ไม่พบ BrainX.Mind.exe";
 
             // Hand over the vault explicitly: she can find it on her own, but
-            // only the dashboard knows which one is open right now.
-            Process.Start(new ProcessStartInfo(exe, $"\"{_vaultPath}\"") { UseShellExecute = true });
+            // only the dashboard knows which one is open right now. As an
+            // argument LIST: quoted by hand, a vault at a drive root ("D:\")
+            // ended in \" and reached her as D:" — a vault that is not there.
+            var psi = new ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(exe)! };
+            psi.ArgumentList.Add(_vaultPath);
+            var p = Process.Start(psi);
+            // She is out in her own window now: the dashboard's Mind view puts
+            // its copy of her down and watches for her to come back.
+            if (p != null) MindWentOut(p);
             return "เปิดแล้ว";
         }
         catch (Exception ex) { return $"เปิดไม่ได้: {ex.Message}"; }

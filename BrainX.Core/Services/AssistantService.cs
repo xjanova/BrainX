@@ -112,14 +112,25 @@ public sealed class AssistantService
 
     public AssistantConfig LoadConfig()
     {
-        try
+        if (!File.Exists(ConfigPath)) return new AssistantConfig();
+        // A file the other app is writing at this instant is busy, not empty:
+        // treating it as "no config" handed back the defaults, and the next
+        // save wrote them over everything the owner had set.
+        for (var attempt = 0; ; attempt++)
         {
-            if (File.Exists(ConfigPath))
-                return JsonConvert.DeserializeObject<AssistantConfig>(File.ReadAllText(ConfigPath))
-                       ?? new AssistantConfig();
+            string text;
+            try { text = File.ReadAllText(ConfigPath); }
+            catch (IOException) when (attempt < 4) { Thread.Sleep(60); continue; }
+            catch { return new AssistantConfig(); }
+            try { return JsonConvert.DeserializeObject<AssistantConfig>(text) ?? new AssistantConfig(); }
+            catch
+            {
+                // Hand-edited and broken: keep the owner's text beside it
+                // before anything can save the defaults over it.
+                try { File.Copy(ConfigPath, ConfigPath + ".bad-" + DateTime.Now.ToString("yyyyMMdd-HHmmss"), overwrite: false); } catch { }
+                return new AssistantConfig();
+            }
         }
-        catch { }
-        return new AssistantConfig();
     }
 
     public void SaveConfig(AssistantConfig c)
@@ -128,9 +139,12 @@ public sealed class AssistantService
         {
             Directory.CreateDirectory(Path.GetDirectoryName(ConfigPath)!);
             // BOM-free: every other reader of this vault's json uses a plain
-            // parser, and a BOM here has broken a config before.
-            File.WriteAllText(ConfigPath, JsonConvert.SerializeObject(c, Formatting.Indented),
+            // parser, and a BOM here has broken a config before. Written
+            // aside and moved into place, so a reader never sees half a file.
+            var tmp = ConfigPath + ".tmp-" + Environment.ProcessId;
+            File.WriteAllText(tmp, JsonConvert.SerializeObject(c, Formatting.Indented),
                               new UTF8Encoding(false));
+            File.Move(tmp, ConfigPath, overwrite: true);
         }
         catch { }
     }
@@ -231,7 +245,12 @@ public sealed class AssistantService
             if (p == null) return "";
             var outp = await p.StandardOutput.ReadToEndAsync(ct);
             await p.WaitForExitAsync(ct);
-            return p.ExitCode == 0 ? outp.Trim() : "";
+            if (p.ExitCode != 0) return "";
+            // "(no matching notes …)" is the brain saying it has nothing, on
+            // exit 0. Pasted in as "use these notes" it switched off the very
+            // rule that tells her to say she could not find it.
+            outp = outp.Trim();
+            return outp.StartsWith("(no matching notes", StringComparison.Ordinal) ? "" : outp;
         }
         catch { return ""; }
     }
@@ -465,8 +484,15 @@ public sealed class AssistantService
                 UseShellExecute = false, CreateNoWindow = true,
                 StandardOutputEncoding = new UTF8Encoding(false),
             };
+            // The voice picked in the dashboard's settings lives in
+            // assistant.json; `speak` on its own reads settings.json, which
+            // nothing writes a voice to — so without these every voice in
+            // the picker came out as the default one.
+            var cfg = LoadConfig();
             foreach (var a in new[] { "speak", "--vault", _vault, "--file", tmp, "--json" })
                 psi.ArgumentList.Add(a);
+            if (!string.IsNullOrWhiteSpace(cfg.Voice)) { psi.ArgumentList.Add("--voice"); psi.ArgumentList.Add(cfg.Voice); }
+            if (!string.IsNullOrWhiteSpace(cfg.Rate)) { psi.ArgumentList.Add("--rate"); psi.ArgumentList.Add(cfg.Rate); }
             using var p = Process.Start(psi);
             if (p == null) return null;
             var so = await p.StandardOutput.ReadToEndAsync(ct);
@@ -494,8 +520,14 @@ public sealed class AssistantService
         t = System.Text.RegularExpressions.Regex.Replace(t, @"\s+", " ").Trim();
         const int cap = 600;
         if (t.Length <= cap) return t;
-        var cut = t.LastIndexOfAny(new[] { '.', '!', '?', '。' }, Math.Min(cap, t.Length - 1));
-        return (cut > 200 ? t[..(cut + 1)] : t[..cap]) + " …";
+        // Thai has no full stops: a sentence ends at a space. Fall back to the
+        // last space before the cap rather than cutting a word in half.
+        var cut = t.LastIndexOfAny(new[] { '!', '?', '。' }, Math.Min(cap, t.Length - 1));
+        var stop = t.LastIndexOf(". ", Math.Min(cap, t.Length - 1), StringComparison.Ordinal);
+        cut = Math.Max(cut, stop);
+        if (cut > 200) return t[..(cut + 1)] + " …";
+        var space = t.LastIndexOf(' ', cap);
+        return (space > 200 ? t[..space] : t[..cap]) + " …";
     }
 
     /// <summary>A reasoning model narrates inside &lt;think&gt;. That is scratch

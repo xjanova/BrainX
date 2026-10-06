@@ -239,6 +239,7 @@ public partial class MainWindow : Window
         ["Universe"] = "UniverseView",
         ["Network"] = "NetworkView",
         ["Cowork"] = "CoworkView",
+        ["Mind"] = "MindView",
         ["Vault"] = "VaultView",
         ["Claude"] = "ClaudeView",
         ["Peers"] = "PeersView",
@@ -8353,7 +8354,7 @@ public partial class MainWindow : Window
             if (view != null) view.Visibility = Visibility.Visible;
         }
 
-        Button[] navButtons = [NavDashboard, NavBrainGraph, NavUniverse, NavNetwork, NavCowork, NavEditor, NavVault, NavSearch, NavClaude, NavGrowth, NavTokens, NavInsights, NavPeers, NavSharing, NavSsh, NavImport, NavSettings];
+        Button[] navButtons = [NavDashboard, NavBrainGraph, NavUniverse, NavNetwork, NavCowork, NavMind, NavEditor, NavVault, NavSearch, NavClaude, NavGrowth, NavTokens, NavInsights, NavPeers, NavSharing, NavSsh, NavImport, NavSettings];
         foreach (var nb in navButtons) nb.Style = (Style)FindResource("NavButton");
         btn.Style = (Style)FindResource("NavButtonActive");
 
@@ -8373,6 +8374,9 @@ public partial class MainWindow : Window
         // it is the view being looked at — the same rule the dashboard timers
         // follow.
         if (tag == "Cowork") _ = InitializeCoworkAsync(); else StopCowork();
+        // Mind: loaded on first visit and kept, like any view; the poll that
+        // notices her own window opening only runs while this one is shown.
+        if (tag == "Mind") _ = ShowMindViewAsync(); else StopMindPoll();
         if (tag == "Vault") RefreshVaultTree();
         if (tag == "Universe") _ = InitializeUniverseAsync();
         // Retired page — its embedded galaxy is built on demand now (see
@@ -15315,7 +15319,7 @@ public partial class MainWindow : Window
             if (v != null) v.Visibility = Visibility.Collapsed;
         }
         EditorView.Visibility = Visibility.Visible;
-        Button[] navButtons = [NavDashboard, NavBrainGraph, NavUniverse, NavNetwork, NavCowork, NavEditor, NavVault, NavSearch, NavClaude, NavGrowth, NavTokens, NavInsights, NavPeers, NavSharing, NavSsh, NavImport, NavSettings];
+        Button[] navButtons = [NavDashboard, NavBrainGraph, NavUniverse, NavNetwork, NavCowork, NavMind, NavEditor, NavVault, NavSearch, NavClaude, NavGrowth, NavTokens, NavInsights, NavPeers, NavSharing, NavSsh, NavImport, NavSettings];
         foreach (var nb in navButtons) nb.Style = (Style)FindResource("NavButton");
         NavEditor.Style = (Style)FindResource("NavButtonActive");
     }
