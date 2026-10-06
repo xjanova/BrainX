@@ -20,6 +20,7 @@
 // is negligible.
 
 using System;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -252,20 +253,26 @@ public sealed class ClaudeUsageProbe
         if (_core == null) return;
         try
         {
-            string raw = await _core.ExecuteScriptAsync(ScrapeScript);
-            LogLine($"tick: source={_core.Source} raw={Truncate(raw, 400)}");
-            if (string.IsNullOrEmpty(raw) || raw == "null") return;
-            // ExecuteScriptAsync returns a JSON-encoded string of the JS
-            // return value, so the result is double-encoded JSON. Unwrap once.
-            string json = raw;
-            if (json.StartsWith("\"") && json.EndsWith("\""))
+            // The usage JSON the page itself reads first; the DOM only when
+            // that cannot be had (not on claude.ai yet, network error).
+            var snap = await ReadUsageApiAsync();
+            if (snap == null)
             {
-                json = JsonSerializer.Deserialize<string>(json) ?? "";
-            }
-            if (string.IsNullOrWhiteSpace(json)) return;
+                string raw = await _core.ExecuteScriptAsync(ScrapeScript);
+                LogLine($"tick: source={_core.Source} raw={Truncate(raw, 400)}");
+                if (string.IsNullOrEmpty(raw) || raw == "null") return;
+                // ExecuteScriptAsync returns a JSON-encoded string of the JS
+                // return value, so the result is double-encoded JSON. Unwrap once.
+                string json = raw;
+                if (json.StartsWith("\"") && json.EndsWith("\""))
+                {
+                    json = JsonSerializer.Deserialize<string>(json) ?? "";
+                }
+                if (string.IsNullOrWhiteSpace(json)) return;
 
-            var snap = ParseSnapshot(json);
-            if (snap == null) return;
+                snap = ParseSnapshot(json);
+                if (snap == null) return;
+            }
 
             if (!snap.Authenticated)
             {
@@ -347,6 +354,135 @@ public sealed class ClaudeUsageProbe
             LogLine($"PinSessionCookiesAsync: {ex.Message}");
         }
     }
+
+    /// <summary>
+    /// The plan limits as claude.ai's own usage page gets them: the page's
+    /// JSON API, called from inside the signed-in page so the session cookie
+    /// goes with it and nothing of it ever passes through this process.
+    ///
+    /// Why not the DOM any more (2026-10-06): settings/usage became a modal
+    /// over /new (#settings/usage), the "Plan usage limits" heading the
+    /// scrape anchored on was gone, and every tick reported auth:false while
+    /// the session was fine — the room's Claude HP sat at "?" all day.
+    ///
+    /// Runtime.evaluate rather than ExecuteScriptAsync: the call is a fetch,
+    /// and only DevTools can wait for a promise and hand back its value.
+    /// Null means "could not ask" and the caller falls back to the DOM.
+    /// </summary>
+    private async Task<UsageSnapshot?> ReadUsageApiAsync()
+    {
+        if (_core == null) return null;
+        try
+        {
+            var args = JsonSerializer.Serialize(new { expression = UsageApiScript, awaitPromise = true, returnByValue = true });
+            var res = await _core.CallDevToolsProtocolMethodAsync("Runtime.evaluate", args);
+            using var doc = JsonDocument.Parse(res);
+            if (!doc.RootElement.TryGetProperty("result", out var r)
+                || !r.TryGetProperty("value", out var v) || v.ValueKind != JsonValueKind.String)
+                return null;
+            var json = v.GetString() ?? "";
+            LogLine($"api: {Truncate(json, 400)}");
+            return ParseApiSnapshot(json);
+        }
+        catch (Exception ex)
+        {
+            LogLine($"api: {ex.Message}");
+            return null;
+        }
+    }
+
+    internal static UsageSnapshot? ParseApiSnapshot(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("error", out _)) return null;
+            if (!(root.TryGetProperty("auth", out var a) && a.ValueKind == JsonValueKind.True))
+                return new UsageSnapshot { Authenticated = false };
+
+            var snap = new UsageSnapshot
+            {
+                Authenticated = true,
+                PlanLabel = root.TryGetProperty("plan", out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() : null,
+                Session = ApiRow(root, "session"),
+                WeeklyAll = ApiRow(root, "weeklyAll"),
+                ModelRow = ApiRow(root, "model"),
+            };
+            if (root.TryGetProperty("credits", out var c) && c.ValueKind == JsonValueKind.Object)
+            {
+                var row = new UsageRow { Percent = Num(c, "pct") ?? 0 };
+                var places = (int)(Num(c, "places") ?? 2);
+                var scale = Math.Pow(10, places);
+                string Money(double v) => "$" + (v / scale).ToString("0.00", CultureInfo.InvariantCulture);
+                if (Num(c, "used") is double used && Num(c, "limit") is double limit)
+                    row.ResetLabel = $"{Money(used)} / {Money(limit)}";
+                snap.Credits = row;
+            }
+            return snap;
+        }
+        catch (Exception ex)
+        {
+            LogLine($"api parse: {ex.Message}");
+            return null;
+        }
+
+        static double? Num(JsonElement o, string key) =>
+            o.TryGetProperty(key, out var n) && n.ValueKind == JsonValueKind.Number ? n.GetDouble() : null;
+
+        static UsageRow? ApiRow(JsonElement root, string key)
+        {
+            if (!root.TryGetProperty(key, out var el) || el.ValueKind != JsonValueKind.Object) return null;
+            var row = new UsageRow { Percent = Num(el, "pct") ?? -1 };
+            // Invariant: this machine's Thai locale writes the year as 2569.
+            if (el.TryGetProperty("at", out var at) && at.ValueKind == JsonValueKind.String
+                && DateTimeOffset.TryParse(at.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.None, out var t))
+                row.ResetLabel = "Resets " + t.LocalDateTime.ToString("d MMM HH:mm", CultureInfo.InvariantCulture);
+            if (el.TryGetProperty("label", out var lb) && lb.ValueKind == JsonValueKind.String)
+                row.Label = lb.GetString();
+            return row;
+        }
+    }
+
+    // Runs inside claude.ai. Returns only the numbers the card shows — never
+    // the org id or anything else the API carries — so the probe log holds
+    // nothing worth reading.
+    private const string UsageApiScript = """
+(async function () {
+  try {
+    var get = function (u) { return fetch(u, { credentials: 'include', headers: { accept: 'application/json' } }); };
+    var r = await get('/api/organizations');
+    if (r.status === 401 || r.status === 403) return JSON.stringify({ auth: false });
+    if (!r.ok) return JSON.stringify({ error: 'organizations ' + r.status });
+    var orgs = await r.json();
+    if (!Array.isArray(orgs) || !orgs.length) return JSON.stringify({ error: 'no organizations' });
+    var org = orgs.filter(function (o) { return (o.capabilities || []).indexOf('chat') >= 0; })[0] || orgs[0];
+    var u = await get('/api/organizations/' + encodeURIComponent(org.uuid) + '/usage');
+    if (!u.ok) return JSON.stringify({ error: 'usage ' + u.status });
+    var j = await u.json();
+
+    var tier = String(org.rate_limit_tier || '');
+    var mx = tier.match(/max_(\d+)x/i);
+    var plan = mx ? 'Max (' + mx[1] + 'x)' : /pro/i.test(tier) ? 'Pro' : /team/i.test(tier) ? 'Team' : null;
+    var win = function (w) {
+      return w && typeof w.utilization === 'number' ? { pct: w.utilization, at: w.resets_at || null } : null;
+    };
+    var scoped = (j.limits || []).filter(function (l) { return l && l.kind === 'weekly_scoped'; })[0];
+    var model = scoped ? {
+      pct: typeof scoped.percent === 'number' ? scoped.percent : -1,
+      at: scoped.resets_at || null,
+      label: scoped.scope && scoped.scope.model ? (scoped.scope.model.display_name || null) : null
+    } : null;
+    var x = j.extra_usage;
+    var credits = x && typeof x.utilization === 'number'
+      ? { pct: x.utilization, used: x.used_credits, limit: x.monthly_limit, places: x.decimal_places }
+      : null;
+    return JSON.stringify({ auth: true, plan: plan, session: win(j.five_hour), weeklyAll: win(j.seven_day), model: model, credits: credits });
+  } catch (e) {
+    return JSON.stringify({ error: String(e && e.message || e) });
+  }
+})()
+""";
 
     private static UsageSnapshot? ParseSnapshot(string json)
     {

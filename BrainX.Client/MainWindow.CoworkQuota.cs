@@ -31,8 +31,13 @@ namespace BrainX.Client;
 //           as "billing: fetched credits config" — creditUsagePercent of the
 //           weekly period = HP. Read from the log, never with Grok's login.
 //           Grok publishes no shorter round, so it has no SP bar.
+//   mind    มาย is a LOCAL AI (Ollama on this machine): no vendor, no
+//           quota — a full bar marked unlimited, never a "?".
 //   anyone  resting on the broker's record (quotaResumeUtc in the future)
 //           keeps its weekly HP and carries the time it is back as a note.
+//
+// CluadeX is a tool BrainX drives, not an AI (owner, 2026-10-06: "cluadex
+// ไม่ใช่ ai แต่เป็นเครื่องมือ"), so it has no HP frame at all.
 // ─────────────────────────────────────────────────────────────────────────
 
 public partial class MainWindow
@@ -52,6 +57,7 @@ public partial class MainWindow
         foreach (var raw in agents.Distinct(StringComparer.OrdinalIgnoreCase))
         {
             var agent = raw.ToLowerInvariant();
+            if (agent == "cluadex") continue;
             JObject? row = null;
             try
             {
@@ -60,6 +66,7 @@ public partial class MainWindow
                     "claude" => ClaudeQuota(),
                     "codex" => CodexQuota(),
                     "grok" => GrokQuota(),
+                    "mind" => new JObject { ["left"] = 100, ["unlimited"] = true, ["window"] = "local", ["source"] = "local · Ollama" },
                     _ => null,
                 };
             }
@@ -87,17 +94,23 @@ public partial class MainWindow
         {
             row["left"] = Math.Round(Math.Clamp(100 - week.Percent, 0, 100));
             row["window"] = "สัปดาห์";
-            row["resets"] = week.ResetLabel ?? "";
+            row["resets"] = ResetsOnly(week.ResetLabel);
         }
         if (u.Session is { Percent: >= 0 } session)
             row["sp"] = new JObject
             {
                 ["left"] = Math.Round(Math.Clamp(100 - session.Percent, 0, 100)),
                 ["window"] = "5 ชม.",
-                ["resets"] = session.ResetLabel ?? "",
+                ["resets"] = ResetsOnly(session.ResetLabel),
             };
+        row["asOf"] = u.FetchedAt.ToLocalTime().ToString("d MMM HH:mm", CultureInfo.InvariantCulture);
         return row["left"]!.Type == JTokenType.Null && row["sp"] == null ? null : row;
     }
+
+    /// <summary>The dashboard card says "Resets 9 Oct 10:59"; the room
+    /// already prints "รีเซ็ต" in front of it.</summary>
+    private static string ResetsOnly(string? label) =>
+        label is { Length: > 0 } l && l.StartsWith("Resets ", StringComparison.OrdinalIgnoreCase) ? l[7..] : label ?? "";
 
     /// <summary>The rate limits codex recorded last — read off the newest
     /// rollout that has them, re-read only when that file changes and at most
@@ -216,7 +229,15 @@ public partial class MainWindow
             try { RefreshGrokCredits(); } catch { }
         }
         var c = _grokCredits;
-        if (c?["creditUsagePercent"]?.ToObject<double?>() is not double used) return null;
+        if (c == null) return null;
+        // Grok writes the config as proto3 JSON, which leaves out a field that
+        // is zero: an account that has used nothing this week has NO
+        // creditUsagePercent at all (the fresh login of 2026-10-06 read "?"
+        // all afternoon). A period with no figure is a period with 0% used.
+        double used;
+        if (c["creditUsagePercent"]?.ToObject<double?>() is double u) used = u;
+        else if (c["currentPeriod"] is JObject) used = 0;
+        else return null;
 
         var end = CoworkUtc(c.SelectToken("currentPeriod.end") ?? c["billingPeriodEnd"]);
         // The period it describes is over: the allowance has reset since, and

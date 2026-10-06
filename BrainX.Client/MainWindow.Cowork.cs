@@ -148,9 +148,12 @@ public partial class MainWindow
                 ["broker"] = CoworkBrokerState(),
                 ["agents"] = agents,
                 // What each agent has left of its usage limits — its HP.
+                // มาย has no presence file — she stands in the room as the
+                // secretary — so she is added by hand while she is on.
                 ["quota"] = CoworkQuota(agents.OfType<JObject>()
                     .Where(a => a["bridge"]?.ToObject<bool?>() != true)
-                    .Select(a => a["id"]?.ToString() ?? "").Where(s => s.Length > 0)),
+                    .Select(a => a["id"]?.ToString() ?? "").Where(s => s.Length > 0)
+                    .Concat(SecretaryOn ? new[] { "mind" } : Array.Empty<string>())),
                 ["messages"] = CoworkMessages(),
                 ["decisions"] = CoworkDecisions(),
                 // Who is doing what. Built from the task files the agents

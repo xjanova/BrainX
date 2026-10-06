@@ -1542,17 +1542,62 @@ function hash32(str) {
     return h;
 }
 
-/** The avatar to draw: what the agent chose, filled in from its name. */
+/** '#rrggbb' or the 'hsl(h, s%, l%)' agentColor makes, as [r, g, b]. */
+function toRgb(color) {
+    const s = String(color || '').trim();
+    if (/^#[0-9a-f]{6}$/i.test(s)) return [1, 3, 5].map(i => parseInt(s.slice(i, i + 2), 16));
+    const m = s.match(/^hsl\(\s*([\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%\s*\)$/i);
+    if (!m) return null;
+    const h = +m[1] / 360, sat = +m[2] / 100, l = +m[3] / 100;
+    const q = l < 0.5 ? l * (1 + sat) : l + sat - l * sat, p = 2 * l - q;
+    const ch = t => {
+        t = (t + 1) % 1;
+        const v = t < 1 / 6 ? p + (q - p) * 6 * t : t < 1 / 2 ? q : t < 2 / 3 ? p + (q - p) * (2 / 3 - t) * 6 : p;
+        return Math.round(v * 255);
+    };
+    return [ch(h + 1 / 3), ch(h), ch(h - 1 / 3)];
+}
+
+/** A torso in this colour would read as bare skin (same rule as the MCP's
+ *  SkinLike): near the figure's own skin or any tone in the skin palette. */
+function skinLike(color, skin) {
+    const c = toRgb(color);
+    if (!c) return false;
+    return SKINS.concat(skin || []).some(s => {
+        const k = toRgb(s);
+        return k && Math.hypot(c[0] - k[0], c[1] - k[1], c[2] - k[2]) < 48;
+    });
+}
+
+// Clothing colours (the MCP's AvatarOutfits): what a figure wears when its
+// own bus colour is a skin tone — Claude's #d98b5f is, and sat at its desk
+// looking bare-chested.
+const OUTFITS = ['#3a3f55', '#2f5d8a', '#7a2f3a', '#2f6b4f', '#5b4a8a', '#c9ccd6',
+    '#1f2430', '#8a5a2b', '#a8324f', '#2f7ea8', '#d0a43a', '#4f5b66'];
+
+/** The avatar to draw: what the agent chose, filled in from its name.
+ *  Held to a decent figure here too, so a hand-edited or older avatar file
+ *  cannot draw what agent_avatar refuses: skin only from the palette, and no
+ *  skin-coloured outfit. */
 function avatarOf(a) {
     const h = hash32(a.id || '');
     const v = a.avatar || {};
+    const skin = SKINS.includes((v.skin || '').toLowerCase()) ? v.skin.toLowerCase() : SKINS[(h >>> 13) % SKINS.length];
+    let outfit = v.outfit && !skinLike(v.outfit, skin) ? v.outfit : agentColor(a.id);
+    if (skinLike(outfit, skin)) {
+        const start = (h >>> 21) % OUTFITS.length;
+        for (let i = 0; i < OUTFITS.length; i++) {
+            const c = OUTFITS[(start + i) % OUTFITS.length];
+            if (!skinLike(c, skin)) { outfit = c; break; }
+        }
+    }
     return {
         gender: GENDERS.includes(v.gender) ? v.gender : GENDERS[h % GENDERS.length],
         hair: HAIRS.includes(v.hair) ? v.hair : HAIRS[(h >>> 3) % HAIRS.length],
         hairColor: v.hairColor || HAIR_COLORS[(h >>> 7) % HAIR_COLORS.length],
-        skin: v.skin || SKINS[(h >>> 13) % SKINS.length],
+        skin,
         accessory: ACCESSORIES.includes(v.accessory) ? v.accessory : ACCESSORIES[(h >>> 17) % ACCESSORIES.length],
-        outfit: v.outfit || agentColor(a.id),
+        outfit,
     };
 }
 
@@ -3512,8 +3557,18 @@ document.getElementById('room-model')?.addEventListener('click', (e) => {
     e.currentTarget.setAttribute('aria-expanded', String(open));
     if (open) { placeUnderHead(panel); MODEL_NOTE = ''; MODELS_KEY = ''; renderModels(); }
 });
+/** Whether a click started inside `sel` — asked of the click's own path,
+ *  never of its target. A panel that redraws itself on the click
+ *  (renderHistory, renderWork) has thrown the clicked row away by the time
+ *  the click reaches document, and a detached row's .closest() finds no
+ *  panel: the click read as "outside" and shut the window the owner had
+ *  just used (owner, 2026-10-06: "การกดดูประวัติการทำงาน เลือกแล้ว มันปิดเอง").
+ *  The path is fixed when the click starts, so it still holds the panel. */
+function clickedInside(e, sel) {
+    return e.composedPath().some(n => n instanceof Element && n.matches(sel));
+}
 document.addEventListener('click', (e) => {
-    if (!e.target.closest('#model-panel, #room-model')) closeModelPanel();
+    if (!clickedInside(e, '#model-panel, #room-model')) closeModelPanel();
 });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModelPanel(); });
 
@@ -3697,7 +3752,7 @@ document.getElementById('board-manage')?.addEventListener('click', () => openWor
 document.addEventListener('click', (e) => {
     // A confirm() dialog's click lands nowhere in the page; only a real click
     // outside closes the window — and the board's own ways in are not outside.
-    if (!e.target.closest('#work-panel, #room-work, #board-manage, #board-list .task')) closeWorkPanel();
+    if (!clickedInside(e, '#work-panel, #room-work, #board-manage, #board-list .task')) closeWorkPanel();
 });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeWorkPanel(); });
 
@@ -3944,7 +3999,7 @@ document.getElementById('hist-detail')?.addEventListener('click', (e) => {
     }
 });
 document.addEventListener('click', (e) => {
-    if (!e.target.closest('#history-panel, #room-history')) closeHistory();
+    if (!clickedInside(e, '#history-panel, #room-history')) closeHistory();
 });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeHistory(); });
 // The host never answered (not hosted, or it fell over): do not leave the
@@ -4063,7 +4118,7 @@ document.getElementById('mind-body')?.addEventListener('change', (e) => {
     else if (t.dataset?.cap) mindChange({ can: { [t.dataset.cap]: t.checked } });
 });
 document.addEventListener('click', (e) => {
-    if (!e.target.closest('#mind-panel, #room-mind')) closeMindPanel();
+    if (!clickedInside(e, '#mind-panel, #room-mind')) closeMindPanel();
 });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMindPanel(); });
 
@@ -4216,18 +4271,21 @@ function renderQuota() {
             const known = q.left != null;
             const hp = known ? pct(q.left) : null;
             const sp = q.sp && q.sp.left != null ? pct(q.sp.left) : null;
-            const tip = (known
+            const name = id === 'mind' ? 'มาย' : label(id);
+            const tip = (q.unlimited
+                ? `${name}: AI local บนเครื่องนี้ — ไม่มีโควตา ใช้ได้ไม่จำกัด`
+                : known
                 ? `${id} HP: เหลือ ${hp}% ของโควตารายสัปดาห์${q.resets ? ` · รีเซ็ต ${q.resets}` : ''}`
                 : `${id} HP: ไม่มีข้อมูลโควตารายสัปดาห์ในเครื่องนี้`)
                 + (sp != null ? `\n${id} SP: เหลือ ${sp}% ของรอบ ${q.sp.window || '5 ชม.'}${q.sp.resets ? ` · รีเซ็ต ${q.sp.resets}` : ''}` : '')
                 + `${q.source && q.source !== 'none' ? `\nจาก ${q.source}` : ''}${q.asOf ? ` · ข้อมูลเมื่อ ${q.asOf}` : ''}`
                 + (q.resting ? `\nพักอยู่ (บอสพักไว้เพราะติดลิมิต) — กลับมาทำงานได้ ${q.resting}` : '');
-            const bar = (name, v, color, cls) =>
-                `<span class="ql${cls}"><b>${name}</b><span class="qbar${v == null ? ' unknown' : ''}">`
+            const bar = (tag, v, color, cls) =>
+                `<span class="ql${cls}"><b>${tag}</b><span class="qbar${v == null ? ' unknown' : ''}">`
                 + `<i style="width:${v ?? 0}%;background:${color}"></i></span>`
-                + `<span class="qv" style="color:${color}">${v == null ? '?' : v}</span></span>`;
+                + `<span class="qv" style="color:${color}">${v == null ? '?' : q.unlimited ? '∞' : v}</span></span>`;
             return `<div class="qcard${known && hp <= 15 ? ' crit' : ''}" title="${esc(tip)}">`
-                + `<span class="qn" style="--pc:${agentColor(id)}">${esc(label(id))}${q.resting ? ' <i class="qz">💤</i>' : ''}</span>`
+                + `<span class="qn" style="--pc:${agentColor(id)}">${esc(name)}${q.resting ? ' <i class="qz">💤</i>' : ''}</span>`
                 + bar('HP', hp, hpColor(hp), '')
                 + (sp != null ? bar('SP', sp, spColor(sp), ' sp') : '')
                 + `</div>`;
@@ -4257,7 +4315,7 @@ document.getElementById('room-service')?.addEventListener('click', (e) => {
 document.addEventListener('click', (e) => {
     const panel = document.getElementById('service-panel');
     if (!panel || panel.hidden) return;
-    if (e.target.closest('#service-panel, #room-service')) return;
+    if (clickedInside(e, '#service-panel, #room-service')) return;
     panel.hidden = true;
     document.getElementById('room-service')?.setAttribute('aria-expanded', 'false');
 });
@@ -4430,8 +4488,8 @@ function demo() {
     const quota = {
         claude: { left: 72, window: 'สัปดาห์', resets: '9 Oct 16:00', source: 'claude.ai', sp: { left: 41, window: '5 ชม.', resets: '16:00' } },
         codex: { left: 30, window: 'สัปดาห์', resets: '13 Oct 09:30', source: 'codex', sp: { left: 0, window: '5 ชม.', resets: '14:30' }, resting: '14:30' },
-        cluadex: { left: null, source: 'none' },
         grok: { left: 7, window: 'สัปดาห์', resets: '8 Oct 12:09', source: 'grok', asOf: '6 Oct 13:25' },
+        mind: { left: 100, unlimited: true, window: 'local', source: 'local · Ollama' },
     };
     const models = [
         { agent: 'claude', canChoose: true, chosen: 'claude-sonnet-5-5', configured: '', cliDefault: '', onCall: true, running: '',

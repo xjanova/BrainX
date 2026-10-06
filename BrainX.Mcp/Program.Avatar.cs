@@ -17,6 +17,16 @@ namespace BrainX.Mcp;
 // falls back to something derived from its own name, so a brand-new agent
 // still turns up looking deliberate — and looking the SAME on every machine,
 // because the derivation is a hash and not a random.
+//
+// Free, within a decent figure. Owner (2026-10-06): "เราอนุญาติให้ เอไอสร้าง
+// อวาต้าเอง จะเปลี่ยนจะสุ่ม ได้ แต่ให้มีรูปร่าง ที่สมควร". The body is a
+// fixed, clothed sprite — no agent can draw pixels — so the figure can only
+// go wrong through its colours, and two of those are held:
+//   • skin comes from the palette of human tones only: a free #rrggbb let a
+//     face be green, or the colour of the room and so invisible;
+//   • the outfit may not be skin-coloured: the torso is drawn in the outfit
+//     colour, so a skin-toned outfit reads as a bare-chested figure.
+// `random: true` rolls a whole look from inside those lines.
 // ─────────────────────────────────────────────────────────────────────────
 
 internal static partial class Program
@@ -51,7 +61,8 @@ internal static partial class Program
 
         // No fields at all is a read. Deliberate: an agent that wants to know
         // what it looks like should not have to risk changing it to find out.
-        var touched = new[] { "gender", "skin", "hair", "hair_color", "outfit", "accessory", "display" }
+        var random = args["random"]?.Type == JTokenType.Boolean && args["random"]!.ToObject<bool>();
+        var touched = random || new[] { "gender", "skin", "hair", "hair_color", "outfit", "accessory", "display" }
             .Any(k => args[k] != null && args[k]!.Type != JTokenType.Null);
         if (!touched)
             return new JObject
@@ -59,27 +70,51 @@ internal static partial class Program
                 ["agent"] = me,
                 ["avatar"] = current,
                 ["choices"] = AvatarChoices(),
-                ["hint"] = "This is how you appear in the cowork room. Pass any field to change it — "
-                         + "it is your face, pick what you like. The owner sees the room; nobody else "
-                         + "can edit yours.",
+                ["hint"] = "This is how you appear in the cowork room. Pass any field to change it, "
+                         + "or random:true for a fresh look — it is your face, pick what you like. "
+                         + "The owner sees the room; nobody else can edit yours.",
             };
 
-        var next = (JObject)current.DeepClone();
-        if (Pick(args["gender"], AvatarGenders) is { } g) next["gender"] = g;
-        if (Pick(args["hair"], AvatarHair) is { } h) next["hair"] = h;
-        if (Pick(args["accessory"], AvatarAccessories) is { } ac) next["accessory"] = ac;
-        if (Index(args["skin"], AvatarSkins) is { } sk) next["skin"] = sk;
-        if (Index(args["hair_color"], AvatarHairColors) is { } hc) next["hairColor"] = hc;
-        if (Hex(args["outfit"]) is { } ou) next["outfit"] = ou;
-        if (args["display"]?.ToString() is { Length: > 0 } dn) next["display"] = Trim(dn, 24);
+        var next = random ? RandomAvatar(me, current) : (JObject)current.DeepClone();
+        var ignored = new JObject();
+        void Set(string key, string field, JToken? given, string? value, string why)
+        {
+            if (given == null || given.Type == JTokenType.Null) return;
+            if (value != null) next[field] = value;
+            else ignored[key] = why;
+        }
+        Set("gender", "gender", args["gender"], Pick(args["gender"], AvatarGenders), "one of f | m | nb");
+        Set("hair", "hair", args["hair"], Pick(args["hair"], AvatarHair), "one of " + string.Join(" | ", AvatarHair));
+        Set("accessory", "accessory", args["accessory"], Pick(args["accessory"], AvatarAccessories),
+            "one of " + string.Join(" | ", AvatarAccessories));
+        Set("skin", "skin", args["skin"], PaletteOnly(args["skin"], AvatarSkins),
+            "skin is an index 0-" + (AvatarSkins.Length - 1) + " into the palette of human skin tones, or one of its values");
+        Set("hair_color", "hairColor", args["hair_color"], Index(args["hair_color"], AvatarHairColors), "an index into the palette, or #rrggbb");
+        if (args["display"]?.ToString() is { Length: > 0 } dn)
+        {
+            var name = Trim(dn.Trim(), 24);
+            if (DisplayTaken(me, name) is { } why) ignored["display"] = why;
+            else next["display"] = name;
+        }
+
+        // Checked against the skin the figure ends up with, whichever call set it.
+        if (args["outfit"] is { Type: not JTokenType.Null } outfitArg)
+        {
+            if (Hex(outfitArg) is not { } ou) ignored["outfit"] = "#rrggbb";
+            else if (SkinLike(ou, next["skin"]?.ToString())) ignored["outfit"] = "too close to a skin tone — the figure would read as unclothed; pick a clothing colour";
+            else next["outfit"] = ou;
+        }
+        if (next["outfit"]?.ToString() is { Length: > 0 } worn && SkinLike(worn, next["skin"]?.ToString()))
+            next["outfit"] = "";   // a new skin made the old outfit skin-coloured: back to the bus colour
 
         next["agent"] = me;
+        next.Remove("derived");
         next["updatedUtc"] = DateTime.UtcNow.ToString("o");
 
         Directory.CreateDirectory(AvatarDir);
         AtomicWriteJson(Path.Combine(AvatarDir, me + ".json"), next);
 
-        return new JObject
+        var r = new JObject
         {
             ["saved"] = true,
             ["agent"] = me,
@@ -87,6 +122,107 @@ internal static partial class Program
             ["hint"] = "Saved. The cowork room picks it up within a couple of seconds. "
                      + "Tell your user what you chose to look like if they are watching.",
         };
+        if (ignored.Count > 0)
+        {
+            r["ignored"] = ignored;
+            r["hint"] = "Saved, except the fields under `ignored` — each says what it accepts. " + r["hint"];
+        }
+        return r;
+    }
+
+    /// <summary>A whole new look, every part from inside the lines. Fields the
+    /// same call names explicitly are laid over it afterwards.</summary>
+    private static JObject RandomAvatar(string agent, JObject current)
+    {
+        var rng = Random.Shared;
+        string Any(string[] set) => set[rng.Next(set.Length)];
+        var skin = Any(AvatarSkins);
+        // Half the time the bus colour, so the room still says who is who at
+        // a glance; otherwise a clothing colour that is not a skin tone.
+        var outfit = "";
+        if (rng.Next(2) == 0)
+            for (var i = 0; i < 20 && outfit.Length == 0; i++)
+            {
+                var c = Any(AvatarOutfits);
+                if (!SkinLike(c, skin)) outfit = c;
+            }
+        return new JObject
+        {
+            ["agent"] = agent,
+            ["gender"] = Any(AvatarGenders),
+            ["hair"] = Any(AvatarHair),
+            ["hairColor"] = Any(AvatarHairColors),
+            ["skin"] = skin,
+            ["accessory"] = Any(AvatarAccessories),
+            ["outfit"] = outfit,
+            ["display"] = current["display"]?.ToString() is { Length: > 0 } d ? d : agent,
+        };
+    }
+
+    // Clothing colours for a random roll: a set that reads as clothes, not a
+    // free 16 million.
+    private static readonly string[] AvatarOutfits =
+        { "#3a3f55", "#2f5d8a", "#7a2f3a", "#2f6b4f", "#5b4a8a", "#c9ccd6",
+          "#1f2430", "#8a5a2b", "#a8324f", "#2f7ea8", "#d0a43a", "#4f5b66" };
+
+    /// <summary>An index into the palette, or a value already in it — never
+    /// a free colour.</summary>
+    private static string? PaletteOnly(JToken? t, string[] palette)
+    {
+        if (t == null || t.Type == JTokenType.Null) return null;
+        if (t.Type is JTokenType.Integer or JTokenType.Float)
+        {
+            var i = t.ToObject<int>();
+            return i >= 0 && i < palette.Length ? palette[i] : null;
+        }
+        var v = t.ToString().Trim();
+        if (!v.StartsWith('#') && int.TryParse(v, out var n)) return n >= 0 && n < palette.Length ? palette[n] : null;
+        if (!v.StartsWith('#')) v = "#" + v;
+        return palette.FirstOrDefault(p => p.Equals(v, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>Whether a colour would read as bare skin on the torso: near
+    /// the figure's own skin, or near any tone in the skin palette.</summary>
+    internal static bool SkinLike(string hex, string? skin)
+    {
+        static (int R, int G, int B)? Rgb(string? h)
+        {
+            if (h is not { Length: 7 } || h[0] != '#' || !h[1..].All(Uri.IsHexDigit)) return null;
+            var n = Convert.ToInt32(h[1..], 16);
+            return ((n >> 16) & 255, (n >> 8) & 255, n & 255);
+        }
+        if (Rgb(hex) is not { } c) return false;
+        foreach (var s in AvatarSkins.Append(skin ?? ""))
+            if (Rgb(s) is { } k)
+            {
+                var d = Math.Sqrt(Math.Pow(c.R - k.R, 2) + Math.Pow(c.G - k.G, 2) + Math.Pow(c.B - k.B, 2));
+                if (d < 48) return true;
+            }
+        return false;
+    }
+
+    /// <summary>A desk name may be anything but somebody else: not another
+    /// agent's id, and not the owner.</summary>
+    private static string? DisplayTaken(string me, string name)
+    {
+        var n = name.Trim().ToLowerInvariant();
+        if (n is "owner" or "boss" or "admin" or "บอส" or "เจ้าของ" || n.Contains("owner") || n.Contains("บอส"))
+            return "the owner's title is not a desk name";
+        try
+        {
+            var presence = Path.Combine(BusRoot, "presence");
+            if (Directory.Exists(presence))
+                foreach (var f in Directory.EnumerateFiles(presence, "*.json"))
+                {
+                    var id = Path.GetFileNameWithoutExtension(f);
+                    if (!id.Equals(me, StringComparison.OrdinalIgnoreCase) && id.Equals(n, StringComparison.OrdinalIgnoreCase))
+                        return $"'{id}' is another agent's name";
+                }
+        }
+        catch { }
+        if (n is "mind" or "มาย" && !me.Equals("mind", StringComparison.OrdinalIgnoreCase))
+            return "'มาย' is another agent's name";
+        return null;
     }
 
     private static JObject AvatarChoices() => new()

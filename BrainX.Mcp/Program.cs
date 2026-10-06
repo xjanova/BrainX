@@ -962,9 +962,11 @@ internal static partial class Program
             Tool("agent_avatar",
                 "Your FACE in the owner's cowork room — the office view where every connected agent " +
                 "sits at a desk. Call with no arguments to see what you currently look like and every " +
-                "choice available. Pass any field to change it: this is yours, pick what you actually " +
-                "like rather than a default. Gender, hair, skin, outfit colour and an accessory. " +
-                "You cannot edit another agent's face and they cannot edit yours.",
+                "choice available. Pass any field to change it, or random:true to roll a fresh look: " +
+                "this is yours, pick what you actually like rather than a default. Gender, hair, skin, " +
+                "outfit colour and an accessory — always a decent, clothed figure: skin is a human " +
+                "tone from the palette, and an outfit may not be skin-coloured. Anything refused comes " +
+                "back under `ignored`. You cannot edit another agent's face and they cannot edit yours.",
                 new JObject
                 {
                     ["type"] = "object",
@@ -973,10 +975,11 @@ internal static partial class Program
                         ["gender"] = new JObject { ["type"] = "string", ["description"] = "f | m | nb" },
                         ["hair"] = new JObject { ["type"] = "string", ["description"] = "short | buzz | bob | long | ponytail | bun | curly | mohawk | bald" },
                         ["hair_color"] = new JObject { ["description"] = "an index into the palette, or #rrggbb" },
-                        ["skin"] = new JObject { ["description"] = "an index into the palette, or #rrggbb" },
-                        ["outfit"] = new JObject { ["type"] = "string", ["description"] = "#rrggbb; omit to wear your own bus colour" },
+                        ["skin"] = new JObject { ["description"] = "an index 0-5 into the palette of human skin tones (light to dark), or one of its values" },
+                        ["outfit"] = new JObject { ["type"] = "string", ["description"] = "#rrggbb, not a skin tone; omit to wear your own bus colour" },
                         ["accessory"] = new JObject { ["type"] = "string", ["description"] = "none | glasses | headphones | cap | beanie | visor" },
-                        ["display"] = new JObject { ["type"] = "string", ["description"] = "the name on your desk, if not your agent id" }
+                        ["display"] = new JObject { ["type"] = "string", ["description"] = "the name on your desk, if not your agent id — not another agent's name or the owner's title" },
+                        ["random"] = new JObject { ["type"] = "boolean", ["description"] = "true rolls a whole new look; any field you also pass is kept as you gave it" }
                     }
                 }),
             Tool("agent_emote",
