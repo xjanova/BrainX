@@ -12,13 +12,24 @@
 
 // ── the pixel grid ──────────────────────────────────────────────────
 
-/** Logical pixels per screen pixel. Three is the smallest that still reads as
- *  deliberate pixel art rather than a low-resolution accident. */
-/** Logical pixels per screen pixel. Two, not four: the painted room has a
- *  far finer scale than the one this file used to draw, so the sprite grid
- *  has to get finer with it or every character stands a head above the
- *  furniture. */
-const SCALE = 2;
+/** Screen pixels per logical pixel. Two in a small room pane: the painted
+ *  room has a far finer scale than the one this file used to draw, so the
+ *  sprite grid has to get finer with it or every character stands a head
+ *  above the furniture.
+ *
+ *  And whatever the BOSS needs it to be. Owner (2026-10-06): "เวลาขยายจอ
+ *  โต๊ะทำงานสัดส่วน พวกเขาเล็กกว่าบอส", then "โต๊ะทำงานและตัวละคร cluade และ
+ *  อื่นๆ ต้องอิงบอส — สัดส่วนต้องตามกัน". The plate and the boss are drawn to
+ *  fill the room, but the desks and the people at them are pixel grids of a
+ *  fixed size — so a bigger window shrank them against him. The grid's pixel
+ *  is now sized FROM him (resize): an agent on its feet stands exactly as
+ *  tall as the boss, at every window size, and the desks follow the agents. */
+let SCALE = 2;
+
+/** An agent on its feet, in logical pixels (drawStanding: the crown of the
+ *  head 30 above the soles, plus the sole row). The one measurement the
+ *  grid is sized from. */
+const AGENT_STAND_H = 31;
 const TILE_W = 32, TILE_H = 16;     // isometric tile, 2:1 like every iso game
 
 /* The picture is built in two passes, and that split is what separates
@@ -82,12 +93,15 @@ ROOM_PLATE.src = 'art/room.webp';
  * Spacing the desks in plate units instead put them on top of each other in
  * a small room pane and miles apart in a large one.
  */
+// Two rows of two, meeting in a V at the rug's far corner. Sized against the
+// boss, the desks are big enough that a third in the left row ran into the
+// glass room; this layout was searched against the painted mask: no desk on
+// furniture, every spot the boss walks to still reachable, the front door open.
 const DESK_ROWS = [
-    // Along the rug's top-left edge, from the coffee bar up toward the racks.
-    { x: 0.335, y: 0.482, face: 'se', count: 3 },
-    // Under the glass room, along the rug's top-right edge.
-    // Kept clear of the window, where the boss goes to stand and think.
-    { x: 0.600, y: 0.458, face: 'sw', count: 1 },
+    // Along the rug's top-left edge, from the coffee bar toward the racks.
+    { x: 0.335, y: 0.490, face: 'se', count: 2 },
+    // Along its top-right edge, under the glass room toward the bookshelf.
+    { x: 0.550, y: 0.460, face: 'sw', count: 2 },
 ];
 /** Desk to desk along a row, in logical pixels: a desk's length and a gap. */
 const DESK_STEP = 34;
@@ -95,11 +109,11 @@ const DESK_STEP = 34;
 /** How many people the room has desks for. */
 const DESK_COUNT = DESK_ROWS.reduce((n, r) => n + r.count, 0);
 
-/** The engines are EQUIPMENT, not colleagues: they stand together on the
- *  little rug by the cabinets, out of the way of the desks. */
+/** The engines are EQUIPMENT, not colleagues: they stand with the server
+ *  racks, behind the point of the V where the two rows of desks meet. */
 const RIG_SPOTS = [
-    { x: 0.352, y: 0.318, r: 18, warm: false },
-    { x: 0.392, y: 0.292, r: 18, warm: false },
+    { x: 0.448, y: 0.262, r: 18, warm: false },
+    { x: 0.582, y: 0.282, r: 18, warm: false },
 ];
 
 /** How steep the plate's floor is: its rug edges drop ~0.43px per px across,
@@ -145,14 +159,21 @@ function iso(gx, gy) {
 
 function resize() {
     const r = cv.parentElement.getBoundingClientRect();
-    CW = Math.max(240, Math.round(r.width / SCALE));
-    CH = Math.max(150, Math.round(r.height / SCALE));
+    // How tall the plate will be on screen, and so how tall the boss is
+    // (BOSS_FILL of it). The grid pixel is whatever makes an agent on its
+    // feet that same height — fractional on purpose: rounding to whole
+    // pixels put the agents anywhere from 80% to 120% of him.
+    const iw = ROOM_PLATE.naturalWidth || 1448, ih = ROOM_PLATE.naturalHeight || 1086;
+    const plateH = ih * Math.min(r.width / iw, r.height / ih);
+    SCALE = Math.max(1, (plateH * BOSS_FILL) / AGENT_STAND_H);
+    CW = Math.max(160, Math.round(r.width / SCALE));
+    CH = Math.max(100, Math.round(r.height / SCALE));
     scene.width = CW;
     scene.height = CH;
     // The visible canvas carries the real pixels, so the lighting pass has
     // something better than the sprite grid to draw on.
-    cv.width = CW * SCALE;
-    cv.height = CH * SCALE;
+    cv.width = Math.round(CW * SCALE);
+    cv.height = Math.round(CH * SCALE);
     shadowLayer.width = cv.width;
     shadowLayer.height = cv.height;
     ctx.imageSmoothingEnabled = false;
@@ -384,7 +405,9 @@ function layoutDesks() {
         if (a.bridge) {
             const st = RIG_SPOTS[r++ % RIG_SPOTS.length];
             const pt = stationPt(st);
-            DESKS.set(a.id, { st, desk: pt, screen: { x: pt.x, y: pt.y - 16 } });
+            // The engine's name goes ABOVE it (.plate.is-rig hangs from its
+            // bottom edge): below, it lay across the desks in front.
+            DESKS.set(a.id, { st, desk: pt, screen: { x: pt.x, y: pt.y - 16 }, label: { x: pt.x, y: pt.y - 15 } });
             continue;
         }
         const g = DESK_GEO[p++ % DESK_GEO.length];

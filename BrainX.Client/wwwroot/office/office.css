@@ -362,6 +362,8 @@ body {
    instead of the accent pill a colleague's badge uses. Owner (2026-09-20):
    unity and unreal are programs, and the room must not imply they can answer. */
 .plate.is-rig .who { font-weight: 500; letter-spacing: 0.4px; opacity: 0.92; }
+/* An engine's name sits on top of it, not under it — the desks are in front. */
+.plate.is-rig { transform: translate(-50%, -100%); }
 .plate .badge.rig {
     background: rgba(242, 239, 230, 0.10);
     color: rgba(226, 223, 214, 0.82);
