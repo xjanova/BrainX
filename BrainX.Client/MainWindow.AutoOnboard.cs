@@ -184,8 +184,9 @@ public partial class MainWindow
         //    (2026-08-01 incident).
         //
         //    `brainx-mcp sync-runtime` mirrors the shipped server to
-        //    %LOCALAPPDATA%\BrainX\mcp — a sibling the updater never touches —
-        //    and prints nothing we need. If it fails for any reason we keep
+        //    McpRuntimePaths.StableDir — OUTSIDE the app root since 2026-10-10,
+        //    because Velopack kills every process under %LOCALAPPDATA%\BrainX
+        //    on each apply — and prints nothing we need. If it fails for any reason we keep
         //    the packaged path: the old behaviour is worse for updates but it
         //    WORKS, and losing brain access is the more expensive failure.
         static string RelocateOutOfCurrent(string packaged)
@@ -195,9 +196,7 @@ public partial class MainWindow
                 return packaged;
             try
             {
-                var stable = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "BrainX", "mcp", "brainx-mcp.exe");
+                var stable = BrainX.Core.Services.McpRuntimePaths.StableExe;
 
                 // Spawn ONLY when the mirror is missing or stale.
                 //
@@ -311,10 +310,15 @@ public partial class MainWindow
     /// could not be made (<see cref="ResolveBestMcpExe"/> falls back to the
     /// packaged path), repointing would rewrite the config to the same bad
     /// place on every launch — churn that fixes nothing.
+    ///
+    /// Since 2026-10-10 "inside current" is not enough: the old mirror at
+    /// %LOCALAPPDATA%\BrainX\mcp is NOT renamed by an update, but every process
+    /// running from it is killed, so a registration there drops the brain from
+    /// its agent on every release. Anything under the app root moves.
     /// </summary>
     private static bool PinnedInsideCurrent(string registeredExe, string bestExe) =>
-        BrainX.Core.Services.McpRuntimePaths.IsInsideManagedCurrent(registeredExe)
-        && !BrainX.Core.Services.McpRuntimePaths.IsInsideManagedCurrent(bestExe);
+        BrainX.Core.Services.McpRuntimePaths.IsInsideUpdaterRoot(registeredExe)
+        && !BrainX.Core.Services.McpRuntimePaths.IsInsideUpdaterRoot(bestExe);
 
     /// <summary>
     /// True when the registered exe is a strictly OLDER build than the best
@@ -745,7 +749,7 @@ public partial class MainWindow
     {
         // Nowhere better to point at — a mirror that could not be made would
         // just be the same bad path rewritten on every launch.
-        if (BrainX.Core.Services.McpRuntimePaths.IsInsideManagedCurrent(exe)) return false;
+        if (BrainX.Core.Services.McpRuntimePaths.IsInsideUpdaterRoot(exe)) return false;
         if (!File.Exists(exe)) return false;
         // The paths we are replacing sit inside TOML literal strings, and two
         // of the three are ALSO inside a double-quoted argument within one.
@@ -769,9 +773,11 @@ public partial class MainWindow
             // past the end of the string it is sitting in. MatchEvaluator
             // rather than a replacement string — a path is not a substitution
             // pattern and `$` in one must stay a `$`.
+            // Both old homes: Velopack's `current\mcp`, and the pre-2026-10-10
+            // mirror `BrainX\mcp`, which updates kill every process in.
             var healed = System.Text.RegularExpressions.Regex.Replace(
                 raw,
-                @"[A-Za-z]:[^'""\r\n]*?\\BrainX\\current\\mcp\\brainx-mcp\.exe",
+                @"[A-Za-z]:[^'""\r\n]*?\\BrainX\\(?:current\\)?mcp\\brainx-mcp\.exe",
                 _ => exe,
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             if (string.Equals(healed, raw, StringComparison.Ordinal)) return false;

@@ -220,10 +220,15 @@ if (Test-Path $installedMcp) {
     # running the code from before it, and nothing anywhere saying so -- the
     # same blindness recorded in "Stale-MCP detection was blind to the case it
     # existed for - version drift, not file timestamps".
-    $sideMcp = Join-Path $env:LOCALAPPDATA "BrainX\mcp"
-    if (Test-Path $sideMcp) {
-        $sideFailed = Deploy-Set $scBuild $sideMcp $appAssets $ts "client-side mcp"
-        $appFailed = @($appFailed) + @($sideFailed)
+    #
+    # Since 2026-10-10 the mirror lives OUTSIDE the app root (xjanova\brainx-mcp),
+    # because Velopack kills every process under %LOCALAPPDATA%\BrainX on each
+    # apply. Both are written while machines still carry the old one.
+    foreach ($side in @((Join-Path $env:LOCALAPPDATA "xjanova\brainx-mcp"), (Join-Path $env:LOCALAPPDATA "BrainX\mcp"))) {
+        if (Test-Path $side) {
+            $sideFailed = Deploy-Set $scBuild $side $appAssets $ts "client-side mcp ($side)"
+            $appFailed = @($appFailed) + @($sideFailed)
+        }
     }
 } else {
     Write-Output ""

@@ -8,8 +8,9 @@
 // three tries; it never removed the cause.
 //
 // The cause is a REGISTRATION. BrainX.Mcp/McpRuntime.cs already mirrors the
-// shipped server to %LOCALAPPDATA%\BrainX\mcp - a sibling the updater never
-// touches - and every registrar is supposed to hand agents that path. But each
+// shipped server to a stable directory (since 2026-10-10 OUTSIDE the app root,
+// see StableDir - the old %LOCALAPPDATA%\BrainX\mcp was killed on every update)
+// and every registrar is supposed to hand agents that path. But each
 // registrar only ever asked "is the registered build OUTDATED", and a config
 // pinned to current\mcp holds the SAME version as the mirror, so it read as
 // healthy forever (owner, 2026-09-21: "ถ้าเปิดโดย codex โปรแกรม brainx จะรีสตาร์ท
@@ -32,13 +33,52 @@ public static class McpRuntimePaths
     /// <summary>Velopack's live install directory - renamed aside on every apply.</summary>
     public static string ManagedCurrentDir => Path.Combine(LocalAppData, "BrainX", "current");
 
-    /// <summary>The directory agents are registered against: beside `current`,
-    /// never inside it, refreshed from the package by `sync-runtime`.</summary>
-    public static string StableDir => Path.Combine(LocalAppData, "BrainX", "mcp");
+    /// <summary>Velopack's app root, %LOCALAPPDATA%\BrainX.</summary>
+    public static string AppRoot => Path.Combine(LocalAppData, "BrainX");
+
+    /// <summary>
+    /// The directory agents are registered against: OUTSIDE the app root,
+    /// refreshed from the package by `sync-runtime`.
+    ///
+    /// It used to be %LOCALAPPDATA%\BrainX\mcp, "a sibling the updater never
+    /// touches". Velopack does not RENAME that folder, but Update.exe logs
+    /// "Checking for running processes in: …\Local\BrainX" and then kills every
+    /// process whose image is anywhere under the root. That includes every
+    /// brainx-mcp launcher in every Claude / Codex / CluadeX session, so every
+    /// release cut the brain out of all of them (14 kill rounds in one day on
+    /// 2026-10-09, failed applies included). It also meant the launcher's
+    /// hot-swap, which exists so an update never closes a client's pipe, never
+    /// got to run. The vendor folder's name deliberately does not start with
+    /// "BrainX", so it stays outside the root under a plain string-prefix test
+    /// as well as a path-component one.
+    /// </summary>
+    public static string StableDir => Path.Combine(LocalAppData, "xjanova", "brainx-mcp");
 
     /// <summary>The MCP binary at <see cref="StableDir"/>. May not exist yet on
     /// a machine whose first mirror has not run.</summary>
     public static string StableExe => Path.Combine(StableDir, "brainx-mcp.exe");
+
+    /// <summary>Where the mirror lived before 2026-10-10. Inside the app root,
+    /// so anything still registered here is killed on every update.</summary>
+    public static string LegacyStableDir => Path.Combine(AppRoot, "mcp");
+
+    /// <summary>
+    /// True when <paramref name="path"/> is anywhere under Velopack's app root
+    /// (%LOCALAPPDATA%\BrainX\, `current` and the legacy mirror included). A
+    /// process running from such a path is killed by every update, so no agent
+    /// should be pointed there. Recognises the root of the CURRENT user, and
+    /// any "\AppData\Local\BrainX\" path, so a config written by another
+    /// account or a test path is judged the same way.
+    /// </summary>
+    public static bool IsInsideUpdaterRoot(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        var n = path.Replace('/', '\\');
+        if (!n.EndsWith('\\')) n += '\\';
+        var root = AppRoot.TrimEnd('\\') + "\\";
+        return n.StartsWith(root, StringComparison.OrdinalIgnoreCase)
+            || n.Contains("\\AppData\\Local\\BrainX\\", StringComparison.OrdinalIgnoreCase);
+    }
 
     /// <summary>
     /// True when <paramref name="path"/> is a file or folder inside a

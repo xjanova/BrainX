@@ -23,6 +23,7 @@
 # and leave JSON-escaped, so they survive; string literals here must not.
 
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+[Console]::InputEncoding = New-Object System.Text.UTF8Encoding $false   # payload is UTF-8; PS 5.1 reads stdin in the ANSI codepage (cp874) and mangled every Thai prompt and path
 $ErrorActionPreference = 'SilentlyContinue'
 
 function Quit { exit 0 }   # every failure path is silence, never a block

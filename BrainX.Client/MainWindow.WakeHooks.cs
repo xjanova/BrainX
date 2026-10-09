@@ -66,7 +66,14 @@ public partial class MainWindow
             if (mcpExe is null || !File.Exists(mcpExe)) return false;
 
             var path = ClaudeSettingsPath();
-            if (File.Exists(path) && File.ReadAllText(path).Contains(BrainWakeHookVersionTag))
+            // Current = this version's tag AND this exe. The exe half is new
+            // (2026-10-10): the MCP moved out of %LOCALAPPDATA%\BrainX\mcp, where
+            // every update kills it, and a tag-only test would have kept these
+            // hooks pointing at the old copy forever. The path is compared in
+            // its JSON-escaped form because that is how settings.json holds it.
+            var exeInJson = Newtonsoft.Json.JsonConvert.ToString(mcpExe).Trim('"');
+            if (File.Exists(path) && File.ReadAllText(path) is var text
+                && text.Contains(BrainWakeHookVersionTag) && text.Contains(exeInJson, StringComparison.OrdinalIgnoreCase))
                 return false;
 
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);

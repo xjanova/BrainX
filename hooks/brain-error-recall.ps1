@@ -18,6 +18,7 @@
 $ErrorActionPreference = 'SilentlyContinue'
 function Quit { exit 0 }
 
+[Console]::InputEncoding = New-Object System.Text.UTF8Encoding $false   # payload is UTF-8; PS 5.1 reads stdin in the ANSI codepage (cp874) and mangled every Thai prompt and path
 try { $payload = [Console]::In.ReadToEnd() | ConvertFrom-Json } catch { Quit }
 if (-not $payload) { Quit }
 if ($payload.tool_name -notmatch '^(Bash|PowerShell)$') { Quit }

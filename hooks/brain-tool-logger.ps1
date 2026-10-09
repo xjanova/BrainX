@@ -38,6 +38,7 @@ function Resolve-Inner($resp) {
 }
 
 try {
+    [Console]::InputEncoding = New-Object System.Text.UTF8Encoding $false   # payload is UTF-8; PS 5.1 reads stdin in the ANSI codepage (cp874) and mangled every Thai prompt and path
     $payload = ([Console]::In.ReadToEnd() | ConvertFrom-Json)
     $tool = $payload.tool_name
     if (-not $tool) { exit 0 }
