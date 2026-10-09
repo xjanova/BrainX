@@ -247,6 +247,12 @@ internal static partial class Program
                     // was to withdraw the card — and raise it again on the next
                     // failure, every two hours, for as long as it lasted.
                     if ((o["id"]?.ToString() ?? "").StartsWith("budget-", StringComparison.Ordinal)) continue;
+                    // A notice about one board card (CoworkBoardNoticesAsync)
+                    // is about that card, which is already off the moving board
+                    // and never chased. Parking on it would freeze everything
+                    // else the agent has — its work label is the card id, and
+                    // with no label at all it would park the whole agent.
+                    if (CoworkIsBoardNotice(o["id"]?.ToString())) continue;
                     // Answered but not yet pumped: the owner has spoken.
                     if (!string.IsNullOrWhiteSpace(o["answer"]?.ToString())) continue;
 
@@ -291,6 +297,21 @@ internal static partial class Program
                 var question = o["question"]?.ToString() ?? "";
                 var id = o["id"]?.ToString() ?? Path.GetFileNameWithoutExtension(f);
                 var work = o["work"]?.ToString();
+
+                // About a board card: the answer is acted on the card itself
+                // (drop it, put it back to work, or leave it with the owner).
+                // Mailing it to the holder would be one more message for a run
+                // to read about work it cannot do — the loop the notice exists
+                // to stop — and the runner counters below are not this card's.
+                if (CoworkIsBoardNotice(id))
+                {
+                    CoworkAnswerBoardNotice(id, answer!);
+                    o["status"] = "answered";
+                    o["answeredUtc"] = DateTime.UtcNow.ToString("o");
+                    AtomicWriteJson(f, o);
+                    StampWake("decision-" + SanitizeAgentSlug(id));
+                    continue;
+                }
 
                 // A folder question is answered for good (see WorkDirHold):
                 // kept per label, so the next tick does not find the same

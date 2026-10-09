@@ -1358,8 +1358,15 @@ internal static partial class Program
 
             var done = await beta.Call("cowork_task", new JObject { ["action"] = "update", ["id"] = coverId, ["status"] = "done", ["note"] = "cover.png in the room" });
             Check("the assignee closes it with a result", done["task"]?["status"]?.ToString() == "done" && done["task"]?["note"]?.ToString() == "cover.png in the room", done.ToString());
+            // Owner (2026-10-09): "อันไหนค้างแล้ว ทำแล้ว เอาออกจากบอร์ดเลย".
             var board = await alpha.Call("cowork_task", new JObject { ["action"] = "list" });
-            Check("the board still lists what closed today", (board["board"] as JArray)?.Any(t => t["id"]?.ToString() == coverId && t["status"]?.ToString() == "done") == true, board.ToString());
+            Check("finished work is off the board the moment it closes", (board["board"] as JArray)?.Any(t => t["id"]?.ToString() == coverId) == false
+                  && board["finished"] == null, board.ToString());
+            Check("…while unfinished work is still on it", (board["board"] as JArray)?.Any(t => t["id"]?.ToString() == openId) == true, board.ToString());
+            var history = await alpha.Call("cowork_task", new JObject { ["action"] = "list", ["finished"] = true });
+            Check("…and is there when asked for with finished:true",
+                  (history["finished"] as JArray)?.Any(t => t["id"]?.ToString() == coverId && t["status"]?.ToString() == "done") == true
+                  && (history["board"] as JArray)?.Any(t => t["id"]?.ToString() == coverId) == false, history.ToString());
             Check("every board change was also said in the room",
                   Directory.GetFiles(room, "*.json").Select(f => JObject.Parse(File.ReadAllText(f)))
                            .Count(o => o["topic"]?.ToString() == "task" && o["task"]?.ToString() == coverId) >= 3);

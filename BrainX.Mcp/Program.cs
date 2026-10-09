@@ -1122,7 +1122,8 @@ internal static partial class Program
             Tool("cowork_task",
                 "THE BOARD in the cowork room — who is doing what. The owner watches it to see which agent took " +
                 "which part of their order, so every piece of work you take or hand over belongs on it, not only " +
-                "in the chat. action:'list' shows it. action:'add' {title, assignee?, detail?, skill?} puts a piece " +
+                "in the chat. action:'list' shows what is unfinished (finished:true adds the latest done/dropped " +
+                "cards); a blocked row's `waits` says what it waits on. action:'add' {title, assignee?, detail?, skill?} puts a piece " +
                 "on it: assignee 'me' = you are taking it; another agent's name = you are handing it to them (they " +
                 "are told by name — use this when the piece needs a skill you do not have); no assignee = open for " +
                 "whoever fits best. action:'claim' {id} takes an open piece — first one wins, and a piece somebody " +
@@ -1143,7 +1144,8 @@ internal static partial class Program
                         ["skill"] = new JObject { ["type"] = "string", ["description"] = "add: what the piece needs, e.g. 'image generation' — helps the right agent claim it" },
                         ["status"] = new JObject { ["type"] = "string", ["description"] = "update: open | assigned | doing | blocked | done | dropped" },
                         ["note"] = new JObject { ["type"] = "string", ["description"] = "update: the result when done, the reason when blocked, or a progress line" },
-                        ["work"] = new JObject { ["type"] = "string", ["description"] = "add: which job/workstream this belongs to" }
+                        ["work"] = new JObject { ["type"] = "string", ["description"] = "add: which job/workstream this belongs to" },
+                        ["finished"] = new JObject { ["type"] = "boolean", ["description"] = "list: also return the latest finished (done/dropped) cards under `finished` — they are not on the board" }
                     }
                 }),
             Tool("cowork_say",

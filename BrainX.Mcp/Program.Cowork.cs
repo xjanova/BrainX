@@ -337,7 +337,7 @@ internal static partial class Program
             ["joined"] = me,
             ["room"] = CoworkMembersSnapshot(),
             ["resting"] = CoworkResting(),
-            ["board"] = CoworkBoard(includeDone: false),
+            ["board"] = CoworkBoard(),
             ["recent"] = recent,
             ["hint"] = "You are in the room. The owner's lines and other members' messages reach you as a "
                      + "`cowork` notice on your next tool response — read with cowork_read, answer with "
@@ -912,7 +912,7 @@ internal static partial class Program
             ["resting"] = CoworkResting(),
             // Who is on what, next to what was said: an order is only half
             // read by an agent that cannot see who already took which part.
-            ["board"] = CoworkBoard(includeDone: false),
+            ["board"] = CoworkBoard(),
             ["hint"] = member == null
                 ? "You are NOT in the room — you were shown the transcript, but nothing said here will reach you. cowork_join to take a seat."
                 : messages.Count == 0
@@ -1997,8 +1997,11 @@ internal static partial class Program
 
     private static readonly string[] CoworkTaskStatuses = { "open", "assigned", "doing", "blocked", "done", "dropped" };
 
-    /// <summary>How long a finished task stays on the board before it is history.</summary>
-    private static readonly TimeSpan CoworkTaskDoneVisible = TimeSpan.FromHours(24);
+    /// <summary>How many finished cards <c>cowork_task list {finished:true}</c>
+    /// hands back, newest first. Finished work is history, not board: owner
+    /// (2026-10-09) "อันไหนค้างแล้ว ทำแล้ว เอาออกจากบอร์ดเลย" — the day-long
+    /// tail of done cards is what made the board read as ever-growing.</summary>
+    private const int CoworkFinishedListed = 50;
 
     private static readonly Regex CoworkTaskIdPattern = new("^t-[0-9a-f]{6}$", RegexOptions.CultureInvariant);
 
@@ -2015,35 +2018,57 @@ internal static partial class Program
         return list;
     }
 
-    /// <summary>The board as an agent should read it: what is waiting, who is
-    /// on what, and — with <paramref name="includeDone"/> — what closed today.</summary>
-    private static JArray CoworkBoard(bool includeDone)
+    /// <summary>The board as an agent should read it: what is unfinished and
+    /// who is on it. Moving work first, then what waits — each blocked row
+    /// says on WHAT (CoworkTriage), so a run can tell "waits on t-x" from
+    /// "waits on the owner's Chrome" without retrying either.</summary>
+    private static JArray CoworkBoard()
     {
-        var cutoff = DateTime.UtcNow - CoworkTaskDoneVisible;
-        var order = new[] { "blocked", "assigned", "open", "doing", "done", "dropped" };
-        var rows = CoworkTasks()
-            .Where(t => CoworkTaskIsActive(t) || (includeDone && (CoworkUtc(t["updatedUtc"]) ?? DateTime.MinValue) > cutoff))
-            .OrderBy(t => Array.IndexOf(order, t["status"]?.ToString() ?? "open"))
-            .ThenBy(t => CoworkUtc(t["createdUtc"]) ?? DateTime.MinValue)
-            .Select(t =>
+        var all = CoworkTasks();
+        var byId = CoworkTriage.ById(all);
+        var now = DateTime.UtcNow;
+        var order = new[] { "doing", "assigned", "open", "blocked" };
+        var rows = all
+            .Where(CoworkTaskIsActive)
+            .Select(t => (Task: t, Wait: CoworkTriage.Classify(t, byId, now)))
+            .OrderBy(x => x.Wait == null ? 0 : 1)
+            .ThenBy(x => Array.IndexOf(order, x.Task["status"]?.ToString() ?? "open"))
+            .ThenBy(x => CoworkUtc(x.Task["createdUtc"]) ?? DateTime.MinValue)
+            .Select(x =>
             {
-                var row = new JObject
-                {
-                    ["id"] = t["id"],
-                    ["title"] = t["title"],
-                    ["status"] = t["status"],
-                    ["assignee"] = t["assignee"],
-                    ["createdBy"] = t["createdBy"],
-                    ["updatedUtc"] = t["updatedUtc"],
-                };
-                if (t["skill"] != null) row["skill"] = t["skill"];
-                if (t["note"] != null) row["note"] = t["note"];
-                // "owner" = paused from the room's work window: hands off until resumed.
-                if (t["paused"] is JObject p) row["paused"] = p["reason"];
-                if (t["droppedBy"] != null) row["droppedBy"] = t["droppedBy"];
+                var row = CoworkBoardRow(x.Task);
+                if (x.Wait != null) row["waits"] = CoworkTriage.ToJson(x.Wait);
                 return row;
             });
         return new JArray(rows);
+    }
+
+    /// <summary>Finished cards, newest first — only when asked for. They are
+    /// history: the room's history panel and the brain hold them.</summary>
+    private static JArray CoworkFinishedBoard() =>
+        new(CoworkTasks()
+            .Where(t => !CoworkTaskIsActive(t))
+            .OrderByDescending(t => CoworkUtc(t["updatedUtc"]) ?? DateTime.MinValue)
+            .Take(CoworkFinishedListed)
+            .Select(CoworkBoardRow));
+
+    private static JObject CoworkBoardRow(JObject t)
+    {
+        var row = new JObject
+        {
+            ["id"] = t["id"],
+            ["title"] = t["title"],
+            ["status"] = t["status"],
+            ["assignee"] = t["assignee"],
+            ["createdBy"] = t["createdBy"],
+            ["updatedUtc"] = t["updatedUtc"],
+        };
+        if (t["skill"] != null) row["skill"] = t["skill"];
+        if (t["note"] != null) row["note"] = t["note"];
+        // "owner" = paused from the room's work window: hands off until resumed.
+        if (t["paused"] is JObject p) row["paused"] = p["reason"];
+        if (t["droppedBy"] != null) row["droppedBy"] = t["droppedBy"];
+        return row;
     }
 
     private static JToken CoworkTask(JObject args)
@@ -2053,14 +2078,27 @@ internal static partial class Program
         var action = (args["action"]?.ToString() ?? "list").Trim().ToLowerInvariant();
 
         if (action == "list")
-            return new JObject
+        {
+            // Unfinished work only. Done and dropped cards used to ride along
+            // for a day (8 of the 16 rows on 2026-10-09), and an agent reading
+            // "16 on the board" planned around work that was already over.
+            // `finished:true` is the explicit way to look back.
+            var list = new JObject
             {
-                ["board"] = CoworkBoard(includeDone: true),
+                ["board"] = CoworkBoard(),
                 ["room"] = CoworkMembersSnapshot(),
-                ["hint"] = "Active first. `assigned` = somebody named, not yet taken — the assignee claims it. "
-                         + "`open` = nobody's yet: claim it if it fits what you are good at and are not already "
-                         + "loaded with (see `doing` on each member).",
+                ["hint"] = "Unfinished work only — moving work first, then what waits. `assigned` = somebody named, not "
+                         + "yet taken — the assignee claims it. `open` = nobody's yet: claim it if it fits what you are "
+                         + "good at and are not already loaded with (see `doing` on each member). A row with `waits` is "
+                         + "not moving: kind 'card' waits on the cards in `on` (the broker reopens it when they close), "
+                         + "'quota' is paused until the reset, 'held' is paused by the owner, 'owner' needs the owner's desktop, login, phone or decision "
+                         + "— a headless run cannot do it, so do not retry it. Finished cards: cowork_task list {finished:true}.",
             };
+            // A boolean, or the word — clients send both.
+            if (string.Equals(args["finished"]?.ToString(), "true", StringComparison.OrdinalIgnoreCase))
+                list["finished"] = CoworkFinishedBoard();
+            return list;
+        }
 
         // A dark room takes no new work, for the same reason nothing can be
         // said in it: the stop only works if every door is shut.

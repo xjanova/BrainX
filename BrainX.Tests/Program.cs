@@ -68,6 +68,7 @@ internal static partial class Program
         RegisterRunnerModelChecks(sshChecks);
         RegisterAssistantChecks(sshChecks);
         RegisterCoworkSnapshotChecks(sshChecks);
+        RegisterCoworkTriageChecks(sshChecks);
         RegisterUpdateHolderChecks(sshChecks);
         RegisterIndexerChecks(sshChecks);
         RegisterAvatarChecks(sshChecks);

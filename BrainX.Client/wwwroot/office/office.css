@@ -786,13 +786,20 @@ body {
     border: none;
 }
 #board-list .call:disabled { opacity: .5; cursor: default; }
-#board-list .done-toggle {
+/* Waiting work, folded under who can move it (renderBoard). The main list
+   above is only what is moving. */
+#board-list .grp-toggle {
     font-size: 9.5px;
     color: var(--ink-faint);
     cursor: pointer;
     padding: 2px 6px;
+    border-radius: 4px;
 }
-#board-list .done-toggle:hover { color: var(--ink-dim); }
+#board-list .grp-toggle:hover, #board-list .grp-toggle:focus-visible { color: var(--ink-dim); background: rgba(26, 30, 52, 0.55); }
+#board-list .grp-toggle.grp-owner { color: var(--warn); }
+#board-list .board-empty { font-size: 9.5px; color: var(--ink-faint); padding: 2px 6px; }
+#board-list .w-owner { border-left-color: var(--warn); background: rgba(48, 34, 14, 0.5); }
+#board-list .w-queue { border-left-color: rgba(242, 239, 230, 0.25); background: rgba(10, 12, 26, 0.45); opacity: 0.85; }
 
 /* The transcript. THE scrolling box in this column — min-height:0 is what
    lets a flex child shrink below its content and actually scroll. */

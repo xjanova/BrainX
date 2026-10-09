@@ -198,8 +198,12 @@ public partial class MainWindow
             try { o = JObject.Parse(File.ReadAllText(f)); } catch { continue; }
 
             var id = Path.GetFileNameWithoutExtension(f);
-            // Probe identities that connected once months ago are not staff.
-            // Everything else earns a desk, including agents that are offline:
+            // Staff only — the bus card's allowlist. A 14-day window alone let a
+            // smoke run that announced itself as "test" take a desk and an HP
+            // bar for days (owner, 2026-10-09: "test คืออะไร ทำไมไม่นำออก").
+            if (!BusWellKnownAgents.Contains(id, StringComparer.OrdinalIgnoreCase)) continue;
+            // Staff who have not connected in a fortnight are not staff either.
+            // Everyone else earns a desk, including agents that are offline:
             // an empty chair is information.
             var seen = DateTime.TryParse(o["lastSeenUtc"]?.ToString(), null,
                 System.Globalization.DateTimeStyles.AdjustToUniversal |
@@ -715,7 +719,8 @@ public partial class MainWindow
             var presence = Path.Combine(CoworkBusRoot, "presence");
             if (Directory.Exists(presence))
                 foreach (var f in Directory.GetFiles(presence, "*.json"))
-                    if ((DateTime.UtcNow - File.GetLastWriteTimeUtc(f)).TotalDays <= 14)
+                    if ((DateTime.UtcNow - File.GetLastWriteTimeUtc(f)).TotalDays <= 14
+                        && BusWellKnownAgents.Contains(Path.GetFileNameWithoutExtension(f), StringComparer.OrdinalIgnoreCase))
                         Add(Path.GetFileNameWithoutExtension(f));
 
             var skills = Path.Combine(CoworkBusRoot, "cowork", "skills.json");
@@ -736,9 +741,16 @@ public partial class MainWindow
     }
 
     /// <summary>
-    /// The board: every task still open or in progress, and what closed in the
-    /// last day. Read straight from cowork/tasks/ — the agents write those files
-    /// through cowork_task, and this window only draws them.
+    /// The board: every task not finished yet — and nothing else. Read straight
+    /// from cowork/tasks/ — the agents write those files through cowork_task,
+    /// and this window only draws them.
+    ///
+    /// Owner (2026-10-09): "อันไหนค้างแล้ว ทำแล้ว เอาออกจากบอร์ดเลย". Done and
+    /// dropped work used to stay a day under a "done" toggle; it is history
+    /// now, and the history panel (MainWindow.CoworkHistory) is where it lives.
+    /// Each unfinished row carries `wait` — what it is waiting on, sorted the
+    /// same way the broker sorts it (CoworkTriage) — so the page can keep the
+    /// main list to work that is moving and fold the rest by who can move it.
     /// </summary>
     private JArray CoworkTasks()
     {
@@ -746,21 +758,30 @@ public partial class MainWindow
         var dir = Path.Combine(CoworkBusRoot, "cowork", "tasks");
         if (!Directory.Exists(dir)) return arr;
 
-        var rows = new List<(int Order, DateTime Created, JObject Row)>();
-        var order = new[] { "blocked", "assigned", "open", "doing", "done", "dropped" };
+        // Every card, finished ones included: "waits on t-x" is only a wait
+        // while t-x is unfinished, and only its file says so.
+        var all = new List<(JObject Card, DateTime Updated)>();
         foreach (var f in Directory.GetFiles(dir, "*.json"))
         {
             JObject o;
             try { o = JObject.Parse(File.ReadAllText(f)); } catch { continue; }
+            if (o["id"] == null) o["id"] = Path.GetFileNameWithoutExtension(f);
+            all.Add((o, CoworkUtc(o["updatedUtc"]) ?? File.GetLastWriteTimeUtc(f)));
+        }
+        var byId = BrainX.Core.Services.CoworkTriage.ById(all.Select(a => a.Card));
+        var now = DateTime.UtcNow;
 
+        var rows = new List<(int Order, DateTime Created, JObject Row)>();
+        var order = new[] { "doing", "assigned", "open", "blocked" };
+        foreach (var (o, updated) in all)
+        {
             var status = o["status"]?.ToString() ?? "open";
-            var updated = CoworkUtc(o["updatedUtc"]) ?? File.GetLastWriteTimeUtc(f);
-            var finished = status is "done" or "dropped";
-            if (finished && (DateTime.UtcNow - updated).TotalHours > 24) continue;
+            if (BrainX.Core.Services.CoworkTriage.IsFinished(status)) continue;
+            var wait = BrainX.Core.Services.CoworkTriage.Classify(o, byId, now);
 
-            rows.Add((Array.IndexOf(order, status), CoworkUtc(o["createdUtc"]) ?? updated, new JObject
+            var row = new JObject
             {
-                ["id"] = o["id"]?.ToString() ?? Path.GetFileNameWithoutExtension(f),
+                ["id"] = o["id"]!.ToString(),
                 ["title"] = Trim(o["title"]?.ToString() ?? "", 200),
                 ["status"] = status,
                 ["assignee"] = o["assignee"]?.Type == JTokenType.String ? o["assignee"]!.ToString() : "",
@@ -769,8 +790,9 @@ public partial class MainWindow
                 ["at"] = new DateTimeOffset(DateTime.SpecifyKind(updated, DateTimeKind.Utc)).ToUnixTimeMilliseconds(),
                 // "owner" = paused from the work window, "quota" = out of quota.
                 ["paused"] = (o["paused"] as JObject)?["reason"]?.ToString() ?? "",
-                ["droppedBy"] = o["droppedBy"]?.ToString() ?? "",
-            }));
+            };
+            if (wait != null) row["wait"] = BrainX.Core.Services.CoworkTriage.ToJson(wait);
+            rows.Add(((wait == null ? 0 : 10) + Array.IndexOf(order, status), CoworkUtc(o["createdUtc"]) ?? updated, row));
         }
         foreach (var r in rows.OrderBy(r => r.Order).ThenBy(r => r.Created)) arr.Add(r.Row);
         return arr;

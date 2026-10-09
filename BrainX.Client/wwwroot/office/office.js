@@ -247,7 +247,7 @@ function label(name) {
 let AGENTS = [];        // [{id,label,state,lastTool,pending,spawned}]
 let MESSAGES = [];      // newest last
 let DECISIONS = [];
-let TASKS = [];         // the board: [{id,title,status,assignee,createdBy,note,at,paused,droppedBy}]
+let TASKS = [];         // the board, unfinished only: [{id,title,status,assignee,createdBy,note,at,paused,wait?:{kind,th,needs?,on?,stale?}}]
 let RUNS = [];          // runs the boss started, still going: [{agent,since,model,effort}]
 let QUOTA = {};         // agent → {left (0–100, or null = unknown), window, resets, source}
 let ROSTER = [];        // everyone with a desk, lit room or not — who a line can be for
@@ -3005,10 +3005,40 @@ const TASK_STATE = {
 };
 /** A paused task is "blocked" on disk; to the owner it is theirs, on hold. */
 const TASK_PAUSED = { owner: { ico: '⏸', th: 'บอสพักไว้' }, quota: { ico: '⏸', th: 'พัก — หมดโควตา' } };
+/** What a waiting card waits on (`wait.kind`, sorted by the host with the
+ *  broker's own CoworkTriage). */
+const TASK_WAIT = {
+    owner: { ico: '🙋', th: 'รอบอส' },
+    card: { ico: '⏳', th: 'รองานอื่น' },
+    ready: { ico: '⏳', th: 'งานที่รอเสร็จแล้ว' },
+    other: { ico: '⛔', th: 'ติดอยู่' },
+};
 function taskState(t) {
-    return (t.paused && TASK_PAUSED[t.paused]) || TASK_STATE[t.status] || TASK_STATE.open;
+    return (t.paused && TASK_PAUSED[t.paused]) || (t.wait && TASK_WAIT[t.wait.kind]) || TASK_STATE[t.status] || TASK_STATE.open;
 }
-let BOARD_SHOW_DONE = false;
+
+// Owner (2026-10-09): "อันไหนค้างแล้ว ทำแล้ว เอาออกจากบอร์ดเลย". The board's
+// main list is work that is MOVING. Finished work is not sent at all (the
+// history panel keeps it); what waits is folded under who can move it — the
+// owner (their desktop, a login, a phone, a decision, or their own pause),
+// another card or the quota (it moves by itself when that clears), or nothing
+// the board can name. Eight blocked cards in the one list read as eight jobs
+// in progress, which is how "งานค้างยิ่งเยอะขึ้นเรื่อยๆ" looked from the chair.
+const WAIT_GROUPS = [
+    { key: 'owner', kinds: ['owner', 'held'], ico: '🙋', th: 'รอบอส / รอเครื่องของบอส', short: 'รอบอส' },
+    { key: 'queue', kinds: ['card', 'ready', 'quota'], ico: '⏳', th: 'รองานอื่น / รอโควต้า', short: 'รองานอื่น' },
+    { key: 'stuck', kinds: ['other'], ico: '⛔', th: 'ติดอยู่ — ยังไม่รู้ว่ารออะไร', short: 'ติด' },
+];
+/** The folded group a card belongs in, or null when it is moving. */
+function waitGroup(t) {
+    if (t.wait) return WAIT_GROUPS.find(g => g.kinds.includes(t.wait.kind)) || WAIT_GROUPS[2];
+    if (t.paused === 'owner') return WAIT_GROUPS[0];
+    if (t.paused === 'quota') return WAIT_GROUPS[1];
+    return t.status === 'blocked' ? WAIT_GROUPS[2] : null;
+}
+/** Which folded groups the owner has opened. Closed by default: the main
+ *  list is the point. */
+const BOARD_OPEN = new Set();
 /** task id → when the owner last pressed "call" for it. The board is rebuilt
  *  every poll, and a button that comes back pressable two seconds later gets
  *  pressed twice — two sealed orders, two spawns for one piece of work. */
@@ -3029,15 +3059,18 @@ function ago(ms) {
     return Math.round(s / 86400) + ' วัน';
 }
 
-/** "กำลังทำ 2 · รอคนรับ 1 · ติด 1 · พักไว้ 2" — paused work is not "stuck". */
+/** "กำลังทำ 2 · รอคนรับ 1 · รอบอส 3 · รองานอื่น 2 · ติด 1" — moving work
+ *  first, then each folded group by who can move it. */
 function workSummary(active) {
-    const paused = active.filter(t => t.paused === 'owner' || t.paused === 'quota').length;
-    const n = s => active.filter(t => t.status === s && !(t.paused === 'owner' || t.paused === 'quota')).length;
+    const moving = active.filter(t => !waitGroup(t));
+    const n = s => moving.filter(t => t.status === s).length;
     const parts = [];
     if (n('doing')) parts.push(`กำลังทำ ${n('doing')}`);
     if (n('assigned') + n('open')) parts.push(`รอคนรับ ${n('assigned') + n('open')}`);
-    if (n('blocked')) parts.push(`ติด ${n('blocked')}`);
-    if (paused) parts.push(`พักไว้ ${paused}`);
+    for (const g of WAIT_GROUPS) {
+        const c = active.filter(t => waitGroup(t) === g).length;
+        if (c) parts.push(`${g.short} ${c}`);
+    }
     return parts.join(' · ');
 }
 
@@ -3046,43 +3079,57 @@ function renderBoard() {
     const list = document.getElementById('board-list');
     if (!box || !list) return;
 
+    // Unfinished only — the host sends nothing else; the filter stays so an
+    // older host's day of finished cards cannot creep back onto the board.
     const active = TASKS.filter(t => !['done', 'dropped'].includes(t.status));
-    const closed = TASKS.filter(t => ['done', 'dropped'].includes(t.status));
-    box.hidden = TASKS.length === 0;
-    if (!TASKS.length) return;
+    box.hidden = active.length === 0;
+    if (!active.length) { list.dataset.html = ''; list.innerHTML = ''; return; }
 
     document.getElementById('board-sum').textContent = workSummary(active) || 'ไม่มีงานค้าง';
 
     const row = t => {
         const st = taskState(t);
         const who = t.assignee || '';
+        const grp = waitGroup(t);
         // A piece that is waiting on somebody who is not in the room gets a way
         // to bring them in. Without it the board could only say "stuck". Not
         // one the owner paused: calling somebody to work they were told to
         // leave is the opposite of the pause — resuming is in the work window.
+        // Nor one waiting on another card, the quota or the owner's desktop:
+        // calling its holder starts a run that can only find that out again.
         const calledAt = CALLED.get(t.id) || 0;
         const held = Date.now() - calledAt < CALL_HOLD_MS;
-        const call = who && ['assigned', 'blocked', 'doing'].includes(t.status) && t.paused !== 'owner' && !presentInRoom(who)
+        const callable = !grp ? ['assigned', 'doing'].includes(t.status) : grp.key === 'stuck' && t.paused !== 'owner';
+        const call = who && callable && !presentInRoom(who)
             ? `<button class="call" data-agent="${esc(who)}" data-id="${esc(t.id)}" data-title="${esc(t.title)}"`
               + (held ? ' disabled' : '')
               + ` title="${esc(who)} ไม่อยู่ในห้อง — ส่งคำสั่งเรียกเข้ามารับงานนี้">${held ? 'เรียกแล้ว' : 'เรียก'}</button>`
             : '';
-        return `<li class="task st-${esc(t.paused === 'owner' ? 'paused' : t.status)}" data-id="${esc(t.id)}" tabindex="0"`
-            + ` title="${esc(t.id)} · ${esc(st.th)} · สร้างโดย ${esc(t.createdBy || '?')} — คลิกเพื่อพัก / ทำต่อ / เลิก / โฟกัส">`
+        // A waiting row says on WHAT before anything else; the holder's own
+        // note follows it.
+        const why = t.wait ? (t.wait.stale ? '⌛ ค้างเกิน 2 วัน · ' : '') + t.wait.th : '';
+        const sub = [why, t.note].filter(Boolean).join(' — ');
+        return `<li class="task st-${esc(t.paused === 'owner' ? 'paused' : t.status)}${grp ? ' w-' + grp.key : ''}" data-id="${esc(t.id)}" tabindex="0"`
+            + ` title="${esc(t.id)} · ${esc(t.wait ? t.wait.th : st.th)} · สร้างโดย ${esc(t.createdBy || '?')} — คลิกเพื่อพัก / ทำต่อ / เลิก / โฟกัส">`
             + `<span class="ico">${st.ico}</span>`
-            + `<span class="tt">${esc(t.title)}${t.note ? `<em>${esc(t.note)}</em>` : ''}</span>`
+            + `<span class="tt">${esc(t.title)}${sub ? `<em>${esc(sub)}</em>` : ''}</span>`
             + `<span class="who" style="--pc:${who ? agentColor(who) : 'var(--ink-faint)'}">${esc(who ? label(who) : 'ว่าง')}</span>`
             + `<span class="age">${esc(ago(t.at))}</span>`
             + call
             + `</li>`;
     };
 
-    const html = active.map(row).join('')
-        + (closed.length
-            ? `<li class="done-toggle" role="button" tabindex="0" aria-expanded="${BOARD_SHOW_DONE}">`
-              + `${BOARD_SHOW_DONE ? '▾' : '▸'} เสร็จ/ยกเลิกใน 24 ชม. (${closed.length})</li>`
-              + (BOARD_SHOW_DONE ? closed.map(row).join('') : '')
-            : '');
+    const moving = active.filter(t => !waitGroup(t));
+    let html = moving.length ? moving.map(row).join('') : '<li class="board-empty">ไม่มีงานที่กำลังเดินอยู่ตอนนี้</li>';
+    for (const g of WAIT_GROUPS) {
+        const items = active.filter(t => waitGroup(t) === g);
+        if (!items.length) continue;
+        const open = BOARD_OPEN.has(g.key);
+        const stale = items.filter(t => t.wait && t.wait.stale).length;
+        html += `<li class="grp-toggle grp-${g.key}" role="button" tabindex="0" data-grp="${g.key}" aria-expanded="${open}">`
+              + `${open ? '▾' : '▸'} ${g.ico} ${esc(g.th)} (${items.length})${stale ? ` · ค้างเกิน 2 วัน ${stale}` : ''}</li>`
+              + (open ? items.map(row).join('') : '');
+    }
     if (html === list.dataset.html) return;
     list.dataset.html = html;
     list.innerHTML = html;
@@ -3100,20 +3147,26 @@ document.getElementById('board-list')?.addEventListener('click', (e) => {
         renderBoard();
         return;
     }
-    if (e.target.closest('.done-toggle')) { BOARD_SHOW_DONE = !BOARD_SHOW_DONE; renderBoard(); return; }
+    const grp = e.target.closest('.grp-toggle');
+    if (grp) { toggleBoardGroup(grp.dataset.grp); return; }
     // Any other press on a piece of work opens the work window at it — the
     // board is where the owner looks, so it is where the controls are reached.
     const row = e.target.closest('.task[data-id]');
     if (row) openWorkPanel(row.dataset.id);
 });
+function toggleBoardGroup(key) {
+    if (BOARD_OPEN.has(key)) BOARD_OPEN.delete(key); else BOARD_OPEN.add(key);
+    renderBoard();
+}
 document.getElementById('board-list')?.addEventListener('keydown', (e) => {
     const row = e.target.closest('.task[data-id]');
     if (row && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openWorkPanel(row.dataset.id); return; }
-    if ((e.key === 'Enter' || e.key === ' ') && e.target.closest('.done-toggle')) {
+    const grp = e.target.closest('.grp-toggle');
+    if (grp && (e.key === 'Enter' || e.key === ' ')) {
         e.preventDefault();
-        BOARD_SHOW_DONE = !BOARD_SHOW_DONE;
-        renderBoard();
-        document.querySelector('#board-list .done-toggle')?.focus();
+        const key = grp.dataset.grp;
+        toggleBoardGroup(key);
+        document.querySelector(`#board-list .grp-toggle[data-grp="${CSS.escape(key)}"]`)?.focus();
     }
 });
 
@@ -3652,8 +3705,11 @@ function renderWork() {
         `<li class="wrun"><span class="who" style="--pc:${agentColor(a.id)}">${esc(label(a.id))}</span>`
         + `<span class="what">อยู่ในห้อง${a.state === 'working' ? ' · กำลังทำงาน' : ''} — session ที่เปิดเอง หยุดจากที่นี่ไม่ได้ แต่จะได้ยินคำสั่งพัก/เลิก</span></li>`));
 
-    // Work in hand first, then what waits, then what is on hold.
-    const rank = t => isPaused(t) ? 4 : t.status === 'doing' ? 0 : ['assigned', 'open'].includes(t.status) ? 1 : 2;
+    // Work in hand first, then what waits for somebody to take it, then what
+    // waits on something else — the owner's group last but the owner's pause.
+    const rank = t => isPaused(t) ? 6
+        : waitGroup(t) ? 3 + WAIT_GROUPS.indexOf(waitGroup(t))
+        : t.status === 'doing' ? 0 : ['assigned', 'open'].includes(t.status) ? 1 : 2;
     const rows = active.slice().sort((a, b) => rank(a) - rank(b)).map(t => {
         const st = taskState(t);
         const who = t.assignee || '';
@@ -3674,7 +3730,7 @@ function renderWork() {
             + `<div class="wt-top"><span class="ico">${st.ico}</span><span class="tt">${esc(t.title)}</span>`
             + `<span class="who" style="--pc:${who ? agentColor(who) : 'var(--ink-faint)'}">${esc(who ? label(who) : 'ว่าง')}</span>`
             + `<span class="age">${esc(ago(t.at))}</span></div>`
-            + `<div class="wt-sub">${esc(t.id)} · ${esc(st.th)}${t.note ? ` — ${esc(t.note)}` : ''}</div>`
+            + `<div class="wt-sub">${esc(t.id)} · ${esc(t.wait ? (t.wait.stale ? '⌛ ค้างเกิน 2 วัน · ' : '') + t.wait.th : st.th)}${t.note ? ` — ${esc(t.note)}` : ''}</div>`
             + `<div class="wt-act">${acts}</div></li>`;
     });
 
@@ -3760,7 +3816,7 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeWorkP
 //
 // Owner (2026-10-06): "เรียกย้อนดู History งาน แยกเป็นโปรเจค ตั้งแต่ต้นจนจบได้
 // ลบทิ้งได้ (ไม่ใช่ลบจากสมองนะ)". The host reads every task and every line
-// that names one (MainWindow.CoworkHistory) — the board only keeps a day.
+// that names one (MainWindow.CoworkHistory) — the board keeps only what is unfinished.
 // Deleting asks the host to move finished work into the room's trash; the
 // notes the agents wrote into the brain are never part of it.
 
@@ -4472,17 +4528,28 @@ function demo() {
     // The board, in every state it can be in. gemini is offline, so the piece
     // waiting on it shows the button that calls it in.
     for (const a of agents) if (['claude', 'codex', 'cluadex'].includes(a.id)) a.inRoom = true;
+    // Unfinished only, as the host sends it: moving work in the main list, the
+    // rest folded under who can move it.
     const tasks = [
         { id: 't-9d3310', title: 'ต่อ payout wallet', status: 'blocked', assignee: 'claude', createdBy: 'claude',
-          note: 'รอบอสยืนยัน address กระเป๋า', at: now - 50 * 60e3 },
+          note: 'รอบอสยืนยัน address กระเป๋า', at: now - 50 * 60e3,
+          wait: { kind: 'owner', th: 'ต้องการข้อมูลหรือการตัดสินใจจากบอส', needs: ['owner'] } },
+        { id: 't-e45c4c', title: 'ภาพนิ่ง→อนิเมชันท่าต่อสู้ที่ Digen', status: 'blocked', assignee: 'claude', createdBy: 'claude',
+          note: 'Headless run: no Claude-in-Chrome', at: now - 3 * 86400e3,
+          wait: { kind: 'owner', th: 'ต้องใช้ Chrome ที่ล็อกอินไว้บนเครื่องบอส (เช่น Digen / MiniMax)', needs: ['browser'], stale: true } },
+        { id: 't-22a9e5', title: 'แปลง green-screen video เป็น sprite atlas', status: 'blocked', assignee: 'claude', createdBy: 'codex',
+          note: 'Waits on Digen clips from t-e45c4c', at: now - 90 * 60e3,
+          wait: { kind: 'card', th: 'รองาน [t-e45c4c] ให้เสร็จก่อน', on: ['t-e45c4c'] } },
         { id: 't-c47d19', title: 'แปลหน้า pricing เป็นอังกฤษ', status: 'assigned', assignee: 'gemini', createdBy: 'claude', at: now - 3 * 3600e3 },
         { id: 't-5e0a77', title: 'รีวิว PR ของ broker', status: 'open', assignee: '', createdBy: 'codex', at: now - 5 * 60e3 },
         { id: 't-3f9a1c', title: 'ทำรูปปกหน้าขาย TPIX 3 แบบ', status: 'doing', assignee: 'codex', createdBy: 'claude', at: now - 12 * 60e3 },
         { id: 't-81b2e0', title: 'ตรวจตาราง phase บน prod ว่าตรงกับหน้าเว็บ', status: 'doing', assignee: 'claude', createdBy: 'claude', at: now - 30 * 60e3 },
-        { id: 't-12aa04', title: 'ตั้งชื่อ workstream ใหม่', status: 'done', assignee: 'codex', createdBy: 'claude',
-          note: 'ใช้ tpix-market', at: now - 2 * 3600e3 },
         { id: 't-77c0de', title: 'วาดฉากเมืองชายทะเล 6 ภาพ', status: 'blocked', assignee: 'codex', createdBy: 'owner',
-          note: '⏸ บอสพักงานนี้ไว้ — รอบอสสั่งทำต่อ', paused: 'owner', at: now - 20 * 60e3 },
+          note: '⏸ บอสพักงานนี้ไว้ — รอบอสสั่งทำต่อ', paused: 'owner', at: now - 20 * 60e3,
+          wait: { kind: 'held', th: 'บอสพักไว้' } },
+        { id: 't-ad7dde', title: 'วาดภาพ layer ชุดแต่งตัว paper-doll', status: 'blocked', assignee: 'codex', createdBy: 'claude',
+          note: 'Female base: 2 tool rejections, no retry', at: now - 4 * 3600e3,
+          wait: { kind: 'other', th: 'ติดอยู่ — ดูโน้ตบนงาน' } },
     ];
     const runs = [{ agent: 'codex', since: now - 7 * 60e3, model: 'gpt-6-astra', effort: 'xhigh' }];
     const quota = {

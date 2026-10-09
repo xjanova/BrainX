@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
+using BrainX.Core.Services;
 using Newtonsoft.Json.Linq;
 
 namespace BrainX.Mcp;
@@ -110,6 +111,9 @@ internal static partial class Program
     ///  - norunner-: the agent has a runner now, or nothing waits for it.
     ///  - ask-: the board task it was about is closed, or the same agent has
     ///    asked about the same work again (the newest card stays).
+    ///  - board- / stale- / nofit- (CoworkBoardNoticesAsync): the card is
+    ///    finished or gone, or no longer in the state the notice was about —
+    ///    somebody took it, it moved since, somebody can do it now.
     /// Budget cards already go by themselves (ExpireClearedBudgetStop).
     /// </summary>
     private static void ExpireMootCards(BrokerConfig cfg, bool dryRun)
@@ -124,9 +128,8 @@ internal static partial class Program
                 .ToList();
             if (open.Count == 0) return;
 
-            var board = CoworkTasks().Where(t => t["id"] != null)
-                .GroupBy(t => t["id"]!.ToString(), StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+            var board = CoworkTriage.ById(CoworkTasks());
+            var now = DateTime.UtcNow;
             var waiting = new Dictionary<string, WaitingWork>(StringComparer.OrdinalIgnoreCase);
             WaitingWork For(string a) => waiting.TryGetValue(a, out var w) ? w : waiting[a] = WaitingWorkFor(a);
 
@@ -168,6 +171,25 @@ internal static partial class Program
                                            && string.Equals(o["work"]?.ToString() ?? "", work, StringComparison.OrdinalIgnoreCase)
                                            && (CoworkUtc(o["askedUtc"]) ?? DateTime.MinValue) > (CoworkUtc(card["askedUtc"]) ?? DateTime.MinValue)))
                         Take(card, $"{agent} asked about '{work}' again — the newer card stands");
+                }
+                else if (CoworkIsBoardNotice(id))
+                {
+                    var tid = id[(id.IndexOf('-') + 1)..];
+                    if (!board.TryGetValue(tid, out var task)) { Take(card, $"[{tid}] is no longer on the board"); continue; }
+                    var status = task["status"]?.ToString() ?? "open";
+                    if (CoworkTriage.IsFinished(status)) { Take(card, $"[{tid}] is {status}"); continue; }
+                    var w = CoworkTriage.Classify(task, board, now);
+                    var holder = task["assignee"]?.Type == JTokenType.String ? task["assignee"]!.ToString() : null;
+                    if (id.StartsWith("board-", StringComparison.Ordinal) && !(status == "blocked" && w?.Kind == "owner"))
+                        Take(card, $"[{tid}] no longer waits on the owner ({status})");
+                    else if (id.StartsWith("stale-", StringComparison.Ordinal)
+                             && (status != "blocked" || (CoworkTriage.Updated(task) ?? DateTime.MinValue) > (CoworkUtc(card["askedUtc"]) ?? DateTime.MaxValue)))
+                        Take(card, $"[{tid}] moved since it was asked about");
+                    else if (id.StartsWith("nofit-", StringComparison.Ordinal)
+                             && (status is not ("open" or "assigned") || w != null
+                                 || (holder != null && CoworkCannotDo(holder, task) == null)
+                                 || CoworkPickAgent(cfg, task, board.Values, except: holder, now) != null))
+                        Take(card, $"[{tid}] has somebody who can do it now");
                 }
             }
         }
@@ -252,23 +274,68 @@ internal static partial class Program
                 || (running.TryGetValue(a, out var r) ? r : running[a] = AdoptOrClearOrphanRun(cfg, a));
 
             var board = CoworkTasks();
-            var byId = board.Where(t => t["id"] != null)
-                            .GroupBy(t => t["id"]!.ToString(), StringComparer.OrdinalIgnoreCase)
-                            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+            var byId = CoworkTriage.ById(board);
+            // Somebody the broker may start for a card right now. Seated in the
+            // room means told already (the line is addressed to them); busy or
+            // resting means the ordinary chase picks it up later.
+            bool Callable(string a) => cfg.Runners.ContainsKey(a) && !Busy(a) && !CoworkHasLiveSession(a)
+                                       && !(ReadRunnerState(a).QuotaResumeUtc is DateTime rq0 && rq0 > now);
             foreach (var t in board)
             {
                 var id = t["id"]?.ToString();
-                var agent = t["assignee"]?.Type == JTokenType.String ? t["assignee"]!.ToString() : null;
-                if (id == null || agent == null || IsReservedIdentity(agent) || !cfg.Runners.ContainsKey(agent)) continue;
                 var status = t["status"]?.ToString() ?? "open";
-                var busy = Busy(agent);
+                if (id == null || CoworkTriage.IsFinished(status)) continue;
+                var agent = t["assignee"]?.Type == JTokenType.String ? t["assignee"]!.ToString() : null;
+                if (agent != null && IsReservedIdentity(agent)) continue;
+                var wait = CoworkTriage.Classify(t, byId, now);
+                var skill = t["skill"]?.ToString() is { Length: > 0 } sk ? sk : null;
+
+                // Nobody's. Owner (2026-10-09): "ฉลาดเรื่องจัดสรรงานขึ้นอีก". An
+                // open card used to wait for whoever happened to be in the room;
+                // with nobody there it waited for ever. Once it has sat unclaimed
+                // for OpenAllocateAfter, the broker hands it to the runner whose
+                // skills fit (CoworkPickAgent) — never to one whose `cannot` rules
+                // it out, and never to a headless run at all when it needs the
+                // owner's desktop: that goes to the owner instead.
+                if (agent == null)
+                {
+                    var since = CoworkUtc(t["updatedUtc"]) ?? DateTime.MinValue;
+                    if (status != "open" || now - since < OpenAllocateAfter) continue;
+                    if (wait?.Kind == "owner")
+                    {
+                        if (!dryRun) CoworkBlockForOwner(id, wait.Needs, CoworkStill("open", null));
+                        continue;
+                    }
+                    if (wait != null) continue;
+                    var pick = CoworkPickAgent(cfg, t, board, except: null, now);
+                    if (pick == null) continue;   // nobody fits: the owner is asked (CoworkBoardNoticesAsync)
+                    if ((dryRun || CoworkBrokerSetTask(id, "assigned",
+                            $"📌 ไม่มีใครรับมา {(int)Math.Min(9999, (now - since).TotalMinutes)} นาที — บอสส่งให้ @{pick}"
+                            + (skill != null ? $" (งาน «{skill}»)" : ""), assignee: pick, onlyIf: CoworkStill("open", null)))
+                        && Callable(pick))
+                        Add(calls, pick, id);
+                    continue;
+                }
+
+                var hasRunner = cfg.Runners.ContainsKey(agent);
+                var busy = hasRunner && Busy(agent);
                 var st = ReadRunnerState(agent);
 
                 // Paused for quota, and the reset time has come: back to work.
                 if (status == "blocked" && t["paused"] is JObject paused
                     && string.Equals(paused["reason"]?.ToString(), "quota", StringComparison.Ordinal))
                 {
-                    if (busy || (CoworkUtc(paused["untilUtc"]) ?? DateTime.MaxValue) > now) continue;
+                    if (!hasRunner || busy || (CoworkUtc(paused["untilUtc"]) ?? DateTime.MaxValue) > now) continue;
+                    // The quota is back, but a headless run still cannot do
+                    // what only the owner's desktop can: to the owner, not back
+                    // to a run (judged without the broker's own pause note).
+                    var pausedSpec = (JObject)t.DeepClone();
+                    pausedSpec.Remove("note");
+                    if (CoworkTriage.DesktopNeeds(pausedSpec) is { Count: > 0 } pausedDesk)
+                    {
+                        if (!dryRun) CoworkBlockForOwner(id, pausedDesk, CoworkStill("blocked", agent), clearPaused: true);
+                        continue;
+                    }
                     if (!dryRun)
                         CoworkBrokerSetTask(id, "assigned",
                             $"▶ ตามต่อหลังโควต้าของ {agent} น่าจะกลับมาแล้ว" + (paused["note"]?.ToString() is { Length: > 0 } pn ? $" — ทำต่อจากบันทึก «{pn}»" : ""),
@@ -284,24 +351,34 @@ internal static partial class Program
                 // after t-047a12 was done, and blocked work is never chased.
                 // Not while its holder has a question open with the owner — that
                 // is a different wait.
+                //
+                // The card goes back to work whoever is around (2026-10-09: it
+                // used to stay blocked for as long as its holder had a session
+                // open, which is exactly when somebody could have picked it up —
+                // the reopen line reaches a seated session through the room).
+                // Only the CALL waits for the holder to be absent, and only a
+                // holder a headless run of whom can actually do the card.
                 if (status == "blocked" && t["paused"] == null)
                 {
-                    var deps = CoworkTaskRef.Matches(t["note"]?.ToString() ?? "").Select(m => m.Value)
-                        .Where(d => !d.Equals(id, StringComparison.OrdinalIgnoreCase))
-                        .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-                    if (deps.Count == 0
-                        || !deps.All(d => byId.TryGetValue(d, out var dt) && (dt["status"]?.ToString() is "done" or "dropped"))
-                        || busy || CoworkHasLiveSession(agent) || (st.QuotaResumeUtc is DateTime rq && rq > now)
-                        || CoworkHasOpenAsk(agent))
+                    if (wait?.Kind != "ready") continue;
+                    if ((st.QuotaResumeUtc is DateTime rq && rq > now) || CoworkHasOpenAsk(agent)) continue;
+                    if (!dryRun && !CoworkBrokerSetTask(id, "assigned",
+                            $"▶ งานที่รออยู่ ({string.Join(", ", wait.Deps.Select(d => $"[{d}]"))}) เสร็จแล้ว — @{agent} ทำต่อจากที่ค้างได้เลย",
+                            onlyIf: CoworkStill("blocked", agent)))
                         continue;
-                    if (!dryRun)
-                        CoworkBrokerSetTask(id, "assigned",
-                            $"▶ งานที่รออยู่ ({string.Join(", ", deps.Select(d => $"[{d}]"))}) เสร็จแล้ว — @{agent} ทำต่อจากที่ค้างได้เลย");
-                    Add(calls, agent, id);
+                    // Judged on what the card IS, without the note: the note was
+                    // about the wait — "waits on Digen clips from t-e45c4c (needs
+                    // interactive Chrome session)" is t-e45c4c's need, not this one's.
+                    var spec = (JObject)t.DeepClone();
+                    spec.Remove("note");
+                    if (hasRunner && !busy && !CoworkHasLiveSession(agent)
+                        && CoworkTriage.DesktopNeeds(spec).Count == 0 && CoworkCannotDo(agent, t) == null)
+                        Add(calls, agent, id);
                     continue;
                 }
 
                 if (status is not ("doing" or "assigned")) continue;
+                if (!hasRunner) continue;
                 if (busy || CoworkHasLiveSession(agent)) continue;
                 // Out of quota: its work waits for the reset, it is not chased.
                 if (st.QuotaResumeUtc is DateTime qr && qr > now) continue;
@@ -313,6 +390,36 @@ internal static partial class Program
                 var cutOff = CoworkInterruptedRuns.Contains(agent);
                 var updated = CoworkUtc(t["updatedUtc"]) ?? DateTime.MinValue;
                 if (!cutOff && (now - updated < FollowUpIdle || CoworkSpokeSince(agent, now - FollowUpIdle))) continue;
+
+                // Before anybody is started for it: can a headless run do this
+                // at all? Owner (2026-10-09), on a board that only grew: three
+                // cards needed the owner's logged-in Chrome or Play Console, and
+                // every chase started a run that found that out again and put
+                // the card back to blocked. Work like that is not chased — it
+                // goes to the owner, once (CoworkBoardNoticesAsync), and leaves
+                // the moving board.
+                var desk = CoworkTriage.DesktopNeeds(t);
+                if (desk.Count > 0)
+                {
+                    if (!dryRun) CoworkBlockForOwner(id, desk, CoworkStill(status, agent));
+                    continue;
+                }
+                // Handed to somebody whose `cannot` rules it out ("generate
+                // images, video or audio — hand that to codex"): waking them is
+                // a run spent saying "not mine". It goes to whoever fits; with
+                // nobody, the owner is asked. Not a card already being done —
+                // its holder chose to take it.
+                if (status == "assigned" && CoworkCannotDo(agent, t) is { } cannotLine)
+                {
+                    var pick = CoworkPickAgent(cfg, t, board, except: agent, now);
+                    if (pick == null) continue;   // the owner is asked (CoworkBoardNoticesAsync)
+                    if ((dryRun || CoworkBrokerSetTask(id, "assigned",
+                            $"🔁 «{skill}» ไม่ใช่งานของ {agent} («{cannotLine}») — บอสส่งต่อให้ @{pick}",
+                            assignee: pick, onlyIf: CoworkStill("assigned", agent)))
+                        && Callable(pick))
+                        Add(calls, pick, id);
+                    continue;
+                }
 
                 var rec = ledger[id] as JObject;
                 var last = CoworkUtc(rec?["lastUtc"]);
@@ -566,22 +673,38 @@ internal static partial class Program
 
     /// <summary>
     /// The broker changing a board task: status and note, a history entry by
-    /// `broker`, a `paused` record set or cleared, and the line on the wall.
+    /// `broker`, a `paused` record set or cleared, a new holder when the work
+    /// is handed on (<paramref name="assignee"/>), who called it off when it is
+    /// dropped (<paramref name="droppedBy"/>), and the line on the wall — to
+    /// the holder, new or old.
+    ///
+    /// <paramref name="onlyIf"/> is checked UNDER the lock against the card as
+    /// it is now: the broker decides from a snapshot, and an agent claiming the
+    /// card in between must not have it handed to somebody else over its head.
+    /// False = nothing was written.
     /// </summary>
-    internal static void CoworkBrokerSetTask(string id, string status, string note, JObject? paused = null, bool clearPaused = false)
+    internal static bool CoworkBrokerSetTask(string id, string status, string note, JObject? paused = null, bool clearPaused = false,
+                                             string? assignee = null, string? droppedBy = null, Func<JObject, bool>? onlyIf = null)
     {
         try
         {
             var path = CoworkTaskFile(id);
-            if (!File.Exists(path)) return;
+            if (!File.Exists(path)) return false;
             using var gate = CoworkTaskLock(path);
             var task = ReadJsonOrNull(path);
-            if (task == null) return;
+            if (task == null) return false;
+            if (onlyIf != null && !onlyIf(task))
+            {
+                BrokerLog($"cowork: [{id}] changed under me ({task["status"]}, {task["assignee"]}) — left as it is");
+                return false;
+            }
             var now = DateTime.UtcNow.ToString("o");
             task["status"] = status;
             task["note"] = note;
             task["updatedBy"] = "broker";
             task["updatedUtc"] = now;
+            if (assignee != null) task["assignee"] = assignee;
+            if (droppedBy != null) task["droppedBy"] = droppedBy;
             if (paused != null) task["paused"] = paused;
             else if (clearPaused) task.Remove("paused");
             var history = task["history"] as JArray ?? new JArray();
@@ -589,8 +712,15 @@ internal static partial class Program
             task["history"] = history;
             AtomicWriteJson(path, task);
             var who = task["assignee"]?.Type == JTokenType.String ? task["assignee"]!.ToString() : null;
-            CoworkSystemLine($"{(status == "blocked" ? "⛔" : "📌")} [{id}] {task["title"]}: {note}", to: who, topic: "task", task: id);
+            var icon = status switch { "blocked" => "⛔", "dropped" => "🗑", _ => "📌" };
+            CoworkSystemLine($"{icon} [{id}] {task["title"]}: {note}", to: who, topic: "task", task: id);
+            return true;
         }
-        catch (Exception ex) { BrokerLog($"cowork: could not update [{id}] — {Redact(ex.Message)}"); }
+        catch (Exception ex) { BrokerLog($"cowork: could not update [{id}] — {Redact(ex.Message)}"); return false; }
     }
+
+    /// <summary>The card is still the way the broker saw it: same status, same holder.</summary>
+    private static Func<JObject, bool> CoworkStill(string status, string? assignee) => now =>
+        (now["status"]?.ToString() ?? "open") == status
+        && string.Equals(now["assignee"]?.Type == JTokenType.String ? now["assignee"]!.ToString() : null, assignee, StringComparison.OrdinalIgnoreCase);
 }

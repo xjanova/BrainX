@@ -593,6 +593,12 @@ internal static partial class Program
         // should be back (Program.CoworkFollowUp.cs).
         var followUps = CoworkFollowUps(cfg, live, dryRun);
 
+        // Board work only the owner can move — their desktop, a login, a
+        // phone, a decision — or nobody on the team can do, or nobody has
+        // touched in two days: the owner is told once per card, never a run
+        // started for it (Program.CoworkAllocate.cs).
+        await CoworkBoardNoticesAsync(cfg, dryRun).ConfigureAwait(false);
+
         // "@มาย" with no mind runner is for the secretary the BrainX window runs
         // on the local model (MainWindow.CoworkSecretary) — not a session to
         // start, and not "could not be called". With coding switched on she
