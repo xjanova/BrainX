@@ -42,6 +42,8 @@ internal static partial class Program
         checks.Add(("chrome bridge: the private log is written behind the call; long pages get chrome advice", ChromePrivateLogBehindTheCall));
         checks.Add(("chrome bridge: private_browse_search only where an owner can use it; unattended runs refused", ChromePrivateSearchGating));
         checks.Add(("chrome launch args: --settings claude-in-chrome is a working action, never a vault path", ChromeSettingsLaunchArgs));
+        checks.Add(("chrome instructions worst case: hooks broken + private browsing + a long vault path — every rule still shown", ChromeInstructionsWorstCase));
+        checks.Add(("chrome private log capture: the writer's queue holds only what the store keeps", ChromeCaptureIsBounded));
         // Opt-in: reads THIS PC's real Claude Code install and browser profiles.
         // Starts claude.exe only for `--version` and `auth status --json` —
         // never the chrome server, never a browser.
@@ -476,6 +478,27 @@ internal static partial class Program
                   urlHit.Count == 1 && urlHit[0].Url?.Contains(jwt) == false && urlHit[0].Url?.Contains("access_token=") == true, urlHit.FirstOrDefault()?.Url);
             Check("…and the token is nowhere in browse.db or its WAL (url column, args, FTS index)",
                   !DbFilesContain(store, jwt[..40]) && !DbFilesContain(store, "c2lnbmF0dXJlLXNpZ25hdHVyZS1zaWc"));
+
+            // Review rev2: an OPAQUE token in the fragment (an OAuth implicit
+            // grant). No token shape knows ya29.…, so only the key=value rule
+            // can mask it — and '#' was not one of that rule's delimiters, so
+            // it was kept in the url column, the index and the args.
+            var opaque = "ya29.A0ARrdaM" + m + "x9Qz7Lk2Wm4Np6Rt8Vb0Cd3Fg5Hj";
+            Check("(control) an opaque ya29 token has no shape the redactor knows by itself — only its key can give it away",
+                  SecretRedactor.Redact(opaque) == opaque, SecretRedactor.Redact(opaque));
+            var implicitUrl = $"https://oauth-{m.ToLowerInvariant()}.example/oauthcb#access_token={opaque}&token_type=Bearer&expires_in=3599";
+            store.Record(new PrivateBrowseRecord { Tool = "navigate", Url = implicitUrl, ArgsJson = new JObject { ["url"] = implicitUrl }.ToString() });
+            var implicitHit = store.Search($"oauth-{m.ToLowerInvariant()}");
+            Check("(control) the implicit-grant callback is stored and searchable by its host",
+                  implicitHit.Count == 1 && implicitHit[0].Url?.Contains("/oauthcb#access_token=") == true, implicitHit.FirstOrDefault()?.Url);
+            Check("an opaque #access_token=ya29… is masked in the url column, and is nowhere in browse.db or its WAL (args, index)",
+                  implicitHit.Count == 1 && implicitHit[0].Url?.Contains(opaque) == false && !DbFilesContain(store, opaque[..24]),
+                  implicitHit.FirstOrDefault()?.Url);
+            Check("…a token in a path segment (/session_token=…) is masked too",
+                  !SecretRedactor.Redact($"https://app.example/cb/session_token={opaque}").Contains(opaque));
+            Check("(control) a plain fragment and a plain path are left alone",
+                  SecretRedactor.Redact("https://example.com/docs/setup#install") == "https://example.com/docs/setup#install"
+                  && SecretRedactor.Redact("tail -n 200 /var/log/nginx/error.log") == "tail -n 200 /var/log/nginx/error.log");
         }
         finally { try { Directory.Delete(Path.GetDirectoryName(root)!, recursive: true); } catch { } }
 
@@ -631,6 +654,25 @@ internal static partial class Program
               && api["message_th"]!.ToString().Contains("API key")
               && api["action"]!["kind"]!.ToString() == "run_console"
               && api["action"]!["target"]!.ToString().Contains("auth login --claudeai"));
+
+        // An unattended broker / Mind run: off whatever else is true, and no
+        // "Turn on in BrainX" button — the switch is already on.
+        var un = ChromeBridgeStatus.Build(new ChromeBridgeStatus.Inputs
+        {
+            Enabled = true, Unattended = true, Locate = found, Auth = signedIn, Scan = scanOk,
+            Runtime = new ChromeRuntimeSnapshot { Live = true, LastOutcome = "ok", Tools = 21 },
+        });
+        Check("unattended run: Disabled over everything else, says why in en + th, action none, enabled:false",
+              un["state"]?.ToString() == "Disabled" && un["action"]?["kind"]?.ToString() == "none"
+              && un["message_en"]!.ToString().Contains("unattended runs") && un["message_th"]!.ToString().Contains("ไม่มีคนดู")
+              && un["enabled"]?.Value<bool>() == false && un["unattended"]?.Value<bool>() == true,
+              un.ToString(Newtonsoft.Json.Formatting.None));
+        Check("(control) the same inputs attended: Connected",
+              ChromeBridgeStatus.Build(new ChromeBridgeStatus.Inputs
+              {
+                  Enabled = true, Locate = found, Auth = signedIn, Scan = scanOk,
+                  Runtime = new ChromeRuntimeSnapshot { Live = true, LastOutcome = "ok", Tools = 21 },
+              })["state"]?.ToString() == "Connected");
         return Task.CompletedTask;
 
         ChromeScanResult Disabled()
@@ -1391,26 +1433,71 @@ internal static partial class Program
             try { Directory.Delete(rootA, recursive: true); } catch { }
         }
 
-        // B / C: unattended runs — the broker's task runner and the Mind.
+        // B / C: unattended runs — the broker's task runner and the Mind. The
+        // switch is ON and the stub is available: the only difference from an
+        // owner's session is the run's environment. Review 2026-10-10 (rev2):
+        // these runs still listed and called chrome__* — the owner's logged-in
+        // browser, pre-approved (`--allowedTools mcp__brainx-brain`, a codex
+        // that bypasses approvals) and driven by whatever a peer put in the
+        // task. Now the bridge is off for them before anything is spawned.
         foreach (var (label, envName, envValue) in new[] { ("broker run", "BRAINX_BROKER_RUN", "1"), ("Mind", "BRAINX_AS_AGENT", "mind") })
         {
             var (root, vault, priv) = ChromeSandboxDirs("brainx-chrome-gate-u-");
             new PrivateBrowseStore(priv).Record(new PrivateBrowseRecord { Tool = "get_page_text", ResultText = "QGATEU2 bank page" });
-            ChromeSession? u = null;
+            var m = "U" + Guid.NewGuid().ToString("N")[..10].ToUpperInvariant();
+            var started = Path.Combine(root, "stub-started.txt");
+            var stubLog = Path.Combine(root, "stub-requests.log");
+            var url = ChromeStubServer.MarkerUrl(m);
+            ChromeSession? u = null, owner = null;
             try
             {
-                u = await StartChromeSession(exe, vault, priv, StubEnv("GU", root, new() { [envName] = envValue }));
+                u = await StartChromeSession(exe, vault, priv, StubEnv(m, root, new() { [envName] = envValue, [ChromeStubServer.LogEnv] = stubLog }));
                 var names = ((await u.List())?["result"]?["tools"] as JArray ?? new JArray()).Select(t => t["name"]!.ToString()).ToList();
                 var r = await u.Call("private_browse_search", new JObject { ["query"] = "QGATEU2" });
                 Check($"{label}: private_browse_search is not listed, and called by name it is refused without the log (en + th)",
                       !names.Contains("private_browse_search") && IsError(r) && !ResultText(r).Contains("bank page")
                       && ResultText(r).Contains("owner only") && ResultText(r).Contains("เฉพาะเจ้าของ"), ResultText(r));
-                Check($"(control) {label}: the chrome bridge itself is unaffected — its tools are listed",
-                      names.Contains("chrome__navigate"));
+                Check($"{label}: no chrome__ tool is listed although the owner's switch is on",
+                      names.Count > 0 && !names.Any(n => n.StartsWith("chrome_", StringComparison.OrdinalIgnoreCase)),
+                      string.Join(",", names.Where(n => n.StartsWith("chrome_"))));
+                var nav = await u.Call("chrome__navigate", new JObject { ["url"] = url, ["tabId"] = 1 });
+                var flat = await u.Call("chrome_navigate", new JObject { ["url"] = url, ["tabId"] = 1 });
+                Check($"{label}: chrome__navigate (and the flat chrome_navigate) called by name is refused, saying why in en + th",
+                      IsError(nav) && IsError(flat) && ResultText(nav).Contains("unattended runs") && ResultText(nav).Contains("ไม่มีคนดู")
+                      && !ResultText(nav).Contains("Navigated"), ResultText(nav));
+                var st = await u.Status();
+                Check($"{label}: bridge_status says Disabled for this run, why in en + th, with no settings button (turning it on would not help)",
+                      st?["state"]?.ToString() == "Disabled" && st["action"]?["kind"]?.ToString() == "none"
+                      && st["message_en"]!.ToString().Contains("unattended") && st["message_th"]!.ToString().Contains("ไม่มีคนดู")
+                      && st["unattended"]?.Type == JTokenType.Boolean && (bool)st["unattended"]! && st["claudePath"]?.Type == JTokenType.Null,
+                      st?.ToString(Newtonsoft.Json.Formatting.None));
+                // Matched on the words every wording of the clause has, not on
+                // today's constant, so an older build's clause is caught too.
+                Check($"{label}: …and the instructions carry no privacy clause — nothing private is visible to this run",
+                      u.Instructions.Length > 0 && !u.Instructions.Contains(ChromeBridgeIds.PrivacyRuleShort)
+                      && !u.Instructions.Contains("private_browse_search output"));
+                await u.DisposeAsync();
+                u = null;
+                Check($"{label}: nothing was spawned — the stub never started and received no request, not even discovery",
+                      !File.Exists(started) && ReadStubLog(stubLog).Count == 0, $"started={File.Exists(started)}, requests={ReadStubLog(stubLog).Count}");
+                Check($"{label}: …the refused calls are not in the private log either (one entry, the seeded one)",
+                      RowCount(new PrivateBrowseStore(priv), m.ToLowerInvariant()) == 0 && new PrivateBrowseStore(priv).Stats().Entries == 1);
+                var leaks = FilesContaining(vault, new[] { m, "chrome__navigate", "chrome_navigate" });
+                Check($"{label}: …nor in the vault (no journal, no activity line)", leaks.Count == 0, string.Join(" | ", leaks));
+
+                // Control: the SAME sandbox, switch and stub — an attended session.
+                owner = await StartChromeSession(exe, vault, priv, StubEnv(m, root, new() { [ChromeStubServer.LogEnv] = stubLog }));
+                var ownerNames = ((await owner.List())?["result"]?["tools"] as JArray ?? new JArray()).Select(t => t["name"]!.ToString()).ToList();
+                var ownerNav = await owner.Call("chrome__navigate", new JObject { ["url"] = url, ["tabId"] = 1 });
+                Check($"(control) {label}: an attended session in the same sandbox lists chrome__navigate and its call reaches the stub",
+                      ownerNames.Contains("chrome__navigate") && !IsError(ownerNav) && ResultText(ownerNav).Contains("Navigated to " + url)
+                      && File.Exists(started) && ReadStubLog(stubLog).Any(h => h.Method == "tools/call" && h.Tool == "navigate"),
+                      ResultText(ownerNav));
             }
             finally
             {
                 if (u != null) await u.DisposeAsync();
+                if (owner != null) await owner.DisposeAsync();
                 try { Directory.Delete(root, recursive: true); } catch { }
             }
         }
@@ -1468,6 +1555,209 @@ internal static partial class Program
               && st["action"]?["target"]?.ToString() == "\"C:\\Users\\x\\AppData\\Local\\BrainX\\current\\BrainX.Client.exe\" --settings claude-in-chrome"
               && st["action"]?["exe"]?.ToString() == @"C:\Users\x\AppData\Local\BrainX\current\BrainX.Client.exe",
               st["action"]?.ToString(Newtonsoft.Json.Formatting.None));
+        return Task.CompletedTask;
+    }
+
+    // ───────────── the instructions head, worst case (review rev2) ─────────────
+
+    /// <summary>
+    /// The head of the server instructions had about 2 characters to spare on
+    /// a CI-length temp path, and whenever the hook warning sat in it (a list
+    /// of problems with script names, ~400 characters) rules 6 and 7 fell past
+    /// the 2,048 characters Claude Code shows. Measured here with everything
+    /// that lengthens it at once: the hook warning (a fake broken ~/.claude —
+    /// a sandbox-only knob), the chrome bridge on (the privacy clause) and a
+    /// vault path of 150+ characters.
+    /// </summary>
+    private static async Task ChromeInstructionsWorstCase()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the check", false); return; }
+
+        var root = Path.Combine(Path.GetTempPath(), "brainx-chrome-head-" + Guid.NewGuid().ToString("N"));
+        var vault = Path.Combine(root, "a-vault-folder-long-enough-to-stand-in-for-a-ci-temp-path-or-a-onedrive-documents-folder", "vault");
+        var privateDir = Path.Combine(root, "private");
+        var claudeDir = Path.Combine(root, "claude");
+        Directory.CreateDirectory(Path.Combine(vault, "Notes"));
+        Directory.CreateDirectory(Path.Combine(vault, ".obsidianx"));
+        Directory.CreateDirectory(claudeDir);
+        BusSeal.EnsureKey(Path.Combine(Path.GetDirectoryName(vault)!, "bus-seal.key"));
+        new ChromeBridgeSettings { Enabled = true, RetentionDays = 30 }.Save(privateDir);
+
+        // The 2026-09-25 signature ($env: without "shell": "powershell") and
+        // four scripts that are gone — a long problem list.
+        var hooks = new JArray();
+        foreach (var script in new[] { "brain-tool-logger.ps1", "brain-pretool-warn.ps1", "brain-error-recall.ps1", "brain-session-end.ps1" })
+            hooks.Add(new JObject
+            {
+                ["type"] = "command",
+                ["command"] = $"powershell -NoProfile -File \"{Path.Combine(root, "gone", script)}\" -Home $env:USERPROFILE # brainx-hooks",
+            });
+        File.WriteAllText(Path.Combine(claudeDir, "settings.json"),
+            new JObject { ["hooks"] = new JObject { ["PostToolUse"] = new JArray(new JObject { ["hooks"] = hooks }) } }.ToString());
+        var problems = HookHealth.Problems(claudeDir, TimeSpan.FromHours(48));
+        var fullLine = HookHealth.InstructionsLine(problems);
+
+        ChromeSession? s = null, healthy = null;
+        try
+        {
+            s = await StartChromeSession(exe, vault, privateDir, StubEnv("H1", root, new() { ["BRAINX_SANDBOX_CLAUDE_DIR"] = claudeDir }));
+            var ins = s.Instructions;
+            var rulesEnd = ins.IndexOf("Each tool's description carries its full protocol.", StringComparison.Ordinal);
+            var alarmAt = ins.IndexOf(HookHealth.HeadAlarm, StringComparison.Ordinal);
+            var privAt = ins.IndexOf(ChromeBridgeIds.PrivacyRuleShort, StringComparison.Ordinal);
+            Check($"(control) the worst case is real: {problems.Count} hook problems, a {vault.Length}-character vault path, and the head carries both the hook warning and the privacy clause",
+                  problems.Count >= 2 && vault.Length >= 150 && alarmAt >= 0 && alarmAt < rulesEnd && privAt > 0 && privAt < rulesEnd,
+                  $"problems {problems.Count}, alarm at {alarmAt}, privacy at {privAt}, rules end at {rulesEnd}");
+            Check($"every rule ends inside 2,000 characters — at {rulesEnd} (Claude Code cuts at 2,048) — with the hook warning in front of them",
+                  rulesEnd > 0 && rulesEnd < 2000 && alarmAt >= 0 && alarmAt + HookHealth.HeadAlarm.Length < rulesEnd, $"rules end at {rulesEnd}");
+
+            // This vault is tiny; the owner's brain's size line is longer.
+            const string intro = "The owner's personal brain";
+            const string bigBrain = " — 123,456 notes, 123,456,789 words, 1,234,567 links";
+            var introAt = ins.IndexOf(intro, StringComparison.Ordinal);
+            var colon = introAt < 0 ? -1 : ins.IndexOf(':', introAt);
+            var sizeLen = colon < 0 ? 0 : colon - (introAt + intro.Length);
+            var bigEnd = rulesEnd - sizeLen + bigBrain.Length;
+            Check($"…and on a brain of 123,456 notes they would end at {bigEnd}: still under 2,000",
+                  introAt > 0 && colon > introAt && bigEnd < 2000, $"size line here {sizeLen} chars");
+
+            var tailAt = Math.Max(0, rulesEnd);
+            Check("nothing is lost: the vault path and every hook problem follow the rules, and the path is not in the head",
+                  rulesEnd > 0
+                  && ins.IndexOf("• Vault: " + vault, StringComparison.Ordinal) > rulesEnd
+                  && problems.All(p => ins.IndexOf(p, rulesEnd, StringComparison.Ordinal) > rulesEnd)
+                  && !ins[..rulesEnd].Contains(vault, StringComparison.OrdinalIgnoreCase),
+                  ins[tailAt..Math.Min(ins.Length, tailAt + 600)]);
+
+            var oldEnd = rulesEnd - (HookHealth.HeadAlarm.Length + 2) + (fullLine.Length + 2) + $" (vault: {vault})".Length;
+            Check($"(control) laid out as before — the whole hook line and the path in the head — rule 7 would end at {oldEnd}, past the 2,048 Claude Code shows",
+                  oldEnd > 2048, $"{oldEnd}");
+
+            healthy = await StartChromeSession(exe, vault, privateDir, StubEnv("H2", root));
+            Check("(control) the same sandbox without the fake Claude folder has no hook warning — the knob is what put it there",
+                  healthy.Instructions.Length > 0 && !healthy.Instructions.Contains("HOOKS BROKEN") && !healthy.Instructions.Contains("HOOK PROBLEMS"));
+        }
+        finally
+        {
+            if (s != null) await s.DisposeAsync();
+            if (healthy != null) await healthy.DisposeAsync();
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    // ───────────── capture is bounded (review rev2) ─────────────
+
+    /// <summary>
+    /// The private log writer's queue is bounded at 64 entries — but each
+    /// entry used to hold the WHOLE result: every text block and every image
+    /// decoded, clipped only later by the store (200 K characters, 8 shots of
+    /// at most 15 MB). A run of big pages behind a slow disk could hold
+    /// hundreds of MB. Capture now keeps only what the store can keep, and
+    /// what is stored must not change by a byte.
+    /// </summary>
+    private static Task ChromeCaptureIsBounded()
+    {
+        var m = "C" + Guid.NewGuid().ToString("N")[..10].ToUpperInvariant();
+        var rnd = new Random(11);
+        // A 5 MB page; a credential that straddles the 200 K cut (only the
+        // redaction margin past the cut catches it whole).
+        var sb = new StringBuilder("CAPTEXT-" + m + " ");
+        while (sb.Length < PrivateBrowseStore.MaxResultChars - 16) sb.Append("word").Append(rnd.Next(100000)).Append(' ');
+        sb.Append(" password=hunter2-" + m + " ");
+        while (sb.Length < 5 * 1024 * 1024) sb.Append("fill").Append(rnd.Next(100000)).Append(' ');
+        var page = sb.ToString();
+
+        byte[] Bytes(int n, int seed) { var b = new byte[n]; new Random(seed).NextBytes(b); return b; }
+        var big = Bytes((int)PrivateBrowseStore.MaxShotBytes + 1024 * 1024, 1);          // 16 MB: over the per-shot limit
+        var smalls = Enumerable.Range(0, 12).Select(i => Bytes(2048 + i, 100 + i)).ToList();
+        var content = new JArray
+        {
+            new JObject { ["type"] = "image", ["data"] = "not base64 !!", ["mimeType"] = "image/png" },
+            new JObject { ["type"] = "text", ["text"] = page },
+            new JObject { ["type"] = "image", ["data"] = Convert.ToBase64String(big), ["mimeType"] = "image/png" },
+        };
+        foreach (var b in smalls) content.Add(new JObject { ["type"] = "image", ["data"] = Convert.ToBase64String(b), ["mimeType"] = "image/jpeg" });
+        content.Add(new JObject { ["type"] = "text", ["text"] = "TAIL-" + m });
+        var result = new JObject { ["content"] = content };
+        var args = new JObject { ["url"] = ChromeStubServer.MarkerUrl(m), ["tabId"] = 1, ["text"] = new string('a', 60_000) };
+        var ts = DateTime.UtcNow;
+
+        // What AfterCall captured before this fix, line for line.
+        PrivateBrowseRecord OldCapture(JObject a, JObject r)
+        {
+            var rec = new PrivateBrowseRecord
+            {
+                TsUtc = ts, Agent = "agent", Tool = "get_page_text", Url = PrivateBrowseCapture.FirstUrl(a),
+                ArgsJson = a.ToString(Newtonsoft.Json.Formatting.None), IsError = false,
+            };
+            var t = new StringBuilder();
+            foreach (var block in (r["content"] as JArray)!.OfType<JObject>())
+            {
+                var type = block["type"]?.ToString();
+                if (type == "text") t.AppendLine(block["text"]?.ToString());
+                else if (type == "image" && block["data"]?.Type == JTokenType.String)
+                {
+                    try { rec.Images.Add((block["mimeType"]?.ToString() ?? "image/png", Convert.FromBase64String(block["data"]!.ToString()))); }
+                    catch (FormatException) { }
+                }
+            }
+            rec.ResultText = t.ToString();
+            return rec;
+        }
+        static long Held(PrivateBrowseRecord r) =>
+            2L * ((r.ResultText?.Length ?? 0) + (r.ArgsJson?.Length ?? 0) + (r.Url?.Length ?? 0)) + r.Images.Sum(i => (long)i.Data.Length);
+
+        var old = OldCapture(args, result);
+        var now = PrivateBrowseCapture.FromCall("get_page_text", args, result, null, "agent", ts);
+        Check($"(control) captured the old way, this one call held {Held(old) / (1024 * 1024)} MB in the writer's queue: the whole 5 MB page, 13 images, one of 16 MB",
+              old.ResultText!.Length > 5_000_000 && old.Images.Count == 13 && old.Images.Max(i => i.Data.Length) > PrivateBrowseStore.MaxShotBytes);
+        Check($"captured now, it holds {Held(now) / 1024} KB: text and args cut to the store's clip + margin, the first 8 images, none over 15 MB",
+              now.ResultText!.Length <= PrivateBrowseStore.CaptureChars(PrivateBrowseStore.MaxResultChars)
+              && now.ArgsJson!.Length <= PrivateBrowseStore.CaptureChars(PrivateBrowseStore.MaxArgsChars)
+              && now.Images.Count <= PrivateBrowseStore.MaxShotsPerEntry
+              && now.Images.All(i => i.Data.Length <= PrivateBrowseStore.MaxShotBytes)
+              && Held(now) < 1_000_000,
+              $"text {now.ResultText.Length}, args {now.ArgsJson?.Length}, images {now.Images.Count}");
+
+        var root = Path.Combine(Path.GetTempPath(), "brainx-chrome-capture-" + Guid.NewGuid().ToString("N"), "private");
+        try
+        {
+            var store = new PrivateBrowseStore(root) { RetentionOverride = 30 };
+            var idOld = store.Record(old);
+            var idNow = store.Record(now);
+            var eOld = store.ReadEntry(idOld);
+            var eNow = store.ReadEntry(idNow);
+            var hits = store.Search("CAPTEXT-" + m, 10);
+            var hOld = hits.FirstOrDefault(h => h.Id == idOld);
+            var hNow = hits.FirstOrDefault(h => h.Id == idNow);
+            byte[]? Shot(string id) => store.ReadShot(id, out _);
+            var shotsSame = hOld != null && hNow != null && hOld.Shots.Count == hNow.Shots.Count
+                            && hOld.Shots.Zip(hNow.Shots).All(p => Shot(p.First.Id) is { } a && Shot(p.Second.Id) is { } b && a.AsSpan().SequenceEqual(b));
+            Check("what is stored is identical either way: text, args, URL and the screenshots byte for byte",
+                  eOld != null && eNow != null && eOld.Value.Result == eNow.Value.Result && eOld.Value.Args == eNow.Value.Args
+                  && hOld?.Url == hNow?.Url && shotsSame,
+                  $"result {eOld?.Result?.Length}/{eNow?.Result?.Length}, args {eOld?.Args?.Length}/{eNow?.Args?.Length}, shots {hOld?.Shots.Count}/{hNow?.Shots.Count}");
+            Check("…the 7 small screenshots after the oversized one, as before; the 16 MB one and the non-base64 one are not kept",
+                  hNow != null && hNow.Shots.Count == 7 && Shot(hNow.Shots[0].Id) is { } first && first.AsSpan().SequenceEqual(smalls[0]),
+                  $"{hNow?.Shots.Count} shots");
+            Check("…and the credential straddling the 200 K cut is masked, the text marked clipped, nothing of it in the database",
+                  eNow?.Result is { } kept && kept.Contains("password=***") && !kept.Contains("hunter2-" + m) && kept.EndsWith("(clipped)")
+                  && !DbFilesContain(store, "hunter2-" + m),
+                  eNow?.Result is { } k2 ? k2[^Math.Min(200, k2.Length)..] : "(none)");
+
+            // Control: a small page is not touched at all.
+            var small = new JObject { ["content"] = new JArray
+            {
+                new JObject { ["type"] = "text", ["text"] = "SMALL-" + m },
+                new JObject { ["type"] = "image", ["data"] = Convert.ToBase64String(smalls[0]), ["mimeType"] = "image/png" },
+            } };
+            var oldSmall = OldCapture(args, small);
+            var nowSmall = PrivateBrowseCapture.FromCall("get_page_text", args, small, null, "agent", ts);
+            Check("(control) a small page is captured exactly as before — text and image",
+                  nowSmall.ResultText == oldSmall.ResultText && nowSmall.Images.Count == 1 && nowSmall.Images[0].Data.AsSpan().SequenceEqual(smalls[0]));
+        }
+        finally { try { Directory.Delete(Path.GetDirectoryName(root)!, recursive: true); } catch { } }
         return Task.CompletedTask;
     }
 }

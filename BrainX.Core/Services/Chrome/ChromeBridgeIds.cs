@@ -67,7 +67,7 @@ public static class ChromeBridgeIds
 
     /// <summary>The same rule, short enough for the head of the MCP instructions (rule 2).</summary>
     public const string PrivacyRuleShort =
-        "Never chrome__*/private_browse_search output (the owner's private browsing): not in notes, handoffs, agent_send or cowork unless they ask.";
+        "Never put chrome__*/private_browse_search output (private browsing) in notes, handoffs, agent_send or cowork unless asked.";
 
     /// <summary>
     /// Everything whose arguments or results are private browsing data: the

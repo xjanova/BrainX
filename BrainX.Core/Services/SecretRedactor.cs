@@ -64,9 +64,12 @@ public static class SecretRedactor
         R(@"(\b(?:config\s+set|config:set|setx|set)\s+[a-z0-9_.\-]*(?:pass(?:word|wd)?|pwd|secret|token|api[_\-]?key|apikey|private[_\-]?key)[a-z0-9_.\-]*\s+)(""[^""]*""|'[^']*'|[^\s&;'""]+)");
 
     // NAME=value / NAME: value where the name says it is a secret — env vars
-    // (DB_PASSWORD=), flags (--dbpass=), query strings (?token=), JSON-ish.
+    // (DB_PASSWORD=), flags (--dbpass=), query strings (?token=), URL
+    // fragments (#access_token= — an OAuth implicit-grant callback carries an
+    // opaque token there, which no token-shape rule recognises) and path
+    // segments (/session_token=), JSON-ish.
     private static readonly Regex SecretAssignment =
-        R(@"((?:^|[\s;&|""'?,({])-{0,2}[a-z0-9_.\-]*(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_\-]?key|apikey|access[_\-]?key|private[_\-]?key|client[_\-]?secret|auth(?:[_\-]?key)?|credentials?)[a-z0-9_.\-]*\s*[=:]\s*)(""[^""]*""|'[^']*'|[^\s&;'""]+)");
+        R(@"((?:^|[\s;&|""'?,({#/])-{0,2}[a-z0-9_.\-]*(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_\-]?key|apikey|access[_\-]?key|private[_\-]?key|client[_\-]?secret|auth(?:[_\-]?key)?|credentials?)[a-z0-9_.\-]*\s*[=:]\s*)(""[^""]*""|'[^']*'|[^\s&;'""]+)");
 
     // mysql -pSECRET — only meaningful next to a MySQL client, and case
     // SENSITIVE: -P is the port there, and `mkdir -p x` has a space after it.

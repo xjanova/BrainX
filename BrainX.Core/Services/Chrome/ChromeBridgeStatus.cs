@@ -33,7 +33,8 @@ public sealed class ChromeRuntimeSnapshot
 /// dead one.
 ///
 /// Precedence, and why:
-///   1. Off (the owner's switch, or the remote endpoint)  — nothing else matters.
+///   1. Off (the owner's switch, the remote endpoint, or an unattended
+///      broker / Mind run)                                — nothing else matters.
 ///   2. No usable Claude Code (missing / too old)          — nothing can start.
 ///   3. Not signed in / API-key only                       — it starts, but never connects.
 ///   4. What the bridge itself saw (connected, several browsers, connecting)
@@ -49,6 +50,9 @@ public static class ChromeBridgeStatus
     {
         public bool Enabled { get; init; }
         public bool Remote { get; init; }
+        /// <summary>A broker task or the Mind: nobody is watching, so the
+        /// bridge is off for this run whatever the owner's switch says.</summary>
+        public bool Unattended { get; init; }
         public ClaudeLocateResult? Locate { get; init; }
         public ClaudeAuthResult? Auth { get; init; }
         public ChromeScanResult? Scan { get; init; }
@@ -63,7 +67,7 @@ public static class ChromeBridgeStatus
 
     public static ChromeBridgeState Decide(Inputs i)
     {
-        if (i.Remote || !i.Enabled) return ChromeBridgeState.Disabled;
+        if (i.Remote || i.Unattended || !i.Enabled) return ChromeBridgeState.Disabled;
 
         if (i.Locate is { } loc)
         {
@@ -123,7 +127,8 @@ public static class ChromeBridgeStatus
             ["message_th"] = th,
             ["action"] = action,
             // Beyond the fixed fields — useful to an agent, ignored by the card.
-            ["enabled"] = i.Enabled && !i.Remote,
+            ["enabled"] = i.Enabled && !i.Remote && !i.Unattended,
+            ["unattended"] = i.Unattended,
             ["authMethod"] = i.Auth?.Method,
             ["server"] = i.Runtime.ServerName == null ? null : $"{i.Runtime.ServerName} {i.Runtime.ServerVersion}".Trim(),
             ["tools"] = i.Runtime.Tools,
@@ -153,6 +158,10 @@ public static class ChromeBridgeStatus
             ChromeBridgeState.Disabled when i.Remote => (
                 "Claude in Chrome is local-only: it is never available over the remote endpoint.",
                 "Claude in Chrome ใช้ได้เฉพาะในเครื่องนี้ — ไม่เปิดให้ใช้ผ่าน endpoint ระยะไกล"),
+            // Turning the switch on would not help here, so no settings action.
+            ChromeBridgeState.Disabled when i.Unattended => (
+                "Claude in Chrome is not available to unattended runs (broker tasks, Mind): only a session the owner is watching can drive the browser.",
+                "งานที่รันเองโดยไม่มีคนดู (งานจาก broker หรือ Mind) ใช้ Claude in Chrome ไม่ได้ — ใช้ได้เฉพาะเซสชันที่เจ้าของดูอยู่"),
             ChromeBridgeState.Disabled => (
                 "The Claude in Chrome bridge is off. Turn it on in BrainX ▸ Settings ▸ Claude in Chrome, then restart the agent.",
                 "การเชื่อม Claude in Chrome ปิดอยู่ — เปิดได้ที่ BrainX ▸ ตั้งค่า ▸ Claude in Chrome แล้วเริ่มเอเจนต์ใหม่"),
@@ -225,7 +234,7 @@ public static class ChromeBridgeStatus
 
         switch (s)
         {
-            case ChromeBridgeState.Disabled when i.Remote:
+            case ChromeBridgeState.Disabled when i.Remote || i.Unattended:
                 return A("none", "", "", null);
             case ChromeBridgeState.Disabled:
             {

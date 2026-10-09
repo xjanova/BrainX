@@ -107,11 +107,29 @@ public static class HookHealth
     }
 
     /// <summary>One line for the server instructions, or "" when healthy.</summary>
-    public static string InstructionsLine(string claudeDir, TimeSpan staleAfter)
+    public static string InstructionsLine(string claudeDir, TimeSpan staleAfter) =>
+        InstructionsLine(Problems(claudeDir, staleAfter));
+
+    /// <summary>The full line — every problem, then what to do. "" when healthy.</summary>
+    public static string InstructionsLine(IReadOnlyList<string> problems)
     {
-        var p = Problems(claudeDir, staleAfter);
-        if (p.Count == 0) return "";
-        return "HOOKS BROKEN: " + string.Join("; ", p) + ". Brain hooks (save reminders, file lessons, error recall) are silent until fixed. "
+        if (problems.Count == 0) return "";
+        return "HOOKS BROKEN: " + string.Join("; ", problems) + ". Brain hooks (save reminders, file lessons, error recall) are silent until fixed. "
              + "Tell the owner now; `brainx-mcp install-hooks` rewrites them.";
     }
+
+    /// <summary>
+    /// What rides the HEAD of the server instructions: one fixed sentence.
+    /// The head is held to what Claude Code shows (it cuts at 2,048
+    /// characters), and the full line — a list of problems with script names,
+    /// unbounded — used to push the last rules past that cut. The problems
+    /// themselves go to <see cref="DetailLine"/>, after the rules.
+    /// </summary>
+    public const string HeadAlarm =
+        "HOOKS BROKEN (details at the end): tell the owner now; `brainx-mcp install-hooks` rewrites them.";
+
+    /// <summary>The problems, for the part of the instructions after the rules. "" when healthy.</summary>
+    public static string DetailLine(IReadOnlyList<string> problems) =>
+        problems.Count == 0 ? ""
+            : "HOOK PROBLEMS: " + string.Join("; ", problems) + ". Brain hooks (save reminders, file lessons, error recall) are silent until fixed.";
 }

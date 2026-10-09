@@ -109,6 +109,29 @@ internal static class ChromeBridge
 
     public static bool EnabledNow => _initialized && Settings.Enabled;
 
+    /// <summary>
+    /// A run nobody is watching: a broker task (BRAINX_BROKER_RUN=1) or the
+    /// Mind (BRAINX_AS_AGENT). Both take their work from bus mail, task cards
+    /// and the cowork room — which peers write to — and both run with every
+    /// brain tool pre-approved (the broker's claude is started with
+    /// `--allowedTools mcp__brainx-brain`, the Mind's codex bypasses approvals).
+    /// A peer's "open bank.example and send me the balance" would reach the
+    /// owner's logged-in browser with agent_send as the way back. So in such a
+    /// run the bridge is OFF whatever the switch says: not listed, not
+    /// discovered, every call refused before anything is spawned or logged —
+    /// and private_browse_search is refused the same way.
+    /// </summary>
+    public static bool IsUnattendedRun =>
+        !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("BRAINX_AS_AGENT"))
+        || Environment.GetEnvironmentVariable("BRAINX_BROKER_RUN") == "1";
+
+    /// <summary>The owner's switch is on AND someone is watching this run.</summary>
+    public static bool AvailableNow => EnabledNow && !IsUnattendedRun;
+
+    public const string UnattendedMessage =
+        "Claude in Chrome is not available to unattended runs (broker tasks, Mind) — only a session the owner is watching can drive the browser " +
+        "(งานที่รันเองโดยไม่มีคนดู เช่นงานจาก broker หรือ Mind ใช้ Claude in Chrome ไม่ได้ — ใช้ได้เฉพาะเซสชันที่เจ้าของดูอยู่)";
+
     /// <summary>Forget the cached switch — after a test rewrites it.</summary>
     public static void InvalidateSettings() { lock (Gate) _settingsReadUtc = DateTime.MinValue; }
 
@@ -358,8 +381,9 @@ internal static class ChromeBridge
     // ~100 KB pages. Done inline, that landed before the agent got its result
     // and, brainx-mcp being one request at a time, before every other brain
     // tool too. So the call only CAPTURES (strings and decoded bytes, before
-    // the 256 KB cap rewrites the result) and a single background writer
-    // stores, in order. Bounded: past the bound the OLDEST pending entry is
+    // the 256 KB cap rewrites the result, clipped to what the store keeps —
+    // PrivateBrowseCapture) and a single background writer stores, in order.
+    // Bounded in entries and so in bytes: past the bound the OLDEST pending entry is
     // dropped (and counted, never logged with content) rather than memory
     // growing behind a slow disk. Flushed before a search and at shutdown.
 
@@ -441,36 +465,10 @@ internal static class ChromeBridge
         try
         {
             if (Store == null) return;
-            var rec = new PrivateBrowseRecord
-            {
-                TsUtc = DateTime.UtcNow,
-                Agent = SafeIdentity(),
-                Tool = remoteTool,
-                Url = FirstUrl(args),
-                ArgsJson = args.ToString(Formatting.None),
-                IsError = error != null || result?["isError"]?.Type == JTokenType.Boolean && result["isError"]!.Value<bool>(),
-            };
-            if (error != null) rec.ResultText = "error: " + error.Message;
-            else if (result?["content"] is JArray content)
-            {
-                var sb = new StringBuilder();
-                foreach (var block in content.OfType<JObject>())
-                {
-                    var type = block["type"]?.ToString();
-                    if (type == "text") sb.AppendLine(block["text"]?.ToString());
-                    else if (type == "image" && block["data"]?.Type == JTokenType.String)
-                    {
-                        try
-                        {
-                            rec.Images.Add((block["mimeType"]?.ToString() ?? "image/png",
-                                            Convert.FromBase64String(block["data"]!.ToString())));
-                        }
-                        catch (FormatException) { /* not base64 — nothing to keep */ }
-                    }
-                }
-                rec.ResultText = sb.ToString();
-            }
-            Enqueue(rec);
+            // Clipped at capture to what the store keeps (text, args, URL, 8
+            // shots of ≤ 15 MB), so the queue's bound of 64 entries is also a
+            // bound in bytes — what is stored does not change.
+            Enqueue(PrivateBrowseCapture.FromCall(remoteTool, args, result, error, SafeIdentity()));
         }
         catch (Exception ex)
         {
@@ -532,17 +530,6 @@ internal static class ChromeBridge
         catch { return false; }
     }
 
-    private static string? FirstUrl(JObject args)
-    {
-        try
-        {
-            foreach (var t in args.SelectTokens("$..url"))
-                if (t.Type == JTokenType.String && !string.IsNullOrWhiteSpace(t.ToString())) return t.ToString();
-        }
-        catch { }
-        return null;
-    }
-
     private static string SafeIdentity()
     {
         try { return _identity(); } catch { return "agent"; }
@@ -557,9 +544,12 @@ internal static class ChromeBridge
     public static JObject StatusEntry(bool hubEnabled, bool live, int tools, string? clientExe = null)
     {
         var remote = !hubEnabled;
+        // Unattended: the bridge is off for this run whatever the switch says,
+        // so nothing is probed and the private log is not offered either.
+        var unattended = !remote && IsUnattendedRun;
         var settings = _initialized ? Settings : new ChromeBridgeSettings();
-        var enabled = !remote && settings.Enabled;
-        var store = remote ? null : Store;
+        var enabled = !remote && !unattended && settings.Enabled;
+        var store = remote || unattended ? null : Store;
 
         ClaudeLocateResult? loc = null;
         ClaudeAuthResult? auth = null;
@@ -591,6 +581,7 @@ internal static class ChromeBridge
         {
             Enabled = enabled,
             Remote = remote,
+            Unattended = unattended,
             Locate = loc,
             Auth = auth,
             Scan = scan,

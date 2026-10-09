@@ -81,6 +81,15 @@ public sealed class PrivateBrowseStore
     /// <summary>Text redacted past the stored clip, so a secret cut by the clip is still masked.</summary>
     private const int RedactSlack = 4096;
 
+    /// <summary>
+    /// How much of a field clipped to <paramref name="storedMax"/> is worth
+    /// holding before it reaches <see cref="Record"/>: the clip, the redaction
+    /// margin, and one character more — so <see cref="RedactedClip"/> takes the
+    /// very same head and still knows the original went on. Anything past this
+    /// cannot change what is stored (see PrivateBrowseCapture).
+    /// </summary>
+    public static int CaptureChars(int storedMax) => storedMax + RedactSlack + 1;
+
     /// <summary>The database's in-use size cap (pages holding data, free pages
     /// excluded). Settable for the harness, which cannot write 2 GB.</summary>
     public long MaxDbBytes { get; init; } = DefaultMaxDbBytes;

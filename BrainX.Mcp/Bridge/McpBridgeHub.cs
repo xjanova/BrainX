@@ -146,9 +146,11 @@ public static class McpBridgeHub
     /// <summary>
     /// Enabled right now. A config bridge answers from its file (read once per
     /// session); the built-in chrome bridge from the owner's switch, re-read
-    /// every few seconds.
+    /// every few seconds — and never in an unattended broker / Mind run
+    /// (<see cref="ChromeBridge.IsUnattendedRun"/>), where it is neither
+    /// listed nor discovered.
     /// </summary>
-    private static bool IsOn(McpBridgeDef def) => def.Private ? ChromeBridge.EnabledNow : def.Enabled;
+    private static bool IsOn(McpBridgeDef def) => def.Private ? ChromeBridge.AvailableNow : def.Enabled;
 
     /// <summary>Is this a private (browsing-data) bridge's tool? The caller
     /// then writes nothing about the call anywhere in the vault.</summary>
@@ -163,7 +165,7 @@ public static class McpBridgeHub
         // per agent session, and it comes back on the next call by itself.
         bool live;
         lock (Gate) live = Live.ContainsKey(ChromeBridge.Def.Id);
-        if (live && (!ChromeBridge.EnabledNow || ChromeBridge.IdleExpired()))
+        if (live && (!ChromeBridge.AvailableNow || ChromeBridge.IdleExpired()))
         {
             DropConnection(ChromeBridge.Def.Id);
             _log("chrome: server closed (" + (ChromeBridge.EnabledNow ? "idle" : "switched off") + ")");
@@ -385,6 +387,12 @@ public static class McpBridgeHub
     /// </summary>
     private static JObject CallPrivate(McpBridgeDef def, string remoteTool, JObject args)
     {
+        // First, before the switch, a spawn or a log write: a run nobody is
+        // watching never drives the owner's logged-in browser (a peer can put
+        // the instruction in its task). Turning the switch on would not
+        // change that, so it is not what the refusal suggests.
+        if (ChromeBridge.IsUnattendedRun)
+            throw new InvalidOperationException(ChromeBridge.UnattendedMessage);
         if (!ChromeBridge.EnabledNow)
         {
             DropConnection(def.Id);
@@ -755,7 +763,7 @@ public static class McpBridgeHub
             // From the one snapshot above. While a chrome spawn holds the
             // gate the entry says Connecting (ChromeBridge counts its spawns).
             var chromeLive = LiveNow(ChromeBridge.Def.Id);
-            var chromeTools = _enabled ? (StateFor(ChromeBridge.Def.Id).Tools?.OfType<JObject>()
+            var chromeTools = _enabled && !ChromeBridge.IsUnattendedRun ? (StateFor(ChromeBridge.Def.Id).Tools?.OfType<JObject>()
                 .Count(t => !ChromeBridge.IsHidden(t["name"]?.ToString() ?? "")) ?? 0) : 0;
             chrome = ChromeBridge.StatusEntry(_enabled, chromeLive, chromeTools, Program.FindClientExe());
         }

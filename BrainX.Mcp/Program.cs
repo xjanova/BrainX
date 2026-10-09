@@ -349,14 +349,19 @@ internal static partial class Program
         // cannot say so themselves when they are dead (2026-09-25: two silent
         // weeks), and this server runs in every session either way, so the
         // answer rides the head of the instructions. Owner config, so never in
-        // a sandbox or cloud run.
-        if (!sandbox)
+        // a sandbox or cloud run — except a fake Claude dir the harness names
+        // (BRAINX_SANDBOX_CLAUDE_DIR, sandbox only), so the instructions can be
+        // measured with the warning in them, the longest head there is.
+        var fakeClaudeDir = Environment.GetEnvironmentVariable("BRAINX_SANDBOX") == "1"
+            ? Environment.GetEnvironmentVariable("BRAINX_SANDBOX_CLAUDE_DIR") : null;
+        if (!sandbox || (!string.IsNullOrWhiteSpace(fakeClaudeDir) && Path.IsPathRooted(fakeClaudeDir) && Directory.Exists(fakeClaudeDir)))
         {
             try
             {
-                _hookHealthLine = BrainX.Core.Services.HookHealth.InstructionsLine(
-                    BrainX.Core.Services.HookHealth.DefaultClaudeDir(), TimeSpan.FromHours(48));
-                if (_hookHealthLine.Length > 0) Log(_hookHealthLine);
+                _hookProblems = BrainX.Core.Services.HookHealth.Problems(
+                    sandbox ? fakeClaudeDir! : BrainX.Core.Services.HookHealth.DefaultClaudeDir(), TimeSpan.FromHours(48));
+                var hookLine = BrainX.Core.Services.HookHealth.InstructionsLine(_hookProblems);
+                if (hookLine.Length > 0) Log(hookLine);
             }
             catch (Exception ex) { Log($"hook health check skipped: {ex.Message}"); }
         }
@@ -748,10 +753,18 @@ internal static partial class Program
     /// SHOWS that — `codex mcp list` prints config columns only — so this is
     /// the one place an agent can read which build it is talking to, which is
     /// exactly what a stale hot-swapped binary needs.
+    ///
+    /// Nothing of unbounded length sits in the head. Claude Code cuts at 2,048
+    /// characters; the vault path (11 characters here, 100 on a CI temp path)
+    /// and the hook problem list (script names, ~400 characters) used to sit in
+    /// front of the rules, so a long path, the hook warning and the private
+    /// browsing clause together pushed rules 6 and 7 past the cut. The head now
+    /// carries the hook warning as one fixed sentence; the path and the hook
+    /// details are in the tail.
     /// </summary>
-    /// <summary>"" when the brain hooks look runnable; otherwise one warning
-    /// line, set once at startup (see BrainX.Core HookHealth).</summary>
-    private static string _hookHealthLine = "";
+    /// <summary>Empty when the brain hooks look runnable; otherwise what is
+    /// wrong with them, read once at startup (see BrainX.Core HookHealth).</summary>
+    private static IReadOnlyList<string> _hookProblems = Array.Empty<string>();
 
     internal static string Instructions()
     {
@@ -760,12 +773,14 @@ internal static partial class Program
         var size = notes > 0
             ? string.Format(inv, " — {0:N0} notes, {1:N0} words, {2:N0} links", notes, words, links)
             : "";
+        var hookDetail = BrainX.Core.Services.HookHealth.DetailLine(_hookProblems);
         return
-            $"BrainX MCP v{ServerVersion} (vault: {_vaultPath}). Quote this when asked which brain version runs.\n\n" +
+            $"BrainX MCP v{ServerVersion}. Quote this when asked which brain version runs.\n\n" +
             // Only present when something is wrong, so a healthy session pays
-            // nothing. It sits in the head because Claude Code drops the tail.
-            (_hookHealthLine.Length > 0 ? _hookHealthLine + "\n\n" : "") +
-            $"The owner's personal brain{size}, written from their own work: your primary memory, not optional context. " +
+            // nothing. It sits in the head because Claude Code drops the tail —
+            // one fixed sentence; what is wrong follows the rules.
+            (hookDetail.Length > 0 ? BrainX.Core.Services.HookHealth.HeadAlarm + "\n\n" : "") +
+            $"The owner's personal brain{size}: your primary memory, not optional context. " +
             "Tool calls are journaled automatically: never narrate your searches.\n\n" +
             "RULES\n" +
             "1. Before a non-trivial answer, ask the brain: brain_recall (STRONG = cite it and move on; MISS = do the work) or brain_search with 2-4 keywords, " +
@@ -788,7 +803,9 @@ internal static partial class Program
             "6. Asked to change code in a repo you cannot see: task_handoff the spec, don't write the patch from memory.\n" +
             "7. mode='keyword-fallback', 'legacy-heuristic' or 'unverified' means the smart path degraded — say so. superseded:true = retired, follow supersededBy.\n" +
             "Each tool's description carries its full protocol.\n\n" +
+            (hookDetail.Length > 0 ? hookDetail + "\n\n" : "") +
             "MORE\n" +
+            $"• Vault: {_vaultPath}\n" +
             "• \"What is near X\": one brain_walk beats chained search + backlinks. Hot topics: brain_bundles_list, then brain_bundle (~500 tokens) " +
             "before brain_synthesize (~8,000).\n" +
             "• cached:true = an identical call ran within 10 minutes, or the note's sha is unchanged: it is already in your context, so do not re-fetch " +

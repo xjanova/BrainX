@@ -27,10 +27,9 @@ internal static partial class Program
     /// card or a peer — a prompt-injected or peer-instructed agent there could
     /// dump the owner's private log and forward it with agent_send or cowork,
     /// which sync. The owner searches their browsing; an unattended run never.
+    /// One definition, shared with the chrome__ tools themselves.
     /// </summary>
-    private static bool IsUnattendedRun =>
-        !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("BRAINX_AS_AGENT"))
-        || Environment.GetEnvironmentVariable("BRAINX_BROKER_RUN") == "1";
+    private static bool IsUnattendedRun => ChromeBridge.IsUnattendedRun;
 
     /// <summary>
     /// Is there private browsing an owner could search here? The bridge is on,
@@ -52,7 +51,7 @@ internal static partial class Program
     private static bool PrivateBrowsingVisible()
     {
         if (IsRemoteChild) return false;
-        try { return ChromeBridge.EnabledNow || PrivateSearchVisible(); }
+        try { return ChromeBridge.AvailableNow || PrivateSearchVisible(); }
         catch { return false; }
     }
 
