@@ -104,9 +104,21 @@ public static class McpBridgeHub
         if (!_enabled) return;
 
         _defs = McpBridgeConfig.Load(vaultPath, log);
+        // The built-in Claude in Chrome bridge is always ON THE LIST — so its
+        // names are claimed (a call while it is off says how to turn it on,
+        // not "unknown tool") and bridge_status can describe it — but whether
+        // it is ENABLED is the owner's live switch, read on every use.
+        ChromeBridge.Initialize(vaultPath, log, identity);
+        _defs.Add(ChromeBridge.Def);
         LoadCache();
 
-        var on = _defs.Where(d => d.Enabled).ToList();
+        // The heartbeat also closes an idle chrome server and one the owner
+        // switched off mid-session, so it runs whenever the hub does.
+        _statusTimer = new System.Threading.Timer(
+            _ => { try { Heartbeat(); } catch { } }, null,
+            TimeSpan.FromSeconds(StatusHeartbeatSeconds), TimeSpan.FromSeconds(StatusHeartbeatSeconds));
+
+        var on = _defs.Where(IsOn).ToList();
         if (on.Count == 0) return;
 
         log($"bridges: {string.Join(", ", on.Select(d => d.Id))}");
@@ -115,11 +127,35 @@ public static class McpBridgeHub
         // closed still has to appear on the dashboard — as "enabled, not
         // connected", which is a state, not a silence.
         PublishStatus();
-        _statusTimer = new System.Threading.Timer(
-            _ => { try { PublishStatus(); } catch { } }, null,
-            TimeSpan.FromSeconds(StatusHeartbeatSeconds), TimeSpan.FromSeconds(StatusHeartbeatSeconds));
 
         foreach (var def in on) BeginDiscover(def);
+    }
+
+    /// <summary>
+    /// Enabled right now. A config bridge answers from its file (read once per
+    /// session); the built-in chrome bridge from the owner's switch, re-read
+    /// every few seconds.
+    /// </summary>
+    private static bool IsOn(McpBridgeDef def) => def.Private ? ChromeBridge.EnabledNow : def.Enabled;
+
+    /// <summary>Is this a private (browsing-data) bridge's tool? The caller
+    /// then writes nothing about the call anywhere in the vault.</summary>
+    public static bool IsPrivateName(string name) => Resolve(name) is { } r && r.Def.Private;
+
+    private static void Heartbeat()
+    {
+        PublishStatus();
+
+        // Chrome: close the server when the owner switched the bridge off, or
+        // when nobody has used it for a while — an idle claude.exe is ~150 MB
+        // per agent session, and it comes back on the next call by itself.
+        bool live;
+        lock (Gate) live = Live.ContainsKey(ChromeBridge.Def.Id);
+        if (live && (!ChromeBridge.EnabledNow || ChromeBridge.IdleExpired()))
+        {
+            DropConnection(ChromeBridge.Def.Id);
+            _log("chrome: server closed (" + (ChromeBridge.EnabledNow ? "idle" : "switched off") + ")");
+        }
     }
 
     // ───────────── tools/list ─────────────
@@ -145,7 +181,7 @@ public static class McpBridgeHub
         var taken = new HashSet<string>(
             tools.OfType<JObject>().Select(t => t["name"]?.ToString() ?? ""), StringComparer.OrdinalIgnoreCase);
 
-        foreach (var def in _defs.Where(d => d.Enabled))
+        foreach (var def in _defs.Where(IsOn))
         {
             var state = StateFor(def.Id);
 
@@ -156,6 +192,9 @@ public static class McpBridgeHub
             // before the agent can say hello.
             if (state.Tools == null || state.Fingerprint != def.Fingerprint())
             {
+                // The chrome switch can be flipped on after this session
+                // started; nothing kicked discovery off at Initialize then.
+                if (def.Private && (state.InFlight == null || state.InFlight.IsCompleted)) BeginDiscover(def);
                 var inFlight = state.InFlight;
                 if (inFlight != null)
                 {
@@ -176,6 +215,10 @@ public static class McpBridgeHub
 
                 if (def.ToolAllowlist.Count > 0 &&
                     !def.ToolAllowlist.Contains(raw, StringComparer.OrdinalIgnoreCase)) continue;
+
+                // file_upload (and anything else the chrome bridge must never
+                // offer) is dropped here, before any client can see it.
+                if (def.Private && ChromeBridge.IsHidden(raw!)) continue;
 
                 var name = (flatNames ? def.FlatPrefix : def.Prefix) + raw;
                 if (name.Length > MaxToolNameLength)
@@ -272,6 +315,8 @@ public static class McpBridgeHub
         var (def, remoteTool) = Resolve(bridgedName)
                                 ?? throw new InvalidOperationException($"unknown tool: {bridgedName}");
 
+        if (def.Private) return CallPrivate(def, remoteTool, args);
+
         if (!def.Enabled)
             throw new InvalidOperationException(
                 $"the '{def.Id}' bridge is configured but disabled — set \"enabled\": true in " +
@@ -311,14 +356,64 @@ public static class McpBridgeHub
     }
 
     /// <summary>
+    /// A call into the private (Claude in Chrome) bridge. Same transport and
+    /// the same timeout-poisoning rule as any bridge, but:
+    ///   • the owner's switch is checked on EVERY call, not once per session;
+    ///   • file_upload is refused even if a client calls it by name;
+    ///   • images are passed through exactly as the server sent them (no
+    ///     hoisting — the server already sends real image blocks, and hoisting
+    ///     would rewrite page text that merely looks like JSON);
+    ///   • nothing is written into the vault: no status file, no
+    ///     per-bridge counters on disk. The call is kept in the private store.
+    /// </summary>
+    private static JObject CallPrivate(McpBridgeDef def, string remoteTool, JObject args)
+    {
+        if (!ChromeBridge.EnabledNow)
+        {
+            DropConnection(def.Id);
+            throw new InvalidOperationException(ChromeBridge.DisabledMessage);
+        }
+        if (ChromeBridge.IsHidden(remoteTool))
+            throw new InvalidOperationException(ChromeBridge.HiddenMessage(remoteTool));
+
+        ChromeBridge.NoteCallStart();
+        var conn = Connect(def);
+        var state = StateFor(def.Id);
+        state.Calls++;
+        state.LastCallUtc = DateTime.UtcNow;
+
+        JObject result;
+        try
+        {
+            result = conn.CallTool(remoteTool, args);
+        }
+        catch (Exception ex)
+        {
+            if (conn.Poisoned || !conn.IsAlive) DropConnection(def.Id);
+            ChromeBridge.AfterCall(remoteTool, args, null, ex);
+            throw new InvalidOperationException($"{def.Id} bridge: {ex.Message}");
+        }
+
+        // Record BEFORE capping, so the private log keeps what the server
+        // actually said even when the agent is shown a truncated copy.
+        ChromeBridge.AfterCall(remoteTool, args, result, null);
+        return CapText(result, def.Id);
+    }
+
+    /// <summary>
     /// Guard the agent's context (and the brain's own stdout line) against a
     /// server that answers with a whole scene dump.
     /// </summary>
     private static JObject Cap(JObject result, string bridgeId)
     {
-        if (result["content"] is not JArray content) return result;
+        if (result["content"] is JArray content) HoistImages(content);
+        return CapText(result, bridgeId);
+    }
 
-        HoistImages(content);
+    /// <summary>The 256 KB text budget alone. Image blocks are never touched.</summary>
+    private static JObject CapText(JObject result, string bridgeId)
+    {
+        if (result["content"] is not JArray content) return result;
 
         var budget = MaxResultChars;
         foreach (var block in content.OfType<JObject>())
@@ -410,10 +505,14 @@ public static class McpBridgeHub
             // Where the server lives decides the transport, and the config says
             // which: a `url` means it is inside the editor (nothing to spawn),
             // a `command` means the brain spawns it. Validate() has already
-            // refused an entry that claims both or neither.
-            IMcpBridgeConnection conn = def.IsHttp
-                ? McpBridgeHttpConnection.Start(def, _log)
-                : McpBridgeConnection.Start(def, _log);
+            // refused an entry that claims both or neither. The chrome bridge
+            // has no fixed command at all: it resolves claude.exe afresh for
+            // every spawn, supervisor respawns included.
+            IMcpBridgeConnection conn = def.Private
+                ? ChromeBridge.StartConnection(_log)
+                : def.IsHttp
+                    ? McpBridgeHttpConnection.Start(def, _log)
+                    : McpBridgeConnection.Start(def, _log);
             Live[def.Id] = conn;
             _log($"bridge '{def.Id}' connected → {conn.ServerName ?? "?"} {conn.ServerVersion ?? ""}".TrimEnd());
             return conn;
@@ -467,7 +566,10 @@ public static class McpBridgeHub
                     state.FailedUtc = null;
                     state.LastError = null;
                 }
-                SaveCache();
+                // Chrome: the tool list was all discovery wanted. Close the
+                // ~150 MB server again; the first real call starts it.
+                if (def.Private) DropConnection(def.Id);
+                SaveCache(privateStore: def.Private);
                 PublishStatus(def);
                 _log($"bridge '{def.Id}': {tools.Count} tool(s)");
             }
@@ -479,7 +581,7 @@ public static class McpBridgeHub
                     state.LastError = ex.Message;
                 }
                 DropConnection(def.Id);
-                SaveCache();
+                SaveCache(privateStore: def.Private);
                 PublishStatus(def);
                 _log($"bridge '{def.Id}' unavailable: {ex.Message}");
             }
@@ -518,7 +620,7 @@ public static class McpBridgeHub
         // closed left its worker's file behind. That is what ReapDeadSessions
         // and the reader's TTL exist for; this is the fast path, not the
         // guarantee.
-        foreach (var def in _defs) { try { File.Delete(StatusPathFor(def.Id)); } catch { } }
+        foreach (var def in _defs.Where(d => !d.Private)) { try { File.Delete(StatusPathFor(def.Id)); } catch { } }
     }
 
     // ───────────── status ─────────────
@@ -531,7 +633,7 @@ public static class McpBridgeHub
     public static JObject StatusJson()
     {
         var arr = new JArray();
-        foreach (var def in _defs)
+        foreach (var def in _defs.Where(d => !d.Private))
         {
             var s = StateFor(def.Id);
             bool live;
@@ -561,12 +663,45 @@ public static class McpBridgeHub
             });
         }
 
+        // The built-in Claude in Chrome bridge — its own entry, in the shape
+        // CluadeX's card reads (state / action / en + th messages). Always
+        // present: a client that finds no "chrome" key knows this BrainX
+        // predates the bridge.
+        JObject chrome;
+        try
+        {
+            // TryEnter, not lock: a spawn in progress holds the gate for up to
+            // the handshake timeout, and a status call must not hang behind
+            // it — while it is held, the chrome server is (re)connecting.
+            var chromeLive = false;
+            if (Monitor.TryEnter(Gate, TimeSpan.FromMilliseconds(250)))
+            {
+                try { chromeLive = Live.TryGetValue(ChromeBridge.Def.Id, out var cc) && cc.IsAlive; }
+                finally { Monitor.Exit(Gate); }
+            }
+            var chromeTools = _enabled ? (StateFor(ChromeBridge.Def.Id).Tools?.OfType<JObject>()
+                .Count(t => !ChromeBridge.IsHidden(t["name"]?.ToString() ?? "")) ?? 0) : 0;
+            chrome = ChromeBridge.StatusEntry(_enabled, chromeLive, chromeTools);
+        }
+        catch (Exception ex)
+        {
+            chrome = new JObject
+            {
+                ["state"] = "Failed",
+                ["message_en"] = "Could not read the Claude in Chrome bridge status: " + ex.GetType().Name,
+                ["message_th"] = "อ่านสถานะการเชื่อม Claude in Chrome ไม่ได้: " + ex.GetType().Name,
+                ["action"] = new JObject { ["kind"] = "check_again", ["label_en"] = "Check again", ["label_th"] = "ตรวจอีกครั้ง", ["target"] = "bridge_status" },
+                ["browsers"] = new JArray(),
+            };
+        }
+
         return new JObject
         {
             ["enabled"] = _enabled,
             ["reason"] = _enabled ? null : "bridges are disabled in headless mode (remote /mcp child)",
             ["configPath"] = McpBridgeConfig.PathFor(_vaultPath),
             ["bridges"] = arr,
+            ["chrome"] = chrome,
             ["hint"] = arr.Count == 0
                 ? "No bridges configured. The config file above is seeded with disabled unity + unreal entries — point their args at your checkout and set enabled:true."
                 : "Edit the config file above, then restart the agent (tools/list is read once per session).",
@@ -598,7 +733,7 @@ public static class McpBridgeHub
 
     private static void PublishStatus()
     {
-        foreach (var def in _defs.Where(d => d.Enabled))
+        foreach (var def in _defs.Where(d => d.Enabled && !d.Private))
         {
             // The probe belongs to the heartbeat and NOWHERE else: a bridged
             // tool call must never pay a socket timeout so a dashboard can be
@@ -624,7 +759,9 @@ public static class McpBridgeHub
         // A disabled bridge publishes nothing. The card reads mcp-bridges.json
         // for the roster and draws it as "off" from there — a file saying "I am
         // not running this" adds nothing and outlives the config that caused it.
-        if (!_enabled || !def.Enabled) return;
+        // A PRIVATE bridge publishes nothing either, ever: its last tool and
+        // last error would put browsing into the vault (and the vault syncs).
+        if (!_enabled || !def.Enabled || def.Private) return;
 
         try
         {
@@ -710,43 +847,62 @@ public static class McpBridgeHub
         try
         {
             var path = McpBridgeConfig.CachePathFor(_vaultPath);
-            if (!File.Exists(path)) return;
-            var root = JObject.Parse(File.ReadAllText(path));
-            if (root["bridges"] is not JObject bridges) return;
-
-            foreach (var prop in bridges.Properties())
-            {
-                if (prop.Value is not JObject entry) continue;
-                var def = _defs.FirstOrDefault(d => string.Equals(d.Id, prop.Name, StringComparison.OrdinalIgnoreCase));
-                if (def == null) continue;
-
-                var fp = entry["fingerprint"]?.ToString();
-                if (fp != def.Fingerprint()) continue;         // config moved — cache is about a different server
-
-                var s = StateFor(prop.Name);
-                s.Fingerprint = fp;
-                s.Tools = entry["tools"] as JArray;
-                s.FetchedUtc = entry["fetchedUtc"]?.ToObject<DateTime?>();
-                s.FailedUtc = entry["failedUtc"]?.ToObject<DateTime?>();
-                // ?.ToString() on a JSON null yields "" — which bridge_status
-                // then reported as an error with no message, on a bridge that
-                // had never failed.
-                s.LastError = entry["lastError"]?.Type == JTokenType.String
-                    ? entry["lastError"]!.ToString()
-                    : null;
-            }
+            if (File.Exists(path) && JObject.Parse(File.ReadAllText(path))["bridges"] is JObject bridges)
+                ApplyCache(bridges, privateStore: false);
         }
         catch (Exception ex) { _log($"bridge cache unreadable ({ex.Message}) — rediscovering"); }
+
+        // The chrome bridge's schemas live in the private folder: tool
+        // schemas are not secret, but nothing about the browser bridge — not
+        // even that this PC has one — is written into the vault.
+        try
+        {
+            if (ChromeBridge.ReadCacheEntry()?["bridges"] is JObject priv) ApplyCache(priv, privateStore: true);
+        }
+        catch { }
     }
 
-    private static void SaveCache()
+    private static void ApplyCache(JObject bridges, bool privateStore)
+    {
+        foreach (var prop in bridges.Properties())
+        {
+            if (prop.Value is not JObject entry) continue;
+            var def = _defs.FirstOrDefault(d => string.Equals(d.Id, prop.Name, StringComparison.OrdinalIgnoreCase));
+            if (def == null || def.Private != privateStore) continue;
+
+            var fp = entry["fingerprint"]?.ToString();
+            if (fp != def.Fingerprint()) continue;         // config moved — cache is about a different server
+
+            var s = StateFor(prop.Name);
+            s.Fingerprint = fp;
+            s.Tools = entry["tools"] as JArray;
+            s.FetchedUtc = entry["fetchedUtc"]?.ToObject<DateTime?>();
+            s.FailedUtc = entry["failedUtc"]?.ToObject<DateTime?>();
+            // ?.ToString() on a JSON null yields "" — which bridge_status
+            // then reported as an error with no message, on a bridge that
+            // had never failed.
+            s.LastError = entry["lastError"]?.Type == JTokenType.String
+                ? entry["lastError"]!.ToString()
+                : null;
+        }
+    }
+
+    /// <summary>
+    /// Persist discovery results. <paramref name="privateStore"/> picks WHICH
+    /// file: the vault cache holds config bridges only, the private folder the
+    /// chrome bridge only — a chrome discovery never rewrites a vault file.
+    /// </summary>
+    private static void SaveCache(bool privateStore = false)
     {
         try
         {
             var bridges = new JObject();
+            var privateIds = new HashSet<string>(_defs.Where(d => d.Private).Select(d => d.Id), StringComparer.OrdinalIgnoreCase);
             lock (Gate)
             {
                 foreach (var (id, s) in States)
+                {
+                    if (privateIds.Contains(id) != privateStore) continue;
                     bridges[id] = new JObject
                     {
                         ["fingerprint"] = s.Fingerprint,
@@ -755,6 +911,13 @@ public static class McpBridgeHub
                         ["lastError"] = s.LastError,
                         ["tools"] = s.Tools,
                     };
+                }
+            }
+
+            if (privateStore)
+            {
+                ChromeBridge.WriteCacheEntry(new JObject { ["version"] = 1, ["bridges"] = bridges });
+                return;
             }
 
             var path = McpBridgeConfig.CachePathFor(_vaultPath);

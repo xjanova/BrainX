@@ -816,8 +816,22 @@ internal static partial class Program
         try { McpBridgeHub.AppendTools(tools, flatNames: ClientRefusesDoubleUnderscore()); }
         catch (Exception ex) { Log($"bridge tools merge failed (non-fatal): {ex.Message}"); }
 
+        // The private browsing search exists on the LOCAL stdio transport only.
+        // The remote /mcp child is never even told it exists.
+        if (IsRemoteChild)
+            for (var i = tools.Count - 1; i >= 0; i--)
+                if (BrainX.Core.Services.Chrome.ChromeBridgeIds.IsPrivateToolName(tools[i]?["name"]?.ToString()))
+                    tools.RemoveAt(i);
+
         return BuildResult(id, new JObject { ["tools"] = tools });
     }
+
+    /// <summary>
+    /// Spawned by the node to serve the remote /mcp endpoint (or a cloud
+    /// re-index): the caller is whoever holds a bearer token, not the owner at
+    /// this keyboard. Set by BrainX.Server's McpChild / CloudReindexer.
+    /// </summary>
+    private static bool IsRemoteChild => Environment.GetEnvironmentVariable("BRAINX_HEADLESS") == "1";
 
     /// <summary>
     /// Grok Build qualifies an MCP tool as <c>&lt;server&gt;__&lt;tool&gt;</c> and
@@ -1758,8 +1772,30 @@ internal static partial class Program
                 "the command it runs, the last error, and the setup steps still outstanding. " +
                 "Call this FIRST whenever a unity__/unreal__ tool is missing or failing, or when the " +
                 "user asks 'ต่อ unity/unreal ได้ไหม' — the answer is almost always a closed editor, a " +
-                "missing `uv`, or a path in mcp-bridges.json still pointing at the placeholder.",
-                new JObject { ["type"] = "object", ["properties"] = new JObject() })
+                "missing `uv`, or a path in mcp-bridges.json still pointing at the placeholder. " +
+                "The `chrome` entry describes the built-in Claude in Chrome bridge (chrome__* tools): " +
+                "its state, the one action that fixes it, and messages in English and Thai — read it " +
+                "whenever a chrome__ tool is missing or answers 'Browser extension is not connected'.",
+                new JObject { ["type"] = "object", ["properties"] = new JObject() }),
+            Tool(BrainX.Core.Services.Chrome.ChromeBridgeIds.PrivateSearchTool,
+                "Search the owner's PRIVATE browsing log: what the chrome__* (Claude in Chrome) tools saw — " +
+                "URLs, page text, typed values, screenshots. It is kept on this PC only, outside the brain: " +
+                "never synced, never journaled, never available over the remote endpoint. Use it ONLY when " +
+                "the owner asks about something they browsed through Claude in Chrome ('เว็บที่เปิดเมื่อวาน', " +
+                "'หน้าที่มีราคา…'). Every word of `query` must appear (substring match, Thai works); empty " +
+                "query = most recent. Pass `screenshot_id` from a result to see that screenshot. Do not copy " +
+                "results into brain notes, the agent bus or the cowork room unless the owner explicitly asks.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["query"] = new JObject { ["type"] = "string", ["description"] = "words that must all appear in the URL, the arguments or the page text" },
+                        ["limit"] = new JObject { ["type"] = "integer", ["default"] = 10, ["description"] = "1..50" },
+                        ["days"] = new JObject { ["type"] = "integer", ["description"] = "only the last N days" },
+                        ["screenshot_id"] = new JObject { ["type"] = "string", ["description"] = "return this screenshot (an id from a previous result) instead of searching" },
+                    },
+                })
         };
 
     private static JObject Tool(string name, string description, JObject schema) => new()
@@ -1776,6 +1812,13 @@ internal static partial class Program
         var name = parameters?["name"]?.ToString();
         var args = parameters?["arguments"] as JObject ?? new JObject();
 
+        // The private browsing log. Handled before everything else and outside
+        // the switch below, because that path journals the arguments, feeds the
+        // activity log and piggybacks bus notices — none of which a search over
+        // private browsing may do.
+        if (string.Equals(name, BrainX.Core.Services.Chrome.ChromeBridgeIds.PrivateSearchTool, StringComparison.OrdinalIgnoreCase))
+            return PrivateBrowseSearchCall(id, args);
+
         // Bridged tool → hand the call to the engine that owns it. Its whole
         // result envelope is forwarded untouched (see BridgedCall), which the
         // brain's own path can't do because it re-serialises results to text.
@@ -1784,6 +1827,16 @@ internal static partial class Program
         // "brain" would otherwise answer for brain_stats.
         if (name != null && !CoreToolNames.Value.Contains(name) && McpBridgeHub.IsBridgedName(name))
             return BridgedCall(id, name, args);
+
+        // A chrome__ name the hub did not claim (the hub is off: the remote
+        // child, a cloud-cache session, a sandbox). It must NOT fall through to
+        // the switch below: its "unknown tool" path writes the arguments into
+        // the activity feed — a URL in the vault, and in cloud mode, in the
+        // cloud. Refuse with no side effect at all.
+        if (BrainX.Core.Services.Chrome.ChromeBridgeIds.IsChromeToolName(name))
+            return PrivateError(id,
+                "the Claude in Chrome bridge is not available in this session " +
+                "(การเชื่อม Claude in Chrome ใช้ไม่ได้ในเซสชันนี้) — call bridge_status for details");
 
         try
         {
@@ -1939,6 +1992,37 @@ internal static partial class Program
         // unity_x and unity__x are one tool: journal it, and show it on the
         // dashboard, under the one name every other session already uses.
         name = McpBridgeHub.CanonicalName(name);
+
+        // PRIVATE BRIDGE (Claude in Chrome). The owner's rule: what a browser
+        // tool is asked and what it sees — URLs, page text, typed values,
+        // screenshots — never enters the vault. So none of the side effects
+        // below: no journal line, no activity entry, no bus counter, no
+        // agent-bus / task / cowork piggyback (a notice is harmless, but
+        // reading one marks mail delivered, which is a vault write). The hub
+        // keeps the call in the private store instead.
+        if (McpBridgeHub.IsPrivateName(name))
+        {
+            try
+            {
+                var envelope = McpBridgeHub.CallTool(name, args);
+                if (envelope["content"] is not JArray)
+                    envelope["content"] = new JArray { new JObject { ["type"] = "text", ["text"] = envelope.ToString(Formatting.Indented) } };
+                return BuildResult(id, envelope);
+            }
+            catch (Exception ex)
+            {
+                return BuildResult(id, new JObject
+                {
+                    ["isError"] = true,
+                    ["content"] = new JArray { new JObject
+                    {
+                        ["type"] = "text",
+                        ["text"] = $"Error: {ex.Message}\n\nCall bridge_status and read its \"chrome\" entry for the one step that fixes this."
+                    }}
+                });
+            }
+        }
+
         try
         {
             var envelope = McpBridgeHub.CallTool(name, args);

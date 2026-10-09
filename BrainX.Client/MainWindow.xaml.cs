@@ -8401,6 +8401,7 @@ public partial class MainWindow : Window
             RefreshMcpCardForBuildKind();
             RefreshGardenerCard();
             RefreshMcpReaperCard();
+            RefreshChromeBridgeCard();
         }
     }
 

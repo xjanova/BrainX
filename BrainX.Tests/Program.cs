@@ -32,6 +32,10 @@ internal static partial class Program
     {
         // Spawned as a fake MCP child by one of the checks below. Must be the
         // first thing decided — a stub owns stdio and prints nothing else.
+        // The chrome stub first: it is started by brainx-mcp's chrome bridge,
+        // which is itself started by the harness.
+        if (ChromeStubServer.IsRequested(args))
+            return await ChromeStubServer.RunAsync();
         if (Environment.GetEnvironmentVariable(StubMcpServer.EnvFlag) == "1")
             return await StubMcpServer.RunAsync();
 
@@ -78,6 +82,7 @@ internal static partial class Program
         RegisterMindBridgeChecks(sshChecks);
         RegisterHardeningChecks(sshChecks);
         RegisterMySqlChecks(sshChecks);
+        RegisterChromeBridgeChecks(sshChecks);
         foreach (var (name, check) in sshChecks) await Run(name, check);
 
         // BRAINX_TEST_MYSQL set: the whole cloud surface again, with every test

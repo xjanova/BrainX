@@ -81,6 +81,9 @@ public sealed class McpBridgeConnection : IMcpBridgeConnection
         foreach (var a in prefixArgs) psi.ArgumentList.Add(a);
         foreach (var a in def.Args) psi.ArgumentList.Add(a);
         if (!string.IsNullOrWhiteSpace(def.Cwd) && Directory.Exists(def.Cwd)) psi.WorkingDirectory = def.Cwd;
+        // A built-in claude.exe child must authenticate as the owner's own
+        // Claude Code sign-in, never as whichever app spawned the brain.
+        if (def.StripClaudeEnv) BrainX.Core.Services.Chrome.ClaudeChildEnv.Sanitize(psi.Environment);
         foreach (var kv in def.Env) psi.Environment[kv.Key] = kv.Value;   // values never logged — may be tokens
 
         Process proc;
@@ -90,22 +93,31 @@ public sealed class McpBridgeConnection : IMcpBridgeConnection
         }
         catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 2)
         {
-            throw new InvalidOperationException(
-                $"'{def.Command}' not found on PATH — install it, or put an absolute path in mcp-bridges.json");
+            // Typed, so the chrome bridge can tell "the exe vanished under us"
+            // (a desktop update deleted its version folder) from any other
+            // failure and re-resolve once.
+            throw new FileNotFoundException(
+                $"'{def.Command}' not found on PATH — install it, or put an absolute path in mcp-bridges.json", def.Command);
         }
 
         var conn = new McpBridgeConnection(def, proc, log);
 
         // Drain stderr forever: a full stderr pipe blocks the child, and these
         // servers are chatty. Prefixed so engine noise is never mistaken for
-        // the brain's own log lines.
-        _ = Task.Run(async () =>
+        // the brain's own log lines. A QUIET bridge (private browsing) is not
+        // echoed at all — brainx-mcp's stderr ends up in the host app's own log
+        // files — and keeps only its first line, in memory, for the status.
+        var stderrDone = Task.Run(async () =>
         {
             try
             {
                 string? l;
                 while ((l = await proc.StandardError.ReadLineAsync()) != null)
-                    log($"[{def.Id}] {l}");
+                {
+                    if (conn.FirstStderrLine == null && !string.IsNullOrWhiteSpace(l))
+                        conn.FirstStderrLine = l.Length > 300 ? l[..300] + "…" : l.Trim();
+                    if (!def.QuietStderr) log($"[{def.Id}] {l}");
+                }
             }
             catch { /* child gone — surfaced by the next call */ }
         });
@@ -114,13 +126,24 @@ public sealed class McpBridgeConnection : IMcpBridgeConnection
         {
             conn.Handshake();
         }
-        catch
+        catch (Exception ex)
         {
+            // A server that dies during init usually says why on stderr
+            // ("disabled by your organization policy", a module crash). Give the
+            // reader a moment to catch that line, then put it in the message
+            // the owner reads instead of a bare "server exited (code 1)".
+            try { if (proc.HasExited) stderrDone.Wait(TimeSpan.FromMilliseconds(500)); } catch { }
+            var first = conn.FirstStderrLine;
             conn.Dispose();
+            if (first != null && ex is not FileNotFoundException)
+                throw new InvalidOperationException($"{ex.Message} — {first}", ex);
             throw;
         }
         return conn;
     }
+
+    /// <summary>The child's first non-empty stderr line (≤ 300 chars), if any.</summary>
+    public string? FirstStderrLine { get; private set; }
 
     /// <summary>
     /// MCP requires initialize → initialized before any tools call; servers
