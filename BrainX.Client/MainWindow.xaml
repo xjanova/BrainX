@@ -5762,6 +5762,13 @@
                                                 Click="SettingsJump_Click" Tag="Gardener"
                                                 HorizontalContentAlignment="Left" Padding="14,8"
                                                 Margin="0,0,0,2"/>
+                                        <!-- Also where the client's "settings claude-in-chrome" switch
+                                             lands (bridge_status's "Turn on in BrainX" action). -->
+                                        <Button x:Name="SettingsNavChrome" Content="Claude in Chrome"
+                                                Style="{StaticResource NavButton}"
+                                                Click="SettingsJump_Click" Tag="Chrome"
+                                                HorizontalContentAlignment="Left" Padding="14,8"
+                                                Margin="0,0,0,2"/>
                                         <Button x:Name="SettingsNavAbout" Content="About"
                                                 Style="{StaticResource NavButton}"
                                                 Click="SettingsJump_Click" Tag="About"
@@ -6781,8 +6788,12 @@
                                                                    Foreground="{StaticResource NeonGreenBrush}" Margin="0,0,0,4"/>
                                                         <TextBlock FontSize="11" TextWrapping="Wrap" Foreground="{StaticResource TextSecondaryBrush}"
                                                                    Text="What chrome__ tools see (URLs, page text, typed values, screenshots) never enters the brain, the journal, the agent bus or any sync. It is kept only on this PC, readable by your Windows account alone — search it here, or ask an agent to use private_browse_search."/>
-                                                        <TextBlock FontSize="11" TextWrapping="Wrap" Foreground="{StaticResource TextMutedBrush}" Margin="0,2,0,8"
+                                                        <TextBlock FontSize="11" TextWrapping="Wrap" Foreground="{StaticResource TextMutedBrush}" Margin="0,2,0,4"
                                                                    Text="สิ่งที่เครื่องมือ chrome__ เห็น (URL, ข้อความในหน้า, ค่าที่พิมพ์, ภาพหน้าจอ) จะไม่เข้าสมอง ไม่ลงบันทึกประจำวัน ไม่ผ่าน agent bus และไม่ซิงก์ไปไหน เก็บไว้ในเครื่องนี้เท่านั้น อ่านได้เฉพาะบัญชี Windows ของคุณ — ค้นได้ที่นี่ หรือให้เอเจนต์ใช้ private_browse_search"/>
+                                                        <!-- The log and the switch live in %LOCALAPPDATA%\BrainX\private,
+                                                             inside the installer's app root: say so, plainly. -->
+                                                        <TextBlock FontSize="11" TextWrapping="Wrap" Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,8"
+                                                                   Text="Uninstalling BrainX erases this log and turns the bridge off. · การถอนการติดตั้ง BrainX จะลบบันทึกนี้และปิดการเชื่อมด้วย"/>
                                                         <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
                                                             <TextBlock Text="Keep for · เก็บไว้" FontSize="11" VerticalAlignment="Center"
                                                                        Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,8,0"/>

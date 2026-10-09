@@ -56,6 +56,9 @@ public static class ChromeBridgeStatus
         public int RetentionDays { get; init; } = ChromeBridgeSettings.DefaultRetentionDays;
         public string? PrivateLogPath { get; init; }
         public bool PrivateLogAvailable { get; init; }
+        /// <summary>BrainX.Client.exe, when the caller could locate it — the
+        /// Disabled action starts it with <c>--settings claude-in-chrome</c>.</summary>
+        public string? BrainXClientExe { get; init; }
     }
 
     public static ChromeBridgeState Decide(Inputs i)
@@ -162,6 +165,11 @@ public static class ChromeBridgeStatus
             ChromeBridgeState.NotSignedIn => (
                 "Claude Code is not signed in. " + apiNoteEn,
                 "Claude Code ยังไม่ได้ล็อกอิน — " + apiNoteTh),
+            // third_party = Bedrock / Vertex / Foundry or an LLM gateway: it
+            // bills fine and can never reach the extension, same as a key.
+            ChromeBridgeState.ApiKeyOnly when string.Equals(i.Auth?.Method, "third_party", StringComparison.OrdinalIgnoreCase) => (
+                "Claude Code is signed in through a cloud provider or gateway (Bedrock, Vertex, Foundry). " + apiNoteEn,
+                "Claude Code ล็อกอินผ่านผู้ให้บริการคลาวด์หรือเกตเวย์ (Bedrock, Vertex, Foundry) อยู่ — " + apiNoteTh),
             ChromeBridgeState.ApiKeyOnly => (
                 "Claude Code is signed in with an API key. " + apiNoteEn,
                 "Claude Code ล็อกอินด้วย API key อยู่ — " + apiNoteTh),
@@ -220,7 +228,16 @@ public static class ChromeBridgeStatus
             case ChromeBridgeState.Disabled when i.Remote:
                 return A("none", "", "", null);
             case ChromeBridgeState.Disabled:
-                return A("open_brainx_settings", "Turn on in BrainX", "เปิดใน BrainX", ChromeBridgeIds.BrainXSettingsTarget);
+            {
+                // A command line the card can run: BrainX.Client opens (or a
+                // running one is told to open) Settings ▸ Claude in Chrome.
+                // exe + args too, so a caller need not parse the quoting.
+                var o = A("open_brainx_settings", "Turn on in BrainX", "เปิดใน BrainX",
+                          ChromeBridgeIds.SettingsCommandLine(i.BrainXClientExe));
+                o["exe"] = string.IsNullOrWhiteSpace(i.BrainXClientExe) ? null : i.BrainXClientExe;
+                o["args"] = new JArray(ChromeBridgeIds.SettingsSwitch, ChromeBridgeIds.SettingsSection);
+                return o;
+            }
             case ChromeBridgeState.NoClaudeCode:
                 return A("open_url", "How to install", "วิธีติดตั้ง", ChromeBridgeIds.InstallClaudeCodeUrl);
             case ChromeBridgeState.ClaudeTooOld:

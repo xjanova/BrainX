@@ -73,11 +73,14 @@ public partial class MainWindow
         string summary;
         try
         {
-            var (entries, shots, bytes, oldest) = await Task.Run(() => new PrivateBrowseStore().Stats());
-            summary = entries == 0
-                ? "Private log: empty · บันทึกส่วนตัว: ว่าง"
-                : $"Private log: {entries:N0} entries, {shots:N0} screenshots ({bytes / 1024.0 / 1024.0:N1} MB), since {oldest?.ToLocalTime():d} · " +
-                  $"บันทึกส่วนตัว: {entries:N0} รายการ, ภาพหน้าจอ {shots:N0} ภาพ";
+            var st = await Task.Run(() => new PrivateBrowseStore().Stats());
+            var dbMb = st.DbBytes / 1024.0 / 1024.0;
+            var cap = PrivateBrowseStore.DefaultMaxDbBytes / 1024 / 1024 / 1024;
+            summary = st.Entries == 0
+                ? $"Private log: empty ({dbMb:N1} MB on disk) · บันทึกส่วนตัว: ว่าง ({dbMb:N1} MB)"
+                : $"Private log: {st.Entries:N0} entries, {st.Shots:N0} screenshots ({st.ShotBytes / 1024.0 / 1024.0:N1} MB), " +
+                  $"text database {dbMb:N1} MB of {cap} GB max, since {st.OldestUtc?.ToLocalTime():d} · " +
+                  $"บันทึกส่วนตัว: {st.Entries:N0} รายการ, ภาพหน้าจอ {st.Shots:N0} ภาพ, ฐานข้อมูล {dbMb:N1} MB (สูงสุด {cap} GB)";
         }
         catch (Exception ex)
         {
@@ -88,6 +91,35 @@ public partial class MainWindow
             ? "On — agents get chrome__ tools from their next start · เปิดอยู่ — เอเจนต์จะเห็นเครื่องมือ chrome__ เมื่อเริ่มใหม่"
             : "Off · ปิดอยู่";
         SetChromeStatus(string.Join("\n", new[] { lead, state, summary }.Where(x => !string.IsNullOrEmpty(x))));
+    }
+
+    /// <summary>
+    /// Open Settings at one card — from <c>--settings &lt;section&gt;</c> on
+    /// the command line, or a second launch's WM_COPYDATA. Unknown or missing
+    /// section: Settings itself. Brings the window forward either way.
+    /// </summary>
+    internal void OpenSettingsSection(string? section)
+    {
+        try
+        {
+            if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+            if (!IsVisible) Show();
+            Activate();
+            Nav_Click(NavSettings, new RoutedEventArgs());
+
+            var tag = BrainX.Core.Services.ClientLaunchArgs.AnchorFor(section);
+            if (tag == null) return;
+            // After the view is laid out, or BringIntoView has nothing to measure.
+            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, new Action(() =>
+            {
+                (FindName("SettingsAnchor" + tag) as FrameworkElement)?.BringIntoView();
+                if (FindName("SettingsNav" + tag) is Button jump) SettingsJump_Click(jump, new RoutedEventArgs());
+            }));
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"OpenSettingsSection: {ex.Message}");
+        }
     }
 
     private void SetChromeStatus(string text)

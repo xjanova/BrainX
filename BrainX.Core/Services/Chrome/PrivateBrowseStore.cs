@@ -24,6 +24,9 @@ public sealed class PrivateBrowseRecord
     public List<(string MimeType, byte[] Data)> Images { get; } = new();
 }
 
+/// <summary>What the log holds right now, inside the retention window.</summary>
+public sealed record PrivateBrowseStats(long Entries, long Shots, long ShotBytes, DateTime? OldestUtc, long DbBytes);
+
 /// <summary>One search result.</summary>
 public sealed class PrivateBrowseHit
 {
@@ -58,7 +61,12 @@ public sealed class PrivateBrowseHit
 ///   SECRETS credential-shaped strings (tokens, password=, keys) are masked by
 ///           SecretRedactor before anything is written.
 ///   AGE     entries older than the retention setting are pruned (default 30
-///           days), and screenshots are capped at 1 GB in total.
+///           days), and screenshots are capped at 1 GB in total. Every READ
+///           applies the window too — pruning only happens when something
+///           runs it, and an owner who stopped browsing must still never be
+///           shown an entry older than the window they chose.
+///   SIZE    the database itself is capped (default 2 GB in use); past it
+///           the oldest entries go first.
 /// </summary>
 public sealed class PrivateBrowseStore
 {
@@ -68,6 +76,28 @@ public sealed class PrivateBrowseStore
     public const int MaxShotsPerEntry = 8;
     public const long MaxShotBytes = 15L * 1024 * 1024;
     public const long MaxTotalShotBytes = 1024L * 1024 * 1024;
+    public const long DefaultMaxDbBytes = 2L * 1024 * 1024 * 1024;
+
+    /// <summary>Text redacted past the stored clip, so a secret cut by the clip is still masked.</summary>
+    private const int RedactSlack = 4096;
+
+    /// <summary>The database's in-use size cap (pages holding data, free pages
+    /// excluded). Settable for the harness, which cannot write 2 GB.</summary>
+    public long MaxDbBytes { get; init; } = DefaultMaxDbBytes;
+
+    /// <summary>
+    /// The retention window this store applies to reads: an explicit value
+    /// for the harness, otherwise the owner's setting beside the store
+    /// (chrome-bridge.json in the same folder), read each time.
+    /// </summary>
+    public int? RetentionOverride { get; init; }
+
+    public int RetentionDays => RetentionOverride is int d
+        ? ChromeBridgeSettings.ClampRetention(d)
+        : ChromeBridgeSettings.Load(Root).RetentionDays;
+
+    private long CutoffTicks(int? retentionDays = null) =>
+        DateTime.UtcNow.AddDays(-ChromeBridgeSettings.ClampRetention(retentionDays ?? RetentionDays)).Ticks;
 
     private static readonly byte[] ShotEntropy = Encoding.UTF8.GetBytes("BrainX.private-browse.v1");
     private static readonly Regex ShotIdShape = new("^[0-9a-f]{32}$", RegexOptions.CultureInvariant);
@@ -117,7 +147,11 @@ public sealed class PrivateBrowseStore
         sec.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.FullControl,
             InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
             PropagationFlags.None, AccessControlType.Allow));
-        try { sec.SetOwner(user); } catch { }
+        // The DACL only — no SetOwner. This user created the folder and owns
+        // it already; writing the owner too needs WRITE_OWNER, which a parent
+        // granting "Modify" (D:\Temp on the dev PC) does not give, and the
+        // whole call then failed with "unauthorized" — leaving the folder
+        // readable by Administrators, SYSTEM and Users. Found by the harness.
         new DirectoryInfo(dir).SetAccessControl(sec);
     }
 
@@ -211,11 +245,14 @@ public sealed class PrivateBrowseStore
     /// store — the caller treats any throw as "not recorded", never as a failed
     /// tool call.
     /// </summary>
-    public long Record(PrivateBrowseRecord rec, int retentionDays = ChromeBridgeSettings.DefaultRetentionDays)
+    public long Record(PrivateBrowseRecord rec, int? retentionDays = null)
     {
-        var url = Clip(rec.Url, MaxUrlChars);
-        var args = Clip(RedactChunked(rec.ArgsJson), MaxArgsChars);
-        var result = Clip(RedactChunked(rec.ResultText), MaxResultChars);
+        // The URL is redacted like everything else: a callback URL carries
+        // its token in the fragment (#access_token=eyJ…), and the url column
+        // feeds the FTS index, the search results and the log window's header.
+        var url = RedactedClip(rec.Url, MaxUrlChars);
+        var args = RedactedClip(rec.ArgsJson, MaxArgsChars);
+        var result = RedactedClip(rec.ResultText, MaxResultChars);
         var ticks = rec.TsUtc.ToUniversalTime().Ticks;
 
         // Screenshots first, wrapped and on disk, so the row never points at a
@@ -283,23 +320,29 @@ public sealed class PrivateBrowseStore
         return entryId;
     }
 
-    private void MaybePrune(int retentionDays)
+    /// <summary>
+    /// Prune at most once per <see cref="PruneEvery"/> per process and folder:
+    /// on every record, on every search and stats read, when the MCP starts
+    /// and when the log window opens. Never throws.
+    /// </summary>
+    public void MaybePrune(int? retentionDays = null)
     {
         var now = DateTime.UtcNow;
         if (LastPrune.TryGetValue(Root, out var last) && now - last < PruneEvery) return;
         LastPrune[Root] = now;
-        try { Prune(retentionDays); } catch { /* housekeeping never fails a record */ }
+        try { Prune(retentionDays ?? RetentionDays); } catch { /* housekeeping never fails a caller */ }
     }
 
     /// <summary>
     /// Drop entries older than the retention window (and their screenshots),
-    /// trim screenshots to the total budget, and sweep shot files no row owns.
-    /// Returns the number of entries removed.
+    /// trim screenshots to the total budget, keep the database under its size
+    /// cap, and sweep shot files no row owns. Returns the number of entries
+    /// removed.
     /// </summary>
     public int Prune(int retentionDays)
     {
         if (!File.Exists(DbPath)) return 0;
-        var cutoff = DateTime.UtcNow.AddDays(-ChromeBridgeSettings.ClampRetention(retentionDays)).Ticks;
+        var cutoff = CutoffTicks(retentionDays);
         int removed;
         var deadShots = new List<string>();
         using (var c = Open())
@@ -348,10 +391,71 @@ public sealed class PrivateBrowseStore
                     deadShots.Add(id);
                 }
             }
+
+            // Size: page text is ~2.5x its length on disk once the trigram
+            // index is counted, and a busy month of read_page can reach
+            // gigabytes. Past the cap the oldest entries go first.
+            removed += TrimToSize(c, deadShots);
         }
         foreach (var id in deadShots) TryDeleteShotFile(id);
         SweepOrphanShots();
         return removed;
+    }
+
+    /// <summary>
+    /// Delete the oldest tenth of the entries until the pages in use fit
+    /// <see cref="MaxDbBytes"/>, merging the FTS index after each round so its
+    /// deleted postings really leave the file. Bounded; never loops forever.
+    /// </summary>
+    private int TrimToSize(SqliteConnection c, List<string> deadShots)
+    {
+        var removed = 0;
+        for (var round = 0; round < 64 && UsedBytes(c) > MaxDbBytes; round++)
+        {
+            long count;
+            using (var cmd = c.CreateCommand())
+            {
+                cmd.CommandText = "SELECT COUNT(*) FROM entries;";
+                count = (long)cmd.ExecuteScalar()!;
+            }
+            if (count == 0) break;
+            var take = Math.Max(1, count / 10);
+            using (var cmd = c.CreateCommand())
+            {
+                cmd.CommandText = "SELECT id FROM shots WHERE entry_id IN (SELECT id FROM entries ORDER BY ts_ticks ASC, id ASC LIMIT $n);";
+                cmd.Parameters.AddWithValue("$n", take);
+                using var r = cmd.ExecuteReader();
+                while (r.Read()) deadShots.Add(r.GetString(0));
+            }
+            using (var cmd = c.CreateCommand())
+            {
+                cmd.CommandText = "DELETE FROM entries WHERE id IN (SELECT id FROM entries ORDER BY ts_ticks ASC, id ASC LIMIT $n);";
+                cmd.Parameters.AddWithValue("$n", take);
+                removed += cmd.ExecuteNonQuery();
+            }
+            Exec(c, "INSERT INTO entries_fts(entries_fts) VALUES('optimize');");
+        }
+        return removed;
+    }
+
+    /// <summary>Bytes in pages that hold data (free pages excluded).</summary>
+    private static long UsedBytes(SqliteConnection c)
+    {
+        long Scalar(string sql)
+        {
+            using var cmd = c.CreateCommand();
+            cmd.CommandText = sql;
+            return Convert.ToInt64(cmd.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+        }
+        return (Scalar("PRAGMA page_count;") - Scalar("PRAGMA freelist_count;")) * Scalar("PRAGMA page_size;");
+    }
+
+    /// <summary>Bytes in use inside browse.db — for the harness and the settings card.</summary>
+    public long UsedDbBytes()
+    {
+        if (!File.Exists(DbPath)) return 0;
+        using var c = Open();
+        return UsedBytes(c);
     }
 
     /// <summary>
@@ -395,7 +499,11 @@ public sealed class PrivateBrowseStore
         if (!File.Exists(DbPath)) return hits;
         limit = Math.Clamp(limit, 1, 200);
         var terms = Terms(query);
-        var since = days is int d && d > 0 ? DateTime.UtcNow.AddDays(-Math.Min(d, ChromeBridgeSettings.MaxRetentionDays)).Ticks : 0L;
+        // Retention applies to the read itself, pruned or not.
+        var retention = RetentionDays;
+        MaybePrune(retention);
+        var since = Math.Max(CutoffTicks(retention),
+            days is int d && d > 0 ? DateTime.UtcNow.AddDays(-Math.Min(d, ChromeBridgeSettings.MaxRetentionDays)).Ticks : 0L);
 
         using var c = Open();
         using var cmd = c.CreateCommand();
@@ -480,8 +588,9 @@ public sealed class PrivateBrowseStore
         if (!File.Exists(DbPath)) return null;
         using var c = Open();
         using var cmd = c.CreateCommand();
-        cmd.CommandText = "SELECT args, result FROM entries WHERE id = $id;";
+        cmd.CommandText = "SELECT args, result FROM entries WHERE id = $id AND ts_ticks >= $cut;";
         cmd.Parameters.AddWithValue("$id", id);
+        cmd.Parameters.AddWithValue("$cut", CutoffTicks());
         using var r = cmd.ExecuteReader();
         if (!r.Read()) return null;
         return (r.IsDBNull(0) ? null : r.GetString(0), r.IsDBNull(1) ? null : r.GetString(1));
@@ -503,8 +612,13 @@ public sealed class PrivateBrowseStore
             using (var c = Open())
             using (var cmd = c.CreateCommand())
             {
-                cmd.CommandText = "SELECT mime FROM shots WHERE id = $id;";
+                // Through its entry, so an aged-out entry's picture is aged out too.
+                cmd.CommandText = """
+                    SELECT s.mime FROM shots s JOIN entries e ON e.id = s.entry_id
+                    WHERE s.id = $id AND e.ts_ticks >= $cut;
+                    """;
                 cmd.Parameters.AddWithValue("$id", shotId);
+                cmd.Parameters.AddWithValue("$cut", CutoffTicks());
                 var m = cmd.ExecuteScalar() as string;
                 if (m == null) return null;
                 mimeType = SafeMime(m);
@@ -516,19 +630,40 @@ public sealed class PrivateBrowseStore
         catch { return null; }
     }
 
-    public (long Entries, long Shots, long ShotBytes, DateTime? OldestUtc) Stats()
+    public PrivateBrowseStats Stats()
     {
-        if (!File.Exists(DbPath)) return (0, 0, 0, null);
-        using var c = Open();
-        using var cmd = c.CreateCommand();
-        cmd.CommandText = """
-            SELECT (SELECT COUNT(*) FROM entries), (SELECT COUNT(*) FROM shots),
-                   (SELECT COALESCE(SUM(bytes),0) FROM shots), (SELECT MIN(ts_ticks) FROM entries);
-            """;
-        using var r = cmd.ExecuteReader();
-        r.Read();
-        return (r.GetInt64(0), r.GetInt64(1), r.GetInt64(2),
-                r.IsDBNull(3) ? null : new DateTime(r.GetInt64(3), DateTimeKind.Utc));
+        if (!File.Exists(DbPath)) return new PrivateBrowseStats(0, 0, 0, null, 0);
+        var retention = RetentionDays;
+        MaybePrune(retention);
+        long entries, shots, shotBytes;
+        DateTime? oldest;
+        using (var c = Open())
+        using (var cmd = c.CreateCommand())
+        {
+            cmd.CommandText = """
+                SELECT (SELECT COUNT(*) FROM entries WHERE ts_ticks >= $cut),
+                       (SELECT COUNT(*) FROM shots s JOIN entries e ON e.id = s.entry_id WHERE e.ts_ticks >= $cut),
+                       (SELECT COALESCE(SUM(s.bytes),0) FROM shots s JOIN entries e ON e.id = s.entry_id WHERE e.ts_ticks >= $cut),
+                       (SELECT MIN(ts_ticks) FROM entries WHERE ts_ticks >= $cut);
+                """;
+            cmd.Parameters.AddWithValue("$cut", CutoffTicks(retention));
+            using var r = cmd.ExecuteReader();
+            r.Read();
+            entries = r.GetInt64(0);
+            shots = r.GetInt64(1);
+            shotBytes = r.GetInt64(2);
+            oldest = r.IsDBNull(3) ? null : new DateTime(r.GetInt64(3), DateTimeKind.Utc);
+        }
+        return new PrivateBrowseStats(entries, shots, shotBytes, oldest, DbFileBytes());
+    }
+
+    /// <summary>browse.db plus its WAL on disk — what the owner's drive pays.</summary>
+    public long DbFileBytes()
+    {
+        long total = 0;
+        foreach (var p in new[] { DbPath, DbPath + "-wal" })
+            try { if (File.Exists(p)) total += new FileInfo(p).Length; } catch { }
+        return total;
     }
 
     // ───────────── helpers ─────────────
@@ -600,6 +735,22 @@ public sealed class PrivateBrowseStore
 
     private static string? Clip(string? s, int max) =>
         s == null ? null : s.Length <= max ? s : s[..max] + "\n… (clipped)";
+
+    /// <summary>
+    /// Redact, then clip — but only redact what can survive the clip (plus a
+    /// margin, so a secret straddling the cut is still matched whole). A 2 MB
+    /// page used to pay the redactor for all 2 MB to keep 200 KB of it.
+    /// </summary>
+    private static string? RedactedClip(string? s, int max)
+    {
+        if (s == null) return null;
+        var head = s.Length > max + RedactSlack ? s[..(max + RedactSlack)] : s;
+        var redacted = RedactChunked(head) ?? "";
+        // Masking shortens text: a head that now fits was still cut from a
+        // longer original, and must say so.
+        if (head.Length < s.Length && redacted.Length <= max) return redacted + "\n… (clipped)";
+        return Clip(redacted, max);
+    }
 
     private static string SafeMime(string? mime)
     {

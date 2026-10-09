@@ -43,11 +43,31 @@ public static class ChromeBridgeIds
     public static readonly IReadOnlyCollection<string> NeverExposed =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "file_upload" };
 
-    /// <summary>Is this tool name one of the chrome bridge's, in either spelling?</summary>
+    /// <summary>
+    /// Is this tool name in the chrome bridge's namespace, in either spelling?
+    /// ANY name that starts with <c>chrome_</c> — the bare <c>chrome_</c> and
+    /// <c>chrome__</c> included. A name that is in the namespace but names no
+    /// tool must still be treated as private: the alternative is the
+    /// "unknown tool" path, which writes the call's arguments into the vault's
+    /// activity feed.
+    /// </summary>
     public static bool IsChromeToolName(string? name) =>
         !string.IsNullOrEmpty(name)
-        && name.StartsWith(FlatPrefix, StringComparison.OrdinalIgnoreCase)
-        && name.Length > FlatPrefix.Length;
+        && name.StartsWith(FlatPrefix, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The owner's privacy rule, as every chrome__ tool description ends and as
+    /// private_browse_search's description says it. Agents follow BrainX's own
+    /// "save it without asking" rule; this is the exception they must see
+    /// right where they read the tool.
+    /// </summary>
+    public const string PrivacyRule =
+        "PRIVATE: what this tool shows is the owner's private browsing. Never put its URLs, page text, typed values or " +
+        "screenshots into brain notes, brain_remember, handoffs, agent_send, cowork or task results unless the owner explicitly asks.";
+
+    /// <summary>The same rule, short enough for the head of the MCP instructions (rule 2).</summary>
+    public const string PrivacyRuleShort =
+        "Never chrome__*/private_browse_search output (the owner's private browsing): not in notes, handoffs, agent_send or cowork unless they ask.";
 
     /// <summary>
     /// Everything whose arguments or results are private browsing data: the
@@ -64,5 +84,20 @@ public static class ChromeBridgeIds
     public const string ReconnectUrl = "https://clau.de/chrome/reconnect";
     public const string PermissionsUrl = "https://clau.de/chrome/permissions";
     public const string DesktopDownloadUrl = "https://claude.ai/download";
-    public const string BrainXSettingsTarget = "brainx://settings/claude-in-chrome";
+
+    /// <summary>
+    /// BrainX.Client's switch that opens Settings at the Claude in Chrome card
+    /// (a running client is told by message and scrolls there; a new one opens
+    /// there). The open_brainx_settings action's target is the client's exe
+    /// followed by these two arguments.
+    /// </summary>
+    public const string SettingsSwitch = "--settings";
+    public const string SettingsSection = "claude-in-chrome";
+
+    /// <summary>The action target when the client's exe could not be located.</summary>
+    public const string BrainXSettingsTarget = "BrainX.Client.exe " + SettingsSwitch + " " + SettingsSection;
+
+    /// <summary>A command line for the client, the exe quoted.</summary>
+    public static string SettingsCommandLine(string? clientExe) =>
+        string.IsNullOrWhiteSpace(clientExe) ? BrainXSettingsTarget : $"\"{clientExe}\" {SettingsSwitch} {SettingsSection}";
 }

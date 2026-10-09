@@ -21,6 +21,41 @@ internal static partial class Program
 {
     private const int PrivateSearchMaxLimit = 50;
 
+    /// <summary>
+    /// A run nobody is watching: started by the broker for a queued task, or
+    /// the Mind on the local model. Such a run takes its orders from a task
+    /// card or a peer — a prompt-injected or peer-instructed agent there could
+    /// dump the owner's private log and forward it with agent_send or cowork,
+    /// which sync. The owner searches their browsing; an unattended run never.
+    /// </summary>
+    private static bool IsUnattendedRun =>
+        !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("BRAINX_AS_AGENT"))
+        || Environment.GetEnvironmentVariable("BRAINX_BROKER_RUN") == "1";
+
+    /// <summary>
+    /// Is there private browsing an owner could search here? The bridge is on,
+    /// or a log already exists. Local, attended sessions only.
+    /// </summary>
+    private static bool PrivateSearchVisible()
+    {
+        if (IsRemoteChild || IsUnattendedRun) return false;
+        try
+        {
+            if (ChromeBridge.EnabledNow) return true;
+            return ChromeBridge.Store is { } s && File.Exists(s.DbPath);
+        }
+        catch { return false; }
+    }
+
+    /// <summary>Can this session see private browsing at all — chrome__ tools
+    /// or the search? Decides whether the instructions carry the privacy rule.</summary>
+    private static bool PrivateBrowsingVisible()
+    {
+        if (IsRemoteChild) return false;
+        try { return ChromeBridge.EnabledNow || PrivateSearchVisible(); }
+        catch { return false; }
+    }
+
     private static string PrivateBrowseSearchCall(JToken? id, JObject args)
     {
         if (IsRemoteChild)
@@ -28,11 +63,20 @@ internal static partial class Program
                 "private_browse_search is local-only — it is never available over the remote endpoint " +
                 "(ค้นประวัติการท่องเว็บส่วนตัวได้เฉพาะในเครื่องนี้เท่านั้น)");
 
+        if (IsUnattendedRun)
+            return PrivateError(id,
+                "private_browse_search is for the owner only — it is refused in unattended runs (broker tasks, Mind) " +
+                "(ค้นประวัติการท่องเว็บส่วนตัวได้เฉพาะเจ้าของ — งานที่รันเองโดยไม่มีคนดูใช้ไม่ได้)");
+
         var store = ChromeBridge.Store;
         if (store == null)
             return PrivateError(id,
                 "the private browsing log is unavailable: its folder would be inside the vault, so nothing is kept " +
                 "(ไม่มีบันทึกส่วนตัว — โฟลเดอร์ที่ตั้งไว้อยู่ในคลังสมอง จึงไม่เก็บอะไรเลย)");
+
+        // The log is written behind the calls; the page the owner just read
+        // should be findable now, so wait (briefly) for the writer.
+        try { ChromeBridge.FlushPrivateLog(TimeSpan.FromSeconds(15)); } catch { }
 
         try
         {
@@ -81,8 +125,8 @@ internal static partial class Program
                 ["query"] = query,
                 ["count"] = hits.Count,
                 ["results"] = results,
-                ["retentionDays"] = ChromeBridgeSettings.Load().RetentionDays,
-                ["note"] = "Private browsing log on this PC only — never in the brain. Do not copy it into notes, the agent bus or the cowork room unless the owner asks.",
+                ["retentionDays"] = store.RetentionDays,
+                ["note"] = "Private browsing log on this PC only — never in the brain. " + ChromeBridgeIds.PrivacyRule,
             };
             return BuildResult(id, new JObject
             {

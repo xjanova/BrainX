@@ -38,8 +38,16 @@ internal sealed class PrivateBrowseLogWindow : Window
 
     private int _searchSeq;
     private int _detailSeq;
+    /// <summary>Its own counter: two quick picks in the screenshot box must
+    /// leave the LATER picture, whatever order the decodes finish in.</summary>
+    private int _shotSeq;
     private bool _closed;
     private bool _clearing;
+
+    /// <summary>A screenshot wider than this is decoded down to it (a 4K
+    /// capture is 60 MB of pixels); a smaller one is shown at its own size,
+    /// never blown up.</summary>
+    private const int MaxDecodeWidth = 1600;
 
     private static readonly Brush Bg = new SolidColorBrush(Color.FromRgb(0x0B, 0x0D, 0x18));
     private static readonly Brush Panel = new SolidColorBrush(Color.FromRgb(0x14, 0x17, 0x26));
@@ -66,8 +74,26 @@ internal sealed class PrivateBrowseLogWindow : Window
         try { Icon = Application.Current?.MainWindow?.Icon; } catch { }
 
         Content = Build();
-        Loaded += (_, _) => { _query.Focus(); _ = RunSearchAsync(); };
+        Loaded += (_, _) =>
+        {
+            _query.Focus();
+            // Old pages leave the disk when the owner looks, not only when an
+            // agent next browses (reads honour the window regardless).
+            _ = Task.Run(() => { try { _store.MaybePrune(); } catch { } });
+            _ = RunSearchAsync();
+        };
         Closed += (_, _) => _closed = true;
+    }
+
+    /// <summary>The app's dark ComboBox look (CyberpunkTheme), stated rather
+    /// than left to implicit lookup, with dark brushes as the fallback.</summary>
+    private static void StyleCombo(ComboBox c)
+    {
+        c.SetResourceReference(StyleProperty, typeof(ComboBox));
+        c.Background = Panel;
+        c.Foreground = Fg;
+        c.BorderBrush = Fg2;
+        c.FontSize = 12;
     }
 
     private UIElement Build()
@@ -112,6 +138,7 @@ internal sealed class PrivateBrowseLogWindow : Window
                  })
             _days.Items.Add(new ComboBoxItem { Content = label, Tag = days });
         _days.SelectedIndex = 0;
+        StyleCombo(_days);
         _days.Width = 170;
         _days.Margin = new Thickness(8, 0, 8, 0);
         _days.SelectionChanged += (_, _) => { if (IsLoaded) _ = RunSearchAsync(); };
@@ -185,6 +212,7 @@ internal sealed class PrivateBrowseLogWindow : Window
         _shotNote.Foreground = Fg2;
         _shotNote.FontSize = 11.5;
         _shotNote.VerticalAlignment = VerticalAlignment.Center;
+        StyleCombo(_shotPicker);
         _shotPicker.Width = 200;
         _shotPicker.Margin = new Thickness(8, 0, 0, 0);
         _shotPicker.Visibility = Visibility.Collapsed;
@@ -340,7 +368,9 @@ internal sealed class PrivateBrowseLogWindow : Window
     private async Task ShowShotAsync(ComboBoxItem? item)
     {
         if (item?.Tag is not PrivateBrowseShot shot) return;
-        var seq = _detailSeq;
+        // Both: a newer pick in this box, or another entry selected meanwhile.
+        var seq = ++_shotSeq;
+        var detail = _detailSeq;
         _shotNote.Text = "Decrypting… · กำลังถอดรหัส…";
         BitmapImage? img = null;
         try
@@ -349,18 +379,28 @@ internal sealed class PrivateBrowseLogWindow : Window
             {
                 var bytes = _store.ReadShot(shot.Id, out _);
                 if (bytes == null) return null;
+
+                // Width first, from the header only: shrink a big capture,
+                // never enlarge a small one.
+                int width;
+                using (var probe = new MemoryStream(bytes, writable: false))
+                {
+                    var dec = BitmapDecoder.Create(probe, BitmapCreateOptions.DelayCreation, BitmapCacheOption.None);
+                    width = dec.Frames.Count > 0 ? dec.Frames[0].PixelWidth : 0;
+                }
+
                 var bi = new BitmapImage();
                 bi.BeginInit();
                 bi.CacheOption = BitmapCacheOption.OnLoad;   // decode now; the stream is closed below
                 bi.StreamSource = new MemoryStream(bytes);
-                bi.DecodePixelWidth = 1600;                   // a 4K capture must not cost 60 MB of RAM
+                if (width > MaxDecodeWidth) bi.DecodePixelWidth = MaxDecodeWidth;
                 bi.EndInit();
                 bi.Freeze();                                   // built off the UI thread
                 return bi;
             });
         }
         catch { img = null; }
-        if (_closed || seq != _detailSeq) return;
+        if (_closed || seq != _shotSeq || detail != _detailSeq) return;
         _shot.Source = img;
         _shotNote.Text = img == null
             ? "The screenshot could not be opened (it may belong to another Windows account, or be damaged). · เปิดภาพหน้าจอไม่ได้"

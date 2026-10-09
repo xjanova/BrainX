@@ -26,6 +26,11 @@ public static class McpBridgeHub
 {
     private const int CacheTtlHours = 24;
     private const int RetryAfterFailureMinutes = 10;
+
+    /// <summary>The chrome bridge's discovery is a local spawn with no editor
+    /// to wait for; an owner who just fixed what failed should not wait ten
+    /// minutes to see the tools.</summary>
+    private const int PrivateRetryAfterFailureMinutes = 2;
     private const int FirstFetchWaitSeconds = 15;
     private const int MaxToolNameLength = 60;
     private const int MaxResultChars = 256 * 1024;
@@ -44,7 +49,10 @@ public static class McpBridgeHub
 
     private static readonly object Gate = new();
     private static readonly Dictionary<string, IMcpBridgeConnection> Live = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly Dictionary<string, BridgeState> States = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Concurrent, so reading a bridge's state never waits on
+    /// <see cref="Gate"/> — which a spawn holds for up to the 45 s handshake.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, BridgeState> States = new(StringComparer.OrdinalIgnoreCase);
 
     private static List<McpBridgeDef> _defs = new();
     private static string _vaultPath = "";
@@ -101,6 +109,10 @@ public static class McpBridgeHub
         _log = log;
         _enabled = !headless;
         if (identity != null) _identity = identity;
+        // A re-initialised hub (the in-process harness) drops its old timer
+        // rather than stacking a second one beside it.
+        try { _statusTimer?.Dispose(); } catch { }
+        _statusTimer = null;
         if (!_enabled) return;
 
         _defs = McpBridgeConfig.Load(vaultPath, log);
@@ -245,10 +257,15 @@ public static class McpBridgeHub
                 taken.Add(name);
 
                 var desc = t["description"]?.ToString() ?? "";
+                // Private bridge: the owner's rule ends every description, so
+                // an agent following "save it without asking" meets the
+                // exception where it reads the tool. A SUFFIX: CluadeX keys
+                // on the "[chrome bridge] " prefix staying as it is.
+                var tail = def.Private ? "\n\n" + BrainX.Core.Services.Chrome.ChromeBridgeIds.PrivacyRule : "";
                 tools.Add(new JObject
                 {
                     ["name"] = name,
-                    ["description"] = $"[{def.Id} bridge] {desc}".TrimEnd(),
+                    ["description"] = ($"[{def.Id} bridge] {desc}".TrimEnd() + tail),
                     ["inputSchema"] = t["inputSchema"] as JObject
                                       ?? new JObject { ["type"] = "object", ["properties"] = new JObject() },
                 });
@@ -348,7 +365,7 @@ public static class McpBridgeHub
             // server replying in sync — and those errors are the common case
             // when an agent drives an editor. Respawning on each one would cost
             // an engine-server startup (and an editor reconnect) per typo.
-            if (conn.Poisoned || !conn.IsAlive) DropConnection(def.Id);
+            if (conn.Poisoned || !conn.IsAlive) DropConnection(def.Id, conn);
             PublishStatus(def);
 
             throw new InvalidOperationException($"{def.Id} bridge: {ex.Message}");
@@ -375,9 +392,14 @@ public static class McpBridgeHub
         }
         if (ChromeBridge.IsHidden(remoteTool))
             throw new InvalidOperationException(ChromeBridge.HiddenMessage(remoteTool));
+        // "chrome__" alone names no tool; never forward an empty name.
+        if (string.IsNullOrWhiteSpace(remoteTool))
+            throw new InvalidOperationException(ChromeBridge.NoSuchToolMessage);
 
         ChromeBridge.NoteCallStart();
-        var conn = Connect(def);
+        IMcpBridgeConnection conn;
+        try { conn = Connect(def); }
+        catch (Exception ex) { throw new InvalidOperationException(ChromeBridge.ErrorText(ex)); }
         var state = StateFor(def.Id);
         state.Calls++;
         state.LastCallUtc = DateTime.UtcNow;
@@ -389,15 +411,25 @@ public static class McpBridgeHub
         }
         catch (Exception ex)
         {
-            if (conn.Poisoned || !conn.IsAlive) DropConnection(def.Id);
+            if (conn.Poisoned || !conn.IsAlive) DropConnection(def.Id, conn);
             ChromeBridge.AfterCall(remoteTool, args, null, ex);
-            throw new InvalidOperationException($"{def.Id} bridge: {ex.Message}");
+            throw new InvalidOperationException(ChromeBridge.ErrorText(ex));
         }
 
         // Record BEFORE capping, so the private log keeps what the server
         // actually said even when the agent is shown a truncated copy.
         ChromeBridge.AfterCall(remoteTool, args, result, null);
-        return CapText(result, def.Id);
+
+        // A working call proves the server lists tools too. If discovery had
+        // failed (a cold start, a since-fixed install), forget that failure
+        // and fetch the list again now, so this session's next tools/list —
+        // and every new session, through the private cache — has the tools.
+        if (state.Tools == null)
+        {
+            state.FailedUtc = null;
+            if (state.InFlight == null || state.InFlight.IsCompleted) BeginDiscover(def);
+        }
+        return CapText(result, def.Id, chrome: true);
     }
 
     /// <summary>
@@ -411,9 +443,18 @@ public static class McpBridgeHub
     }
 
     /// <summary>The 256 KB text budget alone. Image blocks are never touched.</summary>
-    private static JObject CapText(JObject result, string bridgeId)
+    private static JObject CapText(JObject result, string bridgeId, bool chrome = false)
     {
         if (result["content"] is not JArray content) return result;
+
+        // Advice the agent can act on for THIS kind of server: "one component,
+        // a specific path" is Unity talk and means nothing on a web page.
+        var kb = MaxResultChars / 1024;
+        var hint = chrome
+            ? $"\n\n… truncated by the {bridgeId} bridge at {kb} KB — use find / read_page with a ref, or a narrower tab · " +
+              $"ตัดที่ {kb} KB — ใช้ find / read_page กับ ref หรือแท็บที่แคบลง"
+            : $"\n\n… truncated by the {bridgeId} bridge at {kb} KB — narrow the request (fewer objects, one component, a specific path) · " +
+              $"ตัดที่ {kb} KB — ขอข้อมูลให้แคบลง (วัตถุน้อยลง คอมโพเนนต์เดียว หรือ path ที่เจาะจง)";
 
         var budget = MaxResultChars;
         foreach (var block in content.OfType<JObject>())
@@ -424,8 +465,7 @@ public static class McpBridgeHub
 
             if (text.Length <= budget) { budget -= text.Length; continue; }
 
-            block["text"] = text[..Math.Max(0, budget)] +
-                $"\n\n… truncated by the {bridgeId} bridge at {MaxResultChars / 1024} KB — narrow the request (fewer objects, one component, a specific path).";
+            block["text"] = text[..Math.Max(0, budget)] + hint;
             budget = 0;
         }
         return result;
@@ -519,11 +559,17 @@ public static class McpBridgeHub
         }
     }
 
-    private static void DropConnection(string id)
+    /// <summary>
+    /// Close a bridge's live connection — or, with <paramref name="only"/>,
+    /// only if that very connection is still the live one: a failure seen on
+    /// an old connection must not kill the fresh one that replaced it.
+    /// </summary>
+    private static void DropConnection(string id, IMcpBridgeConnection? only = null)
     {
         lock (Gate)
         {
             if (!Live.TryGetValue(id, out var conn)) return;
+            if (only != null && !ReferenceEquals(conn, only)) return;
             Live.Remove(id);
             try { conn.Dispose(); } catch { }
         }
@@ -545,8 +591,8 @@ public static class McpBridgeHub
 
         // Don't respawn a server that just failed on every single session; an
         // engine that isn't running would otherwise cost 15s of every handshake.
-        if (state.Tools == null && state.FailedUtc is { } failedAt &&
-            DateTime.UtcNow - failedAt < TimeSpan.FromMinutes(RetryAfterFailureMinutes))
+        var retryAfter = TimeSpan.FromMinutes(def.Private ? PrivateRetryAfterFailureMinutes : RetryAfterFailureMinutes);
+        if (state.Tools == null && state.FailedUtc is { } failedAt && DateTime.UtcNow - failedAt < retryAfter)
         {
             _log($"bridge '{def.Id}' skipped — failed {(int)(DateTime.UtcNow - failedAt).TotalMinutes}m ago: {state.LastError}");
             return;
@@ -554,10 +600,29 @@ public static class McpBridgeHub
 
         state.InFlight = Task.Run(() =>
         {
+            IMcpBridgeConnection? shared = null;
             try
             {
-                var conn = Connect(def);
-                var tools = conn.ListTools();
+                JArray tools;
+                if (def.Private)
+                {
+                    // Chrome: discovery gets a connection of its OWN, never
+                    // put in Live. It used to borrow the live one, so a
+                    // chrome__ call arriving during discovery shared its pipe
+                    // — and then discovery closed it under the call: the
+                    // action ran in the owner's browser while the agent was
+                    // told it timed out (its retry clicks twice), and
+                    // discovery's own failure was cached for every new
+                    // session. A call now starts its own server; this one is
+                    // closed as soon as the list is in (~150 MB each).
+                    using var own = ChromeBridge.StartConnection(_log);
+                    tools = own.ListTools();
+                }
+                else
+                {
+                    shared = Connect(def);
+                    tools = shared.ListTools();
+                }
                 lock (Gate)
                 {
                     state.Tools = tools;
@@ -566,9 +631,6 @@ public static class McpBridgeHub
                     state.FailedUtc = null;
                     state.LastError = null;
                 }
-                // Chrome: the tool list was all discovery wanted. Close the
-                // ~150 MB server again; the first real call starts it.
-                if (def.Private) DropConnection(def.Id);
                 SaveCache(privateStore: def.Private);
                 PublishStatus(def);
                 _log($"bridge '{def.Id}': {tools.Count} tool(s)");
@@ -580,28 +642,31 @@ public static class McpBridgeHub
                     state.FailedUtc = DateTime.UtcNow;
                     state.LastError = ex.Message;
                 }
-                DropConnection(def.Id);
+                // Only a connection whose transport broke is closed, and only
+                // if it is still the live one — a call may be using it.
+                if (shared != null && (shared.Poisoned || !shared.IsAlive)) DropConnection(def.Id, shared);
                 SaveCache(privateStore: def.Private);
                 PublishStatus(def);
-                _log($"bridge '{def.Id}' unavailable: {ex.Message}");
+                // Chrome: the type, not the message — a spawn error can name
+                // paths, and brainx-mcp's log ends up in the host's own logs.
+                _log(def.Private
+                    ? $"bridge '{def.Id}' unavailable ({ex.GetType().Name})"
+                    : $"bridge '{def.Id}' unavailable: {ex.Message}");
             }
         });
     }
 
-    private static BridgeState StateFor(string id)
-    {
-        lock (Gate)
-        {
-            if (!States.TryGetValue(id, out var s)) States[id] = s = new BridgeState();
-            return s;
-        }
-    }
+    private static BridgeState StateFor(string id) => States.GetOrAdd(id, _ => new BridgeState());
 
     /// <summary>Kill every child. Called on shutdown — an orphaned engine server holds an editor socket.</summary>
     public static void Shutdown()
     {
         try { _statusTimer?.Dispose(); } catch { }
         _statusTimer = null;
+
+        // The private log is written behind the calls; what was captured is
+        // stored before the process goes, not dropped with it.
+        try { ChromeBridge.FlushPrivateLog(TimeSpan.FromSeconds(10)); } catch { }
 
         lock (Gate)
         {
@@ -632,18 +697,35 @@ public static class McpBridgeHub
     /// </summary>
     public static JObject StatusJson()
     {
+        // ONE bounded look at the live connections. A spawn holds the gate for
+        // up to its 45 s handshake; taking it per bridge (as this did) made
+        // bridge_status — and, requests being serial, every brain tool behind
+        // it — wait out a chrome or engine start. Busy = someone is connecting.
+        Dictionary<string, bool>? liveSnap = null;
+        if (Monitor.TryEnter(Gate, TimeSpan.FromMilliseconds(250)))
+        {
+            try
+            {
+                liveSnap = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+                foreach (var (id, c) in Live) liveSnap[id] = c.IsAlive;
+            }
+            finally { Monitor.Exit(Gate); }
+        }
+        bool LiveNow(string id) => liveSnap != null && liveSnap.TryGetValue(id, out var v) && v;
+
         var arr = new JArray();
         foreach (var def in _defs.Where(d => !d.Private))
         {
             var s = StateFor(def.Id);
-            bool live;
-            lock (Gate) live = Live.TryGetValue(def.Id, out var c) && c.IsAlive;
+            var live = LiveNow(def.Id);
 
             arr.Add(new JObject
             {
                 ["id"] = def.Id,
                 ["enabled"] = def.Enabled,
-                ["connected"] = live,
+                // null while a connection is being made: not known, not false.
+                ["connected"] = liveSnap == null ? null : live,
+                ["connecting"] = liveSnap == null,
                 // Whether the ENGINE answers, which is a different question
                 // from whether this session is holding a bridge to it open.
                 ["engineReachable"] = def.Probe == null ? null : s.Reachable,
@@ -670,18 +752,12 @@ public static class McpBridgeHub
         JObject chrome;
         try
         {
-            // TryEnter, not lock: a spawn in progress holds the gate for up to
-            // the handshake timeout, and a status call must not hang behind
-            // it — while it is held, the chrome server is (re)connecting.
-            var chromeLive = false;
-            if (Monitor.TryEnter(Gate, TimeSpan.FromMilliseconds(250)))
-            {
-                try { chromeLive = Live.TryGetValue(ChromeBridge.Def.Id, out var cc) && cc.IsAlive; }
-                finally { Monitor.Exit(Gate); }
-            }
+            // From the one snapshot above. While a chrome spawn holds the
+            // gate the entry says Connecting (ChromeBridge counts its spawns).
+            var chromeLive = LiveNow(ChromeBridge.Def.Id);
             var chromeTools = _enabled ? (StateFor(ChromeBridge.Def.Id).Tools?.OfType<JObject>()
                 .Count(t => !ChromeBridge.IsHidden(t["name"]?.ToString() ?? "")) ?? 0) : 0;
-            chrome = ChromeBridge.StatusEntry(_enabled, chromeLive, chromeTools);
+            chrome = ChromeBridge.StatusEntry(_enabled, chromeLive, chromeTools, Program.FindClientExe());
         }
         catch (Exception ex)
         {

@@ -27,6 +27,18 @@ internal static class ChromeStubServer
     public const string StartedEnv = "BRAINX_CHROME_STUB_STARTED";
     public const string ServerName = "brainx-chrome-stub";
 
+    /// <summary>Cold start: sleep this long before reading stdin (Defender
+    /// scanning a 250 MB exe, a slow disk) — the discovery race needs it.</summary>
+    public const string StartDelayEnv = "BRAINX_CHROME_STUB_START_MS";
+    /// <summary>Append "&lt;utc ticks&gt; &lt;pid&gt; &lt;method&gt; &lt;tool&gt;" for every request received.</summary>
+    public const string LogEnv = "BRAINX_CHROME_STUB_LOG";
+    /// <summary>Exit WITHOUT answering when this tool is called (a crash mid-call).</summary>
+    public const string ExitOnEnv = "BRAINX_CHROME_STUB_EXIT_ON";
+
+    /// <summary>A get_page_text argument: answer with this many KB of page text.</summary>
+    public const string BigKbArg = "stubBigKb";
+    public const string BigFillMarker = "BIG-PAGE-FILL";
+
     public static bool IsRequested(string[] args) =>
         Environment.GetEnvironmentVariable(EnvFlag) == "1"
         && args.Length > 0 && args[0] == "--claude-in-chrome-mcp";
@@ -56,6 +68,10 @@ internal static class ChromeStubServer
             try { File.AppendAllText(started, DateTime.UtcNow.ToString("o") + "\n"); } catch { }
 
         var tools = LoadFixtureTools();
+        if (int.TryParse(Environment.GetEnvironmentVariable(StartDelayEnv), out var startMs) && startMs > 0)
+            await Task.Delay(Math.Min(startMs, 30_000));
+        var log = Environment.GetEnvironmentVariable(LogEnv);
+        var exitOn = Environment.GetEnvironmentVariable(ExitOnEnv);
         var stdout = Console.Out;
         string? line;
         while ((line = await Console.In.ReadLineAsync()) != null)
@@ -65,6 +81,13 @@ internal static class ChromeStubServer
             try { req = JObject.Parse(line); } catch { continue; }
             var id = req["id"];
             if (id == null || id.Type == JTokenType.Null) continue;   // notification
+
+            var method = req["method"]?.ToString() ?? "";
+            var tool = req["params"]?["name"]?.ToString() ?? "";
+            if (!string.IsNullOrWhiteSpace(log))
+                try { File.AppendAllText(log, $"{DateTime.UtcNow.Ticks} {Environment.ProcessId} {method} {tool}\n"); } catch { }
+            if (method == "tools/call" && !string.IsNullOrEmpty(exitOn) && tool == exitOn)
+                return 0;   // gone mid-call, no answer — stdout closes with the process
 
             JObject result = (req["method"]?.ToString()) switch
             {
@@ -105,6 +128,16 @@ internal static class ChromeStubServer
             case "navigate":
                 return Text($"Navigated to {args["url"]}");
             case "get_page_text":
+                if (args[BigKbArg]?.Type == JTokenType.Integer)
+                {
+                    // A long article: the marker page, then filler in lines.
+                    var kb = Math.Clamp(args[BigKbArg]!.Value<int>(), 1, 4096);
+                    var sb = new StringBuilder(PageText(m)).Append('\n');
+                    var n = 0;
+                    while (sb.Length < kb * 1024)
+                        sb.Append(BigFillMarker).Append(' ').Append(n++).Append(" ข้อความยาวในหน้าเว็บ lorem ipsum dolor sit amet\n");
+                    return Text(sb.ToString());
+                }
                 return Text(PageText(m));
             case "form_input":
                 return Text($"Set value of {args["ref"]} to \"{args["value"]}\"");

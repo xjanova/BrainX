@@ -37,6 +37,11 @@ internal static partial class Program
         checks.Add(("chrome bridge end to end: chrome__ tools, file_upload hidden, images unchanged, NOTHING in the vault, private log searchable", ChromeBridgeEndToEnd));
         checks.Add(("chrome bridge: off by default — no tools, no spawn, a Disabled entry with the way to turn it on", ChromeBridgeOffByDefault));
         checks.Add(("chrome bridge: the remote child refuses private_browse_search and never lists it", ChromeRemoteChildRefuses));
+        checks.Add(("chrome bridge: a call during discovery is answered ONCE and discovery survives (slow-start stub race)", ChromeDiscoveryRace));
+        checks.Add(("chrome bridge: a server that dies mid-call is reported with the real elapsed time, en + th", ChromePipeClosedEarly));
+        checks.Add(("chrome bridge: the private log is written behind the call; long pages get chrome advice", ChromePrivateLogBehindTheCall));
+        checks.Add(("chrome bridge: private_browse_search only where an owner can use it; unattended runs refused", ChromePrivateSearchGating));
+        checks.Add(("chrome launch args: --settings claude-in-chrome is a working action, never a vault path", ChromeSettingsLaunchArgs));
         // Opt-in: reads THIS PC's real Claude Code install and browser profiles.
         // Starts claude.exe only for `--version` and `auth status --json` —
         // never the chrome server, never a browser.
@@ -236,13 +241,40 @@ internal static partial class Program
     {
         Check("loggedIn:false → NotSignedIn (exit 1 output still parsed)",
               ClaudeAuthProbe.FromJson("""{"loggedIn":false,"authMethod":"none"}""")?.State == ClaudeAuthState.NotSignedIn);
-        Check("claude.ai → SignedIn",
-              ClaudeAuthProbe.FromJson("""{"loggedIn":true,"authMethod":"claude.ai","email":"x@y","orgName":"o"}""")?.State == ClaudeAuthState.SignedIn);
-        Check("console / apiKey → ApiKeyOnly",
-              ClaudeAuthProbe.FromJson("""{"loggedIn":true,"authMethod":"console"}""")?.State == ClaudeAuthState.ApiKeyOnly
-              && ClaudeAuthProbe.FromJson("""{"loggedIn":true,"authMethod":"apiKey"}""")?.State == ClaudeAuthState.ApiKeyOnly);
+        // The six authMethod values Claude Code 2.1.293's `auth status` really
+        // emits (read from the binary): none | claude.ai | oauth_token |
+        // api_key | api_key_helper | third_party.
+        foreach (var (method, expect) in new[]
+                 {
+                     ("claude.ai", ClaudeAuthState.SignedIn),
+                     ("oauth_token", ClaudeAuthState.SignedIn),
+                     ("api_key", ClaudeAuthState.ApiKeyOnly),
+                     ("api_key_helper", ClaudeAuthState.ApiKeyOnly),
+                     ("third_party", ClaudeAuthState.ApiKeyOnly),
+                 })
+            Check($"authMethod {method} → {expect}",
+                  ClaudeAuthProbe.FromJson($$"""{"loggedIn":true,"authMethod":"{{method}}","email":"x@y","orgName":"o"}""")?.State == expect);
+        Check("authMethod none (loggedIn:true is not trusted over it) → NotSignedIn",
+              ClaudeAuthProbe.Classify("none") == ClaudeAuthState.NotSignedIn);
+        Check("(control) a value Claude Code does not emit stays Unknown — not a guess either way",
+              ClaudeAuthProbe.Classify("some_future_method") == ClaudeAuthState.Unknown);
         Check("a banner before the JSON is tolerated",
-              ClaudeAuthProbe.FromJson("warning: something\n{\"loggedIn\":true,\"authMethod\":\"oauth\"}")?.State == ClaudeAuthState.SignedIn);
+              ClaudeAuthProbe.FromJson("warning: something\n{\"loggedIn\":true,\"authMethod\":\"oauth_token\"}")?.State == ClaudeAuthState.SignedIn);
+
+        // third_party used to fall to Unknown → Ready → "Connect", which loops
+        // on NotReachable for someone who can never drive Chrome.
+        var tp = ChromeBridgeStatus.Build(new ChromeBridgeStatus.Inputs
+        {
+            Enabled = true,
+            Locate = new ClaudeLocateResult { Status = ClaudeLocateStatus.Found,
+                Install = new ClaudeCodeInstall(@"C:\x\claude.exe", ClaudeInstallKind.Desktop, @"C:\x\claude.exe", Array.Empty<string>(), "2.1.293") },
+            Auth = ClaudeAuthProbe.FromJson("""{"loggedIn":true,"authMethod":"third_party"}"""),
+            Scan = new ChromeScanResult(),
+        });
+        Check("third_party (Bedrock / Vertex / Foundry / gateway) → ApiKeyOnly, says so in en + th, offers the claude.ai sign-in",
+              tp["state"]?.ToString() == "ApiKeyOnly" && tp["message_en"]!.ToString().Contains("cloud provider")
+              && tp["message_th"]!.ToString().Contains("Bedrock") && tp["action"]?["kind"]?.ToString() == "run_console",
+              tp.ToString(Newtonsoft.Json.Formatting.None));
         Check("garbage → no answer (falls back), never a throw", ClaudeAuthProbe.FromJson("not json {") == null);
 
         var root = Path.Combine(Path.GetTempPath(), "brainx-chrome-cred-" + Guid.NewGuid().ToString("N"));
@@ -372,6 +404,10 @@ internal static partial class Program
             var id = store.Record(rec);
 
             Check("the private folder is protected and granted to this Windows user alone", store.IsOwnerOnly());
+            var plainDir = Path.Combine(Path.GetDirectoryName(root)!, "plain");
+            Directory.CreateDirectory(plainDir);
+            Check("(control) a folder made the ordinary way beside it is NOT owner-only (it inherits the parent's ACL)",
+                  !new PrivateBrowseStore(plainDir).IsOwnerOnly());
             var hits = store.Search("ยอดเงินคงเหลือ");
             Check("a Thai phrase from the middle of the page is found (trigram, no word breaks needed)",
                   hits.Count == 1 && hits[0].Id == id && hits[0].Tool == "get_page_text" && hits[0].Url == ChromeStubServer.MarkerUrl(m),
@@ -396,12 +432,31 @@ internal static partial class Program
             Check("a shot id that is not one (path traversal) is refused",
                   store.ReadShot("..\\..\\browse", out _) == null && store.ReadShot(new string('0', 32), out _) == null);
 
-            // Retention: an entry from 40 days ago goes at 30 days.
+            // Retention: an entry from 40 days ago goes at 30 days — and is
+            // never SHOWN while it waits for a prune (reads apply the window).
             store.Record(new PrivateBrowseRecord { TsUtc = DateTime.UtcNow.AddDays(-40), Tool = "navigate", Url = "https://old.example/", ResultText = "OLD-ENTRY" });
-            Check("(the old entry is there before pruning)", store.Search("OLD-ENTRY").Count == 1);
+            Check("(control) the 40-day-old row IS in the table before pruning", RowCount(store, "OLD-ENTRY") == 1);
+            Check("…but a 30-day log never shows it: not in Search, not in Stats",
+                  store.Search("OLD-ENTRY").Count == 0 && store.Search("").All(h => h.Url != "https://old.example/") && store.Stats().Entries == 1,
+                  $"stats {store.Stats().Entries}");
             var removed = store.Prune(30);
             Check("pruning at 30 days removes the 40-day-old entry and keeps today's",
-                  removed == 1 && store.Search("OLD-ENTRY").Count == 0 && store.Search("ยอดเงิน").Count == 1, $"removed {removed}");
+                  removed == 1 && RowCount(store, "OLD-ENTRY") == 0 && store.Search("ยอดเงิน").Count == 1, $"removed {removed}");
+
+            // The review's case: the owner stops browsing. Nothing records,
+            // nothing prunes (throttled), the entry simply ages past 30 days.
+            var agedShot = hits.FirstOrDefault()?.Shots.FirstOrDefault()?.Id;
+            Check("(control) today's entry, its text and its screenshot are all readable",
+                  store.Search("ยอดเงินคงเหลือ").Count == 1 && store.ReadEntry(id) != null && store.ReadShot(agedShot, out _) != null);
+            AgeEntry(store, id, days: 45);
+            Check("aged to 45 days with no new Record: Search, Stats, ReadEntry and ReadShot all stop returning it",
+                  store.Search("ยอดเงินคงเหลือ").Count == 0 && store.Search("").Count == 0 && store.Stats().Entries == 0
+                  && store.ReadEntry(id) == null && store.ReadShot(agedShot, out _) == null,
+                  $"search {store.Search("ยอดเงินคงเหลือ").Count}, stats {store.Stats().Entries}");
+            var longer = new PrivateBrowseStore(root) { RetentionOverride = 90 };
+            Check("(control) the same row under a 90-day window is still there — the window, not a delete, hid it",
+                  longer.Search("ยอดเงินคงเหลือ").Count == 1 && RowCount(store, "PAGE-TEXT-" + m) == 1);
+            AgeEntry(store, id, days: 0);
 
             var cleared = store.Clear();
             Check("Clear removes every entry and screenshot", cleared == 1 && store.Search("").Count == 0
@@ -409,9 +464,83 @@ internal static partial class Program
             var db = File.ReadAllBytes(store.DbPath);
             Check("…and the cleared text is not left in the database file (secure_delete + VACUUM)",
                   !Encoding.UTF8.GetString(db).Contains("PAGE-TEXT-" + m));
+
+            // URL redaction: a callback URL carries its token in the fragment.
+            var jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ" + m + "In0.c2lnbmF0dXJlLXNpZ25hdHVyZS1zaWc";
+            var tokenUrl = $"https://app-{m.ToLowerInvariant()}.example/callback#access_token={jwt}&state=xyz";
+            store.Record(new PrivateBrowseRecord { Tool = "navigate", Url = tokenUrl, ArgsJson = new JObject { ["url"] = tokenUrl }.ToString() });
+            var urlHit = store.Search($"app-{m.ToLowerInvariant()}");
+            Check("(control) the callback URL itself is stored and searchable",
+                  urlHit.Count == 1 && urlHit[0].Url?.Contains("/callback") == true, urlHit.FirstOrDefault()?.Url);
+            Check("…with its token masked in the url column the window and the search show",
+                  urlHit.Count == 1 && urlHit[0].Url?.Contains(jwt) == false && urlHit[0].Url?.Contains("access_token=") == true, urlHit.FirstOrDefault()?.Url);
+            Check("…and the token is nowhere in browse.db or its WAL (url column, args, FTS index)",
+                  !DbFilesContain(store, jwt[..40]) && !DbFilesContain(store, "c2lnbmF0dXJlLXNpZ25hdHVyZS1zaWc"));
         }
         finally { try { Directory.Delete(Path.GetDirectoryName(root)!, recursive: true); } catch { } }
+
+        // ── the text database has a size cap ──
+        var capRoot = Path.Combine(Path.GetTempPath(), "brainx-chrome-cap-" + Guid.NewGuid().ToString("N"), "private");
+        try
+        {
+            const long cap = 256 * 1024;
+            var capped = new PrivateBrowseStore(capRoot) { MaxDbBytes = cap };
+            var rnd = new Random(7);
+            string Page(int i)
+            {
+                var sb = new StringBuilder($"CAPPAGE-{i:D3} ");
+                while (sb.Length < 20 * 1024) sb.Append((char)('a' + rnd.Next(26))).Append((char)('a' + rnd.Next(26))).Append(rnd.Next(1000)).Append(' ');
+                return sb.ToString();
+            }
+            for (var i = 0; i < 24; i++)
+                capped.Record(new PrivateBrowseRecord { TsUtc = DateTime.UtcNow.AddMinutes(-100 + i), Tool = "get_page_text", ResultText = Page(i) });
+            var before = capped.UsedDbBytes();
+            Check("(control) 24 pages of 20 KB put the database over a 256 KB cap", before > cap, $"{before / 1024} KB in use");
+            var trimmed = capped.Prune(30);
+            var after = capped.UsedDbBytes();
+            Check("Prune brings it under the cap, oldest first, newest kept",
+                  after <= cap && trimmed > 0 && capped.Search("CAPPAGE-023").Count == 1 && capped.Search("CAPPAGE-000").Count == 0,
+                  $"{before / 1024} KB → {after / 1024} KB, removed {trimmed}");
+            Check("Stats reports the database's size on disk for the settings card", capped.Stats().DbBytes > 0);
+        }
+        finally { try { Directory.Delete(Path.GetDirectoryName(capRoot)!, recursive: true); } catch { } }
         return Task.CompletedTask;
+    }
+
+    /// <summary>Rows whose text holds <paramref name="needle"/>, ignoring retention — straight SQL.</summary>
+    private static long RowCount(PrivateBrowseStore store, string needle)
+    {
+        using var c = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={store.DbPath};Pooling=False");
+        c.Open();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM entries WHERE instr(COALESCE(result,'') || COALESCE(url,'') || COALESCE(args,''), $n) > 0;";
+        cmd.Parameters.AddWithValue("$n", needle);
+        return (long)cmd.ExecuteScalar()!;
+    }
+
+    /// <summary>Move an entry's timestamp <paramref name="days"/> into the past — what time does to a log nobody writes to.</summary>
+    private static void AgeEntry(PrivateBrowseStore store, long id, int days)
+    {
+        using var c = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={store.DbPath};Pooling=False");
+        c.Open();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = "UPDATE entries SET ts_ticks = $t WHERE id = $id; UPDATE shots SET ts_ticks = $t WHERE entry_id = $id;";
+        cmd.Parameters.AddWithValue("$t", DateTime.UtcNow.AddDays(-days).Ticks);
+        cmd.Parameters.AddWithValue("$id", id);
+        cmd.ExecuteNonQuery();
+    }
+
+    private static bool DbFilesContain(PrivateBrowseStore store, string needle)
+    {
+        foreach (var p in new[] { store.DbPath, store.DbPath + "-wal" })
+        {
+            if (!File.Exists(p)) continue;
+            byte[] bytes;
+            using (var fs = new FileStream(p, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            using (var ms = new MemoryStream()) { fs.CopyTo(ms); bytes = ms.ToArray(); }
+            if (Encoding.UTF8.GetString(bytes).Contains(needle, StringComparison.Ordinal)) return true;
+        }
+        return false;
     }
 
     // ───────────── remote policy + status shape ─────────────
@@ -471,7 +600,7 @@ internal static partial class Program
             ("ClaudeTooOld", In(loc: new ClaudeLocateResult { Status = ClaudeLocateStatus.TooOld, RejectedVersion = "2.0.42",
                 Rejected = new ClaudeCodeCandidate(@"C:\u\.local\bin\claude.exe", ClaudeInstallKind.Native, @"C:\u\.local\bin\claude.exe", Array.Empty<string>(), null) })),
             ("NotSignedIn", In(auth: new ClaudeAuthResult(ClaudeAuthState.NotSignedIn, "none", "cli"))),
-            ("ApiKeyOnly", In(auth: new ClaudeAuthResult(ClaudeAuthState.ApiKeyOnly, "console", "cli"))),
+            ("ApiKeyOnly", In(auth: new ClaudeAuthResult(ClaudeAuthState.ApiKeyOnly, "api_key", "cli"))),
             ("ExtensionMissing", In(scan: new ChromeScanResult())),
             ("ExtensionDisabled", In(scan: Disabled())),
             ("BrowserClosed", In(scan: Closed())),
@@ -496,7 +625,7 @@ internal static partial class Program
                   o.ToString(Newtonsoft.Json.Formatting.None));
         }
 
-        var api = ChromeBridgeStatus.Build(In(auth: new ClaudeAuthResult(ClaudeAuthState.ApiKeyOnly, "console", "cli")));
+        var api = ChromeBridgeStatus.Build(In(auth: new ClaudeAuthResult(ClaudeAuthState.ApiKeyOnly, "api_key", "cli")));
         Check("ApiKeyOnly says plainly that an API key cannot drive Chrome (en + th), and offers 'auth login --claudeai'",
               api["message_en"]!.ToString().Contains("API key or API credit cannot drive Chrome")
               && api["message_th"]!.ToString().Contains("API key")
@@ -524,6 +653,9 @@ internal static partial class Program
     private sealed class ChromeSession : IAsyncDisposable
     {
         public required Process Server { get; init; }
+        /// <summary>The initialize answer (server instructions included).</summary>
+        public JObject? Init { get; init; }
+        public string Instructions => Init?["result"]?["instructions"]?.ToString() ?? "";
         private int _id = 10;
         public Task<JObject?> Call(string tool, JObject? args = null) =>
             Rpc(Server, Interlocked.Increment(ref _id), "tools/call", new JObject { ["name"] = tool, ["arguments"] = args ?? new JObject() });
@@ -567,13 +699,50 @@ internal static partial class Program
         var server = Process.Start(psi)!;
         server.StandardInput.AutoFlush = true;
         _ = Task.Run(async () => { try { while (await server.StandardError.ReadLineAsync() != null) { } } catch { } });
-        await Rpc(server, 1, "initialize", new JObject
+        var init = await Rpc(server, 1, "initialize", new JObject
         {
             ["protocolVersion"] = "2025-06-18", ["capabilities"] = new JObject(),
             ["clientInfo"] = new JObject { ["name"] = "cluadex", ["version"] = "1" },
         });
         await server.StandardInput.WriteLineAsync("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}");
-        return new ChromeSession { Server = server };
+        return new ChromeSession { Server = server, Init = init };
+    }
+
+    /// <summary>A sandboxed brainx-mcp with the chrome bridge ON and the stub
+    /// as its claude.exe — the setup most of the chrome checks share.</summary>
+    private static (string Root, string Vault, string PrivateDir) ChromeSandboxDirs(string prefix, bool enabled = true)
+    {
+        var root = Path.Combine(Path.GetTempPath(), prefix + Guid.NewGuid().ToString("N"));
+        var vault = Path.Combine(root, "vault");
+        var privateDir = Path.Combine(root, "localappdata", "BrainX", "private");
+        Directory.CreateDirectory(Path.Combine(vault, "Notes"));
+        Directory.CreateDirectory(Path.Combine(vault, ".obsidianx"));
+        BusSeal.EnsureKey(Path.Combine(root, "bus-seal.key"));
+        if (enabled) new ChromeBridgeSettings { Enabled = true, RetentionDays = 30 }.Save(privateDir);
+        return (root, vault, privateDir);
+    }
+
+    private static Dictionary<string, string?> StubEnv(string marker, string root, Dictionary<string, string?>? more = null)
+    {
+        var env = new Dictionary<string, string?>
+        {
+            ["BRAINX_CHROME_STUB_COMMAND"] = Environment.ProcessPath,
+            [ChromeStubServer.EnvFlag] = "1",
+            [ChromeStubServer.MarkerEnv] = marker,
+            [ChromeStubServer.StartedEnv] = Path.Combine(root, "stub-started.txt"),
+            ["BRAINX_CHROME_STUB_RUNNING"] = "1",
+        };
+        foreach (var (k, v) in more ?? new()) env[k] = v;
+        return env;
+    }
+
+    /// <summary>The stub must prove it is the stub before a result is trusted.</summary>
+    private static async Task<bool> StubProven(ChromeSession s)
+    {
+        var st = await s.Status();
+        var ok = st != null && string.Equals(st["claudePath"]?.ToString(), Environment.ProcessPath, StringComparison.OrdinalIgnoreCase);
+        Check("(stub) bridge_status names the harness stub as claude.exe — never a real one", ok, st?.ToString(Newtonsoft.Json.Formatting.None));
+        return ok;
     }
 
     /// <summary>relative path → sha256 of every file under the vault.</summary>
@@ -669,6 +838,32 @@ internal static partial class Program
             var navFixture = fixture!.OfType<JObject>().First(t => t["name"]?.ToString() == "navigate");
             Check("inputSchema is the server's own, unchanged", nav != null && JToken.DeepEquals(nav["inputSchema"], navFixture["inputSchema"]));
 
+            // The owner's rule where an agent reads the tool: every chrome__
+            // description keeps the "[chrome bridge] " prefix (CluadeX keys on
+            // it) and ENDS with the privacy rule.
+            var chromeTools = tools.Where(t => t["name"]!.ToString().StartsWith("chrome__")).ToList();
+            Check("every chrome__ description keeps the '[chrome bridge] ' prefix and ends with the privacy rule",
+                  chromeTools.Count == expected.Count && chromeTools.All(t =>
+                      t["description"]!.ToString().StartsWith("[chrome bridge] ", StringComparison.Ordinal)
+                      && t["description"]!.ToString().EndsWith(ChromeBridgeIds.PrivacyRule, StringComparison.Ordinal)),
+                  chromeTools.Select(t => t["description"]!.ToString()).FirstOrDefault(d => !d.EndsWith(ChromeBridgeIds.PrivacyRule)));
+            Check("(control) a brain tool's description does not carry it",
+                  tools.First(t => t["name"]!.ToString() == "brain_search")["description"]!.ToString().Contains(ChromeBridgeIds.PrivacyRule) == false);
+            Check("private_browse_search's description carries the rule and asks clients for ask-every-time",
+                  tools.FirstOrDefault(t => t["name"]?.ToString() == "private_browse_search")?["description"]?.ToString() is { } psd
+                  && psd.Contains(ChromeBridgeIds.PrivacyRule) && psd.Contains("ask-every-time"));
+
+            // …and in the server instructions, inside rule 2 ("save it without
+            // asking"), inside what Claude Code shows.
+            var instr = s.Instructions;
+            var rulesEnd = instr.IndexOf("Each tool's description carries its full protocol.", StringComparison.Ordinal);
+            var clause = instr.IndexOf(ChromeBridgeIds.PrivacyRuleShort, StringComparison.Ordinal);
+            var rule2 = instr.IndexOf("\n2. ", StringComparison.Ordinal);
+            var rule3 = instr.IndexOf("\n3. ", StringComparison.Ordinal);
+            Check("with the bridge on, rule 2 of the instructions carries the privacy exception, all rules inside 2,000 characters",
+                  clause > rule2 && clause < rule3 && rulesEnd > 0 && rulesEnd < 2000,
+                  $"clause at {clause}, rule 2 at {rule2}, rules end at {rulesEnd}");
+
             // ── snapshot the vault, then browse ──
             var before = SnapshotTree(vault);
 
@@ -681,6 +876,15 @@ internal static partial class Program
             var roster = await s.Call("chrome__list_connected_browsers");
             var flat = await s.Call("chrome_get_page_text", new JObject { ["tabId"] = 101 });
             var upload = await s.Call("chrome__file_upload", new JObject { ["paths"] = new JArray(@"C:\Users\x\.ssh\id_rsa"), ["ref"] = "ref_1", ["tabId"] = 101 });
+            // Names in the namespace that name no tool: refused, forwarded
+            // nowhere, and (checked by the vault snapshot below) not written
+            // to the activity feed by the unknown-tool path.
+            var bare1 = await s.Call("chrome_", new JObject { ["note"] = "QBARE1" + m });
+            var bare2 = await s.Call("chrome__", new JObject { ["note"] = "QBARE2" + m });
+            Check("'chrome_' and 'chrome__' (no tool) are refused, en + th, and never reach the server",
+                  IsError(bare1) && IsError(bare2) && !ResultText(bare2).Contains("ok ") && ResultText(bare1).Contains("Claude in Chrome")
+                  && ResultText(bare2).Contains("ไม่มีเครื่องมือ"),
+                  ResultText(bare1) + " | " + ResultText(bare2));
 
             Check("tabs_context_mcp and navigate reach the server and come back",
                   ResultText(tabs).Contains(ChromeStubServer.MarkerUrl(m)) && ResultText(navigated).Contains("Navigated to " + ChromeStubServer.MarkerUrl(m)));
@@ -715,7 +919,7 @@ internal static partial class Program
             var needles = new[]
             {
                 m, ChromeStubServer.ScreenshotBase64(m)[..40], "chrome__", "chrome_get", "get_page_text", "file_upload",
-                "private-" + m.ToLowerInvariant(),
+                "private-" + m.ToLowerInvariant(), "QBARE1", "QBARE2",
             };
             var leaks = FilesContaining(vault, needles);
             Check("no byte of the browsing — marker, URL, page text, typed value, screenshot, even a chrome tool name — is anywhere in the vault",
@@ -745,11 +949,12 @@ internal static partial class Program
             Check("(control) the vault snapshot covered real files", before.Count > 0, $"{before.Count} files");
 
             // ── all of it in the private store ──
+            // (The log is written behind the calls; the search below waits
+            // for the writer, so the file checks come after it.)
             var beforeSearch = SnapshotTree(vault);
+            var found = await s.Call("private_browse_search", new JObject { ["query"] = "PAGE-TEXT-" + m });
             Check("the private store exists OUTSIDE the vault", File.Exists(Path.Combine(privateDir, "browse.db")));
             Check("the private folder is owner-only", new PrivateBrowseStore(privateDir).IsOwnerOnly());
-
-            var found = await s.Call("private_browse_search", new JObject { ["query"] = "PAGE-TEXT-" + m });
             var body = JObject.Parse(ResultText(found));
             var first = (body["results"] as JArray)?.OfType<JObject>().FirstOrDefault();
             Check("private_browse_search finds the page text, tagged with the tool and the agent",
@@ -824,12 +1029,27 @@ internal static partial class Program
             });
             var names = ((await s.List())?["result"]?["tools"] as JArray ?? new JArray()).Select(t => t["name"]!.ToString()).ToList();
             Check("no settings file → no chrome__ tool is listed", names.Count > 0 && !names.Any(n => n.StartsWith("chrome_")), $"{names.Count} tools");
-            Check("…private_browse_search is still there locally (the owner may search an existing log)", names.Contains("private_browse_search"));
+            Check("…and no private_browse_search either: the bridge was never on and there is no log to search",
+                  !names.Contains("private_browse_search"));
+            Check("…and the instructions spend nothing on the privacy rule where no browsing is visible",
+                  s.Instructions.Length > 0 && !s.Instructions.Contains(ChromeBridgeIds.PrivacyRuleShort));
             var st = await s.Status();
             Check("bridge_status: chrome entry present, Disabled, with the way to turn it on in en + th",
                   st?["state"]?.ToString() == "Disabled" && st["action"]?["kind"]?.ToString() == "open_brainx_settings"
                   && st["message_en"]!.ToString().Contains("off") && !string.IsNullOrWhiteSpace(st["message_th"]?.ToString()),
                   st?.ToString(Newtonsoft.Json.Formatting.None));
+            // "Turn on in BrainX" is a command line the card can run — the
+            // client opens Settings at the Claude in Chrome card — not the
+            // brainx:// link nothing handled.
+            var act = st?["action"] as JObject;
+            var target = act?["target"]?.ToString() ?? "";
+            var parsedBack = ClientLaunchArgs.Parse(SplitCommandLine(target).Skip(1));
+            Check("…its target is BrainX.Client.exe --settings claude-in-chrome, with exe + args spelled out",
+                  target.EndsWith(" --settings claude-in-chrome", StringComparison.Ordinal)
+                  && target.Contains("BrainX.Client.exe", StringComparison.OrdinalIgnoreCase)
+                  && act?["args"] is JArray a && a.Count == 2 && a[0]!.ToString() == "--settings" && a[1]!.ToString() == "claude-in-chrome"
+                  && parsedBack.OpenSettings && parsedBack.VaultPath == null && ClientLaunchArgs.AnchorFor(parsedBack.SettingsSection) == "Chrome",
+                  act?.ToString(Newtonsoft.Json.Formatting.None));
             var call = await s.Call("chrome__navigate", new JObject { ["url"] = "https://example.test/" });
             Check("calling chrome__navigate anyway is refused, not 'unknown tool'", IsError(call) && ResultText(call).Contains("off"), ResultText(call));
             Check("…and nothing was started — not even for discovery", !File.Exists(started));
@@ -890,14 +1110,364 @@ internal static partial class Program
                   IsError(r) && ResultText(r).Contains("local-only") && !ResultText(r).Contains("must not be seen"), ResultText(r));
             var c = await s.Call("chrome__get_page_text", new JObject { ["tabId"] = 1, ["note"] = "QARGQ9" });
             Check("…and a chrome__ call is refused with no side effect", IsError(c) && !File.Exists(started), ResultText(c));
-            Check("…and neither refused call's arguments were written into the vault (journal, activity feed)",
-                  FilesContaining(vault, new[] { "chrome__get_page_text", "QREMOTEQ7", "QARGQ9" }).Count == 0,
-                  string.Join(" | ", FilesContaining(vault, new[] { "chrome__get_page_text", "QREMOTEQ7", "QARGQ9" })));
+            // The bare namespace used to fall through to "unknown tool", which
+            // writes an activity line (tool + error) into the vault.
+            var bare = await s.Call("chrome_", new JObject { ["note"] = "QBAREQ8" });
+            Check("…and so is the bare 'chrome_' (it names no tool, but it is in the namespace)", IsError(bare), ResultText(bare));
+            // Control: an unknown NON-chrome name does reach the activity feed,
+            // so "no chrome_ line in the vault" means something.
+            await s.Call("not_a_tool_xyz", new JObject { ["note"] = "QCONTROLQ6" });
+            Check("(control) an unknown non-chrome tool IS written to the activity feed in this session",
+                  FilesContaining(vault, new[] { "not_a_tool_xyz" }).Count > 0);
+            var leaks = FilesContaining(vault, new[] { "chrome__get_page_text", "QREMOTEQ7", "QARGQ9", "QBAREQ8", "\"chrome_\"", "unknown tool: chrome" });
+            Check("…and none of the refused calls — names or arguments — were written into the vault (journal, activity feed)",
+                  leaks.Count == 0, string.Join(" | ", leaks));
         }
         finally
         {
             if (s != null) await s.DisposeAsync();
             try { Directory.Delete(root, recursive: true); } catch { }
         }
+    }
+
+    // ───────────── the discovery race (review 2026-10-10) ─────────────
+
+    /// <summary>One request the stub received: when, which process, what.</summary>
+    private sealed record StubHit(long Ticks, int Pid, string Method, string Tool);
+
+    private static List<StubHit> ReadStubLog(string path)
+    {
+        var list = new List<StubHit>();
+        if (!File.Exists(path)) return list;
+        foreach (var l in File.ReadAllLines(path))
+        {
+            var p = l.Split(' ', 4);
+            if (p.Length >= 3 && long.TryParse(p[0], out var t) && int.TryParse(p[1], out var pid))
+                list.Add(new StubHit(t, pid, p[2], p.Length > 3 ? p[3].Trim() : ""));
+        }
+        return list;
+    }
+
+    /// <summary>
+    /// THE BUG. A chrome__ call that arrived while discovery was spawning the
+    /// server shared discovery's pipe; discovery then closed it under the call.
+    /// The navigate RAN (the stub answered it) yet the agent was told "no
+    /// response within 180s" after five seconds — its retry would click twice
+    /// — and discovery's own failure was cached, so new sessions listed no
+    /// chrome__ tools for ten minutes and bridge_status said "Connected · 0 tools".
+    /// Run with a 3 s cold start (the review's repro) and with none.
+    /// </summary>
+    private static async Task ChromeDiscoveryRace()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the check", false); return; }
+
+        // Status first, on its own: while discovery's server is still cold,
+        // bridge_status must answer at once (it used to queue behind the
+        // spawn's lock for the whole cold start) and say Connecting.
+        {
+            var (root, vault, privateDir) = ChromeSandboxDirs("brainx-chrome-status-");
+            ChromeSession? s = null;
+            try
+            {
+                s = await StartChromeSession(exe, vault, privateDir, StubEnv("S1", root, new() { [ChromeStubServer.StartDelayEnv] = "4000" }));
+                var sw0 = Stopwatch.StartNew();
+                var stConnecting = await s.Status();
+                var statusMs = sw0.ElapsedMilliseconds;
+                Check("bridge_status answers within 2 s while discovery's server is still starting (4 s cold start), and says Connecting",
+                      statusMs < 2000 && stConnecting?["state"]?.ToString() == "Connecting", $"{statusMs} ms, state {stConnecting?["state"]}");
+                await s.List();   // discovery done
+                var after = await s.Status();
+                Check("(control) once discovery is in, it no longer says Connecting — the state came from the spawn in flight",
+                      after?["state"]?.ToString() is { } st0 && st0 != "Connecting", after?["state"]?.ToString());
+            }
+            finally
+            {
+                if (s != null) await s.DisposeAsync();
+                try { Directory.Delete(root, recursive: true); } catch { }
+            }
+        }
+
+        // The race itself: the call goes out right after initialize, while
+        // discovery is still spawning (3 s cold start) or racing it (none).
+        foreach (var startMs in new[] { 3000, 0 })
+        {
+            var (root, vault, privateDir) = ChromeSandboxDirs("brainx-chrome-race-");
+            var m = "R" + Guid.NewGuid().ToString("N")[..10].ToUpperInvariant();
+            var log = Path.Combine(root, "stub-requests.log");
+            ChromeSession? s = null;
+            try
+            {
+                s = await StartChromeSession(exe, vault, privateDir, StubEnv(m, root, new()
+                {
+                    [ChromeStubServer.StartDelayEnv] = startMs.ToString(),
+                    [ChromeStubServer.LogEnv] = log,
+                }));
+
+                var url = ChromeStubServer.MarkerUrl(m);
+                var sentTicks = DateTime.UtcNow.Ticks;
+                var sw = Stopwatch.StartNew();
+                var nav = await s.Call("chrome__navigate", new JObject { ["url"] = url, ["tabId"] = 101 });
+                var navMs = sw.ElapsedMilliseconds;
+
+                Check($"[{startMs} ms start] the first chrome__navigate, sent during discovery, comes back as the SUCCESS it was",
+                      !IsError(nav) && ResultText(nav).Contains("Navigated to " + url), $"{navMs} ms: {ResultText(nav)}");
+
+                // Let discovery finish (tools/list waits for it), then read the stub's log.
+                var names = ((await s.List())?["result"]?["tools"] as JArray ?? new JArray()).Select(t => t["name"]!.ToString()).ToList();
+                var hits = ReadStubLog(log);
+                var navs = hits.Where(h => h.Method == "tools/call" && h.Tool == "navigate").ToList();
+                Check($"[{startMs} ms start] the server received that navigate exactly ONCE (no retry clicks twice)",
+                      navs.Count == 1, string.Join("; ", hits.Select(h => $"{h.Pid}:{h.Method}:{h.Tool}")));
+                var discoveryPids = hits.Where(h => h.Method == "tools/list").Select(h => h.Pid).ToHashSet();
+                Check($"[{startMs} ms start] …served by a server of its own, never discovery's pipe",
+                      navs.Count == 1 && discoveryPids.Count > 0 && !discoveryPids.Contains(navs[0].Pid),
+                      $"navigate pid {navs.FirstOrDefault()?.Pid}, discovery pids {string.Join(",", discoveryPids)}");
+                if (startMs > 0)
+                {
+                    var listAt = hits.Where(h => h.Method == "tools/list").Select(h => h.Ticks).DefaultIfEmpty(0).Min();
+                    Check($"(control) [{startMs} ms start] discovery really was in flight when the call went out (its tools/list came later)",
+                          listAt > sentTicks, $"tools/list {TimeSpan.FromTicks(listAt - sentTicks).TotalMilliseconds:0} ms after the call");
+                }
+
+                Check($"[{startMs} ms start] discovery survived: this session lists the chrome__ tools",
+                      names.Contains("chrome__navigate") && names.Contains("chrome__get_page_text"), $"{names.Count(n => n.StartsWith("chrome__"))} chrome tools");
+                var cache = File.Exists(Path.Combine(privateDir, "chrome-tools.cache.json"))
+                    ? JObject.Parse(File.ReadAllText(Path.Combine(privateDir, "chrome-tools.cache.json")))["bridges"]?["chrome"] as JObject
+                    : null;
+                var cacheText = cache?.ToString(Newtonsoft.Json.Formatting.None) ?? "(no cache)";
+                Check($"[{startMs} ms start] …and the private cache new sessions read holds the tools, not a failure",
+                      cache?["tools"] is JArray { Count: > 0 } && cache["failedUtc"]?.Type is null or JTokenType.Null,
+                      cacheText[..Math.Min(200, cacheText.Length)]);
+                var st = await s.Status();
+                Check($"[{startMs} ms start] bridge_status: Connected with the real tool count (not 'Connected · 0 tools')",
+                      st?["state"]?.ToString() == "Connected" && (int?)st["tools"] > 0, $"{st?["state"]} · {st?["tools"]} tools");
+            }
+            finally
+            {
+                if (s != null) await s.DisposeAsync();
+                try { Directory.Delete(root, recursive: true); } catch { }
+            }
+        }
+    }
+
+    /// <summary>
+    /// A server that dies mid-call. The call failed after a second or two but
+    /// said "no response within 180s" — which sent the reader looking for a
+    /// hang. It must say what happened and when, in both languages, and the
+    /// next call must get a fresh server.
+    /// </summary>
+    private static async Task ChromePipeClosedEarly()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the check", false); return; }
+
+        var (root, vault, privateDir) = ChromeSandboxDirs("brainx-chrome-pipe-");
+        var m = "P" + Guid.NewGuid().ToString("N")[..10].ToUpperInvariant();
+        ChromeSession? s = null;
+        try
+        {
+            s = await StartChromeSession(exe, vault, privateDir, StubEnv(m, root, new() { [ChromeStubServer.ExitOnEnv] = "navigate" }));
+            if (!await StubProven(s)) return;
+            await s.List();   // discovery done
+
+            var sw = Stopwatch.StartNew();
+            var r = await s.Call("chrome__navigate", new JObject { ["url"] = ChromeStubServer.MarkerUrl(m) });
+            var ms = sw.ElapsedMilliseconds;
+            var text = ResultText(r);
+            Check("the call fails (the server is gone) within seconds, not after the 180 s timeout", IsError(r) && ms < 30_000, $"{ms} ms");
+            Check("…saying the server closed the pipe after N s — not 'no response within 180s'",
+                  System.Text.RegularExpressions.Regex.IsMatch(text, @"closed the pipe after \d+(\.\d)? s") && !text.Contains("no response within"), text);
+            Check("…in Thai too, with the warning that the action may already have run",
+                  text.Contains("ปิดการเชื่อมต่อหลังจาก") && text.Contains("อาจทำงานไปแล้ว"), text);
+
+            var again = await s.Call("chrome__tabs_context_mcp");
+            Check("the next call gets a fresh server and works", !IsError(again) && ResultText(again).Contains(ChromeStubServer.MarkerUrl(m)), ResultText(again));
+        }
+        finally
+        {
+            if (s != null) await s.DisposeAsync();
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// Keeping a call (redaction, FTS insert, DPAPI) cost 0.7-2.3 s per page
+    /// INSIDE the call, before the agent saw its result. It is written behind
+    /// the call now. Proven with a deliberately slow writer (sandbox-only
+    /// knob): the call returns well before the writer could have finished,
+    /// and a search right after still finds the page (it waits for the writer).
+    /// </summary>
+    private static async Task ChromePrivateLogBehindTheCall()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the check", false); return; }
+
+        // For the report: what one ~100 KB page costs to keep, measured here.
+        var probeRoot = Path.Combine(Path.GetTempPath(), "brainx-chrome-cost-" + Guid.NewGuid().ToString("N"), "private");
+        try
+        {
+            var store = new PrivateBrowseStore(probeRoot);
+            var page = string.Concat(Enumerable.Range(0, 2200).Select(i => $"บรรทัด {i} lorem ipsum dolor sit amet\n"));
+            store.Record(new PrivateBrowseRecord { Tool = "warmup", ResultText = "x" });
+            var swr = Stopwatch.StartNew();
+            store.Record(new PrivateBrowseRecord { Tool = "get_page_text", ResultText = page });
+            Console.WriteLine($"         (one {page.Length / 1024} KB page costs {swr.ElapsedMilliseconds} ms to keep — now off the call path)");
+        }
+        finally { try { Directory.Delete(Path.GetDirectoryName(probeRoot)!, true); } catch { } }
+
+        const int writerDelayMs = 4000;
+        var (root, vault, privateDir) = ChromeSandboxDirs("brainx-chrome-async-");
+        var m = "A" + Guid.NewGuid().ToString("N")[..10].ToUpperInvariant();
+        ChromeSession? s = null;
+        try
+        {
+            s = await StartChromeSession(exe, vault, privateDir, StubEnv(m, root, new() { ["BRAINX_PRIVATE_LOG_DELAY_MS"] = writerDelayMs.ToString() }));
+            if (!await StubProven(s)) return;
+            await s.List();   // discovery done
+            // Warm: the server is up, so the timed call below is the call
+            // alone, not a cold start.
+            await s.Call("chrome__tabs_context_mcp");
+
+            var sw = Stopwatch.StartNew();
+            var r = await s.Call("chrome__get_page_text", new JObject { ["tabId"] = 1, [ChromeStubServer.BigKbArg] = 300 });
+            var callMs = sw.ElapsedMilliseconds;
+            var text = ResultText(r);
+            Check($"a 300 KB page comes back without waiting for the private log (writer delayed {writerDelayMs} ms per entry)",
+                  !IsError(r) && callMs < writerDelayMs - 1500 && text.Contains("PAGE-TEXT-" + m), $"{callMs} ms");
+            Check("…cut at 256 KB with advice for a web page, in en + th — not Unity's 'one component, a specific path'",
+                  text.Contains("use find / read_page with a ref") && text.Contains("ใช้ find / read_page กับ ref") && !text.Contains("one component"),
+                  text.Length > 300 ? text[^300..] : text);
+
+            var sw2 = Stopwatch.StartNew();
+            var found = JObject.Parse(ResultText(await s.Call("private_browse_search", new JObject { ["query"] = "PAGE-TEXT-" + m })));
+            var searchMs = sw2.ElapsedMilliseconds;
+            Check("a search right after finds the page — it waits for the writer, so nothing captured is missed",
+                  (int?)found["count"] == 1, found.ToString(Newtonsoft.Json.Formatting.None));
+            Check("(control) the writer really was slow: that search had to wait for it",
+                  searchMs > 1000, $"search took {searchMs} ms");
+            var kept = new PrivateBrowseStore(privateDir).ReadEntry((long)found["results"]![0]!["id"]!)?.Result ?? "";
+            Check("…and the log kept the page as the SERVER sent it (captured before the cut rewrote the agent's copy)",
+                  kept.Contains(ChromeStubServer.BigFillMarker + " 100 ") && !kept.Contains("truncated by the chrome bridge"),
+                  kept.Length > 200 ? kept[^200..] : kept);
+        }
+        finally
+        {
+            if (s != null) await s.DisposeAsync();
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// private_browse_search used to be listed and callable everywhere: in a
+    /// session that never had the bridge, and in broker / Mind runs that take
+    /// orders from a task card or a peer — a prompt-injected agent there could
+    /// dump the log and forward it with agent_send or cowork.
+    /// </summary>
+    private static async Task ChromePrivateSearchGating()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the check", false); return; }
+
+        // A: bridge OFF, but a log exists → the owner may still search it.
+        var (rootA, vaultA, privA) = ChromeSandboxDirs("brainx-chrome-gate-a-", enabled: false);
+        new PrivateBrowseStore(privA).Record(new PrivateBrowseRecord { Tool = "get_page_text", ResultText = "QGATEA1 page" });
+        ChromeSession? s = null;
+        try
+        {
+            s = await StartChromeSession(exe, vaultA, privA, StubEnv("GA", rootA));
+            var names = ((await s.List())?["result"]?["tools"] as JArray ?? new JArray()).Select(t => t["name"]!.ToString()).ToList();
+            Check("bridge off but a log on disk: private_browse_search is listed and finds it, chrome__ tools are not",
+                  names.Contains("private_browse_search") && !names.Any(n => n.StartsWith("chrome_"))
+                  && (int?)JObject.Parse(ResultText(await s.Call("private_browse_search", new JObject { ["query"] = "QGATEA1" })))["count"] == 1);
+            var ins = s.Instructions;
+            var rulesEnd = ins.IndexOf("Each tool's description carries its full protocol.", StringComparison.Ordinal);
+            Check("…and the instructions carry the privacy rule, every rule still inside 2,000 characters",
+                  ins.Contains(ChromeBridgeIds.PrivacyRuleShort) && rulesEnd > 0 && rulesEnd < 2000, $"rules end at {rulesEnd}");
+        }
+        finally
+        {
+            if (s != null) await s.DisposeAsync();
+            try { Directory.Delete(rootA, recursive: true); } catch { }
+        }
+
+        // B / C: unattended runs — the broker's task runner and the Mind.
+        foreach (var (label, envName, envValue) in new[] { ("broker run", "BRAINX_BROKER_RUN", "1"), ("Mind", "BRAINX_AS_AGENT", "mind") })
+        {
+            var (root, vault, priv) = ChromeSandboxDirs("brainx-chrome-gate-u-");
+            new PrivateBrowseStore(priv).Record(new PrivateBrowseRecord { Tool = "get_page_text", ResultText = "QGATEU2 bank page" });
+            ChromeSession? u = null;
+            try
+            {
+                u = await StartChromeSession(exe, vault, priv, StubEnv("GU", root, new() { [envName] = envValue }));
+                var names = ((await u.List())?["result"]?["tools"] as JArray ?? new JArray()).Select(t => t["name"]!.ToString()).ToList();
+                var r = await u.Call("private_browse_search", new JObject { ["query"] = "QGATEU2" });
+                Check($"{label}: private_browse_search is not listed, and called by name it is refused without the log (en + th)",
+                      !names.Contains("private_browse_search") && IsError(r) && !ResultText(r).Contains("bank page")
+                      && ResultText(r).Contains("owner only") && ResultText(r).Contains("เฉพาะเจ้าของ"), ResultText(r));
+                Check($"(control) {label}: the chrome bridge itself is unaffected — its tools are listed",
+                      names.Contains("chrome__navigate"));
+            }
+            finally
+            {
+                if (u != null) await u.DisposeAsync();
+                try { Directory.Delete(root, recursive: true); } catch { }
+            }
+        }
+    }
+
+    /// <summary>Split a command line the way the card would: quotes group, spaces split.</summary>
+    private static List<string> SplitCommandLine(string line)
+    {
+        var parts = new List<string>();
+        var cur = new StringBuilder();
+        var quoted = false;
+        foreach (var ch in line)
+        {
+            if (ch == '"') { quoted = !quoted; continue; }
+            if (ch == ' ' && !quoted) { if (cur.Length > 0) { parts.Add(cur.ToString()); cur.Clear(); } continue; }
+            cur.Append(ch);
+        }
+        if (cur.Length > 0) parts.Add(cur.ToString());
+        return parts;
+    }
+
+    private static Task ChromeSettingsLaunchArgs()
+    {
+        var a = ClientLaunchArgs.Parse(new[] { "--settings", "claude-in-chrome" });
+        Check("--settings claude-in-chrome → open Settings at the Chrome card, and NO vault path (it used to be the vault)",
+              a.OpenSettings && a.SettingsSection == "claude-in-chrome" && a.VaultPath == null && ClientLaunchArgs.AnchorFor(a.SettingsSection) == "Chrome",
+              a.ToString());
+        var b = ClientLaunchArgs.Parse(new[] { @"D:\Vaults\Mine" });
+        Check("(control) a plain path is still the vault, and opens no settings", b.VaultPath == @"D:\Vaults\Mine" && !b.OpenSettings);
+        var c = ClientLaunchArgs.Parse(new[] { @"D:\V", "--settings=CHROME" });
+        Check("vault + --settings=<section> together, case-insensitive", c.VaultPath == @"D:\V" && c.OpenSettings && c.SettingsSection == "chrome");
+        var d = ClientLaunchArgs.Parse(new[] { "--settings", "../../etc", "--veloapp-firstrun" });
+        Check("an unknown section opens Settings itself; any other switch is never a vault",
+              d.OpenSettings && d.SettingsSection == null && d.VaultPath == null);
+
+        var msg = ClientLaunchArgs.ToMessage("claude-in-chrome");
+        Check("the second launch's message round-trips", ClientLaunchArgs.FromMessage(msg) == (true, "claude-in-chrome"));
+        Check("a foreign WM_COPYDATA is ignored; an unknown section opens nothing in particular",
+              ClientLaunchArgs.FromMessage("format c:") == (false, null)
+              && ClientLaunchArgs.FromMessage("brainx:settings:SettingsAnchorAbout\\..\\x") == (true, null)
+              && ClientLaunchArgs.FromMessage(new string('x', 4000)) == (false, null));
+
+        // Every section the switch can name has its card (and Chrome its jump
+        // button) in the real MainWindow.xaml — no dead targets.
+        var xaml = FindRepoFile("BrainX.Client", "MainWindow.xaml");
+        if (xaml == null) { Check("BrainX.Client/MainWindow.xaml found", false); return Task.CompletedTask; }
+        var text = File.ReadAllText(xaml);
+        var missing = ClientLaunchArgs.Sections.Values.Distinct().Where(tag => !text.Contains($"x:Name=\"SettingsAnchor{tag}\"")).ToList();
+        Check("every --settings section has its SettingsAnchor card in MainWindow.xaml", missing.Count == 0, string.Join(", ", missing));
+        Check("…and Claude in Chrome has a jump button in the Settings menu", text.Contains("x:Name=\"SettingsNavChrome\"") && text.Contains("Tag=\"Chrome\""));
+
+        var st = ChromeBridgeStatus.Build(new ChromeBridgeStatus.Inputs { Enabled = false, BrainXClientExe = @"C:\Users\x\AppData\Local\BrainX\current\BrainX.Client.exe" });
+        Check("Disabled → open_brainx_settings with the client's quoted exe and the switch",
+              st["action"]?["kind"]?.ToString() == "open_brainx_settings"
+              && st["action"]?["target"]?.ToString() == "\"C:\\Users\\x\\AppData\\Local\\BrainX\\current\\BrainX.Client.exe\" --settings claude-in-chrome"
+              && st["action"]?["exe"]?.ToString() == @"C:\Users\x\AppData\Local\BrainX\current\BrainX.Client.exe",
+              st["action"]?.ToString(Newtonsoft.Json.Formatting.None));
+        return Task.CompletedTask;
     }
 }

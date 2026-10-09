@@ -69,14 +69,31 @@ public static class ClaudeAuthProbe
 
     /// <summary>
     /// claude.ai / OAuth sign-ins pass. Console API keys and the cloud
-    /// providers (Bedrock, Vertex, Foundry) cannot reach the browser bridge.
-    /// Anything unrecognised is Unknown rather than a guess either way.
+    /// providers (Bedrock, Vertex, Foundry, a gateway) cannot reach the browser
+    /// bridge. Anything unrecognised is Unknown rather than a guess either way.
+    ///
+    /// The exact values first: what Claude Code 2.1.293's `auth status` really
+    /// emits (read from the binary) is none | claude.ai | oauth_token | api_key
+    /// | api_key_helper | third_party. third_party used to fall through to
+    /// Unknown, which reads as Ready — a Connect button that loops on
+    /// NotReachable for someone who can never drive Chrome.
     /// </summary>
     public static ClaudeAuthState Classify(string? method)
     {
         if (string.IsNullOrWhiteSpace(method)) return ClaudeAuthState.Unknown;
-        var m = method.ToLowerInvariant();
-        if (m == "none") return ClaudeAuthState.NotSignedIn;
+        var m = method.Trim().ToLowerInvariant();
+        switch (m)
+        {
+            case "none": return ClaudeAuthState.NotSignedIn;
+            case "claude.ai":
+            case "oauth_token": return ClaudeAuthState.SignedIn;
+            case "api_key":
+            case "api_key_helper":
+            case "third_party": return ClaudeAuthState.ApiKeyOnly;
+        }
+        // Older or future spellings, by shape.
+        if (m.Contains("third") || m.Contains("bedrock") || m.Contains("vertex") || m.Contains("foundry") || m.Contains("gateway"))
+            return ClaudeAuthState.ApiKeyOnly;
         if (m.Contains("claude") || m.Contains("oauth") || m.Contains("subscription")) return ClaudeAuthState.SignedIn;
         if (m.Contains("api") || m.Contains("console") || m.Contains("bedrock") || m.Contains("vertex") || m.Contains("foundry"))
             return ClaudeAuthState.ApiKeyOnly;

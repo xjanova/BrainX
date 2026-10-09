@@ -60,7 +60,12 @@ public partial class App : Application
             name: SingleInstanceMutexName, out createdNew);
         if (!createdNew)
         {
-            FocusExistingInstance();
+            var hwnd = FocusExistingInstance();
+            // `--settings <section>` (bridge_status's "Turn on in BrainX"):
+            // the running window opens Settings at that card.
+            var launch = BrainX.Core.Services.ClientLaunchArgs.Parse(e.Args);
+            if (launch.OpenSettings && hwnd != IntPtr.Zero)
+                SendSettingsRequest(hwnd, launch.SettingsSection);
             // Shutdown(0) here would still run more App init; Environment.Exit
             // is the cleanest way out before WPF builds a window.
             Environment.Exit(0);
@@ -119,15 +124,55 @@ public partial class App : Application
         base.OnExit(e);
     }
 
-    private static void FocusExistingInstance()
+    private static IntPtr FocusExistingInstance()
     {
         // Best-effort: walk the existing app's main-window title and
         // bring it forward. The WPF Window's title is set in the XAML —
         // if it changes, this string needs to match.
-        var hwnd = FindWindow(null, "BrainX — Neural Knowledge Engine");
-        if (hwnd == IntPtr.Zero) return;
+        var hwnd = FindWindow(null, MainWindowTitle);
+        if (hwnd == IntPtr.Zero) return IntPtr.Zero;
         ShowWindow(hwnd, SW_RESTORE);
         SetForegroundWindow(hwnd);
+        return hwnd;
+    }
+
+    internal const string MainWindowTitle = "BrainX — Neural Knowledge Engine";
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct COPYDATASTRUCT
+    {
+        public IntPtr dwData;
+        public int cbData;
+        public IntPtr lpData;
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wParam, ref COPYDATASTRUCT lParam,
+                                                    uint flags, uint timeoutMs, out IntPtr result);
+
+    /// <summary>
+    /// Hand "open Settings at &lt;section&gt;" to the running window. A
+    /// timeout, not a plain SendMessage: a hung first instance must not hang
+    /// this second launch forever.
+    /// </summary>
+    private static void SendSettingsRequest(IntPtr hwnd, string? section)
+    {
+        const uint WM_COPYDATA = 0x004A;
+        const uint SMTO_ABORTIFHUNG = 0x0002;
+        var text = BrainX.Core.Services.ClientLaunchArgs.ToMessage(section);
+        var buf = Marshal.StringToHGlobalUni(text);
+        try
+        {
+            var cds = new COPYDATASTRUCT
+            {
+                dwData = (IntPtr)BrainX.Core.Services.ClientLaunchArgs.CopyDataTag,
+                cbData = (text.Length + 1) * 2,
+                lpData = buf,
+            };
+            SendMessageTimeout(hwnd, WM_COPYDATA, IntPtr.Zero, ref cds, SMTO_ABORTIFHUNG, 5000, out _);
+        }
+        catch (Exception ex) { Debug.WriteLine($"settings request: {ex.Message}"); }
+        finally { Marshal.FreeHGlobal(buf); }
     }
 
     // Create or self-heal a Desktop shortcut pointing at this exe. Uses the

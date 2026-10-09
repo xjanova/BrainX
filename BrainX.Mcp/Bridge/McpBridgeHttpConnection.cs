@@ -165,7 +165,9 @@ public sealed class McpBridgeHttpConnection : IMcpBridgeConnection
     {
         if (Poisoned) throw new InvalidOperationException($"bridge '{_def.Id}' connection is poisoned");
 
-        var id = _nextId++;
+        // Interlocked: a background discovery and a call can share this
+        // connection, and two requests with one id would answer each other.
+        var id = Interlocked.Increment(ref _nextId) - 1;
         var payload = new JObject
         {
             ["jsonrpc"] = "2.0",

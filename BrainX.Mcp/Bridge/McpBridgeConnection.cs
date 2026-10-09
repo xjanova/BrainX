@@ -36,6 +36,18 @@ public sealed class McpBridgeConnection : IMcpBridgeConnection
     private Task<string?>? _pendingRead;
     private int _nextId = 1;
 
+    /// <summary>
+    /// One request on the pipe at a time. The brain's request path is serial,
+    /// but a background discovery (tools/list) and a tools/call from the agent
+    /// can reach the SAME connection; unguarded, both readers took turns on
+    /// <see cref="_pendingRead"/>, each skipped the other's answer as "not my
+    /// id", and the call that lost its answer was reported as a timeout —
+    /// although the server had carried it out (a click, a form submit), so
+    /// the agent's retry would do it twice. Dispose is deliberately NOT under
+    /// this lock: it must be able to end a hung request.
+    /// </summary>
+    private readonly object _io = new();
+
     /// <summary>Unusable — timed out or died mid-conversation. Never reused.</summary>
     public bool Poisoned { get; private set; }
 
@@ -201,8 +213,25 @@ public sealed class McpBridgeConnection : IMcpBridgeConnection
 
     private JToken? Request(string method, JObject parameters, TimeSpan timeout)
     {
+        // Waiting for the pipe counts against this request's own deadline. A
+        // request that never got the pipe has not touched it, so the
+        // connection is NOT poisoned — the other request is still in sync.
+        var started = DateTime.UtcNow;
+        if (!Monitor.TryEnter(_io, timeout))
+            throw new TimeoutException(
+                $"bridge '{_def.Id}' {method}: the server was busy with another request for {timeout.TotalSeconds:0}s");
+        try
+        {
+            var left = timeout - (DateTime.UtcNow - started);
+            return RequestLocked(method, parameters, left > TimeSpan.FromSeconds(1) ? left : TimeSpan.FromSeconds(1));
+        }
+        finally { Monitor.Exit(_io); }
+    }
+
+    private JToken? RequestLocked(string method, JObject parameters, TimeSpan timeout)
+    {
         if (Poisoned) throw new InvalidOperationException($"bridge '{_def.Id}' connection is poisoned");
-        if (_proc.HasExited) { Poisoned = true; throw new InvalidOperationException($"bridge '{_def.Id}' server exited (code {SafeExitCode()})"); }
+        if (SafeHasExited()) { Poisoned = true; throw new InvalidOperationException($"bridge '{_def.Id}' server exited (code {SafeExitCode()})"); }
 
         var id = _nextId++;
         var payload = new JObject
@@ -224,19 +253,27 @@ public sealed class McpBridgeConnection : IMcpBridgeConnection
             throw new InvalidOperationException($"bridge '{_def.Id}' write failed: {ex.Message}");
         }
 
-        var deadline = DateTime.UtcNow + timeout;
+        var sent = DateTime.UtcNow;
+        var deadline = sent + timeout;
         while (true)
         {
-            var line = ReadLineBefore(deadline);
-            if (line == null)
+            var (outcome, line) = ReadLineBefore(deadline);
+            if (outcome != ReadOutcome.Line || line == null)
             {
                 // Timed out, or the pipe closed. Either way this connection can
                 // no longer be trusted to be in sync (see class remarks).
                 Poisoned = true;
-                var reason = _proc.HasExited
-                    ? $"server exited (code {SafeExitCode()})"
-                    : $"no response within {timeout.TotalSeconds:0}s";
-                throw new TimeoutException($"bridge '{_def.Id}' {method}: {reason}");
+                if (outcome == ReadOutcome.Timeout)
+                    throw new TimeoutException($"bridge '{_def.Id}' {method}: no response within {timeout.TotalSeconds:0}s");
+
+                // The pipe closed early. Say WHEN — "no response within 180s"
+                // after five seconds sent the reader looking for a hang that
+                // never happened. Give an exiting child a moment for its code.
+                var after = (DateTime.UtcNow - sent).TotalSeconds;
+                try { _proc.WaitForExit(500); } catch { }
+                var code = SafeHasExited() ? $" (code {SafeExitCode()})" : "";
+                throw new IOException(
+                    $"bridge '{_def.Id}' {method}: server closed the pipe after {after.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)} s{code}");
             }
 
             JObject msg;
@@ -259,18 +296,23 @@ public sealed class McpBridgeConnection : IMcpBridgeConnection
 
     private void Notify(string method)
     {
-        try
+        lock (_io)
         {
-            _proc.StandardInput.WriteLine(new JObject
+            try
             {
-                ["jsonrpc"] = "2.0",
-                ["method"] = method,
-                ["params"] = new JObject(),
-            }.ToString(Formatting.None));
-            _proc.StandardInput.Flush();
+                _proc.StandardInput.WriteLine(new JObject
+                {
+                    ["jsonrpc"] = "2.0",
+                    ["method"] = method,
+                    ["params"] = new JObject(),
+                }.ToString(Formatting.None));
+                _proc.StandardInput.Flush();
+            }
+            catch (Exception ex) { _log($"bridge '{_def.Id}' notify {method} failed: {ex.Message}"); }
         }
-        catch (Exception ex) { _log($"bridge '{_def.Id}' notify {method} failed: {ex.Message}"); }
     }
+
+    private enum ReadOutcome { Line, Timeout, Closed }
 
     /// <summary>
     /// Read one line, giving up at <paramref name="deadline"/>. The in-flight
@@ -279,21 +321,30 @@ public sealed class McpBridgeConnection : IMcpBridgeConnection
     /// messages non-deterministically. On timeout the caller poisons the
     /// connection and Dispose kills the child, which completes the orphan.
     /// </summary>
-    private string? ReadLineBefore(DateTime deadline)
+    private (ReadOutcome Outcome, string? Line) ReadLineBefore(DateTime deadline)
     {
-        _pendingRead ??= Task.Run(() => _proc.StandardOutput.ReadLine());
+        try { _pendingRead ??= Task.Run(() => _proc.StandardOutput.ReadLine()); }
+        catch { return (ReadOutcome.Closed, null); }   // disposed under us
 
         var remaining = deadline - DateTime.UtcNow;
-        if (remaining <= TimeSpan.Zero) return null;
-        if (!_pendingRead.Wait(remaining)) return null;
+        if (remaining <= TimeSpan.Zero) return (ReadOutcome.Timeout, null);
+        try { if (!_pendingRead.Wait(remaining)) return (ReadOutcome.Timeout, null); }
+        catch { /* faulted — read below */ }
 
         var task = _pendingRead;
         _pendingRead = null;
-        try { return task.Result; }
-        catch { return null; }
+        try
+        {
+            var line = task.Result;
+            // ReadLine's null is end of stream: the server closed stdout.
+            return line == null ? (ReadOutcome.Closed, null) : (ReadOutcome.Line, line);
+        }
+        catch { return (ReadOutcome.Closed, null); }
     }
 
     private int SafeExitCode() { try { return _proc.ExitCode; } catch { return -1; } }
+
+    private bool SafeHasExited() { try { return _proc.HasExited; } catch { return true; } }
 
     /// <summary>
     /// Windows-only wrinkle: with UseShellExecute=false, .NET searches PATH for

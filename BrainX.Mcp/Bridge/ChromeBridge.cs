@@ -44,7 +44,7 @@ internal static class ChromeBridge
     private static ChromeBridgeSettings _settings = new();
     private static DateTime _settingsReadUtc = DateTime.MinValue;
 
-    private static bool _connecting;
+    private static int _connecting;   // spawns in progress (discovery and a call can overlap)
     private static string? _lastOutcome;
     private static DateTime? _lastOutcomeUtc;
     private static string? _failureDetail;
@@ -78,6 +78,15 @@ internal static class ChromeBridge
         _log = log;
         if (identity != null) _identity = identity;
         _initialized = true;
+
+        // Retention is applied on every read regardless, but an owner who
+        // stopped browsing should not keep old pages ON DISK either: prune
+        // when the brain starts, off the handshake path.
+        _ = Task.Run(() =>
+        {
+            try { if (Store is { } s && File.Exists(s.DbPath)) s.MaybePrune(); }
+            catch { /* housekeeping */ }
+        });
     }
 
     // ───────────── switch + store ─────────────
@@ -139,6 +148,36 @@ internal static class ChromeBridge
         $"'{tool}' is not available through BrainX: it reads local files by path, which a browser tool must not do " +
         $"('{tool}' ใช้ผ่าน BrainX ไม่ได้ — เครื่องมือนี้อ่านไฟล์ในเครื่องตาม path)";
 
+    public const string NoSuchToolMessage =
+        "no such Claude in Chrome tool — call tools/list for the chrome__ names " +
+        "(ไม่มีเครื่องมือ Claude in Chrome ชื่อนี้ — ดูชื่อ chrome__ ได้จาก tools/list)";
+
+    /// <summary>
+    /// What a failed chrome__ call tells the agent (and, through CluadeX, the
+    /// owner): English and Thai, never the raw transport text alone. A message
+    /// that already carries Thai (a spawn refusal) passes through.
+    /// </summary>
+    public static string ErrorText(Exception ex)
+    {
+        var msg = ex.Message;
+        if (msg.Any(c => c >= '฀' && c <= '๿')) return "chrome bridge: " + msg;
+
+        var secs = System.Text.RegularExpressions.Regex.Match(msg, @"(\d+(?:\.\d+)?)\s?s\b");
+        var n = secs.Success ? secs.Groups[1].Value : "?";
+        string th;
+        if (msg.Contains("closed the pipe", StringComparison.OrdinalIgnoreCase))
+            th = $"เซิร์ฟเวอร์ Claude in Chrome ปิดการเชื่อมต่อหลังจาก {n} วินาที — การเรียกนี้อาจทำงานไปแล้ว ตรวจหน้าเว็บก่อนลองใหม่";
+        else if (msg.Contains("busy with another request", StringComparison.OrdinalIgnoreCase))
+            th = $"เซิร์ฟเวอร์ Claude in Chrome กำลังทำคำขออื่นอยู่นาน {n} วินาที — ลองใหม่อีกครั้ง";
+        else if (ex is TimeoutException || msg.Contains("no response within", StringComparison.OrdinalIgnoreCase))
+            th = $"Claude in Chrome ไม่ตอบภายใน {n} วินาที — การเรียกนี้อาจทำงานไปแล้ว ตรวจหน้าเว็บก่อนลองใหม่";
+        else if (msg.Contains("server exited", StringComparison.OrdinalIgnoreCase))
+            th = "เซิร์ฟเวอร์ Claude in Chrome ปิดตัวไปแล้ว — จะเริ่มใหม่ในการเรียกครั้งถัดไป";
+        else
+            th = "การเรียก Claude in Chrome ไม่สำเร็จ";
+        return $"chrome bridge: {msg} ({th})";
+    }
+
     // ───────────── sandbox (verification harness only) ─────────────
 
     private static bool Sandbox => Environment.GetEnvironmentVariable("BRAINX_SANDBOX") == "1";
@@ -177,12 +216,15 @@ internal static class ChromeBridge
         if (install == null) return null;
         if (Sandbox)
         {
-            return (Environment.GetEnvironmentVariable("BRAINX_CHROME_STUB_AUTH") ?? "signed-in") switch
+            // The stub answers with one of Claude Code's real authMethod
+            // values, run through the same classifier as a live answer.
+            var method = (Environment.GetEnvironmentVariable("BRAINX_CHROME_STUB_AUTH") ?? "claude.ai") switch
             {
-                "none" => new ClaudeAuthResult(ClaudeAuthState.NotSignedIn, "none", "cli"),
-                "apikey" => new ClaudeAuthResult(ClaudeAuthState.ApiKeyOnly, "console", "cli"),
-                _ => new ClaudeAuthResult(ClaudeAuthState.SignedIn, "claude.ai", "cli"),
+                "signed-in" => "claude.ai",
+                "apikey" => "api_key",
+                var m => m,
             };
+            return new ClaudeAuthResult(ClaudeAuthProbe.Classify(method), method, "cli");
         }
         lock (Gate)
             if (_auth is { } a && a.Exe == install.Path && DateTime.UtcNow - a.At < AuthTtl) return a.Result;
@@ -217,7 +259,7 @@ internal static class ChromeBridge
     /// </summary>
     public static IMcpBridgeConnection StartConnection(Action<string> log)
     {
-        lock (Gate) _connecting = true;
+        lock (Gate) _connecting++;
         try
         {
             for (var attempt = 0; ; attempt++)
@@ -250,7 +292,7 @@ internal static class ChromeBridge
         }
         finally
         {
-            lock (Gate) _connecting = false;
+            lock (Gate) _connecting--;
         }
     }
 
@@ -261,12 +303,16 @@ internal static class ChromeBridge
             throw new InvalidOperationException(loc.Status switch
             {
                 ClaudeLocateStatus.TooOld =>
-                    $"Claude Code {loc.RejectedVersion} at {loc.Rejected?.Path} is too old for Claude in Chrome (needs 2.1+) — update it",
+                    $"Claude Code {loc.RejectedVersion} at {loc.Rejected?.Path} is too old for Claude in Chrome (needs 2.1+) — update it " +
+                    $"(Claude Code {loc.RejectedVersion} เก่าเกินไปสำหรับ Claude in Chrome ต้องเป็น 2.1 ขึ้นไป — อัปเดตก่อน)",
                 ClaudeLocateStatus.Broken =>
-                    $"Claude Code at {loc.Rejected?.Path} did not answer --version",
+                    $"Claude Code at {loc.Rejected?.Path} did not answer --version " +
+                    "(Claude Code ไม่ตอบคำสั่ง --version — ลองติดตั้งใหม่)",
                 _ => Sandbox
-                    ? "sandbox: no chrome stub configured (BRAINX_CHROME_STUB_COMMAND) — the real claude.exe is never started in a sandbox"
-                    : "Claude Code isn't installed on this PC — see https://code.claude.com/docs/en/setup",
+                    ? "sandbox: no chrome stub configured (BRAINX_CHROME_STUB_COMMAND) — the real claude.exe is never started in a sandbox " +
+                      "(แซนด์บ็อกซ์: ไม่ได้ตั้ง stub จึงไม่เริ่ม claude.exe จริง)"
+                    : "Claude Code isn't installed on this PC — see https://code.claude.com/docs/en/setup " +
+                      "(ยังไม่พบ Claude Code ในเครื่องนี้ — ดูวิธีติดตั้งที่ https://code.claude.com/docs/en/setup)",
             });
 
         var install = loc.Install;
@@ -277,12 +323,17 @@ internal static class ChromeBridge
         // The flag must be the FIRST argument the CLI sees (args[1] under
         // node). Anything else would start the interactive CLI on our pipe.
         if (spawn.Args.Count <= install.FlagIndex || spawn.Args[install.FlagIndex] != ChromeBridgeIds.McpFlag)
-            throw new InvalidOperationException("refusing to start Claude Code: --claude-in-chrome-mcp is not the first argument");
+            throw new InvalidOperationException("refusing to start Claude Code: --claude-in-chrome-mcp is not the first argument " +
+                                                "(ไม่เริ่ม Claude Code เพราะ --claude-in-chrome-mcp ไม่ใช่อาร์กิวเมนต์แรก)");
         return spawn;
     }
 
     private static void SetFailed(string message)
     {
+        // The status carries its own en + th messages around this detail, so
+        // keep the English part of a bilingual refusal.
+        var cut = message.IndexOf(" (", StringComparison.Ordinal);
+        if (cut > 0 && message[cut..].Any(c => c >= '฀' && c <= '๿')) message = message[..cut];
         lock (Gate)
         {
             _lastOutcome = "failed";
@@ -300,9 +351,88 @@ internal static class ChromeBridge
         lock (Gate) return _lastCallUtc != DateTime.MinValue && DateTime.UtcNow - _lastCallUtc > IdleClose;
     }
 
+    // ───────────── the private log writer ─────────────
+    //
+    // Keeping a call costs SecretRedactor over the page, an FTS5 trigram insert
+    // and DPAPI per screenshot — measured at 0.7 s median and 2.3 s worst for
+    // ~100 KB pages. Done inline, that landed before the agent got its result
+    // and, brainx-mcp being one request at a time, before every other brain
+    // tool too. So the call only CAPTURES (strings and decoded bytes, before
+    // the 256 KB cap rewrites the result) and a single background writer
+    // stores, in order. Bounded: past the bound the OLDEST pending entry is
+    // dropped (and counted, never logged with content) rather than memory
+    // growing behind a slow disk. Flushed before a search and at shutdown.
+
+    private const int PendingCapacity = 64;
+    private static readonly System.Threading.Channels.Channel<PrivateBrowseRecord> Pending =
+        System.Threading.Channels.Channel.CreateBounded<PrivateBrowseRecord>(
+            new System.Threading.Channels.BoundedChannelOptions(PendingCapacity)
+            {
+                FullMode = System.Threading.Channels.BoundedChannelFullMode.DropOldest,
+                SingleReader = true,
+            },
+            _ => { Interlocked.Increment(ref _dropped); Interlocked.Decrement(ref _queued); });
+
+    private static long _queued;      // enqueued and not yet stored (or dropped)
+    private static long _dropped;
+    private static Task? _writer;
+    private static readonly object WriterGate = new();
+
+    /// <summary>Entries dropped because the writer fell behind (no content, a count).</summary>
+    public static long DroppedRecords => Interlocked.Read(ref _dropped);
+
+    private static void Enqueue(PrivateBrowseRecord rec)
+    {
+        lock (WriterGate) _writer ??= Task.Run(WriteLoopAsync);
+        Interlocked.Increment(ref _queued);
+        if (!Pending.Writer.TryWrite(rec)) Interlocked.Decrement(ref _queued);
+    }
+
+    private static async Task WriteLoopAsync()
+    {
+        while (await Pending.Reader.WaitToReadAsync().ConfigureAwait(false))
+        {
+            while (Pending.Reader.TryRead(out var rec))
+            {
+                try
+                {
+                    // Harness only: a slow disk, on demand, so "the call does
+                    // not wait for the log" can be proven rather than hoped.
+                    if (Sandbox && int.TryParse(Environment.GetEnvironmentVariable("BRAINX_PRIVATE_LOG_DELAY_MS"), out var delay) && delay > 0)
+                        await Task.Delay(Math.Min(delay, 30_000)).ConfigureAwait(false);
+                    var store = Store;
+                    store?.Record(rec, Settings.RetentionDays);
+                }
+                catch (Exception ex)
+                {
+                    // The type only: the message of a failed write could quote content.
+                    _log($"chrome: private log write failed ({ex.GetType().Name}) — the call itself is unaffected");
+                }
+                finally { Interlocked.Decrement(ref _queued); }
+            }
+        }
+    }
+
     /// <summary>
-    /// Learn the bridge state from a result and keep the call in the private
-    /// store. Never throws, never logs content.
+    /// Wait until every captured call is stored (or <paramref name="timeout"/>
+    /// passes). True when nothing is pending. Before a private search — the
+    /// owner should find the page that was just read — and at shutdown.
+    /// </summary>
+    public static bool FlushPrivateLog(TimeSpan timeout)
+    {
+        var until = DateTime.UtcNow + timeout;
+        while (Interlocked.Read(ref _queued) > 0)
+        {
+            if (DateTime.UtcNow >= until) return false;
+            Thread.Sleep(25);
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Learn the bridge state from a result and hand the call to the private
+    /// log writer. Never throws, never logs content. Runs BEFORE the result is
+    /// capped for the agent, so the log keeps what the server actually said.
     /// </summary>
     public static void AfterCall(string remoteTool, JObject args, JObject? result, Exception? error)
     {
@@ -310,8 +440,7 @@ internal static class ChromeBridge
 
         try
         {
-            var store = Store;
-            if (store == null) return;
+            if (Store == null) return;
             var rec = new PrivateBrowseRecord
             {
                 TsUtc = DateTime.UtcNow,
@@ -341,12 +470,12 @@ internal static class ChromeBridge
                 }
                 rec.ResultText = sb.ToString();
             }
-            store.Record(rec, Settings.RetentionDays);
+            Enqueue(rec);
         }
         catch (Exception ex)
         {
-            // The type only: the message of a failed write could quote content.
-            _log($"chrome: private log write failed ({ex.GetType().Name}) — the call itself is unaffected");
+            // The type only: the message of a failed capture could quote content.
+            _log($"chrome: private log capture failed ({ex.GetType().Name}) — the call itself is unaffected");
         }
     }
 
@@ -355,8 +484,12 @@ internal static class ChromeBridge
         if (error != null)
         {
             // A tool-level error from a healthy server is still a connection
-            // that works; only a transport failure counts as "failed".
-            if (error is TimeoutException || error.Message.Contains("server exited", StringComparison.OrdinalIgnoreCase)
+            // that works; only a transport failure counts as "failed". So is
+            // a request that merely waited for the pipe (nothing broke).
+            if (error.Message.Contains("busy with another request", StringComparison.OrdinalIgnoreCase)) return;
+            if (error is TimeoutException or IOException
+                || error.Message.Contains("server exited", StringComparison.OrdinalIgnoreCase)
+                || error.Message.Contains("closed the pipe", StringComparison.OrdinalIgnoreCase)
                 || error.Message.Contains("poisoned", StringComparison.OrdinalIgnoreCase)
                 || error.Message.Contains("write failed", StringComparison.OrdinalIgnoreCase))
                 SetFailed(error.Message);
@@ -421,7 +554,7 @@ internal static class ChromeBridge
     /// The "chrome" entry. With the bridge off or remote, nothing is probed or
     /// spawned — the owner has not asked for Claude Code to be touched.
     /// </summary>
-    public static JObject StatusEntry(bool hubEnabled, bool live, int tools)
+    public static JObject StatusEntry(bool hubEnabled, bool live, int tools, string? clientExe = null)
     {
         var remote = !hubEnabled;
         var settings = _initialized ? Settings : new ChromeBridgeSettings();
@@ -444,7 +577,7 @@ internal static class ChromeBridge
             rt = new ChromeRuntimeSnapshot
             {
                 Live = live,
-                Connecting = _connecting,
+                Connecting = _connecting > 0,
                 LastOutcome = _lastOutcome,
                 LastOutcomeUtc = _lastOutcomeUtc,
                 FailureDetail = _failureDetail,
@@ -465,6 +598,7 @@ internal static class ChromeBridge
             RetentionDays = settings.RetentionDays,
             PrivateLogPath = store?.Root,
             PrivateLogAvailable = store != null,
+            BrainXClientExe = clientExe,
         });
     }
 

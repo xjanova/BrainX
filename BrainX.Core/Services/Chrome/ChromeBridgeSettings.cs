@@ -49,6 +49,11 @@ public sealed class ChromeBridgeSettings
         {
             var env = Environment.GetEnvironmentVariable("BRAINX_PRIVATE_DIR");
             if (!string.IsNullOrWhiteSpace(env) && Path.IsPathRooted(env)) return Path.GetFullPath(env);
+            // A sandboxed brainx-mcp (the verification harness) that was not
+            // given a folder never reads or writes the owner's real one — not
+            // their switch, not their log.
+            if (Environment.GetEnvironmentVariable("BRAINX_SANDBOX") == "1")
+                return Path.Combine(Path.GetTempPath(), "brainx-sandbox-private");
             return Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BrainX", "private");
         }
