@@ -14,7 +14,11 @@
 // a sibling directory that Velopack never touches becomes what agents run:
 //
 //   %LOCALAPPDATA%\BrainX\current\mcp\   <- shipped by the package (source)
-//   %LOCALAPPDATA%\BrainX\mcp\           <- what registration points at (runtime)
+//   %LOCALAPPDATA%\xjanova\brainx-mcp\   <- what registration points at (runtime)
+//
+// (Until 2026-10-10 the runtime was %LOCALAPPDATA%\BrainX\mcp. Velopack never
+// renamed it, but it killed every process under the app root on each apply,
+// launchers included, so every release dropped the brain from every session.)
 //
 // Mirroring uses rename-aside rather than overwrite-in-place: a running server
 // holds its own image, so the file cannot be replaced, but it CAN be renamed
@@ -30,10 +34,29 @@ internal static class McpRuntime
 {
     private const string VersionMarker = "runtime.version";
 
-    /// <summary>The stable directory agents are registered against.</summary>
-    public static string StableDir => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "BrainX", "mcp");
+    /// <summary>The stable directory agents are registered against. Outside
+    /// Velopack's app root since 2026-10-10 — see McpRuntimePaths.StableDir for
+    /// why the old %LOCALAPPDATA%\BrainX\mcp was killed on every update.</summary>
+    public static string StableDir => BrainX.Core.Services.McpRuntimePaths.StableDir;
+
+    /// <summary>
+    /// True when <paramref name="dir"/> is the pre-2026-10-10 mirror. Every
+    /// agent was registered there, so a server running from it is the normal
+    /// case on an upgraded machine, and it is as good a source for the new
+    /// mirror as `current\mcp`: `register-*` run from there must land the agent
+    /// in the new place, not re-pin the old one.
+    /// </summary>
+    public static bool IsLegacyMirror(string dir)
+    {
+        try
+        {
+            return string.Equals(
+                Path.GetFullPath(dir).TrimEnd('\\', '/'),
+                Path.GetFullPath(BrainX.Core.Services.McpRuntimePaths.LegacyStableDir).TrimEnd('\\', '/'),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
 
     /// <summary>
     /// True when <paramref name="dir"/> sits inside a Velopack-managed
@@ -62,8 +85,9 @@ internal static class McpRuntime
             if (string.IsNullOrEmpty(sourceDir)) return runningExe;
 
             // Already running from the stable dir, or from somewhere that is
-            // not the updater's business — nothing to do.
-            if (!IsInsideManagedCurrent(sourceDir)) return runningExe;
+            // not the updater's business (a dev build) — nothing to do. The
+            // legacy mirror inside the app root IS the updater's business.
+            if (!IsInsideManagedCurrent(sourceDir) && !IsLegacyMirror(sourceDir)) return runningExe;
 
             var target = StableDir;
             var targetExe = Path.Combine(target, Path.GetFileName(runningExe));
@@ -120,6 +144,11 @@ internal static class McpRuntime
         Directory.CreateDirectory(target);
         foreach (var src in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
         {
+            // A legacy-mirror source carries its own renamed-aside images and
+            // version marker; neither is part of the build.
+            var name = Path.GetFileName(src);
+            if (name.Contains(".stale.", StringComparison.OrdinalIgnoreCase)
+                || name.Equals(VersionMarker, StringComparison.OrdinalIgnoreCase)) continue;
             var rel = Path.GetRelativePath(source, src);
             var dst = Path.Combine(target, rel);
             Directory.CreateDirectory(Path.GetDirectoryName(dst)!);

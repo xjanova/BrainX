@@ -35,6 +35,10 @@ public partial class MainWindow
         var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         return new[]
         {
+            // Stable mirror first: outside the app root, so an update does not
+            // kill the assistant's server mid-conversation. The legacy mirror
+            // and `current` stay as fallbacks for a machine not yet migrated.
+            BrainX.Core.Services.McpRuntimePaths.StableExe,
             Path.Combine(local, "BrainX", "mcp", "brainx-mcp.exe"),
             Path.Combine(local, "BrainX", "current", "mcp", "brainx-mcp.exe"),
             Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "mcp", "brainx-mcp.exe"),

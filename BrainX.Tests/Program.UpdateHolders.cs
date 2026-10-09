@@ -12,6 +12,29 @@ internal static partial class Program
     private static void RegisterUpdateHolderChecks(List<(string Name, Func<Task> Check)> checks)
     {
         checks.Add(("update: another process's working folder is read, so one parked in `current` can be named", UpdateHolderWorkingDirectory));
+        checks.Add(("update: the MCP mirror lives outside the root the updater kills in", MirrorOutsideUpdaterRoot));
+    }
+
+    // 2026-10-10: Velopack kills every process under %LOCALAPPDATA%\BrainX on
+    // each apply, so the mirror at BrainX\mcp dropped the brain from every
+    // session on every release. These hold the move and the predicate the
+    // registrars use to decide what to repoint.
+    private static Task MirrorOutsideUpdaterRoot()
+    {
+        Check("the stable mirror is NOT inside the updater root", !McpRuntimePaths.IsInsideUpdaterRoot(McpRuntimePaths.StableDir), McpRuntimePaths.StableDir);
+        // A string-prefix test as well as the predicate: a future rename to
+        // "BrainX-runtime" would pass a component check and still be a prefix
+        // of the root for a matcher that compares strings.
+        Check("the mirror's path does not even start with the root's string",
+              !McpRuntimePaths.StableDir.StartsWith(McpRuntimePaths.AppRoot, StringComparison.OrdinalIgnoreCase), McpRuntimePaths.StableDir);
+        Check("the legacy mirror IS inside the root (so it gets repointed)", McpRuntimePaths.IsInsideUpdaterRoot(McpRuntimePaths.LegacyStableDir));
+        Check("current IS inside the root", McpRuntimePaths.IsInsideUpdaterRoot(Path.Combine(McpRuntimePaths.AppRoot, "current", "mcp", "brainx-mcp.exe")));
+        Check("another account's legacy path is recognised", McpRuntimePaths.IsInsideUpdaterRoot(@"C:\Users\someone\AppData\Local\BrainX\mcp\brainx-mcp.exe"));
+        Check("a sibling that only shares the prefix is not", !McpRuntimePaths.IsInsideUpdaterRoot(@"C:\Users\x\AppData\Local\BrainX-runtime\mcp\brainx-mcp.exe"));
+        Check("a dev build is not", !McpRuntimePaths.IsInsideUpdaterRoot(@"D:\BrainX\BrainX.Mcp\bin\Release\net9.0\brainx-mcp.exe"));
+        Check("empty is not", !McpRuntimePaths.IsInsideUpdaterRoot("") && !McpRuntimePaths.IsInsideUpdaterRoot(null));
+        Check("the stable exe sits in the stable dir", McpRuntimePaths.StableExe.StartsWith(McpRuntimePaths.StableDir, StringComparison.OrdinalIgnoreCase));
+        return Task.CompletedTask;
     }
 
     private static async Task UpdateHolderWorkingDirectory()
