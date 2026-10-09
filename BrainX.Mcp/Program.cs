@@ -345,6 +345,22 @@ internal static partial class Program
         // app they would re-point those at the cache. Same treatment as sandbox.
         if (cloud) sandbox = true;
 
+        // Can the brain hooks in Claude Code's settings.json actually run? They
+        // cannot say so themselves when they are dead (2026-09-25: two silent
+        // weeks), and this server runs in every session either way, so the
+        // answer rides the head of the instructions. Owner config, so never in
+        // a sandbox or cloud run.
+        if (!sandbox)
+        {
+            try
+            {
+                _hookHealthLine = BrainX.Core.Services.HookHealth.InstructionsLine(
+                    BrainX.Core.Services.HookHealth.DefaultClaudeDir(), TimeSpan.FromHours(48));
+                if (_hookHealthLine.Length > 0) Log(_hookHealthLine);
+            }
+            catch (Exception ex) { Log($"hook health check skipped: {ex.Message}"); }
+        }
+
         // Self-install brain-first memory rules into the user's Claude
         // Code project memory dir, idempotently. Mirrors what
         // BrainX.Client does on first launch — but Client may not be
@@ -733,6 +749,10 @@ internal static partial class Program
     /// the one place an agent can read which build it is talking to, which is
     /// exactly what a stale hot-swapped binary needs.
     /// </summary>
+    /// <summary>"" when the brain hooks look runnable; otherwise one warning
+    /// line, set once at startup (see BrainX.Core HookHealth).</summary>
+    private static string _hookHealthLine = "";
+
     internal static string Instructions()
     {
         var inv = System.Globalization.CultureInfo.InvariantCulture;
@@ -742,6 +762,9 @@ internal static partial class Program
             : "";
         return
             $"BrainX MCP v{ServerVersion} (vault: {_vaultPath}). When the owner asks which brain version is running, answer with this.\n\n" +
+            // Only present when something is wrong, so a healthy session pays
+            // nothing. It sits in the head because Claude Code drops the tail.
+            (_hookHealthLine.Length > 0 ? _hookHealthLine + "\n\n" : "") +
             $"This is the owner's personal brain{size}, written from their own work. It is your primary memory, not optional context. " +
             "Every tool call is journaled automatically: never narrate your searches.\n\n" +
             "RULES\n" +

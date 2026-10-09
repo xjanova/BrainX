@@ -43,7 +43,7 @@ internal static partial class Program
 
     /// <summary>Bumped when the SET of hooks changes (not when a script's body
     /// changes — that is handled by overwriting the script file).</summary>
-    private const string HooksVersion = "v1";
+    private const string HooksVersion = "v2";
 
     private sealed record HookSpec(string Event, string? Matcher, string Script, int TimeoutSec);
 
@@ -61,6 +61,10 @@ internal static partial class Program
         new("PostToolUse",      ".*",                    "brain-tool-logger.ps1",  10),
         new("PostToolUse",      "Bash|PowerShell",       "brain-error-recall.ps1", 10),
         new("Stop",             null,                    "stop-hook.ps1",          15),
+        // v2: a session that closes, or loses its context to compaction, without
+        // a #session-handoff note leaves an auto digest instead of nothing.
+        new("SessionEnd",       null,                    "session-end.ps1",        30),
+        new("PreCompact",       null,                    "session-end.ps1",        30),
     };
 
     /// <summary>Shipped alongside the hooks but not registered: called BY

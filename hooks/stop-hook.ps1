@@ -27,6 +27,7 @@ $markerFile = "$root\.last-stop-marker"
 # actually did; see the note beside the brain-write check below.
 $transcript = $null
 try {
+    [Console]::InputEncoding = New-Object System.Text.UTF8Encoding $false   # payload is UTF-8; PS 5.1 reads stdin in the ANSI codepage (cp874) and mangled every Thai prompt and path
     $stdin = [Console]::In.ReadToEnd()
     if ($stdin) { $transcript = ($stdin | ConvertFrom-Json).transcript_path }
 } catch { }

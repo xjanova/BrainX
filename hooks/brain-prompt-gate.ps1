@@ -31,6 +31,7 @@ if ($mode -eq 'off') {
 
 # Read prompt from stdin
 try {
+    [Console]::InputEncoding = New-Object System.Text.UTF8Encoding $false   # payload is UTF-8; PS 5.1 reads stdin in the ANSI codepage (cp874) and mangled every Thai prompt and path
     $payload = ([Console]::In.ReadToEnd() | ConvertFrom-Json)
     $p = $payload.prompt
     if (-not $p) { $p = $payload.user_prompt }
@@ -101,7 +102,10 @@ $protocolParts = @(
 if (Test-Path $searchLog) {
     try {
         $cutoff = (Get-Date).AddMinutes(-60)
-        $recent = Get-Content $searchLog -Tail 50 -ErrorAction SilentlyContinue | ForEach-Object {
+        # -Encoding utf8: the log is BOM-less UTF-8, and Windows PowerShell 5.1
+        # reads such a file in the ANSI codepage (cp874 here), so every Thai
+        # query came back as mojibake in RECENT SEARCHES (seen 2026-10-10).
+        $recent = Get-Content $searchLog -Tail 50 -Encoding utf8 -ErrorAction SilentlyContinue | ForEach-Object {
             try { $_ | ConvertFrom-Json } catch { $null }
         } | Where-Object {
             $_ -and $_.query -and ((Get-Date $_.ts) -gt $cutoff)
@@ -157,7 +161,7 @@ if (Test-Path $toolLog) {
                 if ($stamp) { $cutoff = Get-Date $stamp }
             } catch { }
         }
-        $prevTurn = Get-Content $toolLog -Tail 200 -ErrorAction SilentlyContinue | ForEach-Object {
+        $prevTurn = Get-Content $toolLog -Tail 200 -Encoding utf8 -ErrorAction SilentlyContinue | ForEach-Object {
             try { $_ | ConvertFrom-Json } catch { $null }
         } | Where-Object { $_ -and $_.ts -and ((Get-Date $_.ts) -gt $cutoff) }
 

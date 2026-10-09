@@ -14151,6 +14151,9 @@ public partial class MainWindow : Window
             # Everything is best-effort: a hook that can fail a tool call is worse
             # than no hook at all.
             $ErrorActionPreference = 'SilentlyContinue'
+            # The payload is UTF-8; Windows PowerShell 5.1 reads stdin in the ANSI
+            # codepage, which turned every Thai file path into mojibake.
+            [Console]::InputEncoding = New-Object System.Text.UTF8Encoding $false
             $j = [Console]::In.ReadToEnd() | ConvertFrom-Json
             $p = $j.tool_input.file_path
             if ($p -and ($p -like '*.md')) {
