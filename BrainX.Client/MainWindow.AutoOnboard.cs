@@ -1119,7 +1119,13 @@ public partial class MainWindow
         {
             var path = ClaudeSettingsPath();
             if (File.Exists(path) && File.ReadAllText(path).Contains(BrainAutoIngestHookVersionTag))
-                return false;   // current version already installed
+            {
+                // The entry is current, but the script it calls lives in its own
+                // file now (v5). Re-assert it so a deleted or stale script cannot
+                // leave a current-looking hook that fails every run.
+                WriteAutoIngestHookScript();
+                return false;
+            }
 
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 
@@ -1151,6 +1157,8 @@ public partial class MainWindow
                     {
                         ["type"] = "command",
                         ["command"] = BuildAutoIngestHookCommand(),
+                        ["shell"] = "powershell",
+                        ["timeout"] = 10,
                     },
                 },
             });

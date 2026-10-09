@@ -14083,7 +14083,16 @@ public partial class MainWindow : Window
     // put EF BB BF in front of the first line and made the reader drop it.
     // The bump is what gets the corrected command onto machines already
     // carrying v3; without it they keep the broken hook forever.
-    private const string BrainAutoIngestHookVersionTag = BrainAutoIngestHookMarker + " v4";
+    // v5: the logic lives in ~/.claude/scripts/brain-auto-ingest.ps1, called
+    // with -File and an absolute forward-slash path. v1–v4 were one inline
+    // `powershell -Command "$j = …"` string with no "shell" field, and Claude
+    // Code on Windows runs such a command in Git Bash. Bash expanded $j, $p and
+    // $body to empty strings before PowerShell saw them, so the hook never
+    // ingested anything there. Setting "shell": "powershell" alone would not
+    // save an inline form either: the outer PowerShell expands "$j" inside the
+    // double quotes the same way. A script file means the same thing to every
+    // shell. We still set "shell" for the cases where it is honoured.
+    private const string BrainAutoIngestHookVersionTag = BrainAutoIngestHookMarker + " v5";
 
     /// <summary>
     /// The PostToolUse hook command. Claude Code hands hooks their payload as
@@ -14114,38 +14123,63 @@ public partial class MainWindow : Window
     /// </summary>
     private string BuildAutoIngestHookCommand()
     {
-        // PowerShell single-quoted string: the only escape that matters is a
+        var script = WriteAutoIngestHookScript().Replace('\\', '/');
+        return $"powershell -NoProfile -ExecutionPolicy Bypass -File \"{script}\" # {BrainAutoIngestHookVersionTag}";
+    }
+
+    /// <summary>
+    /// Writes (or refreshes) ~/.claude/scripts/brain-auto-ingest.ps1 and returns
+    /// its path. Rewritten only when the bytes differ, so calling it at every
+    /// startup costs one file read.
+    /// </summary>
+    private string WriteAutoIngestHookScript()
+    {
+        var dir = Path.Combine(Path.GetDirectoryName(ClaudeSettingsPath())!, "scripts");
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, "brain-auto-ingest.ps1");
+
+        // PowerShell single-quoted strings: the only escape that matters is a
         // literal quote, which doubles. A vault path with an apostrophe would
         // otherwise end the string and break every hook run.
         var vaultForPs = _vaultPath.Replace("'", "''");
+        var ingestUrl = $"{AiServerBase}/api/brain/auto-ingest".Replace("'", "''");
 
-        return "powershell -NoProfile -Command \"" +
-            "$j = [Console]::In.ReadToEnd() | ConvertFrom-Json; " +
-            "$p = $j.tool_input.file_path; " +
-            "if ($p -and ($p -like '*.md')) { " +
-            "$body = @{ path = $p } | ConvertTo-Json; " +
-            $"try {{ Invoke-RestMethod -Uri '{AiServerBase}/api/brain/auto-ingest' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 3 | Out-Null }} catch {{ }} " +
-            "}; " +
-            "if ($p -and $j.tool_name -ne 'Read') { " +
-            $"try {{ $d = Join-Path '{vaultForPs}' '.obsidianx\\agent-bus\\activity'; " +
-            "if (!(Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }; " +
-            "$e = [ordered]@{ ts = (Get-Date).ToUniversalTime().ToString('o'); agent = 'claude-code'; " +
-            "tool = $j.tool_name; summary = $p; ok = $true } | ConvertTo-Json -Compress; " +
-            // .NET AppendAllText, NOT `Add-Content -Encoding utf8`. This hook
-            // runs under Windows PowerShell 5.1, where `-Encoding utf8` writes
-            // a BOM — and on a file this hook CREATES, those three bytes land
-            // in front of the first JSON object. Program.Activity.cs parses the
-            // feed line by line and skips anything that will not parse, and
-            // string.Trim() does not strip U+FEFF (char.IsWhiteSpace('﻿')
-            // is false), so that first line is not merely mangled: it is
-            // silently dropped, forever, with nothing anywhere saying so.
-            // Measured, not assumed — Add-Content wrote EF BB BF.
-            "[System.IO.File]::AppendAllText((Join-Path $d 'claude-code.ndjson'), " +
-            "($e + [Environment]::NewLine), (New-Object System.Text.UTF8Encoding $false)) " +
-            // Plain string, NOT interpolated: these braces are PowerShell's, so
-            // they are written once. Doubling belongs only in the $"" segments.
-            "} catch { } " +
-            "}\" # " + BrainAutoIngestHookVersionTag;
+        var body = $$"""
+            # PostToolUse hook, written by BrainX.Client ({{BrainAutoIngestHookVersionTag}}).
+            # INGEST: a .md file the agent touched goes to /api/brain/auto-ingest.
+            # REPORT: every non-Read edit is appended to the agent-bus work feed.
+            # Everything is best-effort: a hook that can fail a tool call is worse
+            # than no hook at all.
+            $ErrorActionPreference = 'SilentlyContinue'
+            $j = [Console]::In.ReadToEnd() | ConvertFrom-Json
+            $p = $j.tool_input.file_path
+            if ($p -and ($p -like '*.md')) {
+                $body = @{ path = $p } | ConvertTo-Json
+                try { Invoke-RestMethod -Uri '{{ingestUrl}}' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 3 | Out-Null } catch { }
+            }
+            if ($p -and $j.tool_name -ne 'Read') {
+                try {
+                    $d = Join-Path '{{vaultForPs}}' '.obsidianx\agent-bus\activity'
+                    if (!(Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+                    $e = [ordered]@{ ts = (Get-Date).ToUniversalTime().ToString('o'); agent = 'claude-code'; tool = $j.tool_name; summary = $p; ok = $true } | ConvertTo-Json -Compress
+                    # .NET AppendAllText, NOT Add-Content -Encoding utf8: under PowerShell
+                    # 5.1 that writes EF BB BF in front of the first line of a new file,
+                    # and Program.Activity.cs then silently drops that line forever.
+                    [System.IO.File]::AppendAllText((Join-Path $d 'claude-code.ndjson'), ($e + [Environment]::NewLine), (New-Object System.Text.UTF8Encoding $false))
+                } catch { }
+            }
+            exit 0
+
+            """;
+
+        // Always with a BOM: Windows PowerShell 5.1 reads a BOM-less .ps1 in the
+        // ANSI codepage, so a non-ASCII vault path would turn into mojibake.
+        var bytes = System.Text.Encoding.UTF8.GetPreamble()
+            .Concat(new System.Text.UTF8Encoding(false).GetBytes(body.Replace("\r\n", "\n").Replace("\n", "\r\n")))
+            .ToArray();
+        if (!File.Exists(path) || !File.ReadAllBytes(path).SequenceEqual(bytes))
+            File.WriteAllBytes(path, bytes);
+        return path;
     }
 
     private void InstallClaudeHook_Click(object s, RoutedEventArgs e)
@@ -14192,7 +14226,9 @@ public partial class MainWindow : Window
                     new Newtonsoft.Json.Linq.JObject
                     {
                         ["type"] = "command",
-                        ["command"] = command
+                        ["command"] = command,
+                        ["shell"] = "powershell",
+                        ["timeout"] = 10,
                     }
                 }
             });

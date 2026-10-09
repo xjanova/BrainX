@@ -186,6 +186,17 @@ internal static partial class Program
         var hooksNode = root["hooks"] as JObject;
         if (hooksNode == null) { hooksNode = new JObject(); root["hooks"] = hooksNode; }
 
+        // The script path is written ABSOLUTE, with forward slashes, never as
+        // "$env:USERPROFILE\.claude\scripts\x.ps1". The $env form only resolves
+        // when Claude Code honours "shell": "powershell"; anything that rewrites
+        // settings.json and drops that field hands the command to Git Bash, which
+        // expands $env:USERPROFILE to ":USERPROFILE". PowerShell then rejects
+        // the path and every hook fails silently. That happened on 2026-09-25
+        // 22:15 and nothing fired for two weeks (892 sessions). A forward-slash
+        // absolute path means the same thing to bash, cmd and PowerShell. It is
+        // also right when the Claude config dir is not ~/.claude.
+        var scriptsDirForCmd = scriptsDir.Replace('\\', '/').TrimEnd('/');
+
         int added = 0, replaced = 0, kept = 0;
         foreach (var group in Hooks.GroupBy(h => h.Event))
         {
@@ -206,7 +217,7 @@ internal static partial class Program
                 {
                     ["type"] = "command",
                     ["command"] = $"powershell -NoProfile -ExecutionPolicy Bypass -File "
-                                + $"\"$env:USERPROFILE\\.claude\\scripts\\{h.Script}\" {Marker} {HooksVersion}",
+                                + $"\"{scriptsDirForCmd}/{h.Script}\" {Marker} {HooksVersion}",
                     ["shell"] = "powershell",
                     ["timeout"] = h.TimeoutSec,
                 });
