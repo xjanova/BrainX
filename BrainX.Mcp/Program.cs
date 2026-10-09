@@ -1130,7 +1130,9 @@ internal static partial class Program
                 "already holds is refused, so two agents never start the same job. action:'update' {id, status?, " +
                 "assignee?, note?} moves it: 'doing', 'blocked' (note = what it is waiting on), 'done' (note = " +
                 "one-line result), 'open' (let it go), 'dropped'; a new assignee hands it over. Every change is " +
-                "also said in the room.",
+                "also said in the room. Sit in the room (cowork_join) while you hold a piece: a 'doing' card whose " +
+                "agent has nobody in the room is read as abandoned after five quiet minutes and chased by the broker " +
+                "— every Claude session shares the name 'claude', so this is the only way it knows you are on it.",
                 new JObject
                 {
                     ["type"] = "object",

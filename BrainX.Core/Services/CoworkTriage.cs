@@ -78,7 +78,10 @@ public static class CoworkTriage
     private static readonly Regex BrowserStrong = new(
         @"claude[\s-]*in[\s-]*chrome|chrome\s+(?:extension|cdp|devtools\s+protocol|debug(?:ging)?\s+port)"
         + @"|logged[\s-]?in\s+(?:\S+\s+)?(?:tab|session|browser|chrome|account)"
-        + @"|interactive\s+(?:claude\s+)?(?:session|chrome|browser|desktop)|owner'?s\s+(?:chrome|browser|desktop|screen|logged)", Rx);
+        // "interactive session" only as a NEED: "taken by the interactive
+        // session's agent" (t-0a07e2) says who is doing it, not what it needs.
+        + @"|(?:needs?|requires?|unblocks?\s+in|only\s+(?:in|from|via)|wait(?:s|ing)?\s+(?:for|on))\s+(?:an?\s+|the\s+)?interactive\s+(?:claude\s+)?(?:session|chrome|browser|desktop)"
+        + @"|owner'?s\s+(?:chrome|browser|desktop|screen|logged)", Rx);
 
     /// <summary>The web-only services the owner drives from Chrome
     /// ("เสียงดนตรีสร้าง ด้วย minimax บน chome"). No leading \b for MiniMax:

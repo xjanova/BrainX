@@ -160,6 +160,15 @@ internal static partial class Program
         var decide = Card("t-eee005", "blocked", "claude", "pricing page", "Code only, headless-safe — waiting on the owner's decision about the price tiers.");
         Check("…and a headless-safe card blocked on the owner's decision waits on that decision alone",
               CoworkTriage.BlockedNeeds(decide).SequenceEqual(new[] { "owner" }), string.Join(",", CoworkTriage.BlockedNeeds(decide)));
+
+        // Later still (t-0a07e2): "interactive session" naming WHO does the
+        // work was read as a need, and the broker blocked a card being done.
+        var taken = Card("t-0a07e2", "assigned", "claude", "กรุงศรี: รวมท่าต่อสู้ความละเอียดสูง (crop) + ยกระดับเสียงเพลงกลับ",
+                         skill: "Godot animation / audio integration",
+                         detail: "Taken by the interactive session's agent (not a broker run) — please don't dispatch a duplicate. Merge the cropped atlases, raise the music level.");
+        Check("'taken by the interactive session's agent' says who, not what the card needs", Needs(taken) == "", Needs(taken));
+        Check("…while 'needs an interactive Claude session' still is a need",
+              Needs(Assigned("animate poses", "Needs an interactive Claude session to drive the site")) == "browser");
         return Task.CompletedTask;
     }
 
