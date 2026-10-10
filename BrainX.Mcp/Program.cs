@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using BrainX.Core.Services;
+using BrainX.Core.Services.License;
 using BrainX.Mcp.Bridge;
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1808,6 +1809,19 @@ internal static partial class Program
         if (name != null && !CoreToolNames.Value.Contains(name) && McpBridgeHub.IsBridgedName(name))
             return BridgedCall(id, name, args);
 
+        // BrainX Pro: every brain tool stays free for every agent; joining the
+        // cowork room, posting to it, and generating media need Pro on this PC
+        // (ProGate reads the license the BrainX window saved).
+        if (ProFeatureOf(name) is { } proFeature && !ProGate.Allows(proFeature))
+        {
+            NoteActivity(name, SummarizeArgs(name, args), ok: false, error: "BrainX Pro required");
+            return BuildResult(id, new JObject
+            {
+                ["isError"] = true,
+                ["content"] = new JArray { new JObject { ["type"] = "text", ["text"] = ProGate.LockedMessage(proFeature) } },
+            });
+        }
+
         try
         {
             JToken result = name switch
@@ -1943,6 +1957,29 @@ internal static partial class Program
                 }}
             });
         }
+    }
+
+    /// <summary>
+    /// The Pro feature a tool belongs to, or null for a free one. Reading the
+    /// room, seeing who is in it and leaving it stay free; taking part does not.
+    ///
+    /// Never gated off the desktop: a BrainX Cloud session (--cloud, or a
+    /// customer's child on the server with BRAINX_SANDBOX=1) already proved a
+    /// paid key to get in, and a node's headless child serves its owner's
+    /// remote /mcp. Neither has a desktop license file to read.
+    /// </summary>
+    private static ProFeature? ProFeatureOf(string? tool)
+    {
+        if (_cloudMode
+            || Environment.GetEnvironmentVariable("BRAINX_SANDBOX") == "1"
+            || Environment.GetEnvironmentVariable("BRAINX_HEADLESS") == "1")
+            return null;
+        return tool switch
+        {
+            "cowork_join" or "cowork_say" or "cowork_task" => ProFeature.Cowork,
+            "media_generate" => ProFeature.Media,
+            _ => null,
+        };
     }
 
     /// <summary>

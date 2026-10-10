@@ -149,6 +149,22 @@ jobs:
             --icon BrainX.Client/Assets/Logo.ico `
             --outputDir Releases
 
+      - name: Sign the update feed (client auto-update through xman)
+        # The app updates from xman4289.com/brainx/download/ (GitHub's latest
+        # release as the fallback) and trusts neither: it reads a feed only if
+        # releases.win.json.sig is the release key's signature of its exact
+        # bytes, and Velopack then checks every package against the SHA-256 in
+        # that feed. sign-file self-verifies with the key built into the app,
+        # so a missing or wrong secret fails the release here, not on users.
+        shell: pwsh
+        env:
+          BRAINX_NODE_SIGNING_KEY: ${{ secrets.BRAINX_NODE_SIGNING_KEY }}
+        run: |
+          if (-not (Test-Path Releases/releases.win.json)) { throw "vpk produced no Releases/releases.win.json" }
+          dotnet run --project tools/NodeReleaseSigner -c Release -- sign-file Releases/releases.win.json
+          if ($LASTEXITCODE -ne 0) { throw "signing the update feed failed" }
+          if (-not (Test-Path Releases/releases.win.json.sig)) { throw "no releases.win.json.sig was written" }
+
       - name: Publish + zip node (server self-update)
         # brainx-node-win-x64.zip is exactly the asset SelfUpdateService looks
         # for. BUILD_VERSION stamps the node so its version-compare matches the tag.

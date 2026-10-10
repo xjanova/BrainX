@@ -31,6 +31,17 @@ public partial class App : Application
             Shutdown();
             return;
         }
+
+        // Mind is a BrainX Pro feature. The dashboard checks before it opens
+        // her; this covers a Start-menu shortcut or a double-click on the exe.
+        // ProGate reads the license the BrainX window saved for this PC.
+        if (!BrainX.Core.Services.License.ProGate.Allows(BrainX.Core.Services.License.ProFeature.Mind))
+        {
+            MessageBox.Show(BrainX.Core.Services.License.ProGate.LockedMessage(BrainX.Core.Services.License.ProFeature.Mind),
+                "BrainX Pro", MessageBoxButton.OK, MessageBoxImage.Information);
+            Shutdown();
+            return;
+        }
         new MindWindow().Show();
     }
 

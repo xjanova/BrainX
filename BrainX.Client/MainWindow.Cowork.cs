@@ -544,7 +544,26 @@ public partial class MainWindow
         try
         {
             var m = JObject.Parse(e.WebMessageAsJson);
-            switch (m["type"]?.ToString())
+            var kind = m["type"]?.ToString();
+
+            // BrainX Pro: the room is free to watch; giving it orders, steering
+            // its agents and its secretary are Pro (ProGate). Stopping a run,
+            // leaving, opening a file and reading history stay free.
+            if (kind is "officeSay" or "officeCall" or "officeAnswer" or "officeBrokerService" or "officeModel"
+                    or "officeEffort" or "officeTask" or "officeHistorySummary" or "officeSecretary"
+                && !RequirePro(BrainX.Core.Services.License.ProFeature.Cowork))
+            {
+                if (kind == "officeSay")
+                    CoworkSurface?.PostWebMessageAsJson(new JObject
+                    {
+                        ["type"] = "officeSayFailed",
+                        ["text"] = m["text"]?.ToString() ?? "",
+                        ["reason"] = "สั่งงานในห้องเป็นฟีเจอร์ของ BrainX Pro",
+                    }.ToString());
+                return;
+            }
+
+            switch (kind)
             {
                 case "officeReady": PostCowork(); break;
                 case "officeSay":

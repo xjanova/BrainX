@@ -15,6 +15,8 @@
 
   <ItemGroup>
     <Compile Include="..\..\BrainX.Server\Services\UpdatePackageVerifier.cs" Link="Shared\UpdatePackageVerifier.cs" />
+    <!-- The desktop app's feed check (sign-file), linked for the same reason. -->
+    <Compile Include="..\..\BrainX.Core\Services\ReleaseFeedVerifier.cs" Link="Shared\ReleaseFeedVerifier.cs" />
   </ItemGroup>
 
 </Project>

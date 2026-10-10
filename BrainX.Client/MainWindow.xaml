@@ -5702,6 +5702,11 @@
                                                 Click="SettingsJump_Click" Tag="Updates"
                                                 HorizontalContentAlignment="Left" Padding="14,8"
                                                 Margin="0,0,0,2"/>
+                                        <Button x:Name="SettingsNavLicense" Content="BrainX Pro"
+                                                Style="{StaticResource NavButton}"
+                                                Click="SettingsJump_Click" Tag="License"
+                                                HorizontalContentAlignment="Left" Padding="14,8"
+                                                Margin="0,0,0,2"/>
                                         <Button x:Name="SettingsNavIdentity" Content="Identity"
                                                 Style="{StaticResource NavButton}"
                                                 Click="SettingsJump_Click" Tag="Identity"
@@ -5827,6 +5832,85 @@
                                                 </StackPanel>
                                                 <TextBlock x:Name="UpdStatusText" Text="" FontSize="11"
                                                            Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap"/>
+                                            </StackPanel>
+                                        </Border>
+
+                                        <!-- BrainX Pro — the desktop license on xman studio's license API
+                                             (MainWindow.License.cs, BrainX.Core/Services/License). The same
+                                             paid key signs in to BrainX Cloud. -->
+                                        <Border x:Name="SettingsAnchorLicense"
+                                                Style="{StaticResource NeuralCard}"
+                                                Padding="22" Margin="0,0,0,14">
+                                            <StackPanel>
+                                                <StackPanel Margin="0,0,0,14">
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <TextBlock Text="BrainX Pro" FontSize="16" FontWeight="Bold"
+                                                                   Foreground="{StaticResource NeuralText}"/>
+                                                        <Border x:Name="LicenseBadge" CornerRadius="6" Padding="8,1" Margin="10,0,0,0"
+                                                                VerticalAlignment="Center" Background="{StaticResource SurfaceLightBrush}">
+                                                            <TextBlock x:Name="LicenseBadgeText" Text="FREE" FontSize="10.5" FontWeight="Bold"
+                                                                       Foreground="{StaticResource NeuralText}"/>
+                                                        </Border>
+                                                    </StackPanel>
+                                                    <TextBlock Text="The brain is free — every agent keeps its brain tools. Pro adds the cowork room and agent broker, Mind (the voice assistant) and image/video generation, and the same key signs you in to BrainX Cloud."
+                                                               FontSize="12.5" FontWeight="Medium" TextWrapping="Wrap"
+                                                               Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0"/>
+                                                </StackPanel>
+
+                                                <Grid Margin="0,0,0,6">
+                                                    <Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                    <TextBlock Grid.Column="0" Text="Status" FontSize="12" Foreground="{StaticResource NeuralText3}"/>
+                                                    <TextBlock Grid.Column="1" x:Name="LicenseStatusText" Text="—" FontSize="12" TextWrapping="Wrap"
+                                                               Foreground="{StaticResource NeuralText}"/>
+                                                </Grid>
+                                                <Grid Margin="0,0,0,6">
+                                                    <Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                    <TextBlock Grid.Column="0" Text="Key" FontSize="12" Foreground="{StaticResource NeuralText3}"/>
+                                                    <TextBlock Grid.Column="1" x:Name="LicenseKeyText" Text="—" FontSize="12"
+                                                               FontFamily="{StaticResource MonoFont}" Foreground="{StaticResource NeuralText}"/>
+                                                </Grid>
+                                                <Grid Margin="0,0,0,12">
+                                                    <Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                    <TextBlock Grid.Column="0" Text="Valid until" FontSize="12" Foreground="{StaticResource NeuralText3}"/>
+                                                    <TextBlock Grid.Column="1" x:Name="LicenseExpiryText" Text="—" FontSize="12" TextWrapping="Wrap"
+                                                               Foreground="{StaticResource NeuralText}"/>
+                                                </Grid>
+
+                                                <StackPanel x:Name="LicenseEntryPanel">
+                                                    <TextBlock Text="LICENSE KEY" FontSize="11" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource NeuralText3}" Margin="0,0,0,4"/>
+                                                    <Grid Margin="0,0,0,8">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="*"/>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                        </Grid.ColumnDefinitions>
+                                                        <TextBox x:Name="LicenseKeyBox" Grid.Column="0" FontSize="12" Padding="8,6"
+                                                                 FontFamily="{StaticResource MonoFont}" CharacterCasing="Upper"
+                                                                 Background="{StaticResource DarkPanelBrush}"
+                                                                 Foreground="{StaticResource TextPrimaryBrush}"
+                                                                 BorderBrush="{StaticResource SurfaceLightBrush}"
+                                                                 CaretBrush="{StaticResource NeonCyanBrush}"
+                                                                 KeyDown="LicenseKeyBox_KeyDown"/>
+                                                        <Button x:Name="LicenseActivateBtn" Grid.Column="1" Content="Activate"
+                                                                Style="{StaticResource NeuralBtnPrimary}" Click="LicenseActivate_Click"
+                                                                Padding="18,0" Margin="8,0,0,0"/>
+                                                    </Grid>
+                                                </StackPanel>
+
+                                                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                                    <Button x:Name="LicenseTrialBtn" Content="Start free trial" Style="{StaticResource NeuralBtnGhost}"
+                                                            Click="LicenseTrial_Click" Padding="14,6" Margin="0,0,8,0"/>
+                                                    <Button x:Name="LicenseRefreshBtn" Content="Check again" Style="{StaticResource NeuralBtnGhost}"
+                                                            Click="LicenseRefresh_Click" Padding="14,6" Margin="0,0,8,0"/>
+                                                    <Button x:Name="LicenseDeactivateBtn" Content="Release from this PC" Style="{StaticResource NeuralBtnGhost}"
+                                                            Click="LicenseDeactivate_Click" Padding="14,6" Visibility="Collapsed"/>
+                                                </StackPanel>
+                                                <TextBlock FontSize="11.5" TextWrapping="Wrap" Foreground="{StaticResource NeuralText3}" Margin="0,0,0,6">
+                                                    <Hyperlink Click="LicenseBuy_Click" Foreground="{StaticResource NeonCyanBrush}"><Run x:Name="LicenseBuyText" Text="Buy BrainX Pro"/></Hyperlink>
+                                                    — one key per PC; moving it asks first.
+                                                </TextBlock>
+                                                <TextBlock x:Name="LicenseMessageText" Text="" FontSize="11" TextWrapping="Wrap"
+                                                           Foreground="{StaticResource TextSecondaryBrush}"/>
                                             </StackPanel>
                                         </Border>
 

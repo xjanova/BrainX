@@ -22,14 +22,25 @@ namespace BrainX.Client;
 // ─────────────────────────────────────────────────────────────────────────
 public partial class MainWindow
 {
+    /// <summary>
+    /// The one place an update manager is made: on xman studio's channel with a
+    /// signed feed (Services/SignedFeedSource). It used to read GitHub releases
+    /// directly in three places; a release still goes to GitHub, and installs
+    /// older than this one keep updating from there until they reach it.
+    /// </summary>
+    private static Velopack.UpdateManager NewUpdateManager() => new(new Services.SignedFeedSource());
+
+    /// <summary>Where a portable or dev build gets the installer: xman's own
+    /// download, which streams the latest BrainX-win-Setup.exe.</summary>
+    private const string InstallerDownloadUrl = "https://xman4289.com/brainx/download";
+
     /// <summary>True when this build was installed via Velopack's Setup.exe
     /// (i.e. can self-update). False for raw dev/zip/portable runs.</summary>
     private bool VelopackInstalled()
     {
         try
         {
-            return new Velopack.UpdateManager(
-                new Velopack.Sources.GithubSource($"https://github.com/{GitHubRepo}", null, false)).IsInstalled;
+            return NewUpdateManager().IsInstalled;
         }
         catch { return false; }
     }
@@ -109,7 +120,7 @@ public partial class MainWindow
         if (_autoUpdateEnabled) _ = TryApplyStagedWhenIdleAsync();
     }
 
-    /// <summary>Manual "Check for updates": refresh the GitHub latest tag, and on
+    /// <summary>Manual "Check for updates": read the signed feed's latest version, and on
     /// an installed build also download+stage via Velopack. Then repaint + report.</summary>
     private async void UpdCheckNow_Click(object sender, RoutedEventArgs e)
     {
@@ -165,18 +176,18 @@ public partial class MainWindow
         catch (Exception ex) { UpdStatusText.Text = $"Apply failed: {ex.Message}"; }
     }
 
-    /// <summary>Open the GitHub releases page so a portable/dev build can grab
-    /// the Setup.exe and switch onto the auto-update track.</summary>
+    /// <summary>Download the installer from xman so a portable/dev build can
+    /// switch onto the auto-update track.</summary>
     private void UpdDownloadInstaller_Click(object sender, RoutedEventArgs e)
     {
         try
         {
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
             {
-                FileName = $"https://github.com/{GitHubRepo}/releases/latest",
+                FileName = InstallerDownloadUrl,
                 UseShellExecute = true,
             });
-            UpdStatusText.Text = "Opened the GitHub releases page — download & run BrainX-win-Setup.exe.";
+            UpdStatusText.Text = "Downloading BrainX-win-Setup.exe from xman4289.com — run it once to turn on auto-update.";
         }
         catch (Exception ex) { UpdStatusText.Text = $"Couldn't open the browser: {ex.Message}"; }
     }

@@ -8,6 +8,11 @@
 //       missing secret, or one that is not the private half of that key, fails
 //       the release instead of publishing an update no node would install.
 //
+//   dotnet run --project tools/NodeReleaseSigner -c Release -- sign-file <file>
+//       Same key. Signs one file's exact bytes into <file>.sig — the desktop
+//       app's Velopack feed (Releases/releases.win.json), which the app
+//       verifies with ReleaseFeedVerifier before it trusts a single entry.
+//
 //   dotnet run --project tools/NodeReleaseSigner -- verify <node folder> <version>
 //       Runs the node's check on a signed folder (manual spot check).
 //
@@ -23,7 +28,7 @@ using BrainX.Server.Services;
 
 if (args.Length == 0)
 {
-    Console.Error.WriteLine("usage: NodeReleaseSigner sign <folder> <version> | verify <folder> <version> | keygen <out.pem>");
+    Console.Error.WriteLine("usage: NodeReleaseSigner sign <folder> <version> | sign-file <file> | verify <folder> <version> | keygen <out.pem>");
     return 2;
 }
 
@@ -56,6 +61,38 @@ switch (args[0].ToLowerInvariant())
         return 0;
     }
 
+    case "sign-file" when args.Length == 2:
+    {
+        // The desktop app's Velopack feed: sign the exact bytes of one file
+        // (releases.win.json) into <file>.sig, then verify with the app's own
+        // check and built-in key, so a wrong secret fails the release here.
+        var file = Path.GetFullPath(args[1]);
+        if (!File.Exists(file)) { Console.Error.WriteLine($"file not found: {file}"); return 2; }
+
+        var secret = Environment.GetEnvironmentVariable("BRAINX_NODE_SIGNING_KEY");
+        if (string.IsNullOrWhiteSpace(secret))
+        {
+            Console.Error.WriteLine("BRAINX_NODE_SIGNING_KEY is not set. Refusing to publish a feed no BrainX could verify.");
+            return 1;
+        }
+
+        ECDsa key;
+        try { key = PackageSigner.LoadPrivateKey(secret); }
+        catch (InvalidOperationException ex) { Console.Error.WriteLine(ex.Message); return 1; }
+
+        var content = File.ReadAllBytes(file);
+        string signature;
+        using (key) signature = BrainX.Core.Services.ReleaseFeedVerifier.Sign(content, key);
+        if (!BrainX.Core.Services.ReleaseFeedVerifier.Verify(content, signature))
+        {
+            Console.Error.WriteLine("the signature does not verify with the public key built into BrainX — BRAINX_NODE_SIGNING_KEY is not the release key");
+            return 1;
+        }
+        File.WriteAllText(file + BrainX.Core.Services.ReleaseFeedVerifier.SignatureSuffix, signature);
+        Console.WriteLine($"signed {Path.GetFileName(file)} ({content.Length} bytes)");
+        return 0;
+    }
+
     case "verify" when args.Length == 3:
     {
         var verdict = UpdatePackageVerifier.Verify(args[1], args[2], "0.0.0", UpdatePackageVerifier.VersionRule.MustBeNewer);
@@ -84,6 +121,6 @@ switch (args[0].ToLowerInvariant())
     }
 
     default:
-        Console.Error.WriteLine("usage: NodeReleaseSigner sign <folder> <version> | verify <folder> <version> | keygen <out.pem>");
+        Console.Error.WriteLine("usage: NodeReleaseSigner sign <folder> <version> | sign-file <file> | verify <folder> <version> | keygen <out.pem>");
         return 2;
 }

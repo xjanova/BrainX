@@ -2490,6 +2490,9 @@ public partial class MainWindow : Window
         // refreshes the bottom-bar label if a newer build is available.
         // Doesn't block startup — UX nicety only.
         _ = CheckLatestReleaseAsync();
+        // BrainX Pro. Its first, synchronous part publishes the saved answer
+        // to ProGate, so the broker below is gated by it straight away.
+        _ = InitLicenseAsync();
         // We are running, so whatever update was last attempted either landed
         // (this IS the target version — clear the history) or it did not (the
         // count stands). Must happen before the check below reads that count.
@@ -5885,7 +5888,7 @@ public partial class MainWindow : Window
     // Local builds with no env vars get "2.0.0-dev+local" so dev work
     // doesn't accidentally claim it's a release.
     private const string GitHubRepo = "xjanova/BrainX";
-    private const string GitHubLatestUrl = "https://api.github.com/repos/" + GitHubRepo + "/releases/latest";
+
     private string? _latestRemoteVersion;          // e.g. "2.0.137" — null until first poll succeeds
 
     /// <summary>
@@ -6040,25 +6043,13 @@ public partial class MainWindow : Window
     {
         try
         {
-            using var http = new System.Net.Http.HttpClient
-            {
-                Timeout = TimeSpan.FromSeconds(6)
-            };
-            // GitHub requires a User-Agent on all API requests; without it
-            // they return 403. Use the product name + local version so
-            // their telemetry can spot real clients vs scrapers.
-            var (display, _) = GetLocalVersion();
-            http.DefaultRequestHeaders.UserAgent.ParseAdd($"BrainX/{display} (+https://github.com/{GitHubRepo})");
-            http.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+            // The same signed feed the updater installs from, so "latest" on
+            // the card is exactly what an update would bring — not a GitHub
+            // tag that xman's channel may not serve yet.
+            var latest = await Services.SignedFeedSource.LatestVersionAsync().ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(latest)) return;
 
-            var json = await http.GetStringAsync(GitHubLatestUrl).ConfigureAwait(false);
-            // Tiny ad-hoc parse — pulling tag_name and html_url. Avoids
-            // taking a dependency on Octokit just for two strings.
-            var obj = Newtonsoft.Json.Linq.JObject.Parse(json);
-            var tag = obj["tag_name"]?.ToString();      // e.g. "v2.0.137"
-            if (string.IsNullOrWhiteSpace(tag)) return;
-
-            var clean = tag.StartsWith("v", StringComparison.OrdinalIgnoreCase) ? tag[1..] : tag;
+            var clean = latest;
             await Dispatcher.InvokeAsync(() =>
             {
                 _latestRemoteVersion = clean;
@@ -6173,8 +6164,7 @@ public partial class MainWindow : Window
 
         try
         {
-            var mgr = new Velopack.UpdateManager(
-                new Velopack.Sources.GithubSource($"https://github.com/{GitHubRepo}", null, false));
+            var mgr = NewUpdateManager();
             if (!mgr.IsInstalled) return false;              // dev / portable — nothing to apply
 
             Services.StartupProgress.Report("Checking for updates", 0.12, tag: "update");
@@ -6328,8 +6318,7 @@ public partial class MainWindow : Window
     {
         try
         {
-            var mgr = new Velopack.UpdateManager(
-                new Velopack.Sources.GithubSource($"https://github.com/{GitHubRepo}", null, false));
+            var mgr = NewUpdateManager();
             if (!mgr.IsInstalled) return;                  // dev/unpacked — nothing to do
             var info = await mgr.CheckForUpdatesAsync().ConfigureAwait(false);
             if (info == null) return;                      // already on the latest release
@@ -8347,6 +8336,7 @@ public partial class MainWindow : Window
     private void Nav_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button btn || btn.Tag is not string tag) return;
+        if (tag == "Mind" && !RequirePro(BrainX.Core.Services.License.ProFeature.Mind)) return;
         foreach (var vn in _viewMap.Values)
         {
             var view = (UIElement?)FindName(vn);

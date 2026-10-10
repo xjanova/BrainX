@@ -83,6 +83,14 @@ public partial class MainWindow
     /// </summary>
     private void StartBrokerHost()
     {
+        // BrainX Pro: the broker spawns agents into the cowork room. Without
+        // Pro it waits, and ApplyLicense starts it the moment Pro arrives.
+        if (!BrainX.Core.Services.License.ProGate.Allows(BrainX.Core.Services.License.ProFeature.Cowork))
+        {
+            _brokerWaitingForPro = true;
+            return;
+        }
+
         _brokerWatch ??= new DispatcherTimer(DispatcherPriority.Background) { Interval = BrokerWatchEvery };
         if (_brokerWatch.Tag is not bool)
         {
@@ -117,6 +125,7 @@ public partial class MainWindow
         }
         else
         {
+            if (!RequirePro(BrainX.Core.Services.License.ProFeature.Cowork)) return;
             _brokerStopRequested = false;
             _brokerAdopted = false;
             _brokerRestarts = 0;
