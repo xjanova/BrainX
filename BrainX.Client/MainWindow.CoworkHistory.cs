@@ -101,9 +101,36 @@ public partial class MainWindow
     private static long HistMs(DateTime utc) =>
         new DateTimeOffset(DateTime.SpecifyKind(utc, DateTimeKind.Utc)).ToUnixTimeMilliseconds();
 
+    // ── One read of the room, shared for a few seconds ────────────────────
+    //
+    // Opening the panel, picking a project and then expanding topics one by
+    // one used to re-read and re-parse every task and every line on each step.
+    // A short-lived snapshot makes the expand clicks cost nothing, and a
+    // delete drops it so the next look sees the move.
+    private readonly object _histCacheLock = new();
+    private (DateTime At, List<HistTask> Tasks, List<HistLine> Lines)? _histCache;
+
+    private (List<HistTask> Tasks, List<HistLine> Lines) HistorySnapshot()
+    {
+        lock (_histCacheLock)
+        {
+            if (_histCache is { } c && (DateTime.UtcNow - c.At).TotalSeconds < 5) return (c.Tasks, c.Lines);
+            var tasks = HistoryTasks();
+            var lines = HistoryLines();
+            _histCache = (DateTime.UtcNow, tasks, lines);
+            return (tasks, lines);
+        }
+    }
+
+    private void InvalidateHistoryCache() { lock (_histCacheLock) _histCache = null; }
+
     /// <summary>page → host: {type:"officeHistory", project?}. Answers with the
-    /// project list, and that project's whole story when one is named. Built
-    /// off the UI thread: it reads every task and every line the room has.</summary>
+    /// project list and, when one is named, that project's TOPICS: every task
+    /// and every group of loose lines as one light row (title, state, span,
+    /// counts). The bodies are not sent. Owner (2026-10-10): "ถ้าเยอะแล้วโหลด
+    /// หน้าเดียวมันนานมาก … จะกางออก (โหลดเฉพาะเรื่องนั้นที่กาง)". A topic's
+    /// story comes from officeHistoryTopic when it is opened. Built off the UI
+    /// thread.</summary>
     private async void PostCoworkHistory(string? project, string? note = null)
     {
         try
@@ -118,8 +145,7 @@ public partial class MainWindow
     {
         try
         {
-            var tasks = HistoryTasks();
-            var lines = HistoryLines();
+            var (tasks, lines) = HistorySnapshot();
             var taskWork = tasks.ToDictionary(t => t.Id, t => t.Work, StringComparer.OrdinalIgnoreCase);
             var projectOf = HistoryProjectOf(tasks.Select(t => t.Work).Concat(lines.Select(l => l.Work)));
             string LineProject(HistLine l) =>
@@ -171,22 +197,118 @@ public partial class MainWindow
         catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"BuildCoworkHistory: {ex.Message}"); return null; }
     }
 
+    /// <summary>
+    /// A project as TOPICS, light: one row per task (no history, no lines, no
+    /// body) and one row per group of the project's loose lines (the ones that
+    /// name no task of it), grouped by the topic they carry or else by local
+    /// day. Enough to page a list and draw the timeline; the story behind a row
+    /// is fetched by <see cref="BuildHistoryTopic"/> when it is opened.
+    /// </summary>
     private static JObject HistoryDetail(string key, List<HistTask> tasks, List<HistLine> lines)
     {
-        var byTask = lines.Where(l => l.Task.Length > 0).GroupBy(l => l.Task, StringComparer.OrdinalIgnoreCase)
-                          .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
-        JObject Line(HistLine l) => new()
-        {
-            ["ts"] = HistMs(l.Ts),
-            ["from"] = l.O["from"]?.ToString() ?? "?",
-            ["to"] = l.O["to"]?.ToString() ?? "",
-            ["topic"] = l.O["topic"]?.ToString() ?? "",
-            ["body"] = Trim(l.O["body"]?.ToString() ?? "", 1500),
-        };
-
+        var lineCount = lines.Where(l => l.Task.Length > 0).GroupBy(l => l.Task, StringComparer.OrdinalIgnoreCase)
+                             .ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
         var arr = new JArray();
         foreach (var t in tasks.OrderBy(t => t.Created))
+            arr.Add(new JObject
+            {
+                ["id"] = t.Id,
+                ["kind"] = "task",
+                ["title"] = Trim(t.O["title"]?.ToString() ?? "", 200),
+                ["status"] = t.Status,
+                ["work"] = t.Work,
+                ["assignee"] = t.O["assignee"]?.Type == JTokenType.String ? t.O["assignee"]!.ToString() : "",
+                ["createdBy"] = t.O["createdBy"]?.ToString() ?? "",
+                ["created"] = HistMs(t.Created),
+                ["updated"] = HistMs(t.Updated),
+                ["steps"] = (t.O["history"] as JArray)?.Count ?? 0,
+                ["lines"] = lineCount.TryGetValue(t.Id, out var n) ? n : 0,
+                ["note"] = Trim(t.O["note"]?.ToString() ?? "", 200),
+                ["paused"] = (t.O["paused"] as JObject)?["reason"]?.ToString() ?? "",
+            });
+
+        var taskIds = new HashSet<string>(tasks.Select(t => t.Id), StringComparer.OrdinalIgnoreCase);
+        var loose = new JArray();
+        foreach (var g in lines.Where(l => l.Task.Length == 0 || !taskIds.Contains(l.Task))
+                               .GroupBy(LooseKey, StringComparer.Ordinal))
         {
+            var ls = g.OrderBy(l => l.Ts).ToList();
+            var topic = ls.Select(l => l.O["topic"]?.ToString()).FirstOrDefault(s => !string.IsNullOrWhiteSpace(s));
+            loose.Add(new JObject
+            {
+                ["id"] = g.Key,
+                ["kind"] = "talk",
+                ["title"] = topic != null ? Trim(topic, 200)
+                    : "คุยในห้อง " + ls[0].Ts.ToLocalTime().ToString("d MMM", System.Globalization.CultureInfo.GetCultureInfo("th-TH")),
+                ["status"] = "talk",
+                ["work"] = ls.Select(l => l.Work).FirstOrDefault(w => w.Length > 0) ?? "",
+                ["created"] = HistMs(ls[0].Ts),
+                ["updated"] = HistMs(ls[^1].Ts),
+                ["lines"] = ls.Count,
+                ["agents"] = new JArray(ls.Select(l => l.O["from"]?.ToString()).Where(a => !string.IsNullOrEmpty(a))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)),
+            });
+        }
+        return new JObject { ["key"] = key, ["tasks"] = arr, ["talk"] = loose };
+    }
+
+    /// <summary>The group a loose line belongs to: its topic when it names one,
+    /// otherwise the local day it was said on. Prefixed "L:" so it can never be
+    /// mistaken for a task id.</summary>
+    private static string LooseKey(HistLine l)
+    {
+        var topic = l.O["topic"]?.ToString();
+        return !string.IsNullOrWhiteSpace(topic)
+            ? "L:t:" + topic.Trim().ToLowerInvariant()
+            : "L:d:" + l.Ts.ToLocalTime().ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>page → host: {type:"officeHistoryTopic", project, id}. The
+    /// story behind ONE topic: a task's detail, its every step and the lines
+    /// that name it, or one group of loose lines. Off the UI thread.</summary>
+    private async void PostCoworkHistoryTopic(string? project, string? id)
+    {
+        if (project == null || string.IsNullOrEmpty(id)) return;
+        try
+        {
+            var json = await Task.Run(() => BuildHistoryTopic(project, id));
+            if (json != null) CoworkSurface?.PostWebMessageAsJson(json);
+        }
+        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"PostCoworkHistoryTopic: {ex.Message}"); }
+    }
+
+    private string? BuildHistoryTopic(string project, string id)
+    {
+        try
+        {
+            var (tasks, lines) = HistorySnapshot();
+            JObject Line(HistLine l) => new()
+            {
+                ["ts"] = HistMs(l.Ts),
+                ["from"] = l.O["from"]?.ToString() ?? "?",
+                ["to"] = l.O["to"]?.ToString() ?? "",
+                ["body"] = Trim(l.O["body"]?.ToString() ?? "", 1500),
+            };
+            var reply = new JObject { ["type"] = "officeHistoryTopic", ["project"] = project, ["id"] = id };
+
+            if (id.StartsWith("L:", StringComparison.Ordinal))
+            {
+                var taskWork = tasks.ToDictionary(t => t.Id, t => t.Work, StringComparer.OrdinalIgnoreCase);
+                var projectOf = HistoryProjectOf(tasks.Select(t => t.Work).Concat(lines.Select(l => l.Work)));
+                var taskIds = new HashSet<string>(tasks.Where(t => projectOf(t.Work).Equals(project, StringComparison.OrdinalIgnoreCase))
+                                                       .Select(t => t.Id), StringComparer.OrdinalIgnoreCase);
+                var ls = lines.Where(l =>
+                        projectOf(l.Task.Length > 0 && taskWork.TryGetValue(l.Task, out var w) ? w : l.Work)
+                            .Equals(project, StringComparison.OrdinalIgnoreCase)
+                        && (l.Task.Length == 0 || !taskIds.Contains(l.Task))
+                        && LooseKey(l) == id)
+                    .OrderBy(l => l.Ts).Select(Line);
+                reply["lines"] = new JArray(ls);
+                return reply.ToString();
+            }
+
+            var t = tasks.FirstOrDefault(x => x.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
+            if (t == null) { reply["error"] = "ไม่พบงานนี้แล้ว"; return reply.ToString(); }
             var hist = new JArray();
             foreach (var h in (t.O["history"] as JArray ?? new JArray()).OfType<JObject>())
                 hist.Add(new JObject
@@ -197,33 +319,13 @@ public partial class MainWindow
                     ["assignee"] = h["assignee"]?.Type == JTokenType.String ? h["assignee"]!.ToString() : "",
                     ["note"] = Trim(h["note"]?.ToString() ?? "", 600),
                 });
-            arr.Add(new JObject
-            {
-                ["id"] = t.Id,
-                ["title"] = Trim(t.O["title"]?.ToString() ?? "", 200),
-                ["status"] = t.Status,
-                ["work"] = t.Work,
-                ["assignee"] = t.O["assignee"]?.Type == JTokenType.String ? t.O["assignee"]!.ToString() : "",
-                ["createdBy"] = t.O["createdBy"]?.ToString() ?? "",
-                ["created"] = HistMs(t.Created),
-                ["updated"] = HistMs(t.Updated),
-                ["detail"] = Trim(t.O["detail"]?.ToString() ?? "", 1500),
-                ["note"] = Trim(t.O["note"]?.ToString() ?? "", 600),
-                ["paused"] = (t.O["paused"] as JObject)?["reason"]?.ToString() ?? "",
-                ["history"] = hist,
-                ["lines"] = new JArray((byTask.TryGetValue(t.Id, out var tl) ? tl : new List<HistLine>())
-                    .OrderBy(l => l.Ts).Select(Line)),
-            });
+            reply["detail"] = Trim(t.O["detail"]?.ToString() ?? "", 1500);
+            reply["history"] = hist;
+            reply["lines"] = new JArray(lines.Where(l => l.Task.Equals(t.Id, StringComparison.OrdinalIgnoreCase))
+                                             .OrderBy(l => l.Ts).Select(Line));
+            return reply.ToString();
         }
-        var taskIds = new HashSet<string>(tasks.Select(t => t.Id), StringComparer.OrdinalIgnoreCase);
-        return new JObject
-        {
-            ["key"] = key,
-            ["tasks"] = arr,
-            // Lines about the project that name no task of it.
-            ["lines"] = new JArray(lines.Where(l => l.Task.Length == 0 || !taskIds.Contains(l.Task))
-                .OrderBy(l => l.Ts).Select(Line)),
-        };
+        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"BuildHistoryTopic: {ex.Message}"); return null; }
     }
 
     /// <summary>page → host: {type:"officeHistoryDelete", project?|task?}.</summary>
@@ -314,6 +416,7 @@ public partial class MainWindow
         }
         catch (Exception ex) { note = "ลบไม่สำเร็จ: " + ex.Message; }
 
+        InvalidateHistoryCache();
         PostCoworkHistory(showProject, note);
         PostCowork();   // the board and the wall lose what went
     }

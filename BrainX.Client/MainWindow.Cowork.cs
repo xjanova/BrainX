@@ -602,6 +602,8 @@ public partial class MainWindow
                 // The room's history by project: read, and remove finished work
                 // from it (MainWindow.CoworkHistory) — never from the brain.
                 case "officeHistory": PostCoworkHistory(HistStr(m["project"])); break;
+                // One topic's story, fetched only when the owner opens it.
+                case "officeHistoryTopic": PostCoworkHistoryTopic(HistStr(m["project"]), HistStr(m["id"])); break;
                 case "officeHistorySummary": SecretarySummarize(HistStr(m["project"])); break;
                 case "officeSecretary": SecretaryChange(m); break;
                 case "officeHistoryDelete":

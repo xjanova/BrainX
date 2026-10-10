@@ -3257,6 +3257,7 @@ function onMessage(evt) {
     if (!m || typeof m !== 'object') return;
     if (m.type === 'officeSayFailed') { sayFailed(m.text, m.reason); return; }
     if (m.type === 'officeHistory') { applyHistory(m); return; }
+    if (m.type === 'officeHistoryTopic') { applyHistoryTopic(m); return; }
     if (m.type === 'officeHistorySummary') {
         if (typeof m.project === 'string') HIST.summary[m.project] = { text: m.text || '', error: m.error || '' };
         renderHistory();
@@ -3820,7 +3821,16 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeWorkP
 // Deleting asks the host to move finished work into the room's trash; the
 // notes the agents wrote into the brain are never part of it.
 
-const HIST = { projects: [], detail: null, sel: null, view: 'tasks', open: new Set(), note: '', loading: false, busy: false, busyAt: 0, summary: {} };
+// Owner (2026-10-10): "ถ้าเยอะแล้วโหลดหน้าเดียวมันนานมาก ให้แบ่งหน้า และ ดูไทม์ไลน์
+// รวมควรสรุปหัวข้อแล้วสร้างผังอนิเมชั่นสวยๆ … จะกางออก (โหลดเฉพาะเรื่องนั้นที่กาง)".
+// The host now sends a project as light TOPICS (a task, or a group of loose
+// lines); a topic's story is fetched on its own when it is opened, and cached
+// in `topics` for as long as the project stays picked.
+const HIST_PAGE = 20;
+const HIST = {
+    projects: [], detail: null, sel: null, view: 'tasks', open: new Set(), note: '', loading: false, busy: false, busyAt: 0, summary: {},
+    page: 1, filter: 'all', order: 'new', topics: {}, focus: null,
+};
 
 function histSummaryBox(key) {
     const s = HIST.summary[key];
@@ -3837,9 +3847,6 @@ function histWhen(ms, withDay = true) {
     return d.toLocaleString('th-TH', withDay
         ? { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }
         : { hour: '2-digit', minute: '2-digit' });
-}
-function histDay(ms) {
-    return new Date(ms).toLocaleDateString('th-TH', { weekday: 'short', day: 'numeric', month: 'long', year: 'numeric' });
 }
 function histSpan(ms) {
     const m = Math.max(0, ms) / 60e3;
@@ -3880,7 +3887,14 @@ function pickProject(key) {
 /** host → page: {type:"officeHistory", projects, detail, note}. */
 function applyHistory(m) {
     HIST.projects = Array.isArray(m.projects) ? m.projects : [];
+    const prevKey = HIST.detail?.key;
     HIST.detail = m.detail || null;
+    // Another project, or the same one after a delete: what was fetched for
+    // its topics no longer describes it.
+    if (!HIST.detail || HIST.detail.key !== prevKey || m.note) {
+        HIST.topics = {};
+        if (HIST.detail?.key !== prevKey) { HIST.page = 1; HIST.focus = null; HIST.open.clear(); }
+    }
     if (HIST.sel != null && !HIST.projects.some(p => p.key === HIST.sel)) { HIST.sel = null; HIST.detail = null; }
     if (HIST.sel == null && HIST.detail) HIST.sel = HIST.detail.key;
     HIST.note = m.note || '';
@@ -3921,8 +3935,8 @@ function renderHistory() {
     const finished = (p.done || 0) + (p.dropped || 0);
     const head = `<div class="hx-head"><span class="hx-title">${esc(histName(p.key))}</span>`
         + `<span class="hx-tabs">`
-        + `<button type="button" class="hbtn${HIST.view === 'tasks' ? ' on' : ''}" data-view="tasks" title="งานทีละชิ้น — กดชื่องานเพื่อดูไทม์ไลน์ของมัน">งาน</button>`
-        + `<button type="button" class="hbtn${HIST.view === 'timeline' ? ' on' : ''}" data-view="timeline" title="ทุกเหตุการณ์ของโปรเจคเรียงตามเวลา">ไทม์ไลน์รวม</button></span>`
+        + `<button type="button" class="hbtn${HIST.view === 'tasks' ? ' on' : ''}" data-view="tasks" title="หัวข้อทีละหน้า — กดชื่อเพื่อกางดูเรื่องนั้น (โหลดเฉพาะเรื่องที่กาง)">หัวข้อ</button>`
+        + `<button type="button" class="hbtn${HIST.view === 'timeline' ? ' on' : ''}" data-view="timeline" title="ผังทุกหัวข้อตามเวลา — กดแท่งเพื่อกางเรื่องนั้น">ไทม์ไลน์รวม</button></span>`
         + (SECRETARY?.enabled && SECRETARY.can?.summarize
             ? `<button type="button" class="hbtn" data-summary="1"${HIST.summary[p.key]?.loading ? ' disabled' : ''}`
               + ` title="ให้มาย (โมเดลในเครื่อง) สรุปโปรเจคนี้ในไม่กี่บรรทัด">✨ ให้มายสรุป</button>`
@@ -3937,19 +3951,63 @@ function renderHistory() {
         box.innerHTML = head + `<div class="hx-empty">กำลังโหลด…</div>`;
         return;
     }
-    box.innerHTML = head + (HIST.view === 'timeline' ? histTimeline(d) : histTasks(d));
+    box.innerHTML = head + (HIST.view === 'timeline' ? histChart(d) : histTasks(d));
+    if (HIST.view === 'timeline') {
+        wireRail();
+        // The focused topic's story may already be cached; fetch it if not.
+        if (HIST.focus) { requestTopic(HIST.focus); railReveal(HIST.focus); }
+    }
 }
 
-function histEvents(t) {
-    const ev = [{ ts: t.created, who: t.createdBy, kind: 'made', text: `📌 สร้างงาน${t.assignee ? ` → ${label(t.assignee)}` : ''}` }];
-    for (const h of t.history || []) {
+/** Every event of one topic, from its fetched story `s` ({history, lines}). */
+function histEvents(t, s) {
+    const ev = [];
+    if (t.kind !== 'talk')
+        ev.push({ ts: t.created, who: t.createdBy, kind: 'made', text: `📌 สร้างงาน${t.assignee ? ` → ${label(t.assignee)}` : ''}` });
+    for (const h of s?.history || []) {
         const st = TASK_STATE[h.status] || { ico: '•', th: h.status };
         ev.push({ ts: h.ts, who: h.by, kind: 'move',
                   text: `${st.ico} ${st.th}${h.assignee && h.assignee !== h.by ? ` (${label(h.assignee)})` : ''}${h.note ? ' — ' + h.note : ''}` });
     }
-    for (const l of t.lines || [])
+    for (const l of s?.lines || [])
         ev.push({ ts: l.ts, who: l.from, kind: 'line', text: `💬 ${l.to ? `→ ${label(l.to)}: ` : ''}${l.body}` });
     return ev.sort((a, b) => a.ts - b.ts);
+}
+
+/** The project's topics: its tasks, then its loose-line groups, as one list. */
+function histTopicList(d) {
+    if (!d) return [];
+    if (d._topics) return d._topics;
+    const talk = (d.talk || []).map(t => ({ ...t, kind: 'talk' }));
+    const tasks = (d.tasks || []).map(t => ({ ...t, kind: 'task' }));
+    return (d._topics = tasks.concat(talk));
+}
+function histTopic(id) { return histTopicList(HIST.detail).find(t => t.id === id); }
+function histLive(t) { return t.kind === 'task' && t.status !== 'done' && t.status !== 'dropped'; }
+
+/** Ask the host for one topic's story, once. */
+function requestTopic(id) {
+    if (!id || HIST.sel == null || HIST.topics[id]) return;
+    HIST.topics[id] = { loading: true };
+    post({ type: 'officeHistoryTopic', project: HIST.sel, id });
+}
+/** host → page: {type:"officeHistoryTopic", project, id, detail?, history?, lines?, error?}. */
+function applyHistoryTopic(m) {
+    if (m.project !== HIST.sel || typeof m.id !== 'string') return;
+    HIST.topics[m.id] = m.error ? { error: m.error } : { data: m };
+    refreshTopicRow(m.id);
+    if (HIST.focus === m.id) refreshFocus();
+}
+
+/** What an opened topic shows: its story, or why it is not there yet. */
+function histTopicStory(t) {
+    const c = HIST.topics[t.id];
+    if (!c || c.loading) return '<div class="hx-loading"><span class="hx-spin"></span>กำลังโหลดเรื่องนี้…</div>';
+    if (c.error) return `<div class="hx-empty">${esc(c.error)}</div>`;
+    const s = c.data;
+    const ev = histEvents(t, s);
+    return (s.detail ? `<div class="ht-detail">${esc(s.detail)}</div>` : '')
+        + (ev.length ? ev.map(e => evRow(e)).join('') : '<div class="hx-empty">ไม่มีเหตุการณ์</div>');
 }
 
 function evRow(e, tag) {
@@ -3958,47 +4016,296 @@ function evRow(e, tag) {
         + `<span class="who" style="--pc:${agentColor(e.who || '')}">${esc(e.who ? label(e.who) : '')}</span> ${esc(e.text)}</span></div>`;
 }
 
-function histTasks(d) {
-    if (!d.tasks.length && !d.lines.length) return '<div class="hx-empty">ไม่มีงานในโปรเจคนี้แล้ว</div>';
-    const rows = d.tasks.map(t => {
-        const st = taskState(t);
-        const done = t.status === 'done' || t.status === 'dropped';
-        const open = HIST.open.has(t.id);
-        const end = done ? `${histWhen(t.updated)} (${histSpan(t.updated - t.created)})` : 'ยังไม่จบ';
-        const more = open
-            ? `<div class="ht-more">${t.detail ? `<div class="ht-detail">${esc(t.detail)}</div>` : ''}`
-              + histEvents(t).map(e => evRow(e)).join('') + `</div>`
-            : '';
-        return `<li class="ht st-${esc(t.status)}" data-id="${esc(t.id)}">`
-            + `<div class="ht-top"><span class="ico">${st.ico}</span>`
-            + `<span class="tt" data-toggle="${esc(t.id)}" title="${open ? 'ซ่อนไทม์ไลน์' : 'ดูไทม์ไลน์ของงานนี้'}">${open ? '▾' : '▸'} ${esc(t.title)}</span>`
-            + `<span class="who" style="--pc:${t.assignee ? agentColor(t.assignee) : 'var(--ink-faint)'}">${esc(t.assignee ? label(t.assignee) : 'ว่าง')}</span>`
-            + `<button type="button" class="hbtn danger" data-del-task="${esc(t.id)}"${done && !HIST.busy ? '' : ' disabled'}`
-            + ` title="${done ? 'ลบงานนี้ออกจากประวัติของห้อง' : 'ยังไม่จบ — เลิกงานจากหน้าต่าง 📋 งาน ก่อน'}">🗑</button></div>`
-            + `<div class="ht-sub">${esc(t.id)} · ${esc(st.th)} · ${esc(histWhen(t.created))} → ${esc(end)}`
-            + `${(t.history || []).length ? ` · ${t.history.length} ขั้น` : ''}${(t.lines || []).length ? ` · ${t.lines.length} ข้อความ` : ''}`
-            + `${t.note ? ` — ${esc(t.note)}` : ''}</div>${more}</li>`;
-    });
-    const loose = d.lines.length
-        ? `<li class="ht"><div class="ht-top"><span class="ico">💬</span><span class="tt">ข้อความในห้องที่พูดถึงโปรเจคนี้ (ไม่ผูกกับงานไหน)</span><span></span><span></span></div>`
-          + `<div class="ht-more">${d.lines.map(l => evRow({ ts: l.ts, who: l.from, kind: 'line', text: `${l.to ? `→ ${label(l.to)}: ` : ''}${l.body}` })).join('')}</div></li>`
-        : '';
-    return `<ol>${rows.join('')}${loose}</ol>`;
+// ── the topic list, a page at a time ─────────────────────────────────
+
+const HIST_FILTERS = [
+    ['all', 'ทั้งหมด', () => true],
+    ['live', 'ยังไม่จบ', t => histLive(t)],
+    ['done', 'เสร็จ', t => t.status === 'done'],
+    ['dropped', 'ยกเลิก', t => t.status === 'dropped'],
+    ['talk', 'คุยในห้อง', t => t.kind === 'talk'],
+];
+
+function histRow(t) {
+    const talk = t.kind === 'talk';
+    const st = talk ? { ico: '💬', th: 'คุยในห้อง' } : taskState(t);
+    const done = t.status === 'done' || t.status === 'dropped';
+    const open = HIST.open.has(t.id);
+    const end = talk ? histWhen(t.updated) : done ? `${histWhen(t.updated)} (${histSpan(t.updated - t.created)})` : 'ยังไม่จบ';
+    const who = talk ? (t.agents || []).map(a => label(a)).join(', ') : (t.assignee ? label(t.assignee) : 'ว่าง');
+    const color = talk ? 'var(--ink-dim)' : (t.assignee ? agentColor(t.assignee) : 'var(--ink-faint)');
+    const counts = [t.steps ? `${t.steps} ขั้น` : '', t.lines ? `${t.lines} ข้อความ` : ''].filter(Boolean).join(' · ');
+    return `<li class="ht st-${esc(t.status)}${talk ? ' talk' : ''}" data-id="${esc(t.id)}">`
+        + `<div class="ht-top"><span class="ico">${st.ico}</span>`
+        + `<span class="tt" data-toggle="${esc(t.id)}" title="${open ? 'พับเรื่องนี้' : 'กางดูเรื่องนี้ (โหลดเฉพาะเรื่องนี้)'}">${open ? '▾' : '▸'} ${esc(t.title)}</span>`
+        + `<span class="who" style="--pc:${color}">${esc(who)}</span>`
+        + (talk ? '<span></span>'
+            : `<button type="button" class="hbtn danger" data-del-task="${esc(t.id)}"${done && !HIST.busy ? '' : ' disabled'}`
+              + ` title="${done ? 'ลบงานนี้ออกจากประวัติของห้อง' : 'ยังไม่จบ — เลิกงานจากหน้าต่าง 📋 งาน ก่อน'}">🗑</button>`)
+        + `</div><div class="ht-sub">${talk ? '' : `${esc(t.id)} · `}${esc(st.th)} · ${esc(histWhen(t.created))} → ${esc(end)}`
+        + `${counts ? ` · ${counts}` : ''}${t.note ? ` — ${esc(t.note)}` : ''}</div>`
+        + (open ? `<div class="ht-more">${histTopicStory(t)}</div>` : '')
+        + `</li>`;
 }
 
-function histTimeline(d) {
-    const all = [];
-    for (const t of d.tasks) for (const e of histEvents(t)) all.push({ ...e, tag: t.id });
-    for (const l of d.lines) all.push({ ts: l.ts, who: l.from, kind: 'line', text: `💬 ${l.to ? `→ ${label(l.to)}: ` : ''}${l.body}` });
-    if (!all.length) return '<div class="hx-empty">ไม่มีเหตุการณ์</div>';
-    all.sort((a, b) => a.ts - b.ts);
-    let day = '';
-    return all.map(e => {
-        const dd = histDay(e.ts);
-        const sep = dd !== day ? `<div class="day">${esc(dd)}</div>` : '';
-        day = dd;
-        return sep + evRow(e, e.tag);
+/** Re-draw ONE row (an expand, or its story arriving) without touching the rest. */
+function refreshTopicRow(id) {
+    const li = document.querySelector(`#hist-detail .ht[data-id="${CSS.escape(id)}"]`);
+    const t = histTopic(id);
+    if (li && t) li.outerHTML = histRow(t);
+}
+
+function histPager(page, pages) {
+    if (pages <= 1) return '';
+    const b = (p, txt, title) => `<button type="button" class="hbtn" data-page="${p}"${p < 1 || p > pages || p === page ? ' disabled' : ''} title="${title}">${txt}</button>`;
+    return `<span class="hx-pager">${b(1, '«', 'หน้าแรก')}${b(page - 1, '‹', 'ก่อนหน้า')}`
+        + `<span class="hx-pg">${page} / ${pages}</span>${b(page + 1, '›', 'ถัดไป')}${b(pages, '»', 'หน้าสุดท้าย')}</span>`;
+}
+
+function histTasks(d) {
+    const all = histTopicList(d);
+    if (!all.length) return '<div class="hx-empty">ไม่มีงานในโปรเจคนี้แล้ว</div>';
+    const f = HIST_FILTERS.find(x => x[0] === HIST.filter) || HIST_FILTERS[0];
+    const list = all.filter(f[2]).sort((a, b) => HIST.order === 'new' ? b.updated - a.updated : a.created - b.created);
+    const pages = Math.max(1, Math.ceil(list.length / HIST_PAGE));
+    HIST.page = Math.min(Math.max(1, HIST.page), pages);
+    const slice = list.slice((HIST.page - 1) * HIST_PAGE, HIST.page * HIST_PAGE);
+    const chips = HIST_FILTERS.map(([k, th, fn]) => {
+        const n = all.filter(fn).length;
+        return n || k === 'all' ? `<button type="button" class="hbtn${HIST.filter === k ? ' on' : ''}" data-filter="${k}">${th} ${n}</button>` : '';
     }).join('');
+    const bar = `<div class="hx-bar-top">${chips}`
+        + `<button type="button" class="hbtn" data-order="1" title="สลับลำดับ">${HIST.order === 'new' ? '⇣ ล่าสุดก่อน' : '⇡ เก่าสุดก่อน'}</button>`
+        + histPager(HIST.page, pages) + `</div>`;
+    const body = slice.length ? `<ol>${slice.map(histRow).join('')}</ol>` : '<div class="hx-empty">ไม่มีหัวข้อในตัวกรองนี้</div>';
+    const foot = pages > 1
+        ? `<div class="hx-bar-bot">แสดง ${(HIST.page - 1) * HIST_PAGE + 1}–${(HIST.page - 1) * HIST_PAGE + slice.length} จาก ${list.length}${histPager(HIST.page, pages)}</div>`
+        : '';
+    return bar + body + foot;
+}
+
+// ── the whole project as one line you scroll along ───────────────────
+//
+// Owner (2026-10-10): "ไทม์ไลน์ใช้แบบเป็นเส้นเดียวเลื่อนไปด้วยๆ เป็นกราฟฟิคได้ไหม".
+// One rail, every topic a stop on it in the order it started, its title on a
+// card that alternates above and below on three heights so neighbours never
+// collide. Work comes in bursts, so time is not linear: inside a burst a
+// minute is a few pixels (never closer than HIST_MIN_GAP between stops), and
+// an idle stretch longer than HIST_IDLE becomes a zig-zag break that says how
+// long the room was quiet. The rail draws itself in, the stops pop on one
+// after another, open work pulses; wheel, drag or the arrow buttons move
+// along it, and it opens at the latest. A stop opens its story below —
+// fetched then, and only that one.
+
+const HIST_STATUS_COLOR = { done: '#6fcf97', dropped: '#9a6a66', blocked: '#e0a86a', talk: '#7f9cc7', open: '#9f9c94', assigned: '#c8c4b8', doing: '#d8b978' };
+const HIST_IDLE = 90 * 60e3;
+const HIST_MIN_GAP = 30;        // px between two stops, however close in time
+const HIST_PX_PER_MIN = 2.2;    // inside a burst
+const HIST_BREAK_W = 64;        // an idle stretch, whatever its length
+const HIST_CARD_W = 168;
+const HIST_SLOTS = [-1, 1, -2, 2, -3, 3];   // above/below, three heights
+
+function histColor(t) {
+    if (t.kind === 'talk') return HIST_STATUS_COLOR.talk;
+    if (t.paused) return HIST_STATUS_COLOR.blocked;
+    return HIST_STATUS_COLOR[t.status] || HIST_STATUS_COLOR.open;
+}
+
+function histRailModel(d) {
+    if (d._rail) return d._rail;
+    const topics = [...histTopicList(d)].sort((a, b) => (a.created || a.updated) - (b.created || b.updated));
+    const stops = [];
+    const breaks = [];
+    const days = [];
+    let x = 70, prevTs = null, prevDay = '';
+    topics.forEach((t, i) => {
+        const ts = t.created || t.updated;
+        if (prevTs != null) {
+            const gap = ts - prevTs;
+            if (gap > HIST_IDLE) {
+                breaks.push({ x: x + HIST_MIN_GAP / 2 + HIST_BREAK_W / 2, idle: gap });
+                x += HIST_MIN_GAP + HIST_BREAK_W;
+            } else x += Math.max(HIST_MIN_GAP, (gap / 60e3) * HIST_PX_PER_MIN);
+        }
+        const day = new Date(ts).toDateString();
+        if (day !== prevDay) { days.push({ x, ts }); prevDay = day; }
+        stops.push({ t, x, ts, slot: HIST_SLOTS[i % HIST_SLOTS.length], i });
+        prevTs = ts;
+    });
+    return (d._rail = { stops, breaks, days, width: x + HIST_CARD_W / 2 + 60 });
+}
+
+function histChart(d) {
+    const topics = histTopicList(d);
+    if (!topics.length) return '<div class="hx-empty">ไม่มีหัวข้อในโปรเจคนี้</div>';
+    const m = histRailModel(d);
+    const H = 330, Y = H / 2, LEVEL = 44, CARD_H = 34;
+    const now = Date.now();
+    // Most of a project's titles open with the same tag ("กรุงศรี: …"); on a
+    // 168 px card that tag is all you would read, so it goes when it is common.
+    const tags = {};
+    for (const t of topics) { const mm = /^([^:：]{1,24})[:：]\s+/.exec(t.title); if (mm) tags[mm[1]] = (tags[mm[1]] || 0) + 1; }
+    const [tag, tagN] = Object.entries(tags).sort((a, b) => b[1] - a[1])[0] || ['', 0];
+    const short = s => tag && tagN >= topics.length * 0.3 && s.startsWith(tag) ? s.replace(/^[^:：]{1,24}[:：]\s+/, '') : s;
+
+    const dayMarks = m.days.map(dm => {
+        const txt = new Date(dm.ts).toLocaleDateString('th-TH', { weekday: 'short', day: 'numeric', month: 'short' });
+        return `<g class="hx-day" transform="translate(${dm.x},${Y})"><line y1="-${H / 2 - 14}" y2="${H / 2 - 14}"/>`
+            + `<rect x="-2" y="${-H / 2 + 2}" width="${txt.length * 6 + 12}" height="15" rx="7"/>`
+            + `<text x="4" y="${-H / 2 + 13}">${esc(txt)}</text></g>`;
+    }).join('');
+    const breakMarks = m.breaks.map(b =>
+        `<g class="hx-break" transform="translate(${b.x},${Y})">`
+        + `<rect x="${-HIST_BREAK_W / 2 + 6}" y="-9" width="${HIST_BREAK_W - 12}" height="18" rx="9"/>`
+        + `<path d="M-14,0 l5,-6 l6,12 l6,-12 l6,12 l5,-6"/>`
+        + `<text y="24">ว่าง ${esc(histSpan(b.idle))}</text></g>`).join('');
+
+    const stops = m.stops.map(s => {
+        const t = s.t;
+        const live = histLive(t);
+        const color = histColor(t);
+        const above = s.slot < 0;
+        const lv = Math.abs(s.slot);
+        const cy = above ? -(LEVEL * lv) - CARD_H / 2 + 6 : LEVEL * lv - CARD_H / 2 - 6;
+        const stem = above ? -(LEVEL * lv) + 6 : LEVEL * lv - 6;
+        const st = short(t.title);
+        const title = st.length > 26 ? st.slice(0, 25) + '…' : st;
+        const span = live ? 'ยังไม่จบ' : histSpan((t.updated || t.created) - t.created);
+        const sub = `${new Date(s.ts).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} · ${t.kind === 'talk' ? `${t.lines} ข้อความ` : span}`;
+        const who = t.assignee ? label(t.assignee) : (t.agents || []).map(a => label(a)).join(', ');
+        const tip = `${t.title}\n${t.kind === 'talk' ? 'คุยในห้อง' : taskState(t).th} · ${histWhen(t.created)} → ${live ? 'ยังไม่จบ' : histWhen(t.updated)}`
+            + `${who ? ` · ${who}` : ''}${t.steps ? ` · ${t.steps} ขั้น` : ''}${t.lines ? ` · ${t.lines} ข้อความ` : ''}`;
+        return `<g class="hx-stop${live ? ' live' : ''}${HIST.focus === t.id ? ' sel' : ''}" data-bar="${esc(t.id)}" tabindex="0"`
+            + ` transform="translate(${s.x},${Y})" style="--i:${Math.min(s.i, 90)};--c:${color}">`
+            + `<line class="hx-stem" y1="0" y2="${stem}"/>`
+            // Position on the OUTER group, animation on the inner one: a CSS
+            // transform animation replaces an SVG transform attribute, which
+            // put every card back on the rail.
+            + `<g transform="translate(${-HIST_CARD_W / 2},${cy})"><g class="hx-card">`
+            + `<rect width="${HIST_CARD_W}" height="${CARD_H}" rx="7"/><rect class="hx-card-edge" width="4" height="${CARD_H}" rx="2"/>`
+            + `<text class="hx-card-t" x="11" y="14">${esc(title)}</text>`
+            + `<text class="hx-card-s" x="11" y="27">${esc(sub)}${who ? ` · ` : ''}<tspan class="hx-card-who" style="fill:${t.assignee ? agentColor(t.assignee) : 'var(--ink-dim)'}">${esc(who)}</tspan></text></g></g>`
+            + (live ? '<circle class="hx-ring" r="7"/>' : '')
+            + `<circle class="hx-dot" r="${t.kind === 'talk' ? 4.5 : 6}"/><title>${esc(tip)}</title></g>`;
+    }).join('');
+
+    const last = m.stops[m.stops.length - 1];
+    const nowMark = now - last.ts < HIST_IDLE
+        ? `<g class="hx-nowmark" transform="translate(${m.width - 46},${Y})"><circle r="4"/><text y="-10">ตอนนี้</text></g>` : '';
+
+    return histOverview(d)
+        + `<div class="hx-railbar"><button type="button" class="hbtn" data-rail="start" title="ไปต้นเรื่อง">⏮ ต้นเรื่อง</button>`
+        + `<button type="button" class="hbtn" data-rail="back" title="ถอยหลัง">◀</button>`
+        + `<span class="hx-railhint">เลื่อนล้อเมาส์หรือลากเพื่อเดินตามเส้น · กดจุดเพื่อกางเรื่องนั้น</span>`
+        + `<button type="button" class="hbtn" data-rail="fwd" title="เดินหน้า">▶</button>`
+        + `<button type="button" class="hbtn" data-rail="end" title="ไปล่าสุด">ล่าสุด ⏭</button></div>`
+        + `<div class="hx-rail" tabindex="0"><svg width="${m.width}" height="${H}" role="img" aria-label="เส้นเวลาของโปรเจค">`
+        // userSpaceOnUse: a horizontal line has a zero-height bounding box, and
+        // an objectBoundingBox gradient on it is simply not painted.
+        + `<defs><linearGradient id="hx-railgrad" gradientUnits="userSpaceOnUse" x1="20" x2="${m.width - 20}" y1="0" y2="0"><stop offset="0" stop-color="#d8b978" stop-opacity=".15"/>`
+        + `<stop offset=".08" stop-color="#d8b978" stop-opacity=".85"/><stop offset="1" stop-color="#7fc8d8" stop-opacity=".85"/></linearGradient></defs>`
+        + dayMarks
+        + `<line class="hx-railline" x1="20" x2="${m.width - 20}" y1="${Y}" y2="${Y}" pathLength="1"/>`
+        + breakMarks + stops + nowMark + `</svg></div>`
+        + `<div id="hx-focus">${histFocusBox()}</div>`;
+}
+
+/** After a timeline render: wheel and drag move along the rail; open at the latest. */
+function wireRail() {
+    const rail = document.querySelector('#hist-detail .hx-rail');
+    if (!rail || rail.dataset.wired) return;
+    rail.dataset.wired = '1';
+    rail.scrollLeft = rail.scrollWidth;
+    rail.addEventListener('wheel', (e) => {
+        if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+        e.preventDefault();
+        rail.scrollLeft += e.deltaY;
+    }, { passive: false });
+    let drag = null;
+    rail.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0 || e.target.closest('[data-bar]')) return;
+        drag = { x: e.clientX, left: rail.scrollLeft };
+        rail.setPointerCapture(e.pointerId);
+        rail.classList.add('dragging');
+    });
+    rail.addEventListener('pointermove', (e) => { if (drag) rail.scrollLeft = drag.left - (e.clientX - drag.x); });
+    const stop = () => { drag = null; rail.classList.remove('dragging'); };
+    rail.addEventListener('pointerup', stop);
+    rail.addEventListener('pointercancel', stop);
+}
+
+function railJump(where) {
+    const rail = document.querySelector('#hist-detail .hx-rail');
+    if (!rail) return;
+    const step = rail.clientWidth * 0.8;
+    const to = where === 'start' ? 0 : where === 'end' ? rail.scrollWidth
+        : rail.scrollLeft + (where === 'back' ? -step : step);
+    rail.scrollTo({ left: to, behavior: 'smooth' });
+}
+
+/** Bring a stop into view on the rail (chips above, keyboard). */
+function railReveal(id) {
+    const rail = document.querySelector('#hist-detail .hx-rail');
+    const stop = HIST.detail?._rail?.stops.find(s => s.t.id === id);
+    if (rail && stop) rail.scrollTo({ left: Math.max(0, stop.x - rail.clientWidth / 2), behavior: 'smooth' });
+}
+
+/** The chart's summary: what the project is, in numbers, and where to look. */
+function histOverview(d) {
+    const all = histTopicList(d);
+    const firstTs = Math.min(...all.map(t => t.created || t.updated));
+    const lastTs = Math.max(...all.map(t => t.updated || t.created));
+    const tasks = all.filter(t => t.kind === 'task');
+    const n = s => tasks.filter(t => t.status === s).length;
+    const live = tasks.filter(histLive).length;
+    const talk = all.length - tasks.length;
+    const longest = [...tasks].sort((a, b) => (b.updated - b.created) - (a.updated - a.created)).slice(0, 3);
+    const latest = [...all].sort((a, b) => b.updated - a.updated).slice(0, 3);
+    const chip = t => `<button type="button" class="hx-chip" data-bar="${esc(t.id)}" title="${esc(t.title)}">${esc(t.title.length > 34 ? t.title.slice(0, 33) + '…' : t.title)}</button>`;
+    const agents = {};
+    for (const t of tasks) if (t.assignee) agents[t.assignee] = (agents[t.assignee] || 0) + 1;
+    const who = Object.entries(agents).sort((a, b) => b[1] - a[1])
+        .map(([a, c]) => `<span class="hx-agent" style="--pc:${agentColor(a)}">${esc(label(a))} ${c}</span>`).join('');
+    return `<div class="hx-over">`
+        + `<div class="hx-stats"><span class="hx-stat"><b>${all.length}</b> หัวข้อ</span>`
+        + `<span class="hx-stat ok"><b>${n('done')}</b> เสร็จ</span>`
+        + (live ? `<span class="hx-stat live"><b>${live}</b> ยังไม่จบ</span>` : '')
+        + (n('dropped') ? `<span class="hx-stat bad"><b>${n('dropped')}</b> ยกเลิก</span>` : '')
+        + (talk ? `<span class="hx-stat talk"><b>${talk}</b> วงคุย</span>` : '')
+        + `<span class="hx-stat"><b>${histSpan(lastTs - firstTs)}</b> ทั้งเรื่อง</span>${who ? `<span class="hx-who">${who}</span>` : ''}</div>`
+        + (longest.length ? `<div class="hx-hl"><span class="hx-hlh">⏳ ใช้เวลานานสุด</span>${longest.map(chip).join('')}</div>` : '')
+        + `<div class="hx-hl"><span class="hx-hlh">🕒 ล่าสุด</span>${latest.map(chip).join('')}</div>`
+        + `<div class="hx-legend"><i style="--c:${HIST_STATUS_COLOR.done}"></i>เสร็จ<i class="pulse" style="--c:var(--accent)"></i>กำลังทำ`
+        + `<i style="--c:${HIST_STATUS_COLOR.blocked}"></i>ติด<i style="--c:${HIST_STATUS_COLOR.dropped}"></i>ยกเลิก<i style="--c:${HIST_STATUS_COLOR.talk}"></i>คุยในห้อง`
+        + `<span class="hx-legend-tip">กดจุดบนเส้นเพื่อกางเรื่องนั้น</span></div></div>`;
+}
+
+/** The topic opened from the chart, under it. */
+function histFocusBox() {
+    const t = HIST.focus ? histTopic(HIST.focus) : null;
+    if (!t) return '<div class="hx-empty hx-hint">เลือกจุดบนเส้น หรือหัวข้อด้านบน — ระบบจะโหลดเฉพาะเรื่องนั้นมาให้</div>';
+    const talk = t.kind === 'talk';
+    const st = talk ? { ico: '💬', th: 'คุยในห้อง' } : taskState(t);
+    const live = histLive(t);
+    return `<div class="hx-focus-card st-${esc(t.status)}">`
+        + `<div class="hx-focus-head"><span class="ico">${st.ico}</span><span class="hx-focus-title">${esc(t.title)}</span>`
+        + `<button type="button" class="hbtn" data-unfocus="1" title="พับ">×</button></div>`
+        + `<div class="ht-sub">${talk ? '' : `${esc(t.id)} · `}${esc(st.th)} · ${esc(histWhen(t.created))} → ${live ? 'ยังไม่จบ' : esc(histWhen(t.updated))}`
+        + ` (${histSpan((live ? Date.now() : t.updated) - t.created)})${t.assignee ? ` · <span class="who" style="--pc:${agentColor(t.assignee)}">${esc(label(t.assignee))}</span>` : ''}</div>`
+        + `<div class="ht-more">${histTopicStory(t)}</div></div>`;
+}
+
+function refreshFocus() {
+    const f = document.getElementById('hx-focus');
+    if (f) f.innerHTML = histFocusBox();
+    document.querySelectorAll('#hist-detail .hx-stop').forEach(g => g.classList.toggle('sel', g.dataset.bar === HIST.focus));
+}
+
+function focusTopic(id) {
+    HIST.focus = HIST.focus === id ? null : id;
+    if (HIST.focus) { requestTopic(HIST.focus); railReveal(HIST.focus); }
+    refreshFocus();
+    if (HIST.focus) document.getElementById('hx-focus')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
 document.getElementById('room-history')?.addEventListener('click', () => {
@@ -4025,11 +4332,33 @@ document.getElementById('hist-detail')?.addEventListener('click', (e) => {
         post({ type: 'officeHistorySummary', project: HIST.sel });
         return;
     }
+    const pg = e.target.closest('button[data-page]');
+    if (pg && !pg.disabled) {
+        HIST.page = Number(pg.dataset.page) || 1;
+        renderHistory();
+        document.getElementById('hist-detail')?.scrollTo({ top: 0 });
+        return;
+    }
+    const fl = e.target.closest('button[data-filter]');
+    if (fl) { HIST.filter = fl.dataset.filter; HIST.page = 1; renderHistory(); return; }
+    if (e.target.closest('button[data-order]')) {
+        HIST.order = HIST.order === 'new' ? 'old' : 'new';
+        HIST.page = 1;
+        renderHistory();
+        return;
+    }
+    if (e.target.closest('button[data-unfocus]')) { focusTopic(HIST.focus); return; }
+    const rj = e.target.closest('button[data-rail]');
+    if (rj) { railJump(rj.dataset.rail); return; }
+    const bar = e.target.closest('[data-bar]');
+    if (bar) { focusTopic(bar.dataset.bar); return; }
     const tg = e.target.closest('[data-toggle]');
     if (tg) {
+        // Only this row changes, and only this topic is fetched.
         const id = tg.dataset.toggle;
-        if (HIST.open.has(id)) HIST.open.delete(id); else HIST.open.add(id);
-        renderHistory();
+        if (HIST.open.has(id)) HIST.open.delete(id);
+        else { HIST.open.add(id); requestTopic(id); }
+        refreshTopicRow(id);
         return;
     }
     const brain = '\n\nลบเฉพาะบันทึกของห้อง (งานและข้อความในห้องที่ผูกกับมัน) — เก็บในถังขยะของห้อง 30 วันแล้วลบถาวร\nโน้ตที่ agent เขียนไว้ในสมองไม่ถูกลบ';
@@ -4053,6 +4382,10 @@ document.getElementById('hist-detail')?.addEventListener('click', (e) => {
         renderHistory();
         post({ type: 'officeHistoryDelete', project: p.key, show: HIST.sel });
     }
+});
+document.getElementById('hist-detail')?.addEventListener('keydown', (e) => {
+    const bar = e.target.closest?.('g[data-bar]');
+    if (bar && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); focusTopic(bar.dataset.bar); }
 });
 document.addEventListener('click', (e) => {
     if (!clickedInside(e, '#history-panel, #room-history')) closeHistory();

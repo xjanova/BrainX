@@ -336,6 +336,94 @@ body {
 #hist-detail .ev.line .what { color: var(--ink); }
 #hist-detail .ev .tag { color: var(--accent); font-size: 9px; margin-right: 4px; }
 #hist-detail .day { color: var(--ink); font-weight: 600; font-size: 10px; margin: 8px 0 2px; border-bottom: 1px solid rgba(242,239,230,0.08); }
+/* ── history: paged topics, lazy stories, the animated chart (2026-10-10) ── */
+#hist-detail .hx-bar-top, #hist-detail .hx-bar-bot { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 2px 0 6px; }
+#hist-detail .hx-bar-bot { margin: 8px 0 2px; color: var(--ink-faint); font-size: 9.5px; justify-content: space-between; }
+#hist-detail .hx-pager { display: inline-flex; align-items: center; gap: 2px; margin-left: auto; }
+#hist-detail .hx-pg { color: var(--ink-dim); font-size: 10px; padding: 0 6px; font-variant-numeric: tabular-nums; }
+#hist-detail .ht.talk { border-left-color: rgba(127,156,199,0.7); }
+#hist-detail .hx-loading { display: flex; align-items: center; gap: 6px; color: var(--ink-faint); padding: 4px 0; }
+#hist-detail .hx-spin { width: 10px; height: 10px; border-radius: 50%; border: 2px solid rgba(216,185,120,0.25); border-top-color: var(--accent); animation: hx-spin .8s linear infinite; }
+@keyframes hx-spin { to { transform: rotate(360deg); } }
+
+#hist-detail .hx-over { display: grid; gap: 5px; margin-bottom: 8px; animation: hx-fade .4s ease both; }
+#hist-detail .hx-stats { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+#hist-detail .hx-stat { padding: 3px 8px; border-radius: 999px; background: rgba(242,239,230,0.05); border: 1px solid rgba(242,239,230,0.08); color: var(--ink-dim); font-size: 10px; }
+#hist-detail .hx-stat b { color: var(--ink); font-size: 12px; margin-right: 2px; font-variant-numeric: tabular-nums; }
+#hist-detail .hx-stat.ok b { color: #6fcf97; }
+#hist-detail .hx-stat.live b { color: var(--accent); }
+#hist-detail .hx-stat.bad b { color: #e0938c; }
+#hist-detail .hx-stat.talk b { color: #9db6dc; }
+#hist-detail .hx-who { display: inline-flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+#hist-detail .hx-agent { color: var(--pc); font-weight: 600; font-size: 10px; }
+#hist-detail .hx-hl { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+#hist-detail .hx-hlh { color: var(--ink-faint); font-size: 9.5px; margin-right: 2px; }
+#hist-detail .hx-chip { appearance: none; font: inherit; font-size: 10px; cursor: pointer; color: var(--ink-dim); background: rgba(12,15,21,0.55);
+    border: 1px solid rgba(216,185,120,0.22); border-radius: 999px; padding: 1px 8px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#hist-detail .hx-chip:hover { border-color: var(--accent); color: var(--ink); }
+#hist-detail .hx-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--ink-faint); font-size: 9.5px; }
+#hist-detail .hx-legend i { display: inline-block; width: 14px; height: 7px; border-radius: 3px; background: var(--c); margin-right: -4px; }
+#hist-detail .hx-legend i.pulse { animation: hx-glow 1.8s ease-in-out infinite alternate; }
+#hist-detail .hx-legend-tip { margin-left: auto; color: var(--accent); opacity: .8; }
+
+#hist-detail .hx-railbar { display: flex; align-items: center; gap: 4px; margin: 2px 0 4px; }
+#hist-detail .hx-railhint { flex: 1; text-align: center; color: var(--ink-faint); font-size: 9.5px; }
+#hist-detail .hx-rail { overflow-x: auto; overflow-y: hidden; border: 1px solid rgba(242,239,230,0.07); border-radius: 10px; cursor: grab;
+    background: radial-gradient(90% 120% at 50% 50%, rgba(216,185,120,0.07), transparent 60%),
+                linear-gradient(180deg, rgba(8,10,15,0.35), rgba(8,10,15,0.7)); scrollbar-width: thin; outline: none; }
+#hist-detail .hx-rail.dragging { cursor: grabbing; user-select: none; }
+#hist-detail .hx-rail svg { display: block; font-family: inherit; }
+#hist-detail .hx-railline { stroke: url(#hx-railgrad); stroke-width: 3; stroke-linecap: round;
+    stroke-dasharray: 1; stroke-dashoffset: 1; animation: hx-draw 1.6s cubic-bezier(.4,0,.2,1) .1s forwards; }
+#hist-detail .hx-day line { stroke: rgba(242,239,230,0.07); stroke-dasharray: 2 4; }
+#hist-detail .hx-day rect { fill: rgba(216,185,120,0.14); stroke: rgba(216,185,120,0.35); }
+#hist-detail .hx-day text { fill: var(--ink); font-size: 9.5px; font-weight: 600; }
+#hist-detail .hx-day { animation: hx-fadein .5s ease .2s both; }
+#hist-detail .hx-break rect { fill: rgba(8,10,15,0.95); stroke: rgba(216,185,120,0.3); }
+#hist-detail .hx-break path { fill: none; stroke: rgba(216,185,120,0.75); stroke-width: 1.4; stroke-linejoin: round; }
+#hist-detail .hx-break text { fill: rgba(216,185,120,0.7); font-size: 8.5px; text-anchor: middle; }
+#hist-detail .hx-break { animation: hx-fadein .5s ease .5s both; }
+#hist-detail .hx-stop { cursor: pointer; outline: none; }
+#hist-detail .hx-stop .hx-stem, #hist-detail .hx-stop .hx-card, #hist-detail .hx-stop .hx-dot {
+    animation: hx-pop .45s cubic-bezier(.3,1.5,.5,1) both; animation-delay: calc(var(--i) * 14ms + 250ms); transform-box: fill-box; transform-origin: center; }
+#hist-detail .hx-stop .hx-stem { stroke: var(--c); stroke-opacity: .45; stroke-width: 1.2; stroke-dasharray: 2 2; }
+#hist-detail .hx-stop .hx-card rect { fill: rgba(16,19,27,0.92); stroke: rgba(242,239,230,0.1); }
+#hist-detail .hx-stop .hx-card .hx-card-edge { fill: var(--c); stroke: none; }
+#hist-detail .hx-card-t { fill: var(--ink); font-size: 10px; font-weight: 600; }
+#hist-detail .hx-card-s { fill: var(--ink-faint); font-size: 8.5px; }
+#hist-detail .hx-card-who { font-weight: 600; }
+#hist-detail .hx-stop .hx-dot { fill: var(--c); stroke: #0b0d12; stroke-width: 2.5; transition: r .15s; }
+#hist-detail .hx-stop .hx-ring { fill: none; stroke: var(--c); stroke-width: 2; transform-box: fill-box; transform-origin: center;
+    animation: hx-ring 1.8s ease-out 1.2s infinite; }
+#hist-detail .hx-stop:hover .hx-card rect, #hist-detail .hx-stop:focus-visible .hx-card rect { stroke: var(--c); }
+#hist-detail .hx-stop:hover .hx-dot { r: 8; }
+#hist-detail .hx-stop.sel .hx-card rect { stroke: var(--accent); stroke-width: 1.6; fill: rgba(40,34,22,0.95); }
+#hist-detail .hx-stop.sel .hx-dot { stroke: var(--accent); r: 8; }
+#hist-detail .hx-nowmark circle { fill: var(--accent); animation: hx-ring 1.6s ease-out infinite; transform-box: fill-box; transform-origin: center; }
+#hist-detail .hx-nowmark text { fill: var(--accent); font-size: 9px; text-anchor: middle; }
+@keyframes hx-draw { to { stroke-dashoffset: 0; } }
+/* Opacity only: these groups are placed by an SVG transform attribute, which a
+   CSS transform animation would replace (it put every mark at x = 0). */
+@keyframes hx-fadein { from { opacity: 0; } to { opacity: 1; } }
+@keyframes hx-pop { from { opacity: 0; transform: scale(.4); } to { opacity: 1; transform: scale(1); } }
+@keyframes hx-ring { 0% { opacity: .9; transform: scale(1); } 100% { opacity: 0; transform: scale(2.6); } }
+@keyframes hx-glow { from { filter: drop-shadow(0 0 0 var(--c)); } to { filter: drop-shadow(0 0 5px var(--c)); } }
+@keyframes hx-fade { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+
+#hist-detail #hx-focus { margin-top: 8px; }
+#hist-detail .hx-hint { padding: 10px 4px; }
+#hist-detail .hx-focus-card { padding: 8px 10px; border: 1px solid rgba(216,185,120,0.25); border-left: 3px solid var(--accent); border-radius: 8px;
+    background: rgba(12,15,21,0.6); animation: hx-fade .3s ease both; }
+#hist-detail .hx-focus-card.st-done { border-left-color: #6fcf97; }
+#hist-detail .hx-focus-card.st-dropped { border-left-color: #9a6a66; }
+#hist-detail .hx-focus-card.st-talk { border-left-color: #7f9cc7; }
+#hist-detail .hx-focus-head { display: flex; align-items: center; gap: 6px; }
+#hist-detail .hx-focus-title { color: var(--ink); font-weight: 600; font-size: 12px; flex: 1; overflow-wrap: anywhere; }
+#hist-detail .hx-focus-card .ht-sub { padding-left: 20px; }
+@media (prefers-reduced-motion: reduce) {
+    #hist-detail .hx-rail *, #hist-detail .hx-over, #hist-detail .hx-focus-card, #hist-detail .hx-legend i { animation: none !important; }
+}
+
 #hist-note { margin: 6px 0 0; color: #e0b98a; min-height: 1em; }
 #history-panel .hist-foot { margin: 4px 0 0; color: var(--ink-faint); font-size: 9.5px; }
 @media (max-width: 640px) {
