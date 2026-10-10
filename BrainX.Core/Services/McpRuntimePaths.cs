@@ -9,7 +9,8 @@
 //
 // The cause is a REGISTRATION. BrainX.Mcp/McpRuntime.cs already mirrors the
 // shipped server to a stable directory (since 2026-10-10 OUTSIDE the app root,
-// see StableDir - the old %LOCALAPPDATA%\BrainX\mcp was killed on every update)
+// see StableDir - the old %LOCALAPPDATA%\BrainX\mcp was killed on every update,
+// and %LOCALAPPDATA%\xjanova only ever existed inside Claude's MSIX package)
 // and every registrar is supposed to hand agents that path. But each
 // registrar only ever asked "is the registered build OUTDATED", and a config
 // pinned to current\mcp holds the SAME version as the mirror, so it read as
@@ -36,6 +37,9 @@ public static class McpRuntimePaths
     /// <summary>Velopack's app root, %LOCALAPPDATA%\BrainX.</summary>
     public static string AppRoot => Path.Combine(LocalAppData, "BrainX");
 
+    private static string UserProfile =>
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
     /// <summary>
     /// The directory agents are registered against: OUTSIDE the app root,
     /// refreshed from the package by `sync-runtime`.
@@ -48,11 +52,31 @@ public static class McpRuntimePaths
     /// release cut the brain out of all of them (14 kill rounds in one day on
     /// 2026-10-09, failed applies included). It also meant the launcher's
     /// hot-swap, which exists so an update never closes a client's pipe, never
-    /// got to run. The vendor folder's name deliberately does not start with
-    /// "BrainX", so it stays outside the root under a plain string-prefix test
-    /// as well as a path-component one.
+    /// got to run.
+    ///
+    /// Then, for one day, it was %LOCALAPPDATA%\xjanova\brainx-mcp
+    /// (<see cref="PreviousStableDir"/>), and Codex lost the brain entirely:
+    /// "MCP server startup failed … The system cannot find the path specified.
+    /// (os error 3)". The folder never existed. Claude Desktop and Codex are
+    /// MSIX packages, and every process they start runs in their package
+    /// context: Claude Code, the brainx-mcp it spawns, and the BrainX window
+    /// that brainx-mcp opens with `cmd /c start`. In that context a NEW
+    /// top-level folder under %LOCALAPPDATA% or %APPDATA% is redirected into
+    /// the package's private store. The sync-runtime that made xjanova ran in
+    /// Claude's context, so the mirror landed in
+    /// Packages\Claude_…\LocalCache\Local\xjanova — visible to Claude, absent
+    /// for Codex and for any process outside Claude. Measured 2026-10-10: a
+    /// WMI-started process (outside every package) and Codex's package both
+    /// found no xjanova, both found BrainX\mcp and anything under the profile
+    /// root; a sub-folder made inside an EXISTING folder was real as well.
+    /// No MCP also meant nobody opened the BrainX window from Codex.
+    ///
+    /// The profile root is not an AppData folder, so no package redirects it,
+    /// whoever creates the mirror. `.brainx` is outside %LOCALAPPDATA%\BrainX
+    /// under both a path-component and a plain string-prefix test, and already
+    /// holds BrainX's secrets.
     /// </summary>
-    public static string StableDir => Path.Combine(LocalAppData, "xjanova", "brainx-mcp");
+    public static string StableDir => Path.Combine(UserProfile, ".brainx", "mcp");
 
     /// <summary>The MCP binary at <see cref="StableDir"/>. May not exist yet on
     /// a machine whose first mirror has not run.</summary>
@@ -61,6 +85,28 @@ public static class McpRuntimePaths
     /// <summary>Where the mirror lived before 2026-10-10. Inside the app root,
     /// so anything still registered here is killed on every update.</summary>
     public static string LegacyStableDir => Path.Combine(AppRoot, "mcp");
+
+    /// <summary>Where the mirror lived on 2026-10-10: outside the app root, but
+    /// a new top-level %LOCALAPPDATA% folder, so whichever package's context
+    /// created it kept it to itself (see <see cref="StableDir"/>).</summary>
+    public static string PreviousStableDir => Path.Combine(LocalAppData, "xjanova", "brainx-mcp");
+
+    /// <summary>
+    /// True when an agent registered at <paramref name="path"/> must be moved:
+    /// it is under the updater root (killed on every update) or in the
+    /// 2026-10-10 mirror (real only inside one package). This is the question
+    /// every registrar asks; <see cref="IsInsideUpdaterRoot"/> is only half of it.
+    /// </summary>
+    public static bool IsRetiredLocation(string? path)
+    {
+        if (IsInsideUpdaterRoot(path)) return true;
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        var n = path.Replace('/', '\\');
+        if (!n.EndsWith('\\')) n += '\\';
+        var previous = PreviousStableDir.TrimEnd('\\') + "\\";
+        return n.StartsWith(previous, StringComparison.OrdinalIgnoreCase)
+            || n.Contains("\\AppData\\Local\\xjanova\\brainx-mcp\\", StringComparison.OrdinalIgnoreCase);
+    }
 
     /// <summary>
     /// True when <paramref name="path"/> is anywhere under Velopack's app root

@@ -97,7 +97,12 @@ public partial class MainWindow
         string? Respawn = null,
         // Which registration points at that file, so the advice can name the
         // thing to edit instead of leaving the owner to grep their configs.
-        string? Scope = null);
+        string? Scope = null,
+        // No registration names the file it runs from any more, and that file
+        // is somewhere no agent may be registered: its registration was moved
+        // after the session started. A restart spawns what the registration
+        // names NOW, so this is exactly the case a restart fixes.
+        bool Repointed = false);
 
     /// <summary>Stale MCP servers found on the last check, newest first.</summary>
     private List<McpProc> _staleMcp = new();
@@ -162,6 +167,11 @@ public partial class MainWindow
             // re-read file metadata per entry. The registration list is read
             // once for the whole sweep rather than once per stale server.
             var registrations = ReadMcpRegistrations();
+            // Moved first, judged second: a registration left in a retired
+            // place is the one cause of a pinned agent this app can fix by
+            // itself, and judging before fixing is how the banner kept saying
+            // "a restart will not help" about a config BrainX owns.
+            if (HealRetiredRegistrations(registrations)) registrations = ReadMcpRegistrations();
             stale = stale.Select(s => WithRespawn(s, registrations)).ToList();
         }
         catch (Exception ex)
@@ -177,7 +187,7 @@ public partial class MainWindow
         // moment deploy-mcp.ps1 rewrites the file an agent is pinned to, the
         // advice flips from "rebuild" to "restart" with no pid changing at all.
         static string Sig(IEnumerable<McpProc> l) => string.Join("|",
-            l.Select(s => $"{s.Pid}:{s.Reason}:{s.Version}:{s.Respawn}").OrderBy(s => s, StringComparer.Ordinal));
+            l.Select(s => $"{s.Pid}:{s.Reason}:{s.Version}:{s.Respawn}:{s.Repointed}").OrderBy(s => s, StringComparer.Ordinal));
 
         bool changed = !string.Equals(Sig(stale), Sig(_staleMcp), StringComparison.Ordinal);
         _staleMcp = stale;
@@ -288,6 +298,15 @@ public partial class MainWindow
             // notice, and the first is the one the owner has to look at.
             var scope = registrations.FirstOrDefault(r =>
                 string.Equals(SafeFullPath(r.Exe), self, StringComparison.OrdinalIgnoreCase)).Scope;
+
+            // The file is only the restart preview while a registration still
+            // names it. Claude on 2026-10-10 ran from the old BrainX\mcp copy
+            // (2.9.484) after its config had been moved to the stable one
+            // (2.9.490): this method read the old FILE, called the agent
+            // pinned, and the notice said "a restart will not help" — while
+            // offering no restart — about the one case a restart fixes.
+            if (scope is null && BrainX.Core.Services.McpRuntimePaths.IsRetiredLocation(self))
+                return s with { Repointed = true };
             return s with { Respawn = version, Scope = scope };
         }
         catch (Exception ex)
@@ -356,7 +375,102 @@ public partial class MainWindow
         }
         catch (Exception ex) { Debug.WriteLine($"ReadMcpRegistrations(desktop): {ex.Message}"); }
 
+        try
+        {
+            // CluadeX is restartable by this app, so an unread registration
+            // here would turn every CluadeX on an old copy into "repointed"
+            // and close it for a respawn that lands on the same copy.
+            var cluadex = CluadeXMcpConfigPath();
+            if (File.Exists(cluadex)
+                && JObject.Parse(File.ReadAllText(cluadex))["mcpServers"]?["brainx-brain"]?["command"]?.ToString() is { Length: > 0 } cmd)
+                found.Add((cmd, "CluadeX"));
+        }
+        catch (Exception ex) { Debug.WriteLine($"ReadMcpRegistrations(cluadex): {ex.Message}"); }
+
+        try
+        {
+            // Codex: the `command` line of [mcp_servers.brainx-brain]. Read
+            // by line rather than parsed — the same reason HealTomlRuntimePaths
+            // never parses this file. Without it a Codex session looked
+            // unregistered, so its staleness could never be judged at all.
+            var home = BrainX.Core.Services.CodexAgentsRulesInstaller.ResolveCodexHome();
+            var toml = home is null ? null : Path.Combine(home, "config.toml");
+            if (toml is not null && File.Exists(toml))
+            {
+                var inSection = false;
+                foreach (var raw in File.ReadLines(toml))
+                {
+                    var line = raw.Trim();
+                    if (line.StartsWith('['))
+                    {
+                        inSection = line.Equals("[mcp_servers.brainx-brain]", StringComparison.OrdinalIgnoreCase);
+                        continue;
+                    }
+                    if (!inSection || !line.StartsWith("command", StringComparison.Ordinal)) continue;
+                    var eq = line.IndexOf('=');
+                    if (eq < 0) continue;
+                    var cmd = line[(eq + 1)..].Trim().Trim('\'', '"');
+                    if (!string.IsNullOrWhiteSpace(cmd)) found.Add((cmd, "Codex"));
+                    break;
+                }
+            }
+        }
+        catch (Exception ex) { Debug.WriteLine($"ReadMcpRegistrations(codex): {ex.Message}"); }
+
         return found;
+    }
+
+    private DateTime _lastRetiredHeal = DateTime.MinValue;
+
+    /// <summary>
+    /// Move every registration this app owns out of a retired location (the
+    /// updater root, or the 2026-10-10 mirror that exists only inside Claude's
+    /// MSIX package).
+    /// True when a config file changed.
+    ///
+    /// Onboarding already does this once, at startup, and on 2026-10-10 that
+    /// was not enough: Claude Desktop was still registered at BrainX\mcp hours
+    /// after a client carrying the fix had started, and the banner was left to
+    /// tell the owner to repoint a config BrainX itself writes. Re-checking on
+    /// the sweep makes a registration that slipped back (or was never moved)
+    /// converge within one sweep instead of one app restart.
+    ///
+    /// The same registrars onboarding uses, so the same opt-out applies, and
+    /// each is a no-op on a healthy config. Throttled, because ResolveBestMcpExe
+    /// may run sync-runtime and a config another program keeps rewriting should
+    /// cost one write every few minutes, not one per sweep.
+    /// </summary>
+    private bool HealRetiredRegistrations(List<(string Exe, string Scope)> registrations)
+    {
+        if (!_mcpAutoRegisterEnabled) return false;
+        if (!registrations.Any(r => BrainX.Core.Services.McpRuntimePaths.IsRetiredLocation(r.Exe))) return false;
+        if (DateTime.UtcNow - _lastRetiredHeal < TimeSpan.FromMinutes(5)) return false;
+        _lastRetiredHeal = DateTime.UtcNow;
+
+        var exe = ResolveBestMcpExe();
+        if (exe is null || BrainX.Core.Services.McpRuntimePaths.IsRetiredLocation(exe)) return false;
+
+        var changed = false;
+        try { changed |= EnsureClaudeDesktopRegistered(exe); }
+        catch (Exception ex) { Debug.WriteLine($"HealRetiredRegistrations(desktop): {ex.Message}"); }
+        try { changed |= EnsureCluadeXRegistered(exe); }
+        catch (Exception ex) { Debug.WriteLine($"HealRetiredRegistrations(cluadex): {ex.Message}"); }
+        changed |= HealCodexRuntimePaths(exe);
+
+        // Claude Code's scopes are moved through its CLI, which is slow and
+        // asynchronous; the next sweep sees the result.
+        if (registrations.Any(r => r.Scope.StartsWith("Claude Code", StringComparison.Ordinal)
+                                   && BrainX.Core.Services.McpRuntimePaths.IsRetiredLocation(r.Exe)))
+            _ = System.Threading.Tasks.Task.Run(async () =>
+            {
+                try
+                {
+                    await EnsureClaudeCliRegisteredAsync(exe);
+                    await EnsureNoStaleProjectScopesAsync(exe);
+                }
+                catch (Exception ex) { Debug.WriteLine($"HealRetiredRegistrations(cli): {ex.Message}"); }
+            });
+        return changed;
     }
 
     /// <summary>
@@ -537,8 +651,10 @@ public partial class MainWindow
         // over it would be the app overruling a choice it cannot see. The
         // automatic restart stays tied to the signal it was asked for: a binary
         // that was overwritten under a live process, and only where a restart
-        // would actually land on something new.
-        var rewritten = _staleMcp.Any(s => s.Reason == StaleReason.BinaryRewritten && !IsPinnedStale(s));
+        // would actually land on something new. A registration moved out of a
+        // retired location counts the same: no one points an agent at the
+        // updater's folder on purpose, and the move is BrainX's own doing.
+        var rewritten = _staleMcp.Any(s => (s.Reason == StaleReason.BinaryRewritten || s.Repointed) && !IsPinnedStale(s));
 
         if (!_autoRestartSpent && _autoRestartTimer == null && any && rewritten)
         {
@@ -609,6 +725,7 @@ public partial class MainWindow
                 ? $"  {s.Agent} · reports v{s.Version} · pid {s.Pid}"
                 : $"  pid {s.Pid} · started {s.Started:HH:mm:ss}");
             if (!string.IsNullOrEmpty(s.Exe)) sb.Append($"\n      from {s.Exe}");
+            if (s.Repointed) sb.Append("\n      its registration now names the stable copy — a restart picks it up");
             if (IsPinnedStale(s))
             {
                 sb.Append($"\n      that file is still v{s.Respawn} — a restart spawns the SAME build");
@@ -911,6 +1028,18 @@ public partial class MainWindow
         // alive it keeps its lock on the old binary and keeps showing up in
         // the next freshness check.
         KillOrphanedStaleServers();
+
+        // Re-assert the registrations in the gap between close and relaunch —
+        // the one moment a client that reads its config only at startup is
+        // sure to read ours. Claude Desktop writes its own preferences into
+        // that same file while it runs, so an edit made while it was open is
+        // not one to count on still being there when it starts.
+        if (_mcpAutoRegisterEnabled && relaunch.Count > 0 && ResolveBestMcpExe() is string best
+            && !BrainX.Core.Services.McpRuntimePaths.IsRetiredLocation(best))
+        {
+            try { EnsureClaudeDesktopRegistered(best); } catch (Exception ex) { Debug.WriteLine($"re-assert desktop: {ex.Message}"); }
+            try { EnsureCluadeXRegistered(best); } catch (Exception ex) { Debug.WriteLine($"re-assert cluadex: {ex.Message}"); }
+        }
 
         foreach (var exe in relaunch.Distinct(StringComparer.OrdinalIgnoreCase))
         {

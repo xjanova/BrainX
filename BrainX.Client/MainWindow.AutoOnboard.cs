@@ -100,9 +100,9 @@ public partial class MainWindow
             // Grok Build's own MCP config: no registrar ever owned it, so it is
             // only ever healed, never added (a missing entry is the owner's call).
             if (HealGrokRuntimePaths(exe))
-                SetOnboardStatus("Grok was pointed at the folder BrainX updates into — moved it to the stable copy.");
+                SetOnboardStatus("Grok was pointed at an old BrainX MCP copy — moved it to the stable one.");
             if (HealGeminiRuntimePath(exe))
-                SetOnboardStatus("Gemini was pointed at the folder BrainX updates into — moved it to the stable copy.");
+                SetOnboardStatus("Gemini was pointed at an old BrainX MCP copy — moved it to the stable one.");
             if (codexPresent)
             {
                 try
@@ -321,10 +321,15 @@ public partial class MainWindow
     /// %LOCALAPPDATA%\BrainX\mcp is NOT renamed by an update, but every process
     /// running from it is killed, so a registration there drops the brain from
     /// its agent on every release. Anything under the app root moves.
+    ///
+    /// So does the 2026-10-10 mirror, %LOCALAPPDATA%\xjanova\brainx-mcp: it
+    /// was created from inside Claude Desktop's MSIX package and exists only
+    /// in that package's private store, so for Codex a registration there is
+    /// an agent with no brain at all.
     /// </summary>
     private static bool PinnedInsideCurrent(string registeredExe, string bestExe) =>
-        BrainX.Core.Services.McpRuntimePaths.IsInsideUpdaterRoot(registeredExe)
-        && !BrainX.Core.Services.McpRuntimePaths.IsInsideUpdaterRoot(bestExe);
+        BrainX.Core.Services.McpRuntimePaths.IsRetiredLocation(registeredExe)
+        && !BrainX.Core.Services.McpRuntimePaths.IsRetiredLocation(bestExe);
 
     /// <summary>
     /// True when the registered exe is a strictly OLDER build than the best
@@ -574,10 +579,18 @@ public partial class MainWindow
     /// normal launch, so an in-progress `claude` session is never disturbed.
     /// No-ops silently when the CLI isn't installed.
     /// </summary>
+    /// <summary>One `claude mcp` remove/add sequence at a time. Onboarding and
+    /// the freshness sweep (HealRetiredRegistrations) can both decide the same
+    /// registration needs moving within seconds of startup; interleaved, one
+    /// run's remove lands between the other's remove and add. Serialized, the
+    /// second run finds the entry already healthy and does nothing.</summary>
+    private static readonly SemaphoreSlim ClaudeCliGate = new(1, 1);
+
     private async Task<bool> EnsureClaudeCliRegisteredAsync(string exe)
     {
         if (FindClaudeCli() is null) return false;   // CLI not installed → nothing to do
 
+        await ClaudeCliGate.WaitAsync();
         try
         {
             var (_, listOut, _) = await RunClaudeCliAsync("mcp", "list");
@@ -604,6 +617,7 @@ public partial class MainWindow
         {
             return false;   // CLI flaked — fallback is the manual button
         }
+        finally { ClaudeCliGate.Release(); }
     }
 
     /// <summary>
@@ -639,6 +653,7 @@ public partial class MainWindow
         if (FindClaudeCli() is null) return false;
 
         var changed = false;
+        await ClaudeCliGate.WaitAsync();
         try
         {
             var path = Path.Combine(
@@ -675,6 +690,7 @@ public partial class MainWindow
             // Never block onboarding on a config we do not own.
             Debug.WriteLine($"EnsureNoStaleProjectScopesAsync: {ex.Message}");
         }
+        finally { ClaudeCliGate.Release(); }
         return changed;
     }
 
@@ -755,7 +771,7 @@ public partial class MainWindow
     {
         // Nowhere better to point at — a mirror that could not be made would
         // just be the same bad path rewritten on every launch.
-        if (BrainX.Core.Services.McpRuntimePaths.IsInsideUpdaterRoot(exe)) return false;
+        if (BrainX.Core.Services.McpRuntimePaths.IsRetiredLocation(exe)) return false;
         if (!File.Exists(exe)) return false;
         // The paths we are replacing sit inside TOML literal strings, and two
         // of the three are ALSO inside a double-quoted argument within one.
@@ -771,7 +787,7 @@ public partial class MainWindow
             var home = BrainX.Core.Services.CodexAgentsRulesInstaller.ResolveCodexHome();
             if (home is null) return false;
             if (!HealTomlRuntimePaths(Path.Combine(home, "config.toml"), exe)) return false;
-            SetOnboardStatus("Codex was pointed at the folder BrainX updates into — moved it to the stable copy. "
+            SetOnboardStatus("Codex was pointed at an old BrainX MCP copy — moved it to the stable one. "
                            + "Restart Codex once.");
             return true;
         }
@@ -792,7 +808,7 @@ public partial class MainWindow
     /// </summary>
     private bool HealGrokRuntimePaths(string exe)
     {
-        if (BrainX.Core.Services.McpRuntimePaths.IsInsideUpdaterRoot(exe)) return false;
+        if (BrainX.Core.Services.McpRuntimePaths.IsRetiredLocation(exe)) return false;
         if (!File.Exists(exe) || exe.IndexOfAny(['\'', '"', '\r', '\n']) >= 0) return false;
         try
         {
@@ -815,7 +831,7 @@ public partial class MainWindow
     /// </summary>
     private bool HealGeminiRuntimePath(string exe)
     {
-        if (BrainX.Core.Services.McpRuntimePaths.IsInsideUpdaterRoot(exe) || !File.Exists(exe)) return false;
+        if (BrainX.Core.Services.McpRuntimePaths.IsRetiredLocation(exe) || !File.Exists(exe)) return false;
         try
         {
             var cfg = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gemini", "settings.json");
@@ -823,7 +839,7 @@ public partial class MainWindow
             var root = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(cfg));
             if (root["mcpServers"]?["brainx-brain"] is not Newtonsoft.Json.Linq.JObject entry) return false;
             var cmd = entry["command"]?.ToString();
-            if (!BrainX.Core.Services.McpRuntimePaths.IsInsideUpdaterRoot(cmd)) return false;
+            if (!BrainX.Core.Services.McpRuntimePaths.IsRetiredLocation(cmd)) return false;
             entry["command"] = exe;
             try { File.Copy(cfg, cfg + ".brainx.bak", overwrite: true); } catch { }
             File.WriteAllText(cfg, root.ToString(Newtonsoft.Json.Formatting.Indented), new System.Text.UTF8Encoding(false));
@@ -847,12 +863,14 @@ public partial class MainWindow
         // the right. Stops at a quote or a newline so it can never run past
         // the end of the string it is sitting in. MatchEvaluator rather than a
         // replacement string — a path is not a substitution pattern and `$` in
-        // one must stay a `$`. Both old homes: Velopack's `current\mcp`, and
+        // one must stay a `$`. All three old homes: Velopack's `current\mcp`,
         // the pre-2026-10-10 mirror `BrainX\mcp`, which updates kill every
-        // process in.
+        // process in, and the 2026-10-10 `xjanova\brainx-mcp`, which exists
+        // only inside Claude's package — Codex's server and both wake hooks
+        // failed there.
         var healed = System.Text.RegularExpressions.Regex.Replace(
             raw,
-            @"[A-Za-z]:[^'""\r\n]*?\\BrainX\\(?:current\\)?mcp\\brainx-mcp\.exe",
+            @"[A-Za-z]:[^'""\r\n]*?\\(?:BrainX\\(?:current\\)?mcp|xjanova\\brainx-mcp)\\brainx-mcp\.exe",
             _ => exe,
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         if (string.Equals(healed, raw, StringComparison.Ordinal)) return false;

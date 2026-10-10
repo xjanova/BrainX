@@ -8782,6 +8782,15 @@ internal static partial class Program
                 continue;
             if (prop.Value is not JObject entry) continue;
 
+            // Only an entry that launches THIS copy. Any running server used to
+            // stamp its own version on every entry, so on 2026-10-10 a 2.9.490
+            // Claude Code session wrote "2.9.490" onto a Desktop entry that
+            // still launched the 2.9.484 copy at BrainX\mcp — the one place an
+            // owner can read the version agreed with the new build and hid the
+            // stale one. An in-place upgrade keeps the directory, so the case
+            // this method exists for still matches.
+            if (!LaunchesThisCopy(entry["command"]?.ToString())) continue;
+
             var env = entry["env"] as JObject;
             if (env == null)
             {
@@ -8803,6 +8812,20 @@ internal static partial class Program
             try { File.WriteAllText(configPath, json.ToString(Newtonsoft.Json.Formatting.Indented)); }
             catch (IOException ex) { Log($"desktop config write failed: {ex.Message}"); }
         }
+    }
+
+    /// <summary>True when <paramref name="command"/> is a brainx-mcp in the
+    /// directory this server runs from.</summary>
+    private static bool LaunchesThisCopy(string? command)
+    {
+        if (string.IsNullOrWhiteSpace(command)) return false;
+        try
+        {
+            var theirs = Path.GetDirectoryName(Path.GetFullPath(command))?.TrimEnd('\\', '/');
+            var ours = Path.GetFullPath(AppContext.BaseDirectory).TrimEnd('\\', '/');
+            return string.Equals(theirs, ours, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
     }
 
     /// <summary>

@@ -34,6 +34,27 @@ internal static partial class Program
         Check("a dev build is not", !McpRuntimePaths.IsInsideUpdaterRoot(@"D:\BrainX\BrainX.Mcp\bin\Release\net9.0\brainx-mcp.exe"));
         Check("empty is not", !McpRuntimePaths.IsInsideUpdaterRoot("") && !McpRuntimePaths.IsInsideUpdaterRoot(null));
         Check("the stable exe sits in the stable dir", McpRuntimePaths.StableExe.StartsWith(McpRuntimePaths.StableDir, StringComparison.OrdinalIgnoreCase));
+
+        // 2026-10-10, the same day: a top-level folder created under
+        // %LOCALAPPDATA% or %APPDATA% from inside an MSIX package (Claude
+        // Desktop, Codex — and every brainx-mcp and BrainX window they start)
+        // lands in that package's private store. The xjanova mirror existed
+        // only for Claude and left Codex with no brain (os error 3). The mirror
+        // must not be under either AppData root, and the registrars must move
+        // agents off every place they were ever sent.
+        foreach (var appData in new[] { Environment.SpecialFolder.LocalApplicationData, Environment.SpecialFolder.ApplicationData })
+        {
+            var root = Environment.GetFolderPath(appData).TrimEnd('\\') + "\\";
+            Check($"the stable mirror is not under {appData}", !McpRuntimePaths.StableDir.StartsWith(root, StringComparison.OrdinalIgnoreCase), McpRuntimePaths.StableDir);
+        }
+        var stableExe = McpRuntimePaths.StableExe;
+        var previousExe = Path.Combine(McpRuntimePaths.PreviousStableDir, "brainx-mcp.exe");
+        Check("the stable mirror is not a retired location", !McpRuntimePaths.IsRetiredLocation(stableExe), stableExe);
+        Check("the 2026-10-10 mirror is retired", McpRuntimePaths.IsRetiredLocation(previousExe), previousExe);
+        Check("another account's 2026-10-10 mirror is retired", McpRuntimePaths.IsRetiredLocation(@"C:\Users\someone\AppData\Local\xjanova\brainx-mcp\brainx-mcp.exe"));
+        Check("the legacy mirror is retired", McpRuntimePaths.IsRetiredLocation(Path.Combine(McpRuntimePaths.LegacyStableDir, "brainx-mcp.exe")));
+        Check("a dev build is not retired", !McpRuntimePaths.IsRetiredLocation(@"D:\BrainX\BrainX.Mcp\bin\Release\net9.0\brainx-mcp.exe"));
+        Check("empty is not retired", !McpRuntimePaths.IsRetiredLocation("") && !McpRuntimePaths.IsRetiredLocation(null));
         return Task.CompletedTask;
     }
 

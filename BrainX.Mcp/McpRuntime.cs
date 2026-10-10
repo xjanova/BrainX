@@ -14,11 +14,14 @@
 // a sibling directory that Velopack never touches becomes what agents run:
 //
 //   %LOCALAPPDATA%\BrainX\current\mcp\   <- shipped by the package (source)
-//   %LOCALAPPDATA%\xjanova\brainx-mcp\   <- what registration points at (runtime)
+//   %USERPROFILE%\.brainx\mcp\           <- what registration points at (runtime)
 //
 // (Until 2026-10-10 the runtime was %LOCALAPPDATA%\BrainX\mcp. Velopack never
 // renamed it, but it killed every process under the app root on each apply,
-// launchers included, so every release dropped the brain from every session.)
+// launchers included, so every release dropped the brain from every session.
+// For one day after that it was %LOCALAPPDATA%\xjanova\brainx-mcp, which,
+// created from inside Claude Desktop's MSIX package, existed only in that
+// package's private store — McpRuntimePaths.StableDir has the measurement.)
 //
 // Mirroring uses rename-aside rather than overwrite-in-place: a running server
 // holds its own image, so the file cannot be replaced, but it CAN be renamed
@@ -36,24 +39,29 @@ internal static class McpRuntime
 
     /// <summary>The stable directory agents are registered against. Outside
     /// Velopack's app root since 2026-10-10 — see McpRuntimePaths.StableDir for
-    /// why the old %LOCALAPPDATA%\BrainX\mcp was killed on every update.</summary>
+    /// why the old %LOCALAPPDATA%\BrainX\mcp was killed on every update, and
+    /// why %LOCALAPPDATA%\xjanova did not last a day.</summary>
     public static string StableDir => BrainX.Core.Services.McpRuntimePaths.StableDir;
 
     /// <summary>
-    /// True when <paramref name="dir"/> is the pre-2026-10-10 mirror. Every
-    /// agent was registered there, so a server running from it is the normal
-    /// case on an upgraded machine, and it is as good a source for the new
-    /// mirror as `current\mcp`: `register-*` run from there must land the agent
-    /// in the new place, not re-pin the old one.
+    /// True when <paramref name="dir"/> is a mirror agents used to be
+    /// registered at — BrainX\mcp before 2026-10-10, xjanova\brainx-mcp on that
+    /// day. A server running from one is the normal case on an upgraded
+    /// machine, and it is as good a source for the new mirror as `current\mcp`:
+    /// `register-*` run from there must land the agent in the new place, not
+    /// re-pin the old one.
     /// </summary>
-    public static bool IsLegacyMirror(string dir)
+    public static bool IsRetiredMirror(string dir)
     {
         try
         {
-            return string.Equals(
-                Path.GetFullPath(dir).TrimEnd('\\', '/'),
-                Path.GetFullPath(BrainX.Core.Services.McpRuntimePaths.LegacyStableDir).TrimEnd('\\', '/'),
-                StringComparison.OrdinalIgnoreCase);
+            var full = Path.GetFullPath(dir).TrimEnd('\\', '/');
+            return new[]
+                {
+                    BrainX.Core.Services.McpRuntimePaths.LegacyStableDir,
+                    BrainX.Core.Services.McpRuntimePaths.PreviousStableDir,
+                }
+                .Any(r => string.Equals(full, Path.GetFullPath(r).TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase));
         }
         catch { return false; }
     }
@@ -85,9 +93,9 @@ internal static class McpRuntime
             if (string.IsNullOrEmpty(sourceDir)) return runningExe;
 
             // Already running from the stable dir, or from somewhere that is
-            // not the updater's business (a dev build) — nothing to do. The
-            // legacy mirror inside the app root IS the updater's business.
-            if (!IsInsideManagedCurrent(sourceDir) && !IsLegacyMirror(sourceDir)) return runningExe;
+            // not the updater's business (a dev build) — nothing to do. A
+            // retired mirror is, because agents must not be re-pinned to it.
+            if (!IsInsideManagedCurrent(sourceDir) && !IsRetiredMirror(sourceDir)) return runningExe;
 
             var target = StableDir;
             var targetExe = Path.Combine(target, Path.GetFileName(runningExe));
