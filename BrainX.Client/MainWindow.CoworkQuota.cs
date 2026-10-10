@@ -223,6 +223,7 @@ public partial class MainWindow
     /// last one; a log that shrank was rotated and is read again from the top.</summary>
     private JObject? GrokQuota()
     {
+        if (!_grokCacheLoaded) LoadGrokCreditsCache();
         if ((DateTime.UtcNow - _grokCheckedUtc).TotalSeconds >= 30)
         {
             _grokCheckedUtc = DateTime.UtcNow;
@@ -279,6 +280,7 @@ public partial class MainWindow
         var text = System.Text.Encoding.UTF8.GetString(buf, 0, lastNl);
         _grokLogPos += lastNl + 1;
 
+        var changed = false;
         foreach (var line in text.Split('\n'))
         {
             if (!line.Contains("billing: fetched credits config", StringComparison.Ordinal)) continue;
@@ -287,12 +289,64 @@ public partial class MainWindow
                 var o = JObject.Parse(line);
                 if (o.SelectToken("ctx.config") is JObject cfg)
                 {
+                    var at = CoworkUtc(o["ts"]) ?? DateTime.UtcNow;
+                    // Never let an older line (re-read after a rotation) win
+                    // over a newer figure restored from the cache.
+                    if (_grokCredits != null && at < _grokCreditsAt) continue;
                     _grokCredits = cfg;
-                    _grokCreditsAt = CoworkUtc(o["ts"]) ?? DateTime.UtcNow;
+                    _grokCreditsAt = at;
+                    changed = true;
                 }
             }
             catch { /* the first line after a jump into the middle is cut in half */ }
         }
+        if (changed) SaveGrokCreditsCache();
+    }
+
+    // ── The figure outlives the log, and BrainX ───────────────────────────
+    //
+    // The log is Grok's only report, and it forgets. Grok writes the figure
+    // when its TUI starts and never on a headless `grok -p` run, and the log
+    // rolls: on 2026-10-10 it held four days of the broker's headless runs and
+    // no figure at all. The value lived only in this process, so every BrainX
+    // restart (and every update is one, several a day) blanked Grok's HP until
+    // the owner happened to open Grok ("Brianx Grok ไม่เห็น hp"). On disk, the
+    // last figure survives both; GrokQuota still drops it once its period ends,
+    // and `asOf` tells the room how old it is.
+    private bool _grokCacheLoaded;
+
+    private static string GrokCreditsCachePath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BrainX", "grok-credits.json");
+
+    private void LoadGrokCreditsCache()
+    {
+        _grokCacheLoaded = true;
+        try
+        {
+            if (!File.Exists(GrokCreditsCachePath)) return;
+            var o = JObject.Parse(File.ReadAllText(GrokCreditsCachePath));
+            if (o["config"] is not JObject cfg) return;
+            var at = CoworkUtc(o["at"]) ?? File.GetLastWriteTimeUtc(GrokCreditsCachePath);
+            if (_grokCredits != null && at < _grokCreditsAt) return;
+            _grokCredits = cfg;
+            _grokCreditsAt = at;
+        }
+        catch { /* a damaged cache is the same as no cache */ }
+    }
+
+    private void SaveGrokCreditsCache()
+    {
+        try
+        {
+            var o = new JObject
+            {
+                ["at"] = _grokCreditsAt.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture),
+                ["config"] = _grokCredits,
+            };
+            Directory.CreateDirectory(Path.GetDirectoryName(GrokCreditsCachePath)!);
+            File.WriteAllText(GrokCreditsCachePath, o.ToString(Newtonsoft.Json.Formatting.None));
+        }
+        catch { /* HP is a nicety; never let it throw */ }
     }
 
     /// <summary>When the broker paused this agent on a usage limit, if it is
