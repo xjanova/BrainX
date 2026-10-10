@@ -1800,6 +1800,20 @@ internal static partial class Program
         var name = parameters?["name"]?.ToString();
         var args = parameters?["arguments"] as JObject ?? new JObject();
 
+        // Owner, 2026-10-10: a PC that has not registered with xman does not
+        // run BrainX at all, free part included. The window registers on its
+        // first online start (and this server opens the window), so the answer
+        // says exactly that; afterwards everything works offline.
+        if (LicenseGatesApply() && !ProGate.IsRegistered)
+        {
+            NoteActivity(name, SummarizeArgs(name, args), ok: false, error: "device not registered");
+            return BuildResult(id, new JObject
+            {
+                ["isError"] = true,
+                ["content"] = new JArray { new JObject { ["type"] = "text", ["text"] = ProGate.NotRegisteredMessage } },
+            });
+        }
+
         // Bridged tool → hand the call to the engine that owns it. Its whole
         // result envelope is forwarded untouched (see BridgedCall), which the
         // brain's own path can't do because it re-serialises results to text.
@@ -1960,20 +1974,24 @@ internal static partial class Program
     }
 
     /// <summary>
+    /// The desktop license applies here: not a BrainX Cloud session (--cloud,
+    /// or a customer's child on the server with BRAINX_SANDBOX=1), which
+    /// already proved a paid key to get in, and not a node's headless child,
+    /// which serves its owner's remote /mcp. Neither has a desktop license
+    /// file to read. (Tests run the server sandboxed for the same reason.)
+    /// </summary>
+    private static bool LicenseGatesApply() =>
+        !_cloudMode
+        && Environment.GetEnvironmentVariable("BRAINX_SANDBOX") != "1"
+        && Environment.GetEnvironmentVariable("BRAINX_HEADLESS") != "1";
+
+    /// <summary>
     /// The Pro feature a tool belongs to, or null for a free one. Reading the
     /// room, seeing who is in it and leaving it stay free; taking part does not.
-    ///
-    /// Never gated off the desktop: a BrainX Cloud session (--cloud, or a
-    /// customer's child on the server with BRAINX_SANDBOX=1) already proved a
-    /// paid key to get in, and a node's headless child serves its owner's
-    /// remote /mcp. Neither has a desktop license file to read.
     /// </summary>
     private static ProFeature? ProFeatureOf(string? tool)
     {
-        if (_cloudMode
-            || Environment.GetEnvironmentVariable("BRAINX_SANDBOX") == "1"
-            || Environment.GetEnvironmentVariable("BRAINX_HEADLESS") == "1")
-            return null;
+        if (!LicenseGatesApply()) return null;
         return tool switch
         {
             "cowork_join" or "cowork_say" or "cowork_task" => ProFeature.Cowork,

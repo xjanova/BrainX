@@ -1,6 +1,6 @@
-// LicenseService.cs - BrainX Pro on this PC: the key, the trial, and what xman
-// last said about them. Owned by the BrainX window; brainx-mcp only reads the
-// saved result through ProGate.
+// LicenseService.cs - BrainX on this PC: its registration, the key, the trial,
+// and what xman last said about them. Owned by the BrainX window; brainx-mcp
+// and Mind only read the saved result through ProGate.
 //
 // Same design as WinXTools' XmanLicenseService (2026-09-23), whose bugs are
 // the reasons for most of the rules here:
@@ -12,8 +12,18 @@
 //     is_valid decides, not success.
 //   - Keys are product-scoped on the server (slug "brainx"), and demo/free
 //     keys are refused here: anyone can mint a demo key through the API.
-//   - A verified Pro state lasts 30 days offline; the clock moving back more
-//     than five minutes behind the last verification ends that grace.
+//
+// Owner, 2026-10-10, for every licensed program: a PC that has not registered
+// with xman does not run at all — the free part included — so the first
+// launch must be online. After that BrainX runs offline, and the dates on a
+// key or a trial must still hold when the PC's clock is turned back
+// ("ต้องตรวจเช็คเรื่องวันเวลาการใช้คีย์ได้เสมอ ป้องกันการโกง ถ้าไม่ต่อเน็ต"). So
+// time is xman's time: every definite answer records the server's clock and
+// this PC's offset from it; offline, "now" is this PC's clock plus that
+// offset, and never earlier than the latest time this PC has been seen at
+// (LastSeenUtc, which only moves forward and is sealed). A clock set back past
+// that watermark locks Pro until xman is asked again. Expiry, trial end and
+// the 30-day offline grace are all measured on that timeline.
 //
 // The product is the same one BrainX Cloud is sold under, so a paid key
 // unlocks both.
@@ -22,7 +32,8 @@ using System.Text.Json.Nodes;
 
 namespace BrainX.Core.Services.License;
 
-/// <summary>What the window shows and what ProGate decides from.</summary>
+/// <summary>What the window shows and what ProGate decides from. Every
+/// question that involves time takes this PC's clock and corrects it.</summary>
 public sealed record LicenseStatus(
     LicenseState State,
     string? Key,
@@ -30,25 +41,59 @@ public sealed record LicenseStatus(
     DateTimeOffset? ExpiresAtUtc,
     DateTimeOffset? TrialEndsUtc,
     bool TrialUsed,
-    bool Verified,
-    DateTimeOffset? VerifiedAtUtc)
+    bool Sealed,
+    DateTimeOffset? VerifiedAtUtc,
+    DateTimeOffset? RegisteredAtUtc,
+    TimeSpan ClockOffset,
+    DateTimeOffset LastSeenUtc)
 {
-    public static readonly LicenseStatus Empty = new(LicenseState.None, null, null, null, null, false, false, null);
+    public static readonly LicenseStatus Empty =
+        new(LicenseState.None, null, null, null, null, false, false, null, null, TimeSpan.Zero, default);
+
+    /// <summary>A verified Pro state lasts this long without reaching xman.</summary>
+    public static readonly TimeSpan OfflineGrace = TimeSpan.FromDays(30);
+
+    /// <summary>Clock jitter tolerated before a step back counts as turning it back.</summary>
+    public static readonly TimeSpan ClockSlack = TimeSpan.FromMinutes(5);
 
     /// <summary>License types that are a purchase, not a trial or a giveaway.</summary>
     public static readonly IReadOnlySet<string> PaidTypes =
         new HashSet<string>(["lifetime", "yearly", "monthly", "weekly", "daily", "product"], StringComparer.OrdinalIgnoreCase);
 
-    public bool IsPaidActive(DateTimeOffset now) =>
-        Verified && State == LicenseState.Active && Type is { } t && PaidTypes.Contains(t)
-        && (ExpiresAtUtc is null || ExpiresAtUtc > now);
+    /// <summary>xman accepted this PC. Without it BrainX does not start.</summary>
+    public bool Registered => Sealed && RegisteredAtUtc is not null;
 
-    public bool IsTrialActive(DateTimeOffset now) => Verified && TrialEndsUtc is { } end && end > now;
+    /// <summary>This PC's clock corrected by the offset xman last measured.</summary>
+    public DateTimeOffset Trusted(DateTimeOffset localNow) => localNow + ClockOffset;
 
-    public bool IsPro(DateTimeOffset now) => IsPaidActive(now) || IsTrialActive(now);
+    /// <summary>The clock is behind the latest time this PC was seen at.</summary>
+    public bool ClockTurnedBack(DateTimeOffset localNow) =>
+        LastSeenUtc != default && Trusted(localNow) < LastSeenUtc - ClockSlack;
 
-    public TimeSpan? TrialLeft(DateTimeOffset now) =>
-        IsTrialActive(now) ? TrialEndsUtc!.Value - now : null;
+    /// <summary>The time every date is compared with: trusted, and never
+    /// earlier than the watermark.</summary>
+    public DateTimeOffset Effective(DateTimeOffset localNow)
+    {
+        var t = Trusted(localNow);
+        return t > LastSeenUtc ? t : LastSeenUtc;
+    }
+
+    /// <summary>The seal holds, the clock was not turned back, and xman
+    /// answered within the offline grace.</summary>
+    public bool IsVerified(DateTimeOffset localNow) =>
+        Sealed && !ClockTurnedBack(localNow) && VerifiedAtUtc is { } v && Effective(localNow) <= v + OfflineGrace;
+
+    public bool IsPaidActive(DateTimeOffset localNow) =>
+        IsVerified(localNow) && State == LicenseState.Active && Type is { } t && PaidTypes.Contains(t)
+        && (ExpiresAtUtc is null || ExpiresAtUtc > Effective(localNow));
+
+    public bool IsTrialActive(DateTimeOffset localNow) =>
+        IsVerified(localNow) && TrialEndsUtc is { } end && end > Effective(localNow);
+
+    public bool IsPro(DateTimeOffset localNow) => IsPaidActive(localNow) || IsTrialActive(localNow);
+
+    public TimeSpan? TrialLeft(DateTimeOffset localNow) =>
+        IsTrialActive(localNow) ? TrialEndsUtc!.Value - Effective(localNow) : null;
 }
 
 public enum LicenseResult
@@ -56,6 +101,7 @@ public enum LicenseResult
     Ok,
     InvalidKey,
     Expired,
+    /// <summary>The key was revoked — or, for registration, the PC is blocked.</summary>
     Revoked,
     /// <summary>The key is bound to another PC; retry with move = true to take it.</summary>
     OtherDevice,
@@ -70,9 +116,11 @@ public enum LicenseResult
 
 public sealed class LicenseService : IDisposable
 {
-    public static readonly TimeSpan OfflineGrace = TimeSpan.FromDays(30);
-    private static readonly TimeSpan ClockSlack = TimeSpan.FromMinutes(5);
+    public static TimeSpan OfflineGrace => LicenseStatus.OfflineGrace;
     private static readonly TimeSpan MaxTrial = TimeSpan.FromDays(366);
+    /// <summary>The watermark is written when it has moved at least this far,
+    /// so a running app does not rewrite the file on every tick.</summary>
+    private static readonly TimeSpan WatermarkStep = TimeSpan.FromMinutes(1);
 
     private readonly ILicenseTransport _api;
     private readonly string _appVersion;
@@ -96,33 +144,56 @@ public sealed class LicenseService : IDisposable
     /// <summary>Raised after any change, on whatever thread made it.</summary>
     public event Action<LicenseStatus>? Changed;
 
-    public LicenseStatus Current => Evaluate(_snap, _sealOk, _now());
+    public LicenseStatus Current => Evaluate(_snap, _sealOk);
+
+    public static LicenseStatus Evaluate(LicenseSnapshot s, bool sealOk) =>
+        new(s.State, s.Key, s.Type, s.ExpiresAtUtc, s.TrialEndsUtc, s.TrialUsed, sealOk,
+            s.VerifiedAtUtc == default ? null : s.VerifiedAtUtc,
+            s.RegisteredAtUtc,
+            TimeSpan.FromSeconds(double.IsFinite(s.ClockOffsetSeconds) ? s.ClockOffsetSeconds : 0),
+            s.LastSeenUtc);
+
+    // ── registration ─────────────────────────────────────────────────
 
     /// <summary>
-    /// The saved snapshot as ProGate judges it: the seal must hold, and a
-    /// verification is good for <see cref="OfflineGrace"/>, ending early if the
-    /// clock has been turned back past it.
+    /// Register this PC with xman (register-device). Required once before
+    /// BrainX runs at all; repeated at every start to keep the device record
+    /// current, but only the first success is what unlocks the app.
     /// </summary>
-    public static LicenseStatus Evaluate(LicenseSnapshot s, bool sealOk, DateTimeOffset now)
+    public async Task<LicenseResult> RegisterAsync()
     {
-        var verified = sealOk
-            && s.VerifiedAtUtc != default
-            && now >= s.VerifiedAtUtc - ClockSlack
-            && now <= s.VerifiedAtUtc + OfflineGrace;
-        return new LicenseStatus(s.State, s.Key, s.Type, s.ExpiresAtUtc, s.TrialEndsUtc, s.TrialUsed, verified,
-            s.VerifiedAtUtc == default ? null : s.VerifiedAtUtc);
+        await _gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            var reply = await _api.PostAsync("/register-device", new Dictionary<string, object?>
+            {
+                ["machine_id"] = MachineIdentity.MachineId,
+                ["machine_name"] = Trim(MachineIdentity.MachineName, 255),
+                ["os_version"] = Trim(MachineIdentity.OsVersion, 255),
+                ["app_version"] = Trim(_appVersion, 50),
+                ["hardware_hash"] = MachineIdentity.HardwareHash,
+            }).ConfigureAwait(false);
+            if (!reply.IsDefinitive || reply.ErrorCode == "PRODUCT_NOT_FOUND") return Unanswered(reply);
+            if (!reply.Success) return reply.ErrorCode == "DEVICE_BLOCKED" ? LicenseResult.Revoked : LicenseResult.Failed;
+            if (string.Equals(reply.Data.Str("device_status"), "blocked", StringComparison.OrdinalIgnoreCase))
+                return LicenseResult.Revoked;
+
+            Save(_snap with { RegisteredAtUtc = _snap.RegisteredAtUtc ?? TrustedNow(reply) }, reply);
+            return LicenseResult.Ok;
+        }
+        finally { _gate.Release(); }
     }
 
     // ── startup / background ─────────────────────────────────────────
 
     /// <summary>
-    /// Startup: tell xman this PC exists, confirm the saved key (or find one
-    /// bound to this PC — a reinstall gets its key back without typing it),
-    /// and start the trial once, for a PC that never had one.
+    /// Startup: register (or refresh the registration), confirm the saved key
+    /// (or find one bound to this PC — a reinstall gets its key back without
+    /// typing it), and start the trial once, for a PC that never had one.
     /// </summary>
     public async Task InitializeAsync()
     {
-        _ = RegisterDeviceAsync();
+        await RegisterAsync().ConfigureAwait(false);
         await RefreshAsync(startTrialIfEligible: true).ConfigureAwait(false);
     }
 
@@ -140,20 +211,23 @@ public sealed class LicenseService : IDisposable
         finally { _gate.Release(); }
     }
 
-    private async Task RegisterDeviceAsync()
+    /// <summary>
+    /// Move the watermark up to now, offline. Called on a timer while the app
+    /// runs, so turning the clock back mid-session is caught too. Never moves
+    /// it back, and writes only when it has moved.
+    /// </summary>
+    public void Touch()
     {
+        if (!_sealOk || !_gate.Wait(0)) return;
         try
         {
-            await _api.PostAsync("/register-device", new Dictionary<string, object?>
-            {
-                ["machine_id"] = MachineIdentity.MachineId,
-                ["machine_name"] = Trim(MachineIdentity.MachineName, 255),
-                ["os_version"] = Trim(MachineIdentity.OsVersion, 255),
-                ["app_version"] = Trim(_appVersion, 50),
-                ["hardware_hash"] = MachineIdentity.HardwareHash,
-            }).ConfigureAwait(false);
+            var status = Current;
+            if (status.ClockTurnedBack(_now())) return;   // stays caught until xman answers
+            var trusted = status.Trusted(_now());
+            if (trusted - _snap.LastSeenUtc < WatermarkStep) return;
+            Save(_snap with { LastSeenUtc = trusted }, reply: null);
         }
-        catch { /* fire and forget */ }
+        finally { _gate.Release(); }
     }
 
     // ── key ──────────────────────────────────────────────────────────
@@ -190,8 +264,7 @@ public sealed class LicenseService : IDisposable
                     Type = type,
                     ExpiresAtUtc = reply.Data.Date("expires_at"),
                     State = LicenseState.Active,
-                    VerifiedAtUtc = _now(),
-                });
+                }, reply);
                 return LicenseResult.Ok;
             }
 
@@ -222,7 +295,7 @@ public sealed class LicenseService : IDisposable
             }).ConfigureAwait(false);
             if (!reply.IsDefinitive) return Unanswered(reply);
             if (!reply.Success && reply.ErrorCode != "INVALID_LICENSE") return LicenseResult.Failed;
-            Save(_snap with { Key = null, Type = null, ExpiresAtUtc = null, State = LicenseState.None, VerifiedAtUtc = _now() });
+            Save(_snap with { Key = null, Type = null, ExpiresAtUtc = null, State = LicenseState.None }, reply);
             return LicenseResult.Ok;
         }
         finally { _gate.Release(); }
@@ -248,8 +321,7 @@ public sealed class LicenseService : IDisposable
                 State = valid ? LicenseState.Active
                     : string.Equals(status, "revoked", StringComparison.OrdinalIgnoreCase) ? LicenseState.Revoked
                     : LicenseState.Expired,
-                VerifiedAtUtc = _now(),
-            });
+            }, reply);
             return;
         }
 
@@ -258,7 +330,7 @@ public sealed class LicenseService : IDisposable
             // Not bound to this PC (moved elsewhere, or deactivated there). A
             // license bound here under another key is still ours to find.
             if (await CheckMachineLockedAsync().ConfigureAwait(false)) return;
-            Save(_snap with { State = LicenseState.OtherMachine, VerifiedAtUtc = _now() });
+            Save(_snap with { State = LicenseState.OtherMachine }, reply);
         }
     }
 
@@ -280,8 +352,7 @@ public sealed class LicenseService : IDisposable
             Type = type,
             ExpiresAtUtc = reply.Data.Date("expires_at"),
             State = LicenseState.Active,
-            VerifiedAtUtc = _now(),
-        });
+        }, reply);
         return true;
     }
 
@@ -310,13 +381,13 @@ public sealed class LicenseService : IDisposable
         var data = check.Data;
         if (data.Bool("is_trial_active") == true)
         {
-            SaveTrial(RemainingOf(data.Obj("trial_info")), used: true);
+            SaveTrial(RemainingOf(data.Obj("trial_info"), check), used: true, check);
             return LicenseResult.Ok;
         }
         if (data.Bool("has_used_demo") == true || data.Bool("can_start_demo") == false || !startIfEligible)
         {
             if (data.Bool("has_used_demo") == true || data.Bool("can_start_demo") == false)
-                SaveTrial(null, used: true);
+                SaveTrial(null, used: true, check);
             return startIfEligible ? LicenseResult.TrialUnavailable : LicenseResult.Ok;
         }
 
@@ -324,42 +395,65 @@ public sealed class LicenseService : IDisposable
         if (!start.IsDefinitive) return Unanswered(start);
         if (start.Success)
         {
-            SaveTrial(RemainingOf(start.Data), used: true);
+            SaveTrial(RemainingOf(start.Data, start), used: true, start);
             return LicenseResult.Ok;
         }
         if (start.ErrorCode == "TRIAL_ACTIVE")
         {
-            SaveTrial(RemainingOf(start.Json.Obj("trial_info") ?? start.Data?.Obj("trial_info")), used: true);
+            SaveTrial(RemainingOf(start.Json.Obj("trial_info") ?? start.Data?.Obj("trial_info"), start), used: true, start);
             return LicenseResult.Ok;
         }
-        SaveTrial(null, used: true);
+        SaveTrial(null, used: true, start);
         return LicenseResult.TrialUnavailable;
     }
 
     /// <summary>Remaining trial time from an answer: seconds when given,
-    /// else the expiry, capped so a malformed answer cannot grant years.</summary>
-    private TimeSpan? RemainingOf(JsonNode? node)
+    /// else the expiry against the server's clock, capped so a malformed
+    /// answer cannot grant years.</summary>
+    private TimeSpan? RemainingOf(JsonNode? node, ApiReply reply)
     {
         if (node is null) return null;
         TimeSpan? left = node.Long("seconds_remaining") is { } secs ? TimeSpan.FromSeconds(secs)
-            : node.Date("expires_at") is { } exp ? exp - _now()
+            : node.Date("expires_at") is { } exp ? exp - TrustedNow(reply)
             : null;
         if (left is not { } l || l <= TimeSpan.Zero) return null;
         return l > MaxTrial ? MaxTrial : l;
     }
 
-    private void SaveTrial(TimeSpan? remaining, bool used) =>
+    private void SaveTrial(TimeSpan? remaining, bool used, ApiReply reply) =>
         Save(_snap with
         {
-            TrialEndsUtc = remaining is { } r ? _now() + r : null,
+            TrialEndsUtc = remaining is { } r ? TrustedNow(reply) + r : null,
             TrialUsed = _snap.TrialUsed || used,
-            VerifiedAtUtc = _now(),
-        });
+        }, reply);
 
     // ── plumbing ─────────────────────────────────────────────────────
 
-    private void Save(LicenseSnapshot next)
+    /// <summary>xman's clock when the answer carried it, else this PC's
+    /// clock corrected by the last measured offset.</summary>
+    private DateTimeOffset TrustedNow(ApiReply? reply) =>
+        reply?.ServerTime ?? Current.Trusted(_now());
+
+    /// <summary>
+    /// Save <paramref name="next"/>. With an xman answer it is also a
+    /// verification: VerifiedAt is xman's time, the clock offset is measured
+    /// again, and the watermark moves up to xman's time — which also clears
+    /// a clock that had been turned back, now that xman has said what time
+    /// it is.
+    /// </summary>
+    private void Save(LicenseSnapshot next, ApiReply? reply)
     {
+        if (reply is not null)
+        {
+            var local = _now();
+            var trusted = reply.ServerTime ?? Current.Trusted(local);
+            next = next with
+            {
+                VerifiedAtUtc = trusted,
+                ClockOffsetSeconds = reply.ServerTime is { } server ? (server - local).TotalSeconds : next.ClockOffsetSeconds,
+                LastSeenUtc = trusted > next.LastSeenUtc || reply.ServerTime is not null ? trusted : next.LastSeenUtc,
+            };
+        }
         _snap = next;
         _sealOk = true;
         try { LicenseStore.Save(_snap, _storePath); }

@@ -17,6 +17,9 @@ internal static partial class Program
         checks.Add(("license: validate — expired, revoked, moved away, and a key taken from another PC", LicenseValidateOutcomes));
         checks.Add(("license: the trial starts once, counts down, and ends", LicenseTrial));
         checks.Add(("license: a tampered file, the offline grace and a turned-back clock", LicenseSealAndGrace));
+        checks.Add(("license: no registration, no BrainX — register-device unlocks it, offline or refused does not", LicenseRegistration));
+        checks.Add(("license: dates run on xman's clock, and a clock turned back offline locks Pro", LicenseServerTimeAndRollback));
+        checks.Add(("license: a file written by 2.0.494 still opens, and counts as registered", LicenseV1FileStillOpens));
         checks.Add(("update: the app trusts only a feed the release key signed", UpdateFeedSignature));
     }
 
@@ -229,23 +232,23 @@ internal static partial class Program
         LicenseStore.Save(new LicenseSnapshot
         {
             Key = "ABCD-EFGH-IJKL-MNOP", Type = "monthly", ExpiresAtUtc = verified.AddDays(300),
-            State = LicenseState.Active, VerifiedAtUtc = verified,
+            State = LicenseState.Active, VerifiedAtUtc = verified, LastSeenUtc = verified,
         }, path);
 
         var loaded = LicenseStore.Load(path)!.Value;
         Check("a saved license is sealed", loaded.Sealed);
         var s = loaded.Snapshot;
-        Check("Pro inside the offline grace", LicenseService.Evaluate(s, true, verified.AddDays(29)).IsPro(verified.AddDays(29)));
-        Check("not Pro after 30 days without xman", !LicenseService.Evaluate(s, true, verified.AddDays(31)).IsPro(verified.AddDays(31)));
-        Check("not Pro when the clock is turned back past the last check", !LicenseService.Evaluate(s, true, verified.AddMinutes(-10)).IsPro(verified.AddMinutes(-10)));
+        Check("Pro inside the offline grace", LicenseService.Evaluate(s, true).IsPro(verified.AddDays(29)));
+        Check("not Pro after 30 days without xman", !LicenseService.Evaluate(s, true).IsPro(verified.AddDays(31)));
+        Check("not Pro when the clock is turned back past the last check", !LicenseService.Evaluate(s, true).IsPro(verified.AddMinutes(-10)));
         Check("a paid key past its expiry is not Pro offline either",
-              !LicenseService.Evaluate(s with { ExpiresAtUtc = verified.AddDays(1) }, true, verified.AddDays(2)).IsPro(verified.AddDays(2)));
+              !LicenseService.Evaluate(s with { ExpiresAtUtc = verified.AddDays(1) }, true).IsPro(verified.AddDays(2)));
 
         var text = File.ReadAllText(path).Replace("\"monthly\"", "\"lifetime\"");
         File.WriteAllText(path, text);
         var tampered = LicenseStore.Load(path)!.Value;
         Check("an edited file does not keep its seal", !tampered.Sealed);
-        Check("…and is not Pro", !LicenseService.Evaluate(tampered.Snapshot, tampered.Sealed, verified).IsPro(verified));
+        Check("…and is not Pro", !LicenseService.Evaluate(tampered.Snapshot, tampered.Sealed).IsPro(verified));
 
         try { Directory.Delete(Path.GetDirectoryName(path)!, true); } catch { }
         return Task.CompletedTask;

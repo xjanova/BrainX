@@ -67,6 +67,18 @@ public partial class App : Application
             return;
         }
 
+        // Registered with xman before anything else runs (owner, 2026-10-10:
+        // unregistered, the free part does not run either). Already registered
+        // is a file read and nothing on screen. The dialog closing must not
+        // count as the last window closing, hence the explicit mode around it.
+        ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        if (!RegistrationWindow.EnsureRegistered())
+        {
+            Environment.Exit(0);
+            return;
+        }
+        ShutdownMode = ShutdownMode.OnLastWindowClose;
+
         try
         {
             EnsureDesktopShortcut();

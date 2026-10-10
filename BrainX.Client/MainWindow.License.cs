@@ -49,9 +49,14 @@ public partial class MainWindow
             _licenseTimer.Tick += async (_, _) =>
             {
                 if (_license is null) return;
-                // Never answered yet (first launch offline): ask on every tick
-                // until xman answers once, then settle into the 6 h rhythm.
-                if (DateTime.UtcNow - lastAsked >= LicenseRecheckEvery || _license.Current.VerifiedAtUtc is null)
+                // The forward-only watermark: offline, this is what catches a
+                // clock turned back mid-session (LicenseService.Touch).
+                _license.Touch();
+                // Never answered yet (first launch offline), or the clock was
+                // turned back: ask on every tick until xman answers, then
+                // settle into the 6 h rhythm.
+                if (DateTime.UtcNow - lastAsked >= LicenseRecheckEvery || _license.Current.VerifiedAtUtc is null
+                    || _license.Current.ClockTurnedBack(DateTimeOffset.UtcNow))
                 {
                     lastAsked = DateTime.UtcNow;
                     // startTrialIfEligible: a PC that was offline on its
@@ -90,12 +95,13 @@ public partial class MainWindow
         if (LicenseStatusText == null) return;   // card not built yet
 
         var (badge, badgeBrush, line) =
-            s.IsPaidActive(now) ? ("PRO", "SuccessBrush", $"Pro — {Pretty(s.Type)} license, active on this PC.")
+            s.ClockTurnedBack(now) ? ("CLOCK", "DangerBrush", "This PC's clock was set back — Pro is locked until BrainX checks the time with xman. Connect to the internet and press Check again.")
+            : s.IsPaidActive(now) ? ("PRO", "SuccessBrush", $"Pro — {Pretty(s.Type)} license, active on this PC.")
             : s.IsTrialActive(now) ? ("TRIAL", "NeuralAmber", $"Trial — {TimeLeftText(s.TrialLeft(now)!.Value)} left. Everything is unlocked until then.")
             : s.State == LicenseState.Expired ? ("EXPIRED", "DangerBrush", "Your Pro license has expired — renew to unlock Pro again. The free core keeps working.")
             : s.State == LicenseState.Revoked ? ("REVOKED", "DangerBrush", "This key was revoked. Contact xman studio, or use another key.")
             : s.State == LicenseState.OtherMachine ? ("MOVED", "DangerBrush", "This key is active on another PC. Activate it again here to move it.")
-            : s.State == LicenseState.Active && !s.Verified ? ("?", "NeuralAmber", "Not confirmed with xman for 30 days — connect once to keep Pro.")
+            : s.State == LicenseState.Active && !s.IsVerified(now) ? ("?", "NeuralAmber", "Not confirmed with xman for 30 days — connect once to keep Pro.")
             : ("FREE", "SurfaceLightBrush", s.TrialUsed
                 ? "Free — the brain works for every agent. The trial on this PC has ended."
                 : "Free — the brain works for every agent. Start a free trial to try Pro.");

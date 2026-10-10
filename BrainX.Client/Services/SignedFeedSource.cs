@@ -4,11 +4,12 @@
 // Owner, 2026-10-10: updates come through xmanstudio ("ย้ายมาผ่าน xmanstudio"),
 // like the studio's other products. xman4289.com serves the Velopack feed and
 // packages under /brainx/download/, streamed from the latest release by the
-// server itself (it never hands out a GitHub address). GitHub's own "latest
-// release" download path is the fallback for when xman cannot answer — the
-// repo is public, so nothing is revealed by it.
+// server itself. Only from there: "แอพต้องโหลดที่ xman4289.com ห้ามโหลดหรือมี
+// ลิ้งค์ไป github" (owner rule, 2026-09-24) — the first version of this file
+// fell back to GitHub's latest-release path, and that is gone. When xman
+// cannot answer, the app waits for the next check.
 //
-// Neither host is trusted. Every feed must carry releases.win.json.sig, an
+// The host is not trusted either. Every feed must carry releases.win.json.sig, an
 // ECDSA signature CI made over its exact bytes with the release key
 // (ReleaseFeedVerifier); a feed without one, or with a bad one, is skipped.
 // Velopack then refuses any package whose SHA-256 differs from the signed
@@ -16,7 +17,7 @@
 //
 // Velopack asks the source twice: GetReleaseFeed, then DownloadReleaseEntry
 // for the package it picked. The package is fetched from the host that served
-// the verified feed first, so the two always come from the same release.
+// the verified feed, so the two come from the same release.
 
 using System.Diagnostics;
 using System.Text;
@@ -29,12 +30,12 @@ namespace BrainX.Client.Services;
 
 internal sealed class SignedFeedSource : IUpdateSource
 {
-    /// <summary>Feed hosts, preferred first. Both end in '/', and both serve
-    /// releases.win.json, releases.win.json.sig and the packages by file name.</summary>
+    /// <summary>Feed hosts, in order. Each ends in '/' and serves
+    /// releases.win.json, releases.win.json.sig and the packages by file name.
+    /// xman4289.com only — see the owner rule above.</summary>
     public static readonly string[] Hosts =
     [
         "https://xman4289.com/brainx/download/",
-        "https://github.com/xjanova/BrainX/releases/latest/download/",
     ];
 
     private readonly IFileDownloader _download = new HttpClientFileDownloader();

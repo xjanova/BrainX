@@ -58,7 +58,7 @@ public static class ProGate
                 {
                     var loaded = LicenseStore.Load(StorePathOverride);
                     _fromDisk = loaded is { } l
-                        ? LicenseService.Evaluate(l.Snapshot, l.Sealed, DateTimeOffset.UtcNow)
+                        ? LicenseService.Evaluate(l.Snapshot, l.Sealed)
                         : LicenseStatus.Empty;
                     _readAtUtc = DateTime.UtcNow;
                 }
@@ -68,6 +68,15 @@ public static class ProGate
     }
 
     public static bool IsPro => Status.IsPro(DateTimeOffset.UtcNow);
+
+    /// <summary>xman accepted this PC (owner, 2026-10-10: unregistered, the
+    /// free part does not run either). The window registers on its first
+    /// online start; until then brainx-mcp answers every tool with how.</summary>
+    public static bool IsRegistered => Status.Registered;
+
+    public const string NotRegisteredMessage =
+        "BrainX ยังไม่ได้ลงทะเบียนเครื่องนี้ — เปิดโปรแกรม BrainX ขณะต่ออินเทอร์เน็ตหนึ่งครั้ง (ลงทะเบียนฟรี) "
+        + "แล้วใช้ได้ทันที หลังจากนั้นใช้ออฟไลน์ได้";
 
     public static bool Allows(ProFeature feature) => IsPro;
 

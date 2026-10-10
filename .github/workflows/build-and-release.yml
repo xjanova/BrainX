@@ -150,8 +150,8 @@ jobs:
             --outputDir Releases
 
       - name: Sign the update feed (client auto-update through xman)
-        # The app updates from xman4289.com/brainx/download/ (GitHub's latest
-        # release as the fallback) and trusts neither: it reads a feed only if
+        # The app updates only from xman4289.com/brainx/download/ (which
+        # streams this release) and does not trust it: it reads a feed only if
         # releases.win.json.sig is the release key's signature of its exact
         # bytes, and Velopack then checks every package against the SHA-256 in
         # that feed. sign-file self-verifies with the key built into the app,

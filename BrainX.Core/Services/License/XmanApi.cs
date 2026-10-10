@@ -89,7 +89,7 @@ public static class XmanApi
             {
                 // An HTML error page from a proxy or a 503: no answer from the app itself.
             }
-            return new ApiReply(response.StatusCode, json as JsonObject);
+            return new ApiReply(response.StatusCode, json as JsonObject) { ServerTime = response.Headers.Date };
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException)
         {
@@ -129,6 +129,11 @@ public sealed class ApiReply(HttpStatusCode? status, JsonObject? json)
     /// <summary>Null when the request never got an HTTP answer (offline, DNS, TLS pin, timeout).</summary>
     public HttpStatusCode? Status { get; } = status;
     public JsonObject? Json { get; } = json;
+
+    /// <summary>The server's clock (HTTP Date header), when it sent one. The
+    /// license dates times by it rather than by this PC's clock, which the
+    /// person in front of it can set to anything.</summary>
+    public DateTimeOffset? ServerTime { get; init; }
 
     public bool Success => Json.Bool("success") == true;
     public string? ErrorCode => Json.Str("error_code") ?? Json.Str("code");

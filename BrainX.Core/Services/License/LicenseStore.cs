@@ -49,6 +49,15 @@ public sealed record LicenseSnapshot
     public DateTimeOffset? TrialEndsUtc { get; init; }
     /// <summary>xman says this PC has had its trial.</summary>
     public bool TrialUsed { get; init; }
+    /// <summary>When xman accepted this PC's register-device. Until then
+    /// BrainX does not run at all, free part included (owner, 2026-10-10).</summary>
+    public DateTimeOffset? RegisteredAtUtc { get; init; }
+    /// <summary>xman's clock minus this PC's clock at the last definite
+    /// answer. Offline, "now" is this PC's clock plus this offset.</summary>
+    public double ClockOffsetSeconds { get; init; }
+    /// <summary>The latest trusted time this PC has been seen at. Only ever
+    /// moves forward; a clock set back past it is caught.</summary>
+    public DateTimeOffset LastSeenUtc { get; init; }
     public string MachineId { get; init; } = "";
     public string? Mac { get; init; }
 }
@@ -70,10 +79,16 @@ public static class LicenseStore
             if (!File.Exists(path) || new FileInfo(path).Length > 64 * 1024) return null;
             var snap = JsonSerializer.Deserialize<LicenseSnapshot>(File.ReadAllText(path), Json);
             if (snap is null) return null;
-            var ok = snap.MachineId == MachineIdentity.MachineId
-                && snap.Mac is { } mac
-                && CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(mac), Encoding.ASCII.GetBytes(Seal(snap)));
-            return (snap, ok);
+            if (snap.MachineId != MachineIdentity.MachineId || snap.Mac is not { } mac) return (snap, false);
+            if (Matches(mac, Seal(snap))) return (snap, true);
+
+            // Written by 2.0.494, before registration and the clock fields
+            // existed. That build called register-device on every start, and
+            // a snapshot xman verified proves it reached xman, so it counts
+            // as registered; the next save writes the current seal.
+            if (Matches(mac, SealV1(snap)))
+                return (snap with { RegisteredAtUtc = snap.VerifiedAtUtc == default ? null : snap.VerifiedAtUtc }, true);
+            return (snap, false);
         }
         catch { return null; }
     }
@@ -95,13 +110,23 @@ public static class LicenseStore
         try { File.Delete(path ?? DefaultPath); } catch { }
     }
 
-    internal static string Seal(LicenseSnapshot s)
+    private static bool Matches(string a, string b) =>
+        CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(a), Encoding.ASCII.GetBytes(b));
+
+    internal static string Seal(LicenseSnapshot s) => Hmac("brainx-license-cache-v2", string.Join("|",
+        s.Key ?? "", s.Type ?? "", Stamp(s.ExpiresAtUtc), s.State.ToString(), Stamp(s.VerifiedAtUtc),
+        Stamp(s.TrialEndsUtc), s.TrialUsed ? "1" : "0", Stamp(s.RegisteredAtUtc),
+        s.ClockOffsetSeconds.ToString("R", CultureInfo.InvariantCulture), Stamp(s.LastSeenUtc), s.MachineId));
+
+    /// <summary>The seal 2.0.494 wrote: read, never written.</summary>
+    private static string SealV1(LicenseSnapshot s) => Hmac("brainx-license-cache-v1", string.Join("|",
+        s.Key ?? "", s.Type ?? "", Stamp(s.ExpiresAtUtc), s.State.ToString(), Stamp(s.VerifiedAtUtc),
+        Stamp(s.TrialEndsUtc), s.TrialUsed ? "1" : "0", s.MachineId));
+
+    private static string Hmac(string version, string text)
     {
         var secret = SHA256.HashData(Encoding.UTF8.GetBytes(
-            $"brainx-license-cache-v1|{MachineIdentity.MachineId}|{MachineIdentity.MachineGuid ?? ""}"));
-        var text = string.Join("|",
-            s.Key ?? "", s.Type ?? "", Stamp(s.ExpiresAtUtc), s.State.ToString(), Stamp(s.VerifiedAtUtc),
-            Stamp(s.TrialEndsUtc), s.TrialUsed ? "1" : "0", s.MachineId);
+            $"{version}|{MachineIdentity.MachineId}|{MachineIdentity.MachineGuid ?? ""}"));
         return Convert.ToHexString(HMACSHA256.HashData(secret, Encoding.UTF8.GetBytes(text)));
     }
 
