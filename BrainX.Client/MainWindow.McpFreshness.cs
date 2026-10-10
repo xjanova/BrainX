@@ -172,6 +172,7 @@ public partial class MainWindow
             // itself, and judging before fixing is how the banner kept saying
             // "a restart will not help" about a config BrainX owns.
             if (HealRetiredRegistrations(registrations)) registrations = ReadMcpRegistrations();
+            SyncDesktopLabelToRegisteredExe();
             stale = stale.Select(s => WithRespawn(s, registrations)).ToList();
         }
         catch (Exception ex)
@@ -418,6 +419,33 @@ public partial class MainWindow
         catch (Exception ex) { Debug.WriteLine($"ReadMcpRegistrations(codex): {ex.Message}"); }
 
         return found;
+    }
+
+    /// <summary>
+    /// Keep Claude Desktop's BRAINX_MCP_VERSION equal to the version of the
+    /// file its entry launches — the only version Claude's settings page shows,
+    /// since it never displays what the server says about itself.
+    ///
+    /// Onboarding corrected it once, at startup, and anything could write it
+    /// afterwards: on 2026-10-10 an old 2.9.484 server that Claude respawned
+    /// from a stale path stamped "2.9.484" over an entry launching 2.9.491, and
+    /// the owner read the wrong number in Claude's settings. Written only when
+    /// it differs, so a correct label costs one small read per sweep.
+    /// </summary>
+    private void SyncDesktopLabelToRegisteredExe()
+    {
+        if (!_mcpAutoRegisterEnabled) return;
+        try
+        {
+            var cfgPath = ClaudeDesktopConfigPath();
+            if (!File.Exists(cfgPath)) return;
+            var config = JObject.Parse(File.ReadAllText(cfgPath));
+            if (config["mcpServers"]?["brainx-brain"] is not JObject entry) return;
+            var cmd = entry["command"]?.ToString();
+            if (string.IsNullOrEmpty(cmd) || !File.Exists(cmd)) return;
+            SyncDesktopVersionLabel(cfgPath, config, entry, cmd);
+        }
+        catch (Exception ex) { Debug.WriteLine($"SyncDesktopLabelToRegisteredExe: {ex.Message}"); }
     }
 
     private DateTime _lastRetiredHeal = DateTime.MinValue;
