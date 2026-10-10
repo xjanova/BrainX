@@ -44,6 +44,7 @@ internal static partial class Program
         checks.Add(("chrome launch args: --settings claude-in-chrome is a working action, never a vault path", ChromeSettingsLaunchArgs));
         checks.Add(("chrome instructions worst case: hooks broken + private browsing + a long vault path — every rule still shown", ChromeInstructionsWorstCase));
         checks.Add(("chrome private log capture: the writer's queue holds only what the store keeps", ChromeCaptureIsBounded));
+        RegisterUnattendedRunChecks(checks);
         // Opt-in: reads THIS PC's real Claude Code install and browser profiles.
         // Starts claude.exe only for `--version` and `auth status --json` —
         // never the chrome server, never a browser.

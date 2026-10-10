@@ -63,13 +63,32 @@ public static class SecretRedactor
     private static readonly Regex SetSecretByName =
         R(@"(\b(?:config\s+set|config:set|setx|set)\s+[a-z0-9_.\-]*(?:pass(?:word|wd)?|pwd|secret|token|api[_\-]?key|apikey|private[_\-]?key)[a-z0-9_.\-]*\s+)(""[^""]*""|'[^']*'|[^\s&;'""]+)");
 
+    // What a name has to contain to be a secret's name.
+    private const string SecretName =
+        @"[a-z0-9_.\-]*(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_\-]?key|apikey|access[_\-]?key|private[_\-]?key|client[_\-]?secret|auth(?:[_\-]?key)?|credentials?)[a-z0-9_.\-]*";
+
     // NAME=value / NAME: value where the name says it is a secret — env vars
-    // (DB_PASSWORD=), flags (--dbpass=), query strings (?token=), URL
-    // fragments (#access_token= — an OAuth implicit-grant callback carries an
-    // opaque token there, which no token-shape rule recognises) and path
-    // segments (/session_token=), JSON-ish.
+    // (DB_PASSWORD=), flags (--dbpass=), query strings (?token=), JSON-ish.
+    // NOT after '/' or '#': in a shell command those are paths and refs, and
+    // the owner reads this text in the SSH approval prompt — `git push --force
+    // origin feature/auth:main` must show where it pushes, `docker run -v
+    // /srv/secrets:/run/secrets` what it mounts (review rev3). Inside a URL
+    // they are delimiters, and UrlSecretParam handles them there.
     private static readonly Regex SecretAssignment =
-        R(@"((?:^|[\s;&|""'?,({#/])-{0,2}[a-z0-9_.\-]*(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_\-]?key|apikey|access[_\-]?key|private[_\-]?key|client[_\-]?secret|auth(?:[_\-]?key)?|credentials?)[a-z0-9_.\-]*\s*[=:]\s*)(""[^""]*""|'[^']*'|[^\s&;'""]+)");
+        R(@"((?:^|[\s;&|""'?,({])-{0,2}" + SecretName + @"\s*[=:]\s*)(""[^""]*""|'[^']*'|[^\s&;'""]+)");
+
+    // One URL: scheme://… up to whitespace, a quote or an angle bracket. The
+    // scheme starts where a run of scheme characters starts and is short, so
+    // a 200 K page of dotted identifiers is scanned once, not once per dot.
+    private static readonly Regex UrlToken =
+        R(@"(?<![a-z0-9+.\-])[a-z][a-z0-9+.\-]{0,31}://[^\s'""<>]+");
+
+    // Inside a URL only: a secret-named parameter after '#' (a fragment — an
+    // OAuth implicit-grant callback carries an opaque #access_token=ya29… that
+    // no token-shape rule recognises), '/' (a path segment, /session_token=…)
+    // or ';' (a path parameter). '=' only: a ':' in a URL is a port or a ref.
+    private static readonly Regex UrlSecretParam =
+        R(@"([#/;]" + SecretName + @"=)([^\s&#;/'""<>]+)");
 
     // mysql -pSECRET — only meaningful next to a MySQL client, and case
     // SENSITIVE: -P is the port there, and `mkdir -p x` has a space after it.
@@ -106,6 +125,7 @@ public static class SecretRedactor
             s = SqlIdentifiedBy.Replace(s, "$1'" + Mask + "'");
             s = SqlPasswordFunction.Replace(s, "$1'" + Mask + "'");
             s = SetSecretByName.Replace(s, "$1" + Mask);
+            s = UrlToken.Replace(s, m => UrlSecretParam.Replace(m.Value, "$1" + Mask));
             s = SecretAssignment.Replace(s, "$1" + Mask);
             if (MysqlClient.IsMatch(s)) s = AttachedDashP.Replace(s, "-p" + Mask);
             s = KnownTokenShapes.Replace(s, Mask);

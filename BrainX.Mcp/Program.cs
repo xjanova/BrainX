@@ -360,6 +360,7 @@ internal static partial class Program
             {
                 _hookProblems = BrainX.Core.Services.HookHealth.Problems(
                     sandbox ? fakeClaudeDir! : BrainX.Core.Services.HookHealth.DefaultClaudeDir(), TimeSpan.FromHours(48));
+                _hookChecked = true;
                 var hookLine = BrainX.Core.Services.HookHealth.InstructionsLine(_hookProblems);
                 if (hookLine.Length > 0) Log(hookLine);
             }
@@ -766,6 +767,10 @@ internal static partial class Program
     /// wrong with them, read once at startup (see BrainX.Core HookHealth).</summary>
     private static IReadOnlyList<string> _hookProblems = Array.Empty<string>();
 
+    /// <summary>Whether the hooks were looked at all (never in a sandbox or a
+    /// cloud brain, unless the harness names a fake Claude folder).</summary>
+    private static bool _hookChecked;
+
     internal static string Instructions()
     {
         var inv = System.Globalization.CultureInfo.InvariantCulture;
@@ -778,7 +783,9 @@ internal static partial class Program
             $"BrainX MCP v{ServerVersion}. Quote this when asked which brain version runs.\n\n" +
             // Only present when something is wrong, so a healthy session pays
             // nothing. It sits in the head because Claude Code drops the tail —
-            // one fixed sentence; what is wrong follows the rules.
+            // one fixed sentence that names brain_stats → hooks, where the list
+            // of what is wrong can be read (it also follows the rules, for
+            // clients that show the whole text).
             (hookDetail.Length > 0 ? BrainX.Core.Services.HookHealth.HeadAlarm + "\n\n" : "") +
             $"The owner's personal brain{size}: your primary memory, not optional context. " +
             "Tool calls are journaled automatically: never narrate your searches.\n\n" +
@@ -1291,7 +1298,7 @@ internal static partial class Program
                     }
                 }),
             Tool("brain_stats",
-                "High-level stats: brain name, address, note/word counts, top tags, top categories.",
+                "High-level stats: brain name, address, note/word counts, top tags, top categories — and `hooks`: which brain hooks are broken, when the instructions say HOOKS BROKEN.",
                 new JObject { ["type"] = "object", ["properties"] = new JObject() }),
             Tool("brain_bundle",
                 "Load a PRE-BUILT context bundle for a hot topic. Each bundle is ~1200 tokens — way cheaper than " +
@@ -2748,7 +2755,12 @@ internal static partial class Program
 
     private static JToken BrainStats()
     {
-        var export = LoadExport() ?? throw new InvalidOperationException("no brain-export");
+        // No index yet: the hook problems still have to reach whoever followed
+        // the HOOKS BROKEN alarm here.
+        var export = LoadExport() ?? throw new InvalidOperationException("no brain-export"
+            + (_hookProblems.Count > 0
+                ? " · " + BrainX.Core.Services.HookHealth.DetailLine(_hookProblems) + " Fix: `" + BrainX.Core.Services.HookHealth.FixCommand + "`."
+                : ""));
         int memoSize, hits, misses;
         lock (_memoLock)
         {
@@ -2868,7 +2880,41 @@ internal static partial class Program
         };
         // Present only in cloud mode, so a local brain's stats read exactly as before.
         if (_cloudMode) stats["cloud"] = CloudStats();
+        stats["hooks"] = HookStats();
         return stats;
+    }
+
+    /// <summary>
+    /// brain_stats' "hooks": what the HOOKS BROKEN alarm in the instructions
+    /// points at. The alarm is one fixed sentence because the head is held to
+    /// what Claude Code shows; the problems themselves (script names, an
+    /// unbounded list) sit after the rules, which Claude Code never shows — so
+    /// this is where a session reads which hooks are broken.
+    /// </summary>
+    private static JObject HookStats()
+    {
+        if (!_hookChecked)
+            return new JObject
+            {
+                ["checked"] = false,
+                ["note"] = "not checked in this session (sandbox or cloud brain) (เซสชันนี้ไม่ได้ตรวจ hook — แซนด์บ็อกซ์หรือสมองบนคลาวด์)",
+            };
+        var problems = _hookProblems;
+        var o = new JObject
+        {
+            ["checked"] = true,
+            ["ok"] = problems.Count == 0,
+            ["problems"] = new JArray(problems),
+        };
+        if (problems.Count > 0)
+        {
+            o["effect"] = "Brain hooks (save reminders, file lessons, error recall) are silent until fixed " +
+                          "(hook ของสมองเงียบอยู่จนกว่าจะแก้ — ไม่มีการเตือนให้บันทึก ไม่มีบทเรียนของไฟล์ ไม่มีการเรียกคืนวิธีแก้ error)";
+            o["fix"] = BrainX.Core.Services.HookHealth.FixCommand;
+            o["tell"] = "Tell the owner which hooks are broken and that `" + BrainX.Core.Services.HookHealth.FixCommand + "` rewrites them " +
+                        "(บอกเจ้าของว่า hook ตัวไหนเสีย และให้รัน `" + BrainX.Core.Services.HookHealth.FixCommand + "` เพื่อเขียนใหม่)";
+        }
+        return o;
     }
 
     /// <summary>

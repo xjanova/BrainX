@@ -1297,9 +1297,20 @@ internal static partial class Program
         // The effort the same way: one level of lower-case letters, nothing else.
         var model = RunnerModelFor(agent, runner);
         var effort = RunnerEffortFor(agent, runner, model);
-        var args = RunnerModels.ApplyEffortToArgs(
-            RunnerModels.ApplyToArgs(runner.Args, model, runner.ModelFlag), effort, runner.EffortArgs);
-        foreach (var a in args)
+        // So the brain this run talks to knows it is a broker run: its
+        // cowork_leave then leaves for itself only, never for the agent's seat,
+        // and it neither lists nor calls chrome__* nor reads the private
+        // browsing log — this run takes its orders from mail, cards and the
+        // room, which peers write to. claude passes its environment on to its
+        // MCP servers; codex does not (only an allow-list plus each server's
+        // configured env), so a codex runner gets the variable as a config
+        // override on every brain server in its config.toml (UnattendedRuns).
+        var launch = UnattendedRuns.ForRunner(exe,
+            RunnerModels.ApplyEffortToArgs(RunnerModels.ApplyToArgs(runner.Args, model, runner.ModelFlag), effort, runner.EffortArgs),
+            UnattendedRuns.IsCodex(exe) ? UnattendedRuns.ReadCodexConfig() : null);
+        if (UnattendedRuns.IsCodex(exe) && launch.CodexServers.Count == 0)
+            BrokerSay(agent + ":codex-brain", $"{agent}: no BrainX server with a command in codex's config.toml — its runs are recognised by the run registry alone");
+        foreach (var a in launch.Args)
             psi.ArgumentList.Add(a.Replace("{prompt}", BuildSpawnPrompt(work, cfg.MaxRunSeconds))
                                   .Replace("{cwd}", psi.WorkingDirectory)
                                   .Replace("{agent}", agent));
@@ -1308,9 +1319,7 @@ internal static partial class Program
         // on one path and not another — set it explicitly so a spawned agent
         // always reads the same brain the broker is watching.
         psi.Environment["BRAINX_VAULT"] = _vaultPath;
-        // So the brain this run talks to knows it is a broker run: its
-        // cowork_leave then leaves for itself only, never for the agent's seat.
-        psi.Environment["BRAINX_BROKER_RUN"] = "1";
+        foreach (var (k, v) in launch.Env) psi.Environment[k] = v;
 
         // Claude Code refuses to start inside another Claude Code session, and
         // it decides that from an inherited environment variable:
@@ -1362,6 +1371,12 @@ internal static partial class Program
         {
             var p = Process.Start(psi);
             if (p == null) { BrokerLog($"{agent}: spawn returned no process"); return false; }
+
+            // Recorded at once, before the runner can start a brain: a brain
+            // below this process is an unattended run whatever environment its
+            // CLI hands it (UnattendedRuns.UnderRegisteredRun).
+            if (!UnattendedRuns.Register(p.Id, agent) && !p.HasExited)
+                BrokerLog($"{agent}: could not record pid {p.Id} in the run registry — its brain relies on BRAINX_BROKER_RUN alone");
 
             // Drain both pipes. A child whose stdout fills its buffer blocks
             // forever, which would look exactly like a hung agent — and the
@@ -1789,6 +1804,7 @@ internal static partial class Program
             if (!killed)
                 try { Task.Run(() => run.Process.WaitForExit()).Wait(TimeSpan.FromSeconds(3)); } catch { }
             BrokerLog($"{agent}: run finished, exit {code}, {elapsed.TotalSeconds:F0}s" + (ownerStopped ? " — stopped by the owner" : ""));
+            UnattendedRuns.Unregister(run.Process.Id);
             run.Process.Dispose();
             live.Remove(agent);
 

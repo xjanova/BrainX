@@ -36,6 +36,11 @@ internal static partial class Program
         // which is itself started by the harness.
         if (ChromeStubServer.IsRequested(args))
             return await ChromeStubServer.RunAsync();
+        // A stand-in for a broker runner (a copy of this exe named codex.exe),
+        // started by a sandboxed broker: records what it was started with and
+        // what a brain below it offers. See Program.UnattendedRuns.
+        if (Environment.GetEnvironmentVariable(RunnerProbeEnv) is { Length: > 0 } probeOut)
+            return await RunnerProbeAsync(probeOut);
         if (Environment.GetEnvironmentVariable(StubMcpServer.EnvFlag) == "1")
             return await StubMcpServer.RunAsync();
 

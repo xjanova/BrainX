@@ -123,13 +123,19 @@ public static class HookHealth
     /// The head is held to what Claude Code shows (it cuts at 2,048
     /// characters), and the full line — a list of problems with script names,
     /// unbounded — used to push the last rules past that cut. The problems
-    /// themselves go to <see cref="DetailLine"/>, after the rules.
+    /// themselves go to <see cref="DetailLine"/>, after the rules, and to
+    /// brain_stats' <c>hooks</c> entry — the one place a Claude Code session
+    /// can actually read them, since it never sees the tail (review rev3: the
+    /// alarm used to promise "details at the end" that did not arrive).
     /// </summary>
     public const string HeadAlarm =
-        "HOOKS BROKEN (details at the end): tell the owner now; `brainx-mcp install-hooks` rewrites them.";
+        "HOOKS BROKEN: tell the owner now; `brainx-mcp install-hooks` rewrites them. Which ones: brain_stats → hooks.";
 
     /// <summary>The problems, for the part of the instructions after the rules. "" when healthy.</summary>
     public static string DetailLine(IReadOnlyList<string> problems) =>
         problems.Count == 0 ? ""
             : "HOOK PROBLEMS: " + string.Join("; ", problems) + ". Brain hooks (save reminders, file lessons, error recall) are silent until fixed.";
+
+    /// <summary>The fix the owner runs, named the same everywhere.</summary>
+    public const string FixCommand = "brainx-mcp install-hooks";
 }

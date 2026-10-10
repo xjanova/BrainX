@@ -120,10 +120,17 @@ internal static class ChromeBridge
     /// run the bridge is OFF whatever the switch says: not listed, not
     /// discovered, every call refused before anything is spawned or logged —
     /// and private_browse_search is refused the same way.
+    ///
+    /// Not the environment alone (review rev3): codex hands its MCP servers
+    /// only an allow-list of variables plus their configured env, so a codex
+    /// broker run's brain never saw BRAINX_BROKER_RUN. The broker now passes
+    /// it to codex as a config override AND records every runner it starts;
+    /// a brain below a recorded runner is unattended whatever its environment
+    /// says (UnattendedRuns).
     /// </summary>
     public static bool IsUnattendedRun =>
-        !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("BRAINX_AS_AGENT"))
-        || Environment.GetEnvironmentVariable("BRAINX_BROKER_RUN") == "1";
+        !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(UnattendedRuns.AsAgentEnv))
+        || UnattendedRuns.IsBrokerRun();
 
     /// <summary>The owner's switch is on AND someone is watching this run.</summary>
     public static bool AvailableNow => EnabledNow && !IsUnattendedRun;
@@ -383,40 +390,34 @@ internal static class ChromeBridge
     // tool too. So the call only CAPTURES (strings and decoded bytes, before
     // the 256 KB cap rewrites the result, clipped to what the store keeps —
     // PrivateBrowseCapture) and a single background writer stores, in order.
-    // Bounded in entries and so in bytes: past the bound the OLDEST pending entry is
-    // dropped (and counted, never logged with content) rather than memory
-    // growing behind a slow disk. Flushed before a search and at shutdown.
+    // Bounded in entries (64) AND in bytes (64 MB, PrivateBrowseQueue): past
+    // either bound the OLDEST pending entry is dropped (and counted, never
+    // logged with content) rather than memory growing behind a slow disk.
+    // Flushed before a search and at shutdown.
 
-    private const int PendingCapacity = 64;
-    private static readonly System.Threading.Channels.Channel<PrivateBrowseRecord> Pending =
-        System.Threading.Channels.Channel.CreateBounded<PrivateBrowseRecord>(
-            new System.Threading.Channels.BoundedChannelOptions(PendingCapacity)
-            {
-                FullMode = System.Threading.Channels.BoundedChannelFullMode.DropOldest,
-                SingleReader = true,
-            },
-            _ => { Interlocked.Increment(ref _dropped); Interlocked.Decrement(ref _queued); });
+    private static readonly PrivateBrowseQueue Pending = new();
 
     private static long _queued;      // enqueued and not yet stored (or dropped)
-    private static long _dropped;
     private static Task? _writer;
     private static readonly object WriterGate = new();
 
     /// <summary>Entries dropped because the writer fell behind (no content, a count).</summary>
-    public static long DroppedRecords => Interlocked.Read(ref _dropped);
+    public static long DroppedRecords => Pending.Dropped;
 
     private static void Enqueue(PrivateBrowseRecord rec)
     {
         lock (WriterGate) _writer ??= Task.Run(WriteLoopAsync);
         Interlocked.Increment(ref _queued);
-        if (!Pending.Writer.TryWrite(rec)) Interlocked.Decrement(ref _queued);
+        var dropped = Pending.Enqueue(rec);
+        if (dropped > 0) Interlocked.Add(ref _queued, -dropped);
     }
 
     private static async Task WriteLoopAsync()
     {
-        while (await Pending.Reader.WaitToReadAsync().ConfigureAwait(false))
+        while (true)
         {
-            while (Pending.Reader.TryRead(out var rec))
+            await Pending.WaitAsync().ConfigureAwait(false);
+            while (Pending.TryDequeue(out var rec))
             {
                 try
                 {
@@ -466,8 +467,8 @@ internal static class ChromeBridge
         {
             if (Store == null) return;
             // Clipped at capture to what the store keeps (text, args, URL, 8
-            // shots of ≤ 15 MB), so the queue's bound of 64 entries is also a
-            // bound in bytes — what is stored does not change.
+            // shots of ≤ 15 MB) — what is stored does not change — and the
+            // queue holds at most 64 entries and 64 MB (or one entry).
             Enqueue(PrivateBrowseCapture.FromCall(remoteTool, args, result, error, SafeIdentity()));
         }
         catch (Exception ex)
