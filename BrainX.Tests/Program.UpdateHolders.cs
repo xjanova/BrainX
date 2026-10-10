@@ -13,6 +13,30 @@ internal static partial class Program
     {
         checks.Add(("update: another process's working folder is read, so one parked in `current` can be named", UpdateHolderWorkingDirectory));
         checks.Add(("update: the MCP mirror lives outside the root the updater kills in", MirrorOutsideUpdaterRoot));
+        checks.Add(("update: the package probe cleans up after itself, and the breakaway launch starts a process", PackageBreakawayBasics));
+    }
+
+    // 2026-10-10: a BrainX window inside Claude's MSIX virtualization made a
+    // mirror nobody else could see. The probe that detects that state writes a
+    // folder into %LOCALAPPDATA% on every client start, so it must never leave
+    // one behind; and the launch that escapes must still be a working launch
+    // outside any package (CI, a dev shell, the owner's machine).
+    private static async Task PackageBreakawayBasics()
+    {
+        var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        static int Probes(string dir) => Directory.Exists(dir)
+            ? Directory.GetDirectories(dir, "brainx-silo-probe-*").Length : 0;
+        var before = Probes(local);
+        var package = PackageBreakaway.VirtualizingPackage();
+        Check("the probe leaves no folder behind", Probes(local) == before, $"{Probes(local) - before} left");
+        Check("a test runner carries no package identity", PackageBreakaway.CurrentPackage() is null, PackageBreakaway.CurrentPackage());
+        if (package is not null) Console.WriteLine($"    (this run is inside {package}'s file-system virtualization)");
+
+        var flag = Path.Combine(Path.GetTempPath(), "brainx-breakaway-" + Guid.NewGuid().ToString("N")[..8] + ".txt");
+        var pid = PackageBreakaway.StartWithBreakawayPolicy($"cmd.exe /c echo ok> \"{flag}\"", Path.GetTempPath(), hidden: true);
+        for (var i = 0; i < 50 && !File.Exists(flag); i++) await Task.Delay(100);
+        Check("the breakaway launch runs its command", pid > 0 && File.Exists(flag), $"pid {pid}");
+        try { File.Delete(flag); } catch { }
     }
 
     // 2026-10-10: Velopack kills every process under %LOCALAPPDATA%\BrainX on

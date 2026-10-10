@@ -8997,12 +8997,21 @@ internal static partial class Program
     ///
     /// `cmd /c start` breaks the link: cmd exits immediately, so by the time
     /// anyone walks the tree the GUI's recorded parent is already gone.
+    ///
+    /// It does not break the MSIX link. This server is started by Claude or
+    /// Codex, and a window it opens with `cmd /c start` runs in that package's
+    /// file-system virtualization, where a new top-level AppData folder the
+    /// window creates exists for no one else (PackageBreakaway has the
+    /// 2026-10-10 measurements). So a virtualized server opens the window
+    /// from outside the package first, and only falls back to `start`.
     /// </summary>
     private static void StartDetached(string exe)
     {
         var dir = Path.GetDirectoryName(exe)!;
         if (OperatingSystem.IsWindows())
         {
+            if (StartOutsidePackage(exe, dir)) return;
+
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = "cmd.exe",
@@ -9024,6 +9033,39 @@ internal static partial class Program
             UseShellExecute = true,
             CreateNoWindow = false,
         });
+    }
+
+    /// <summary>
+    /// Open the window outside the package this server is virtualized by.
+    /// False when it is not virtualized, or no route out worked — the caller
+    /// then starts it as before, and the window relaunches itself.
+    /// </summary>
+    private static bool StartOutsidePackage(string exe, string dir)
+    {
+        try
+        {
+            var package = PackageBreakaway.VirtualizingPackage();
+            if (package is null) return false;
+
+            if (PackageBreakaway.CurrentPackage() is not null)
+            {
+                // `start` still keeps the window off this worker's tree; the
+                // policy takes cmd, and so the window, out of the package.
+                PackageBreakaway.StartWithBreakawayPolicy($"cmd.exe /c start \"\" \"{exe}\"", dir, hidden: true);
+                Log($"client launch: outside package {package} (breakaway policy)");
+                return true;
+            }
+            // No identity, so the policy does nothing here; the shell is
+            // outside every package, and its child is in no one's tree.
+            if (PackageBreakaway.StartViaShell(exe))
+            {
+                Log($"client launch: outside package {package} (through the shell)");
+                return true;
+            }
+            Log($"client launch: still inside package {package} — no shell to hand it to");
+        }
+        catch (Exception ex) { Log($"client launch: could not leave the package ({ex.Message})"); }
+        return false;
     }
 
     private static string? FindSolutionRoot(string startDir)
