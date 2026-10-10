@@ -97,6 +97,12 @@ public partial class MainWindow
             // — and so were its two wake hooks, which no `codex mcp` command
             // can reach. Both are repointed here.
             if (codexPresent) codexChanged |= HealCodexRuntimePaths(exe);
+            // Grok Build's own MCP config: no registrar ever owned it, so it is
+            // only ever healed, never added (a missing entry is the owner's call).
+            if (HealGrokRuntimePaths(exe))
+                SetOnboardStatus("Grok was pointed at the folder BrainX updates into — moved it to the stable copy.");
+            if (HealGeminiRuntimePath(exe))
+                SetOnboardStatus("Gemini was pointed at the folder BrainX updates into — moved it to the stable copy.");
             if (codexPresent)
             {
                 try
@@ -764,26 +770,7 @@ public partial class MainWindow
         {
             var home = BrainX.Core.Services.CodexAgentsRulesInstaller.ResolveCodexHome();
             if (home is null) return false;
-            var cfg = Path.Combine(home, "config.toml");
-            if (!File.Exists(cfg)) return false;
-
-            var raw = File.ReadAllText(cfg);
-            // Anchored at both ends: a drive letter on the left, the exe name
-            // on the right. Stops at a quote or a newline so it can never run
-            // past the end of the string it is sitting in. MatchEvaluator
-            // rather than a replacement string — a path is not a substitution
-            // pattern and `$` in one must stay a `$`.
-            // Both old homes: Velopack's `current\mcp`, and the pre-2026-10-10
-            // mirror `BrainX\mcp`, which updates kill every process in.
-            var healed = System.Text.RegularExpressions.Regex.Replace(
-                raw,
-                @"[A-Za-z]:[^'""\r\n]*?\\BrainX\\(?:current\\)?mcp\\brainx-mcp\.exe",
-                _ => exe,
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-            if (string.Equals(healed, raw, StringComparison.Ordinal)) return false;
-
-            try { File.Copy(cfg, cfg + ".brainx.bak", overwrite: true); } catch { }
-            File.WriteAllText(cfg, healed, new System.Text.UTF8Encoding(false));
+            if (!HealTomlRuntimePaths(Path.Combine(home, "config.toml"), exe)) return false;
             SetOnboardStatus("Codex was pointed at the folder BrainX updates into — moved it to the stable copy. "
                            + "Restart Codex once.");
             return true;
@@ -793,6 +780,86 @@ public partial class MainWindow
             Debug.WriteLine($"HealCodexRuntimePaths: {ex.Message}");
             return false;
         }
+    }
+
+    /// <summary>
+    /// The same repoint for Grok Build's ~/.grok/config.toml (or $GROK_HOME),
+    /// whose [mcp_servers.brainx-brain] was written by hand on 2026-10-06 at
+    /// %LOCALAPPDATA%\BrainX\mcp. No registrar owned it, so after the mirror
+    /// moved out of the app root (2026-10-10) every broker run of Grok still
+    /// launched the old copy, the one an update kills. Same TOML-literal
+    /// string, same anchored swap, same refusals.
+    /// </summary>
+    private bool HealGrokRuntimePaths(string exe)
+    {
+        if (BrainX.Core.Services.McpRuntimePaths.IsInsideUpdaterRoot(exe)) return false;
+        if (!File.Exists(exe) || exe.IndexOfAny(['\'', '"', '\r', '\n']) >= 0) return false;
+        try
+        {
+            var home = Environment.GetEnvironmentVariable("GROK_HOME") is { Length: > 0 } h
+                ? h : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".grok");
+            return HealTomlRuntimePaths(Path.Combine(home, "config.toml"), exe);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"HealGrokRuntimePaths: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Gemini CLI's ~/.gemini/settings.json, written once by `register-gemini`
+    /// (2026-08-14) at the old mirror and never revisited. JSON, so the entry
+    /// is parsed and only its `command` changes, and only when it names a path
+    /// an update kills.
+    /// </summary>
+    private bool HealGeminiRuntimePath(string exe)
+    {
+        if (BrainX.Core.Services.McpRuntimePaths.IsInsideUpdaterRoot(exe) || !File.Exists(exe)) return false;
+        try
+        {
+            var cfg = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gemini", "settings.json");
+            if (!File.Exists(cfg)) return false;
+            var root = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(cfg));
+            if (root["mcpServers"]?["brainx-brain"] is not Newtonsoft.Json.Linq.JObject entry) return false;
+            var cmd = entry["command"]?.ToString();
+            if (!BrainX.Core.Services.McpRuntimePaths.IsInsideUpdaterRoot(cmd)) return false;
+            entry["command"] = exe;
+            try { File.Copy(cfg, cfg + ".brainx.bak", overwrite: true); } catch { }
+            File.WriteAllText(cfg, root.ToString(Newtonsoft.Json.Formatting.Indented), new System.Text.UTF8Encoding(false));
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"HealGeminiRuntimePath: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>Swap every old brainx-mcp path in one TOML file for
+    /// <paramref name="exe"/>. Backs the file up first; UTF-8 without BOM.
+    /// True when the file changed.</summary>
+    private static bool HealTomlRuntimePaths(string cfg, string exe)
+    {
+        if (!File.Exists(cfg)) return false;
+        var raw = File.ReadAllText(cfg);
+        // Anchored at both ends: a drive letter on the left, the exe name on
+        // the right. Stops at a quote or a newline so it can never run past
+        // the end of the string it is sitting in. MatchEvaluator rather than a
+        // replacement string — a path is not a substitution pattern and `$` in
+        // one must stay a `$`. Both old homes: Velopack's `current\mcp`, and
+        // the pre-2026-10-10 mirror `BrainX\mcp`, which updates kill every
+        // process in.
+        var healed = System.Text.RegularExpressions.Regex.Replace(
+            raw,
+            @"[A-Za-z]:[^'""\r\n]*?\\BrainX\\(?:current\\)?mcp\\brainx-mcp\.exe",
+            _ => exe,
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (string.Equals(healed, raw, StringComparison.Ordinal)) return false;
+
+        try { File.Copy(cfg, cfg + ".brainx.bak", overwrite: true); } catch { }
+        File.WriteAllText(cfg, healed, new System.Text.UTF8Encoding(false));
+        return true;
     }
 
     /// <summary>
