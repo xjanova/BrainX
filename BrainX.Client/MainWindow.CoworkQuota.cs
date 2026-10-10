@@ -1,8 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 
 namespace BrainX.Client;
@@ -228,6 +231,7 @@ public partial class MainWindow
         {
             _grokCheckedUtc = DateTime.UtcNow;
             try { RefreshGrokCredits(); } catch { }
+            try { MaybeProbeGrok(); } catch { }
         }
         var c = _grokCredits;
         if (c == null) return null;
@@ -325,6 +329,7 @@ public partial class MainWindow
         {
             if (!File.Exists(GrokCreditsCachePath)) return;
             var o = JObject.Parse(File.ReadAllText(GrokCreditsCachePath));
+            if (CoworkUtc(o["probedAt"]) is DateTime probed) _grokProbedUtc = probed;
             if (o["config"] is not JObject cfg) return;
             var at = CoworkUtc(o["at"]) ?? File.GetLastWriteTimeUtc(GrokCreditsCachePath);
             if (_grokCredits != null && at < _grokCreditsAt) return;
@@ -341,12 +346,100 @@ public partial class MainWindow
             var o = new JObject
             {
                 ["at"] = _grokCreditsAt.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture),
-                ["config"] = _grokCredits,
+                ["probedAt"] = _grokProbedUtc.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture),
             };
+            if (_grokCredits != null) o["config"] = _grokCredits;
             Directory.CreateDirectory(Path.GetDirectoryName(GrokCreditsCachePath)!);
             File.WriteAllText(GrokCreditsCachePath, o.ToString(Newtonsoft.Json.Formatting.None));
         }
         catch { /* HP is a nicety; never let it throw */ }
+    }
+
+    // ── Asking Grok, when nobody has for a while ──────────────────────────
+    //
+    // The cache keeps the last figure; it cannot make it current. The only way
+    // to a fresh one without Grok's login token is to let Grok fetch it
+    // itself, which its TUI does the moment it starts (measured 2026-10-10:
+    // the line was in the log within a second of a hidden start). So when the
+    // figure is older than six hours, or its period has ended, start the TUI
+    // in a hidden window, wait for the line, and close it. No prompt is ever
+    // sent, so it costs no quota. It runs at most once per six hours, a limit
+    // that survives restarts via `probedAt` in the cache, and from its own
+    // empty folder, so the session folder Grok makes for it stays in one
+    // place. Owner approved this on 2026-10-10 ("ทำเลย").
+    private static readonly TimeSpan GrokProbeEvery = TimeSpan.FromHours(6);
+    private DateTime _grokProbedUtc;
+    private static int _grokProbeRunning;
+
+    private void MaybeProbeGrok()
+    {
+        var now = DateTime.UtcNow;
+        var periodOver = CoworkUtc(_grokCredits?.SelectToken("currentPeriod.end")) is DateTime end && end <= now;
+        var fresh = _grokCredits != null && now - _grokCreditsAt < GrokProbeEvery && !periodOver;
+        if (fresh || now - _grokProbedUtc < GrokProbeEvery) return;
+
+        var home = Environment.GetEnvironmentVariable("GROK_HOME") is { Length: > 0 } h
+            ? h : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".grok");
+        var exe = Path.Combine(home, "bin", "grok.exe");
+        if (!File.Exists(exe)) return;   // Grok is not installed here
+        if (Interlocked.Exchange(ref _grokProbeRunning, 1) == 1) return;
+
+        _grokProbedUtc = now;
+        SaveGrokCreditsCache();
+        var log = Path.Combine(home, "logs", "unified.jsonl");
+        _ = Task.Run(() =>
+        {
+            try { RunGrokProbe(exe, log); }
+            catch { /* a probe that fails just leaves the old figure */ }
+            finally { Interlocked.Exchange(ref _grokProbeRunning, 0); }
+        });
+    }
+
+    /// <summary>Start Grok's TUI hidden, wait (up to 25 s) for it to log its
+    /// credits config, then close it and everything it started. The next
+    /// GrokQuota look reads the new line the normal way.</summary>
+    private static void RunGrokProbe(string exe, string log)
+    {
+        var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BrainX", "grok-probe");
+        Directory.CreateDirectory(dir);
+        long startLen = File.Exists(log) ? new FileInfo(log).Length : 0;
+
+        // ShellExecute with a hidden window, not CreateNoWindow: the TUI needs
+        // a real console, it just must not be seen.
+        using var p = Process.Start(new ProcessStartInfo(exe)
+        {
+            UseShellExecute = true,
+            WindowStyle = ProcessWindowStyle.Hidden,
+            WorkingDirectory = dir,
+        });
+        if (p == null) return;
+        try
+        {
+            var until = DateTime.UtcNow.AddSeconds(25);
+            while (DateTime.UtcNow < until && !p.HasExited)
+            {
+                Thread.Sleep(1000);
+                if (LogHasCreditsSince(log, startLen)) break;
+            }
+        }
+        finally
+        {
+            try { if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { }
+        }
+    }
+
+    private static bool LogHasCreditsSince(string log, long from)
+    {
+        try
+        {
+            if (!File.Exists(log)) return false;
+            using var fs = new FileStream(log, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            if (fs.Length <= from) return false;
+            fs.Seek(from, SeekOrigin.Begin);
+            using var sr = new StreamReader(fs, System.Text.Encoding.UTF8);
+            return sr.ReadToEnd().Contains("billing: fetched credits config", StringComparison.Ordinal);
+        }
+        catch { return false; }
     }
 
     /// <summary>When the broker paused this agent on a usage limit, if it is
