@@ -245,6 +245,8 @@ public partial class MainWindow
                 // owner is watching for it.
                 ["avatar"] = CoworkAvatar(id),
                 ["emote"] = CoworkEmote(id),
+                // The model it answers with, when the room knows: CluadeX says so over its pipe (CoworkModels).
+                ["model"] = CoworkAgentModel(id),
             });
         }
 
@@ -1135,11 +1137,10 @@ public partial class MainWindow
     {
         var arr = new JArray();
         var runners = CoworkRunners();
-        if (runners == null) return arr;
         var picks = BrainX.Core.Services.RunnerModels.ReadChoices(CoworkBusRoot);
         var effortPicks = BrainX.Core.Services.RunnerModels.ReadEffortChoices(CoworkBusRoot);
 
-        foreach (var (name, val) in runners)
+        foreach (var (name, val) in runners ?? new JObject())
         {
             if (val is not JObject r || name.StartsWith("//", StringComparison.Ordinal)) continue;
             try
@@ -1191,10 +1192,108 @@ public partial class MainWindow
             }
             catch { /* one broken runner entry must not hide the others */ }
         }
+
+        // CluadeX while it is on: the app the owner runs, asked over its own pipe (BrainX.Core.Services.CluadeXModels).
+        if (!arr.OfType<JObject>().Any(m => string.Equals(m["agent"]?.ToString(), BrainX.Core.Services.CluadeXModels.Agent, StringComparison.OrdinalIgnoreCase)))
+        {
+            RefreshCoworkCluadeX();
+            if (_coworkCluadeXInfo is { } ci && DateTime.UtcNow - _coworkCluadeXAt < CoworkCluadeXFresh)
+                arr.Add(BrainX.Core.Services.CluadeXModels.Row(ci, _coworkCluadeXNote));
+        }
         return arr;
 
         static JArray Options(IEnumerable<BrainX.Core.Services.RunnerModels.Option> list) =>
             new(list.Select(o => new JObject { ["id"] = o.Id, ["label"] = o.Label, ["note"] = o.Note }));
+    }
+
+    // ─── CluadeX in the model panel (BrainX.Core.Services.CluadeXModels) ───
+
+    /// <summary>How long an answer from CluadeX stands for it; how often it is asked while the room is open.</summary>
+    private static readonly TimeSpan CoworkCluadeXFresh = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan CoworkCluadeXEvery = TimeSpan.FromSeconds(5);
+    /// <summary>The room's own connection: a Co-Pilot run holds the shared bridge for as long as it runs.</summary>
+    private BrainX.Core.Services.CluadeXClient? _coworkCluadeX;
+    private BrainX.Core.Services.CluadeXModelInfo? _coworkCluadeXInfo;
+    private DateTime _coworkCluadeXAt = DateTime.MinValue, _coworkCluadeXAsked = DateTime.MinValue;
+    /// <summary>Why CluadeX refused the last pick, shown under its row until a pick goes through.</summary>
+    private string? _coworkCluadeXNote;
+    private int _coworkCluadeXBusy;
+
+    /// <summary>CluadeX's presence on the bus is fresh — only then is its pipe asked, so a CluadeX that is not running
+    /// never costs a connect attempt every few seconds.</summary>
+    private bool CoworkCluadeXOnline()
+    {
+        try
+        {
+            var p = Path.Combine(CoworkBusRoot, "presence", BrainX.Core.Services.CluadeXModels.Agent + ".json");
+            if (!File.Exists(p)) return false;
+            var seen = JObject.Parse(File.ReadAllText(p))["lastSeenUtc"]?.ToObject<DateTime?>();
+            return seen is { } t && DateTime.UtcNow - t.ToUniversalTime() < TimeSpan.FromSeconds(120);
+        }
+        catch { return false; }
+    }
+
+    /// <summary>Ask CluadeX what it answers with — at most every few seconds, off the UI thread; the room repaints
+    /// when the answer changed.</summary>
+    private void RefreshCoworkCluadeX(bool now = false)
+    {
+        if (!now && DateTime.UtcNow - _coworkCluadeXAsked < CoworkCluadeXEvery) return;
+        if (Interlocked.Exchange(ref _coworkCluadeXBusy, 1) == 1) return;
+        _coworkCluadeXAsked = DateTime.UtcNow;
+        bool online = CoworkCluadeXOnline();
+        _ = Task.Run(async () =>
+        {
+            string before = CoworkCluadeXKey(_coworkCluadeXInfo);
+            try
+            {
+                if (!online) { _coworkCluadeXInfo = null; return; }
+                _coworkCluadeX ??= new BrainX.Core.Services.CluadeXClient();
+                _coworkCluadeXInfo = await _coworkCluadeX.GetActiveModelAsync(4000);
+                _coworkCluadeXAt = DateTime.UtcNow;
+            }
+            catch
+            {
+                _coworkCluadeXInfo = null;
+                try { if (_coworkCluadeX != null) await _coworkCluadeX.DisposeAsync(); } catch { }
+                _coworkCluadeX = null;
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _coworkCluadeXBusy, 0);
+                if (CoworkCluadeXKey(_coworkCluadeXInfo) != before)
+                    _ = Dispatcher.BeginInvoke(new Action(PostCowork));
+            }
+        });
+    }
+
+    /// <summary>The model an agent answers with, for its nameplate — known for CluadeX (it says so over its pipe).</summary>
+    private string CoworkAgentModel(string id) =>
+        string.Equals(id, BrainX.Core.Services.CluadeXModels.Agent, StringComparison.OrdinalIgnoreCase)
+        && _coworkCluadeXInfo is { } ci && DateTime.UtcNow - _coworkCluadeXAt < CoworkCluadeXFresh
+            ? ci.Model ?? "" : "";
+
+    private static string CoworkCluadeXKey(BrainX.Core.Services.CluadeXModelInfo? i) => i == null ? "" :
+        $"{i.Provider}|{i.Model}|{i.Effort}|{string.Join(",", (i.Options ?? new()).Select(o => o.Model))}";
+
+    /// <summary>The owner picked CluadeX's model or effort in the room: asked of CluadeX itself (choose_model, its own
+    /// model box and rules), and the room repaints from what CluadeX answers with afterwards — so "saved" means it
+    /// really switched. A refusal (a reply still running on another provider, no Pro, …) shows under the row.</summary>
+    private void CoworkChooseCluadeX(string? model, string? effort)
+    {
+        var info = _coworkCluadeXInfo;
+        if (info == null || !BrainX.Core.Services.CluadeXModels.IsOffered(info, model, effort)) return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                // A connection of its own: a pick must not queue behind the poll.
+                await using var client = new BrainX.Core.Services.CluadeXClient();
+                var r = await client.ChooseModelAsync(model, effort);
+                _coworkCluadeXNote = r.Ok ? "" : r.Reason;
+            }
+            catch (Exception ex) { _coworkCluadeXNote = "ติดต่อ CluadeX ไม่ได้ — " + ex.Message; }
+            _ = Dispatcher.BeginInvoke(new Action(() => { RefreshCoworkCluadeX(now: true); PostCowork(); }));
+        });
     }
 
     /// <summary>The model and effort a broker run still in flight was started on.</summary>
@@ -1227,6 +1326,8 @@ public partial class MainWindow
             var row = CoworkModels().OfType<JObject>().FirstOrDefault(m =>
                 string.Equals(m["agent"]?.ToString(), agent, StringComparison.OrdinalIgnoreCase));
             if (row == null || row["canChoose"]?.ToObject<bool>() != true) return;
+            // CluadeX is asked to switch — nothing goes into models.json; "" (no pick) means nothing for an app.
+            if (row["app"] != null) { if (model.Length > 0) CoworkChooseCluadeX(model, null); return; }
             var offered = (row["options"] as JArray ?? new JArray())
                 .Any(o => string.Equals(o["id"]?.ToString(), model, StringComparison.Ordinal));
             if (model.Length > 0 && !offered) return;
@@ -1249,6 +1350,8 @@ public partial class MainWindow
             var row = CoworkModels().OfType<JObject>().FirstOrDefault(m =>
                 string.Equals(m["agent"]?.ToString(), agent, StringComparison.OrdinalIgnoreCase));
             if (row == null || row["effortCanChoose"]?.ToObject<bool>() != true) return;
+            // CluadeX: "" (the default) is its auto level.
+            if (row["app"] != null) { CoworkChooseCluadeX(null, effort.Length > 0 ? effort : BrainX.Core.Services.CluadeXModels.AutoEffort); return; }
             var offered = (row["effortOptions"] as JArray ?? new JArray())
                 .Any(o => string.Equals(o["id"]?.ToString(), effort, StringComparison.Ordinal));
             if (effort.Length > 0 && !offered) return;

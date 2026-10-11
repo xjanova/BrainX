@@ -332,18 +332,55 @@ public sealed class CluadeXClient : IAsyncDisposable
             arguments = new { },
         }, timeoutMs, ct);
         ThrowIfError(resp);
-        string flat = ExtractToolText(resp.Result);
-        if (string.IsNullOrWhiteSpace(flat))
-            return new CluadeXModelInfo();
+        return ParseActiveModel(ExtractToolText(resp.Result));
+    }
+
+    /// <summary>The get_active_model reply as an object — public so the parse is testable without a pipe. A CluadeX
+    /// from before the cowork model panel sends no options / effort: those stay empty.</summary>
+    public static CluadeXModelInfo ParseActiveModel(string? flat)
+    {
+        if (string.IsNullOrWhiteSpace(flat)) return new CluadeXModelInfo();
         try
         {
-            return JsonSerializer.Deserialize<CluadeXModelInfo>(flat, JsonOpts)
-                   ?? new CluadeXModelInfo();
+            return JsonSerializer.Deserialize<CluadeXModelInfo>(flat, JsonOpts) ?? new CluadeXModelInfo();
         }
         catch
         {
             return new CluadeXModelInfo { Note = $"unparseable response: {flat}" };
         }
+    }
+
+    /// <summary>
+    /// Pick the model and/or effort CluadeX's chat answers with — the cowork room's model panel. Unlike
+    /// <see cref="SetModelAsync"/> (Co-Pilot alignment, any provider) this goes through CluadeX's own model box
+    /// (cluadex.choose_model): only a model from <see cref="CluadeXModelInfo.Options"/>, never a model on that PC,
+    /// and a provider change waits for its running replies. A CluadeX without the tool answers with a tool error,
+    /// which comes back as <c>Ok=false</c> and that text as the reason.
+    /// </summary>
+    public async Task<CluadeXChooseResult> ChooseModelAsync(string? model, string? effort,
+        int timeoutMs = 30_000, CancellationToken ct = default)
+    {
+        await EnsureConnectedAsync(ct: ct);
+        var resp = await SendRequestRawAsync("tools/call", new
+        {
+            name = "cluadex.choose_model",
+            arguments = new { model, effort },
+        }, timeoutMs, ct);
+        ThrowIfError(resp);
+        return ParseChoose(ExtractToolText(resp.Result));
+    }
+
+    /// <summary>choose_model's reply: its JSON verdict, or — a tool error is plain text — that text as the reason.</summary>
+    public static CluadeXChooseResult ParseChoose(string? flat)
+    {
+        if (string.IsNullOrWhiteSpace(flat)) return new CluadeXChooseResult { Reason = "(empty response from CluadeX)" };
+        try
+        {
+            if (flat.TrimStart().StartsWith('{'))
+                return JsonSerializer.Deserialize<CluadeXChooseResult>(flat, JsonOpts) ?? new CluadeXChooseResult();
+        }
+        catch { /* not the verdict — fall through to the text */ }
+        return new CluadeXChooseResult { Ok = false, Reason = flat.Trim() };
     }
 
     /// <summary>Force CluadeX to switch its active provider+model so it
@@ -556,6 +593,34 @@ public sealed class CluadeXModelInfo
     /// <summary>Compact "provider:model" form for display + comparison.</summary>
     public string Identity =>
         string.IsNullOrEmpty(Model) ? $"{Provider}:(none)" : $"{Provider}:{Model}";
+
+    /// <summary>The effort the chat answers at ("auto" = the model decides). Empty from an older CluadeX.</summary>
+    public string Effort { get; set; } = "";
+    /// <summary>What choose_model accepts: the chat's model box — API models that have a key, never a model on that PC.</summary>
+    public List<CluadeXModelOption> Options { get; set; } = new();
+    /// <summary>The effort levels choose_model accepts.</summary>
+    public List<string> Efforts { get; set; } = new();
+}
+
+/// <summary>One model CluadeX's chat can be switched to from outside.</summary>
+public sealed class CluadeXModelOption
+{
+    public string Provider { get; set; } = "";
+    public string Model { get; set; } = "";
+    /// <summary>The provider's display name, e.g. "Anthropic Claude".</summary>
+    public string Label { get; set; } = "";
+    /// <summary>List price, "$2 / $10" — input / output per million tokens.</summary>
+    public string Price { get; set; } = "";
+}
+
+/// <summary>Outcome of <see cref="CluadeXClient.ChooseModelAsync"/>: what the chat answers with now, and why not when
+/// it refused (in CluadeX's language).</summary>
+public sealed class CluadeXChooseResult
+{
+    public bool Ok { get; set; }
+    public string Model { get; set; } = "";
+    public string Effort { get; set; } = "";
+    public string Reason { get; set; } = "";
 }
 
 /// <summary>

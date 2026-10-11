@@ -2816,6 +2816,8 @@ function drawOverlay() {
             (a.bridge ? `<span class="badge rig">เครื่องมือ</span>` : '') +
             (a.spawned ? `<span class="badge">AUTO</span>` : '') +
             (a.pending ? `<span class="badge">${a.pending}</span>` : '') +
+            // The model it answers with (CluadeX reports it); the vendor prefix is the agent's name already.
+            (a.model ? `<span class="badge model" title="โมเดลที่ใช้อยู่ — ${esc(a.model)}">${esc(a.model.replace(/^(claude|gpt|gemini)-/, ''))}</span>` : '') +
             `<span class="doing">${esc(doing)}</span>`);
     }
 
@@ -3474,6 +3476,10 @@ function effortLabel(row, id) {
 /** What "no pick" means for this runner, in words — runners.json's model if
  *  it names one, else whatever the CLI itself is set to. */
 function modelDefaultText(row) {
+    // An app the owner runs (CluadeX): no default to fall back to — what it answers with now.
+    if (row.app) return row.current
+        ? `ตอนนี้ใช้ ${row.current}${row.currentProvider ? ` (${row.currentProvider})` : ''}`
+        : `${row.app} ยังไม่ได้เลือกโมเดล`;
     if (row.configured) return `ค่าเริ่มต้น — ${modelLabel(row, row.configured)} (runners.json)`;
     if (row.cliDefault) return `ค่าเริ่มต้นของ CLI — ${modelLabel(row, row.cliDefault)}`;
     return 'ค่าเริ่มต้นของ CLI';
@@ -3482,6 +3488,7 @@ function modelDefaultText(row) {
 /** The same for the effort: runners.json's level, else what the next model
  *  starts at by itself (claude: the model's own, codex: config.toml). */
 function effortDefaultText(row) {
+    if (row.app) return 'อัตโนมัติ — ให้โมเดลเลือกเอง';
     if (row.effortConfigured) return `ค่าเริ่มต้น — ${effortLabel(row, row.effortConfigured)} (runners.json)`;
     if (row.effortCliDefault) return `ค่าเริ่มต้นของ CLI — ${effortLabel(row, row.effortCliDefault)}`;
     return 'ค่าเริ่มต้นของ CLI';
@@ -3536,13 +3543,17 @@ function renderModels() {
             // A pick the CLI no longer offers still shows as what it is,
             // rather than silently reading as the default.
             const stale = value && !opts.some(o => o.id === value);
-            const options = [`<option value="">${esc(modelDefaultText(row))}</option>`]
+            // An app's row has no "default" pick once it answers with a listed model: there is nothing to fall back to.
+            const options = (row.app && value ? [] : [`<option value="">${esc(modelDefaultText(row))}</option>`])
                 .concat(stale ? [`<option value="${esc(value)}" selected>${esc(value)} (ไม่อยู่ในรายการแล้ว)</option>`] : [])
                 .concat(opts.map(o => `<option value="${esc(o.id)}"${o.id === value ? ' selected' : ''}>${esc(o.label)}</option>`))
                 .join('');
             const picked = opts.find(o => o.id === value);
-            const why = !row.canChoose ? 'runner นี้ไม่รับการเลือกโมเดล (modelFlag ว่างใน runners.json)'
+            const why = row.note ? row.note
+                : !row.canChoose ? (row.app ? `${row.app} ยังไม่มีโมเดล API ที่ใส่คีย์ไว้ — ตั้งใน ${row.app} ก่อน`
+                    : 'runner นี้ไม่รับการเลือกโมเดล (modelFlag ว่างใน runners.json)')
                 : !opts.length ? 'ไม่พบรายการโมเดลของ runner นี้ — ใส่ "models" ใน runners.json'
+                : row.app && !value ? `โมเดลในเครื่องเลือกจากที่นี่ไม่ได้ — เลือกโมเดล API เพื่อสลับ ${row.app}`
                 : picked ? (picked.note || '') : '';
 
             // The effort, offered for the model the NEXT run starts on. A level
@@ -3557,7 +3568,8 @@ function renderModels() {
                 .concat(eopts.map(o => `<option value="${esc(o.id)}"${o.id === evalue ? ' selected' : ''}>${esc(o.label)}</option>`))
                 .join('');
             const epicked = eopts.find(o => o.id === evalue);
-            const ewhy = !row.effortCanChoose ? 'runner นี้ไม่รับการตั้ง effort (effortArgs ว่างใน runners.json)'
+            const ewhy = !row.effortCanChoose ? (row.app ? `${row.app} รุ่นนี้ยังไม่บอกระดับ effort`
+                    : 'runner นี้ไม่รับการตั้ง effort (effortArgs ว่างใน runners.json)')
                 : !eopts.length ? 'โมเดลนี้ไม่มีระดับ effort ให้เลือก'
                 : epicked ? (epicked.note || '') : '';
 
@@ -3573,7 +3585,7 @@ function renderModels() {
                 : MODEL_SAVED.has(`model:${row.agent}`) || MODEL_SAVED.has(`effort:${row.agent}`)
                     ? ' · <span class="msave">✓ บันทึกแล้ว</span>' : '';
             return `<li><div><span class="who" style="--pc:${agentColor(row.agent)}">${esc(label(row.agent))}</span>`
-                + `<span class="tag">${row.onCall ? 'ถูกเรียกเมื่อห้องว่าง' : ''}${state}</span></div>`
+                + `<span class="tag">${row.app ? `แอป ${esc(row.app)} ที่เปิดอยู่ — เลือกแล้วสลับทันที` : row.onCall ? 'ถูกเรียกเมื่อห้องว่าง' : ''}${state}</span></div>`
                 + `<label class="mfield"><span>โมเดล</span><select data-agent="${esc(row.agent)}" data-kind="model" aria-label="โมเดลของ ${esc(row.agent)}"`
                 + `${row.canChoose && opts.length ? '' : ' disabled'}>${options}</select></label>`
                 + `<p class="mnote">${esc(why)}</p>`
@@ -4830,7 +4842,7 @@ function demo() {
         { id: 'codex', label: 'Codex', state: 'working', lastTool: 'agent_inbox', pending: 2, spawned: true,
           avatar: { gender: 'm', hair: 'short', hairColor: '#2b2430', skin: '#d9a06b', accessory: 'headphones' },
           emote: em('happy', 'thumbsup', 'none', 'ชุดภาพเสร็จแล้ว') },
-        { id: 'cluadex', label: 'CluadeX', state: 'idle', lastTool: '', pending: 0,
+        { id: 'cluadex', label: 'CluadeX', state: 'idle', lastTool: '', pending: 0, model: 'claude-sonnet-5-5',
           avatar: { gender: 'nb', hair: 'curly', hairColor: '#6b4fa8', skin: '#b97a4e', accessory: 'beanie' },
           emote: em('tired', 'none', 'none') },
         { id: 'gemini', label: 'Gemini', state: 'offline', lastTool: '', pending: 1,
@@ -4920,6 +4932,16 @@ function demo() {
               { id: 'xhigh', label: 'สูงมาก (xhigh)', note: 'คิดลึกมาก — งานยาก ใช้โควตาเร็วขึ้น' },
               { id: 'ultra', label: 'อัลตรา (ultra)', note: 'คิดเต็มที่และแตกงานให้ agent ย่อยเอง — แพงที่สุด' },
           ] },
+        // CluadeX, as CluadeXModels.Row builds it from its pipe report.
+        { agent: 'cluadex', app: 'CluadeX', canChoose: true, chosen: 'claude-sonnet-5-5', current: 'claude-sonnet-5-5',
+          currentProvider: 'Anthropic', configured: '', cliDefault: '', onCall: false, running: '', note: '',
+          options: [
+              { id: 'claude-opus-5-5', label: 'Anthropic Claude · claude-opus-5-5', note: 'ราคา $5 / $25 ต่อล้านโทเค็น (เข้า / ออก)' },
+              { id: 'claude-sonnet-5-5', label: 'Anthropic Claude · claude-sonnet-5-5', note: 'ราคา $2 / $10 ต่อล้านโทเค็น (เข้า / ออก)' },
+              { id: 'claude-haiku-5-5', label: 'Anthropic Claude · claude-haiku-5-5', note: 'ราคา $0.8 / $4 ต่อล้านโทเค็น (เข้า / ออก)' },
+          ],
+          effortCanChoose: true, effortChosen: 'medium', effortConfigured: '', effortCliDefault: '', effortRunning: '',
+          effortOptions: ['low', 'medium', 'high', 'xhigh', 'max'].map(id => ({ id, label: id, note: '' })) },
     ];
     const secretary = { enabled: true, model: '', codeModel: '', busy: '',
         can: { answer: true, digest: true, summarize: true, code: false },
