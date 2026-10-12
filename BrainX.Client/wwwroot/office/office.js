@@ -228,8 +228,14 @@ function bossRelayout() {
  *  bus card uses, so an agent is the same colour everywhere in the app. */
 const FIXED = {
     claude: '#d98b5f', codex: '#6cf0ff', cluadex: '#b98cff',
-    gemini: '#7fd4ff', grok: '#9fe870', owner: '#ffb86c', broker: '#8a90b8',
+    gemini: '#7fd4ff', grok: '#9fe870', owner: '#ffb86c',
+    // The broker IS มาย (owner, 2026-10-12: "Broker ก็คือน้องมายด์ นั่นเอง"):
+    // one person, her plate's colour, whichever of the two ids said it.
+    broker: '#b9a5ff', mind: '#b9a5ff',
 };
+/** Who speaks for the room. The bus keeps "broker" as the sender id (agents
+ *  and tests key on it); only the owner's view gives it her name. */
+const isMind = (name) => name === 'mind' || name === 'broker';
 function agentColor(name) {
     const key = (name || '').toLowerCase();
     for (const k in FIXED) if (key === k || key.startsWith(k)) return FIXED[k];
@@ -239,6 +245,7 @@ function agentColor(name) {
 }
 function label(name) {
     if (!name) return '?';
+    if (isMind(name)) return 'มาย';
     return name.length > 14 ? name.slice(0, 13) + '…' : name;
 }
 
@@ -2825,7 +2832,7 @@ function drawOverlay() {
     for (const b of BUBBLES) {
         if (now >= b.until) continue;
         const d = DESKS.get(b.agent);
-        const at = d ? d.screen : (b.agent === 'mind' && MIND_FIG ? mindHead() : null);
+        const at = d ? d.screen : (isMind(b.agent) && MIND_FIG ? mindHead() : null);
         if (!at) continue;
         overlayPut(seen, `b:${b.agent}:${b.until}`, 'bubble',
             `--bc:${b.color};left:${(at.x * sx).toFixed(1)}px;top:${((at.y - 6) * sy).toFixed(1)}px`,
@@ -3330,7 +3337,7 @@ function apply(p) {
                 try { BOSS_AV?.play('instruct', { loop: false }); } catch { /* pack still loading */ }
             } else {
                 BUBBLES.push({ agent: m.from, text: firstLine(m.body), color: c, until: nowMs() + SAY_MS });
-                if (m.from === 'mind') try { MIND_FIG?.setState('talking'); } catch { /* still loading */ }
+                if (isMind(m.from)) try { MIND_FIG?.setState('talking'); } catch { /* still loading */ }
             }
             if (DESKS.has(m.from) && DESKS.has(m.to)) {
                 PACKETS.push({ from: m.from, to: m.to, color: c, t0: performance.now(), ms: 900 });
@@ -3378,12 +3385,12 @@ function apply(p) {
         if (BROKER_CLICK && (st !== BROKER_CLICK.from || Date.now() - BROKER_CLICK.at > 10000)) BROKER_CLICK = null;
         bb.disabled = !!BROKER_CLICK;
         const svc = (BROKER && BROKER.service) || null;
-        const label = { running: 'บอสจัดสรรงาน ✓', adopted: 'บอสจัดสรรงาน (ตัวอื่นคุม)',
-                        stopped: 'บอสหยุด — กดเพื่อเริ่ม', failed: 'บอสเริ่มไม่ขึ้น' }[st] || st;
+        const label = { running: 'มายจัดสรรงาน ✓', adopted: 'มายจัดสรรงาน (ตัวอื่นคุม)',
+                        stopped: 'มายหยุด — กดเพื่อเริ่ม', failed: 'มายเริ่มไม่ขึ้น' }[st] || st;
         bb.textContent = label;
         bb.className = st === 'running' ? 'on' : st === 'adopted' ? 'warn' : st === 'failed' ? 'warn' : 'off';
         bb.title = [
-            'คลิก = เริ่ม/หยุดบอสในแอปนี้',
+            'คลิก = เริ่ม/หยุดมาย (ตัวจัดสรรงาน) ในแอปนี้',
             'Windows Service (ทำงานต่อแม้ปิดแอป) อยู่ที่ปุ่ม service ข้าง ๆ',
             '', ...((BROKER && BROKER.tail) || []),
         ].join('\n');
@@ -3516,10 +3523,10 @@ function renderModels() {
     if (chip) {
         chip.classList.toggle('set', MODELS.some(m => m.chosen || m.effortChosen));
         chip.title = MODELS.length
-            ? 'โมเดลและ effort ที่บอสใช้เรียก agent เข้ามาทำงาน\n' + MODELS.map(m =>
+            ? 'โมเดลและ effort ที่มายใช้เรียก agent เข้ามาทำงาน\n' + MODELS.map(m =>
                 `${m.agent}: ${m.chosen ? modelLabel(m, m.chosen) : modelDefaultText(m)}`
                 + ` · effort ${m.effortChosen ? effortLabel(m, m.effortChosen) : effortDefaultText(m)}`).join('\n')
-            : 'ยังไม่มี agent ที่บอสเรียกได้ (runners.json)';
+            : 'ยังไม่มี agent ที่มายเรียกได้ (runners.json)';
     }
     const note = document.getElementById('model-note');
     if (note) note.textContent = MODEL_NOTE;
@@ -3535,7 +3542,7 @@ function renderModels() {
     const focused = focusedSel ? [focusedSel.dataset.agent, focusedSel.dataset.kind] : null;
 
     list.innerHTML = !MODELS.length
-        ? '<li class="mnote">ยังไม่มี agent ที่บอสเรียกเข้ามาทำงานได้ — เพิ่ม runner ใน runners.json</li>'
+        ? '<li class="mnote">ยังไม่มี agent ที่มายเรียกเข้ามาทำงานได้ — เพิ่ม runner ใน runners.json</li>'
         : MODELS.map(row => {
             const pending = MODEL_PENDING.get(`model:${row.agent}`);
             const value = pending ? pending.value : (row.chosen || '');
@@ -3713,7 +3720,7 @@ function renderWork() {
         return `<li class="wrun"><span class="who" style="--pc:${agentColor(r.agent)}">${esc(label(r.agent))}</span>`
             + `<span class="what">${esc(runWhat(r))}</span>`
             + `<button type="button" class="wbtn" data-stop="${esc(r.agent)}"${held ? ' disabled' : ''}`
-            + ` title="หยุดรอบที่บอสเรียก ${esc(r.agent)} เข้ามาทำ — งานบนบอร์ดยังอยู่">${held ? 'กำลังหยุด…' : '⏹ หยุดรอบนี้'}</button></li>`;
+            + ` title="หยุดรอบที่มายเรียก ${esc(r.agent)} เข้ามาทำ — งานบนบอร์ดยังอยู่">${held ? 'กำลังหยุด…' : '⏹ หยุดรอบนี้'}</button></li>`;
     }).concat(AGENTS.filter(a => !a.bridge && a.state !== 'offline' && a.inRoom && !RUNS.some(r => r.agent === a.id)).map(a =>
         `<li class="wrun"><span class="who" style="--pc:${agentColor(a.id)}">${esc(label(a.id))}</span>`
         + `<span class="what">อยู่ในห้อง${a.state === 'working' ? ' · กำลังทำงาน' : ''} — session ที่เปิดเอง หยุดจากที่นี่ไม่ได้ แต่จะได้ยินคำสั่งพัก/เลิก</span></li>`));
@@ -3749,7 +3756,7 @@ function renderWork() {
 
     list.innerHTML =
         `<li class="whead">กำลังทำงานอยู่ตอนนี้</li>`
-        + (running.length ? running.join('') : '<li class="wempty">ไม่มีใครรันอยู่ — บอสจะเรียกเข้ามาเองเมื่อมีงานรอ</li>')
+        + (running.length ? running.join('') : '<li class="wempty">ไม่มีใครรันอยู่ — มายจะเรียกเข้ามาเองเมื่อมีงานรอ</li>')
         + `<li class="whead">งานที่สั่งไว้ (${active.length})</li>`
         + (rows.length ? rows.join('') : '<li class="wempty">ไม่มีงานค้างบนบอร์ด</li>');
 }
@@ -3758,7 +3765,7 @@ document.getElementById('work-list')?.addEventListener('click', (e) => {
     const stop = e.target.closest('button[data-stop]');
     if (stop && !stop.disabled) {
         const agent = stop.dataset.stop;
-        if (!confirm(`หยุดรอบที่ ${agent} กำลังทำอยู่ตอนนี้?\n\nงานบนบอร์ดยังอยู่ตามเดิม บอสจะตามให้ทำต่อเมื่อเงียบไปสักพัก — ถ้าไม่ต้องการให้ทำต่อ ให้กด "พัก" หรือ "เลิก" ที่ตัวงาน`)) return;
+        if (!confirm(`หยุดรอบที่ ${agent} กำลังทำอยู่ตอนนี้?\n\nงานบนบอร์ดยังอยู่ตามเดิม มายจะตามให้ทำต่อเมื่อเงียบไปสักพัก — ถ้าไม่ต้องการให้ทำต่อ ให้กด "พัก" หรือ "เลิก" ที่ตัวงาน`)) return;
         WORK_NOTE = '';
         WORK_PENDING.set('run:' + agent, { sig: '', at: Date.now() });
         post({ type: 'officeStopRun', agent });
@@ -3772,7 +3779,7 @@ document.getElementById('work-list')?.addEventListener('click', (e) => {
     const t = TASKS.find(x => x.id === id);
     if (!t) return;
     const active = TASKS.filter(x => !['done', 'dropped'].includes(x.status));
-    const stopsRun = `\n\nคนที่ถืองานจะถูกบอกให้หยุดทันที และถ้าไม่เหลืองานอื่นบนบอร์ด รอบที่บอสเรียกเข้ามาทำอยู่จะถูกหยุดด้วย`;
+    const stopsRun = `\n\nคนที่ถืองานจะถูกบอกให้หยุดทันที และถ้าไม่เหลืองานอื่นบนบอร์ด รอบที่มายเรียกเข้ามาทำอยู่จะถูกหยุดด้วย`;
 
     let watch = [t];
     if (act === 'drop'
@@ -4426,7 +4433,7 @@ const MIND_CAPS = [
     { id: 'answer', name: 'ตอบคำถามบอสในห้อง', note: 'พิมพ์ @มาย ตามด้วยคำถาม — ตอบจากบอร์ด ข้อความในห้อง และใครทำอะไรอยู่จริง' },
     { id: 'digest', name: 'สรุปห้องเป็นระยะ', note: 'ทุก ~30 นาทีเมื่อมีความเคลื่อนไหว: อะไรเสร็จ อะไรติด อะไรรอบอส' },
     { id: 'summarize', name: 'สรุปโปรเจค', note: 'ปุ่ม ✨ ให้มายสรุป ในหน้าประวัติ' },
-    { id: 'code', name: 'เขียนโค้ดเหมือน agent อีกตัว', note: 'บอสเรียกเธอเข้ามาทำงานได้เหมือน codex — รันผ่าน codex บนโมเดลในเครื่อง สิทธิ์เต็มแบบเดียวกับ codex' },
+    { id: 'code', name: 'เขียนโค้ดเหมือน agent อีกตัว', note: 'รับงานบนบอร์ดเข้ามาทำเองได้เหมือน codex — รันผ่าน codex บนโมเดลในเครื่อง สิทธิ์เต็มแบบเดียวกับ codex' },
 ];
 
 function renderMindPanel() {
@@ -4597,7 +4604,7 @@ function renderService(svc) {
     // from "installed ✓ running ✓".
     const warn = [];
     if (s.installed && s.privileged)
-        warn.push('เลิกใช้แล้ว — รันเป็น SYSTEM จึงเรียก codex / claude ที่ล็อกอินไว้ในบัญชีคุณไม่ได้ (เวอร์ชันนี้จะถอยให้บอสในแอปเอง แต่ควรถอนออก)');
+        warn.push('เลิกใช้แล้ว — รันเป็น SYSTEM จึงเรียก codex / claude ที่ล็อกอินไว้ในบัญชีคุณไม่ได้ (เวอร์ชันนี้จะถอยให้มายในแอปเอง แต่ควรถอนออก)');
     if (s.installed && s.privileged && s.userWritableBinary)
         warn.push('ไฟล์โปรแกรมของ service อยู่ในโฟลเดอร์ผู้ใช้ แต่รันด้วยสิทธิ์ SYSTEM — โปรแกรมใดก็ตามที่แก้ไฟล์นั้นได้ จะได้สิทธิ์ SYSTEM ตามไปด้วย');
     setHtml(document.getElementById('service-warn'), warn.map(w => `<li>⚠ ${w}</li>`).join(''));
@@ -4611,7 +4618,7 @@ function renderService(svc) {
         `<button type="button" data-svc="${a}"${c ? ` class="${c}"` : ''}${SVC_PENDING ? ' disabled' : ''}>${t}</button>`).join(''));
     document.getElementById('service-note').textContent = SVC_PENDING ? SVC_PENDING.note
         : SVC_RESULT ? SVC_RESULT
-        : !s.installed && svc ? 'บอสในแอปทำงานในนามบัญชีคุณอยู่แล้ว จึงเห็น codex / claude ที่ล็อกอินไว้ครบ'
+        : !s.installed && svc ? 'มายในแอปทำงานในนามบัญชีคุณอยู่แล้ว จึงเห็น codex / claude ที่ล็อกอินไว้ครบ'
         : acts.some(([, t]) => t.includes('🛡')) ? '🛡 = Windows จะถามยืนยันสิทธิ์แอดมิน' : '';
 }
 
@@ -4680,7 +4687,7 @@ function renderQuota() {
                 : `${id} HP: ไม่มีข้อมูลโควตารายสัปดาห์ในเครื่องนี้`)
                 + (sp != null ? `\n${id} SP: เหลือ ${sp}% ของรอบ ${q.sp.window || '5 ชม.'}${q.sp.resets ? ` · รีเซ็ต ${q.sp.resets}` : ''}` : '')
                 + `${q.source && q.source !== 'none' ? `\nจาก ${q.source}` : ''}${q.asOf ? ` · ข้อมูลเมื่อ ${q.asOf}` : ''}`
-                + (q.resting ? `\nพักอยู่ (บอสพักไว้เพราะติดลิมิต) — กลับมาทำงานได้ ${q.resting}` : '');
+                + (q.resting ? `\nพักอยู่ (มายพักไว้เพราะติดลิมิต) — กลับมาทำงานได้ ${q.resting}` : '');
             const bar = (tag, v, color, cls) =>
                 `<span class="ql${cls}"><b>${tag}</b><span class="qbar${v == null ? ' unknown' : ''}">`
                 + `<i style="width:${v ?? 0}%;background:${color}"></i></span>`
@@ -4732,7 +4739,7 @@ document.getElementById('service-actions')?.addEventListener('click', (e) => {
     const b = e.target.closest('button[data-svc]');
     if (!b || SVC_PENDING) return;
     const action = b.dataset.svc;
-    if (action === 'uninstall' && !confirm('ถอน Windows Service ของบอสออก?\n\nปิดแอปแล้วจะไม่มีใครเรียก agent เข้ามาทำงาน'))
+    if (action === 'uninstall' && !confirm('ถอน Windows Service ของมายออก?\n\nปิดแอปแล้วจะไม่มีใครเรียก agent เข้ามาทำงาน'))
         return;
     const svc = (BROKER && BROKER.service) || {};
     const uac = action === 'install' || action === 'uninstall' || !svc.canControl;
@@ -4803,7 +4810,7 @@ document.getElementById('room-broker')?.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     const svc = (BROKER && BROKER.service) || null;
     if (!svc || !svc.installed) return;
-    if (confirm('ถอน Windows Service ของบอส (แบบเก่า) ออก?\n\nบอสในแอปทำงานแทนอยู่แล้ว — ต้องยืนยันสิทธิ์ผู้ดูแล'))
+    if (confirm('ถอน Windows Service ของมาย (แบบเก่า) ออก?\n\nมายในแอปทำงานแทนอยู่แล้ว — ต้องยืนยันสิทธิ์ผู้ดูแล'))
         post({ type: 'officeBrokerService', action: 'uninstall' });
 });
 

@@ -121,7 +121,7 @@ public partial class MainWindow
         if (BrokerRunning)
         {
             StopBrokerHost();
-            CoworkWriteRoomLine("broker", "บอสหยุดจัดสรรงานชั่วคราว (สั่งจากห้อง) — คำสั่งใหม่จะยังอยู่ในห้องแต่จะไม่มีใครถูกเรียก", "broker");
+            CoworkWriteRoomLine("broker", "มายหยุดจัดสรรงานชั่วคราว (บอสสั่งจากห้อง) — คำสั่งใหม่จะยังอยู่ในห้องแต่จะไม่มีใครถูกเรียก", "broker");
         }
         else
         {
@@ -130,7 +130,7 @@ public partial class MainWindow
             _brokerAdopted = false;
             _brokerRestarts = 0;
             StartBrokerHost();
-            CoworkWriteRoomLine("broker", "บอสกลับมาจัดสรรงานแล้ว", "broker");
+            CoworkWriteRoomLine("broker", "มายกลับมาจัดสรรงานแล้ว", "broker");
         }
         PostCowork();
     }
@@ -145,7 +145,7 @@ public partial class MainWindow
         var exe = ResolveBestMcpExe();
         if (exe == null || !File.Exists(exe))
         {
-            Dispatcher.Invoke(() => StatusText.Text = "🧭 หา brainx-mcp.exe ไม่เจอ — broker ยังไม่ทำงาน");
+            Dispatcher.Invoke(() => StatusText.Text = "🧭 หา brainx-mcp.exe ไม่เจอ — มาย (ตัวจัดสรรงาน) ยังไม่ทำงาน");
             return;
         }
 
@@ -409,7 +409,7 @@ public partial class MainWindow
                 _brokerServiceLast = new ServiceAction(verb, rc == 0 ? "ok" : "failed", DateTime.UtcNow);
                 _coworkServiceCheckedUtc = DateTime.MinValue;
                 Dispatcher.BeginInvoke(() => StatusText.Text = rc == 0
-                    ? (verb == "start" ? "🧭 เริ่ม service บอสแล้ว" : "🧭 หยุด service บอสแล้ว")
+                    ? (verb == "start" ? "🧭 เริ่ม service ของมายแล้ว" : "🧭 หยุด service ของมายแล้ว")
                     : $"🧭 sc {verb} ล้มเหลว (รหัส {rc})");
             });
             return;

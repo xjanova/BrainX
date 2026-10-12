@@ -214,6 +214,11 @@ public partial class MainWindow
             var age = (DateTime.UtcNow - seen.Value).TotalSeconds;
             var calls = o["calls"]?.ToObject<long?>() ?? 0;
             var online = age <= 90;
+            // A moon (Claude in local-agent mode) sits only while connected.
+            // Its host already has the empty chair, and one handshake with no
+            // tool call left it at a desk for a fortnight — read as a test stuck
+            // in the room (owner, 2026-10-12: "ตอนนี้ก็ค้างอีกแล้ว local -agent").
+            if (!online && BusMoonHosts.ContainsKey(id)) continue;
 
             // Per session when the sessions publish themselves: every window of
             // one agent overwrites this file with its own counter, so with two
@@ -742,9 +747,15 @@ public partial class MainWindow
             var presence = Path.Combine(CoworkBusRoot, "presence");
             if (Directory.Exists(presence))
                 foreach (var f in Directory.GetFiles(presence, "*.json"))
-                    if ((DateTime.UtcNow - File.GetLastWriteTimeUtc(f)).TotalDays <= 14
-                        && BusWellKnownAgents.Contains(Path.GetFileNameWithoutExtension(f), StringComparer.OrdinalIgnoreCase))
-                        Add(Path.GetFileNameWithoutExtension(f));
+                {
+                    var id = Path.GetFileNameWithoutExtension(f);
+                    var age = DateTime.UtcNow - File.GetLastWriteTimeUtc(f);
+                    // A moon is mentionable only while it has a desk (CoworkAgents).
+                    if (age.TotalDays <= 14
+                        && BusWellKnownAgents.Contains(id, StringComparer.OrdinalIgnoreCase)
+                        && (age.TotalSeconds <= 90 || !BusMoonHosts.ContainsKey(id)))
+                        Add(id);
+                }
 
             var skills = Path.Combine(CoworkBusRoot, "cowork", "skills.json");
             if (File.Exists(skills))

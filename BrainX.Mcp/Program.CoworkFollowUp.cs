@@ -310,7 +310,7 @@ internal static partial class Program
                     var pick = CoworkPickAgent(cfg, t, board, except: null, now);
                     if (pick == null) continue;   // nobody fits: the owner is asked (CoworkBoardNoticesAsync)
                     if ((dryRun || CoworkBrokerSetTask(id, "assigned",
-                            $"📌 ไม่มีใครรับมา {(int)Math.Min(9999, (now - since).TotalMinutes)} นาที — บอสส่งให้ @{pick}"
+                            $"📌 ไม่มีใครรับมา {(int)Math.Min(9999, (now - since).TotalMinutes)} นาที — มายส่งให้ @{pick}"
                             + (skill != null ? $" (งาน «{skill}»)" : ""), assignee: pick, onlyIf: CoworkStill("open", null)))
                         && Callable(pick))
                         Add(calls, pick, id);
@@ -414,7 +414,7 @@ internal static partial class Program
                     var pick = CoworkPickAgent(cfg, t, board, except: agent, now);
                     if (pick == null) continue;   // the owner is asked (CoworkBoardNoticesAsync)
                     if ((dryRun || CoworkBrokerSetTask(id, "assigned",
-                            $"🔁 «{skill}» ไม่ใช่งานของ {agent} («{cannotLine}») — บอสส่งต่อให้ @{pick}",
+                            $"🔁 «{skill}» ไม่ใช่งานของ {agent} («{cannotLine}») — มายส่งต่อให้ @{pick}",
                             assignee: pick, onlyIf: CoworkStill("assigned", agent)))
                         && Callable(pick))
                         Add(calls, pick, id);
