@@ -68,7 +68,11 @@ const overlay = document.getElementById('overlay');
  * acts it out: working = at her desk, idle = wandering the deck, offline or
  * lights out = asleep in her bed. `?classic` brings the painted room back.
  */
-const SHIP_MODE = !new URLSearchParams(location.search).has('classic');
+const SHIP_VIEW_KEY = 'brainx.office.view';
+const SHIP_MODE = (() => {
+    if (new URLSearchParams(location.search).has('classic')) return false;
+    try { return localStorage.getItem(SHIP_VIEW_KEY) !== 'classic'; } catch { return true; }
+})();
 const SHIP_FRAME = document.getElementById('ship');
 let SHIP_READY = false;
 /** Agent id -> the girl who plays it. claude-code and claude-chat are both
@@ -5258,4 +5262,24 @@ if (SHIP_MODE) {
     requestAnimationFrame(frame);
 }
 post({ type: 'officeReady' });
+// The host keeps the choice on disk too: on the ship the agents speak as the girls, and the
+// MCP server can only know which room the owner chose from there.
+post({ type: 'officeView', view: SHIP_MODE ? 'ship' : 'classic' });
+{
+    const vb = document.getElementById('room-view');
+    if (vb) {
+        vb.textContent = SHIP_MODE ? '🏢 ห้องเดิม' : '🚀 ยาน';
+        vb.title = SHIP_MODE
+            ? 'กลับไปห้องเดิม — ตัวละครพูดด้วยน้ำเสียงปกติของแต่ละ agent'
+            : 'ไปหน้ายาน — ทุกคนเป็นสาว ๆ บนยาน พูดแบบผู้หญิงตามบุคลิกของตัวเอง';
+        vb.addEventListener('click', () => {
+            const next = SHIP_MODE ? 'classic' : 'ship';
+            try { localStorage.setItem(SHIP_VIEW_KEY, next); } catch { /* the host still has it */ }
+            post({ type: 'officeView', view: next });
+            const u = new URL(location.href);
+            u.searchParams.delete('classic');
+            location.replace(u.toString());
+        });
+    }
+}
 if (new URLSearchParams(location.search).has('demo')) demo();

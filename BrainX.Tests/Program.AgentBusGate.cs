@@ -535,7 +535,18 @@ internal static partial class Program
         {
             inRoom = await StartBusSession(exe, vault, key, "codex");
             chat = await StartBusSession(exe, vault, key, "codex");
-            await inRoom.Call("cowork_join", new JObject());
+            var joined = await inRoom.Call("cowork_join", new JObject());
+            // every agent speaks in the room as her girl on the ship (Program.Persona.cs)
+            var persona = joined["persona"]?.ToString() ?? "";
+            Check("joining the room gives codex her voice: a woman, ค่ะ, never ครับ",
+                persona.Contains("CODEX") && persona.Contains("ค่ะ") && persona.Contains("NEVER use ผม or ครับ"), persona);
+            // …but only on the ship: back in the classic room she is just codex again
+            var view = Path.Combine(bus, "cowork", "view.json");
+            File.WriteAllText(view, "{\"view\":\"classic\"}", new UTF8Encoding(false));
+            var classic = await inRoom.Call("cowork_join", new JObject());
+            Check("in the classic room nobody is given a girl's voice",
+                classic["persona"] == null || classic["persona"]!.Type == JTokenType.Null, classic["persona"]?.ToString() ?? "");
+            File.Delete(view);
 
             OwnerSays(room, key, "codex: draw the destination cards", to: "codex");
             var heard = CoworkNotice(await inRoom.Raw("agent_peers", new JObject()));

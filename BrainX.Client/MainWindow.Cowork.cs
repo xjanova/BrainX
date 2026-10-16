@@ -609,6 +609,11 @@ public partial class MainWindow
                         CoworkWriteRoomLine("broker", "🔌 บอสปิดไฟปิดห้อง — ทุกคนออกจากห้องแล้ว", "room");
                     PostCowork();
                     break;
+                // Ship or classic room. On the ship every agent speaks as her girl
+                // (BrainX.Mcp Program.Persona.cs reads the same file).
+                case "officeView":
+                    CoworkSetView(m["view"]?.ToString() == "classic" ? "classic" : "ship");
+                    break;
                 // Installing or removing the Windows Service. Elevation is
                 // asked for by the client, never by the page.
                 case "officeBrokerService":
@@ -900,6 +905,36 @@ public partial class MainWindow
             }
         }
         catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"CoworkSetRoomLight: {ex.Message}"); }
+    }
+
+    /// <summary>cowork/view.json: which room the owner looks at. "ship" = the girls'
+    /// starship, where the agents talk as the girls; "classic" = the painted room.</summary>
+    private void CoworkSetView(string view)
+    {
+        try
+        {
+            if (CoworkShipView() == (view == "ship") && File.Exists(Path.Combine(CoworkBusRoot, "cowork", "view.json"))) return;
+            var dir = Path.Combine(CoworkBusRoot, "cowork");
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, "view.json");
+            var tmp = path + ".tmp";
+            File.WriteAllText(tmp, new JObject { ["view"] = view, ["sinceUtc"] = DateTime.UtcNow.ToString("o") }.ToString(),
+                new System.Text.UTF8Encoding(false));
+            File.Move(tmp, path, overwrite: true);
+        }
+        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"CoworkSetView: {ex.Message}"); }
+    }
+
+    /// <summary>Is the room on the ship view? A missing file means yes: the ship is the default room.</summary>
+    private bool CoworkShipView()
+    {
+        try
+        {
+            var path = Path.Combine(CoworkBusRoot, "cowork", "view.json");
+            if (!File.Exists(path)) return true;
+            return JObject.Parse(File.ReadAllText(path))["view"]?.ToString() != "classic";
+        }
+        catch { return true; }
     }
 
     /// <summary>Is the room lit? A missing file means yes — a room that went

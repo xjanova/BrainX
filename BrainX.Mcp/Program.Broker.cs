@@ -70,10 +70,12 @@ internal static partial class Program
     /// the temp vaults was unlabelled, so this path was not once exercised.
     /// The oldest stuck message was three days old.
     /// </summary>
-    private static string BuildSpawnPrompt(WaitingWork work, int maxRunSeconds = 0)
+    private static string BuildSpawnPrompt(WaitingWork work, int maxRunSeconds = 0, string? agent = null)
     {
         var sb = new StringBuilder(
             "BrainX broker: work is queued for you on this brain and nobody is driving this session. ");
+        // Who she is in the room, before anything she will say there (Program.Persona.cs).
+        if (agent != null) sb.Append(CoworkPersonaInstruction(agent));
 
         // How long it has. Codex drew four of fifteen images and was cut off at
         // the ceiling without a word anywhere about where it had got to.
@@ -1304,7 +1306,7 @@ internal static partial class Program
         var args = RunnerModels.ApplyEffortToArgs(
             RunnerModels.ApplyToArgs(runner.Args, model, runner.ModelFlag), effort, runner.EffortArgs);
         foreach (var a in args)
-            psi.ArgumentList.Add(a.Replace("{prompt}", BuildSpawnPrompt(work, cfg.MaxRunSeconds))
+            psi.ArgumentList.Add(a.Replace("{prompt}", BuildSpawnPrompt(work, cfg.MaxRunSeconds, agent))
                                   .Replace("{cwd}", psi.WorkingDirectory)
                                   .Replace("{agent}", agent));
 
