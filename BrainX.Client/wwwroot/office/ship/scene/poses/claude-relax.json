@@ -1,0 +1,49 @@
+{
+  "room": "lounge",
+  "position": [
+    1060,
+    530
+  ],
+  "scale": 0.23,
+  "approach": [
+    1060,
+    665
+  ],
+  "floorY": 665,
+  "parts": [
+    {
+      "rect": [
+        0,
+        0,
+        1024,
+        1536
+      ],
+      "anchor": [
+        620,
+        930
+      ],
+      "at": [
+        0,
+        0
+      ]
+    }
+  ],
+  "doze": {
+    "phase": 16.6,
+    "breathPeriod": 5.2,
+    "breathAmount": 11,
+    "chestY": 530,
+    "chestSpread": 210,
+    "supportY": 930,
+    "neck": [
+      620,
+      300
+    ],
+    "neckFade": 280,
+    "nodPeriod": 19,
+    "nodDelay": 1.5,
+    "nodDuration": 5.2,
+    "nodAngle": -0.065,
+    "sink": 9
+  }
+}

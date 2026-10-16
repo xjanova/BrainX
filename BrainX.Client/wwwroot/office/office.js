@@ -58,6 +58,74 @@ const scene = document.createElement('canvas');
 const ctx = scene.getContext('2d');                   // logical, sprites only, TRANSPARENT
 const overlay = document.getElementById('overlay');
 
+// ── the starship ────────────────────────────────────────────────────
+/*
+ * Owner (2026-10-16): the cowork room becomes the girls' warp ship, with the
+ * girls in it instead of the pixel crew. The ship is its own page (ship/,
+ * copied from the Avatar Studio by output/boss-rig/tools/sync_office_ship.py)
+ * in a frame over the room; this file still owns every fact — who is
+ * connected, who is working, what was said — and only tells the ship, which
+ * acts it out: working = at her desk, idle = wandering the deck, offline or
+ * lights out = asleep in her bed. `?classic` brings the painted room back.
+ */
+const SHIP_MODE = !new URLSearchParams(location.search).has('classic');
+const SHIP_FRAME = document.getElementById('ship');
+let SHIP_READY = false;
+/** Agent id -> the girl who plays it. claude-code and claude-chat are both
+ *  Claude; the broker IS มาย (Mai). Anyone else has no girl yet. */
+function shipWho(id) {
+    id = String(id || '').toLowerCase();
+    if (id === 'owner') return 'boss';
+    if (isMind(id) || id.startsWith('mind')) return 'mai';
+    for (const who of ['cluadex', 'claude', 'codex', 'grok']) if (id.startsWith(who)) return who;
+    return null;
+}
+function shipPost(msg) {
+    if (!SHIP_MODE || !SHIP_READY) return;
+    try { SHIP_FRAME.contentWindow.postMessage(msg, location.origin); } catch { /* frame gone */ }
+}
+/** What each girl should be doing, from the same payload the room draws. */
+function shipSync() {
+    // Not before the first payload: an empty roster would send every girl to bed.
+    if (!SHIP_MODE || !SHIP_READY || !PRIMED) return;
+    const rank = { working: 3, idle: 2, offline: 1 };
+    const best = {};
+    for (const a of ROSTER) {
+        const who = a.bridge ? null : shipWho(a.id);
+        if (!who || who === 'boss' || who === 'mai') continue;
+        if (best[who] && (rank[best[who].state] || 0) >= (rank[a.state] || 0)) continue;
+        best[who] = a;
+    }
+    const crew = {};
+    for (const who of ['claude', 'codex', 'grok', 'cluadex']) {
+        const a = best[who];
+        const off = !a || a.state === 'offline';
+        crew[who] = {
+            activity: !ROOM_OPEN || off ? 'sleep' : a.state === 'working' ? 'desk' : null,
+            label: a ? label(a.label || a.id) : label(who),
+            doing: !ROOM_OPEN ? 'ปิดไฟแล้ว' : off ? 'ไม่อยู่' : a.state === 'working' ? (a.lastTool || 'ทำงานอยู่') : 'ว่าง',
+            color: agentColor(a ? a.id : who),
+            off,
+        };
+    }
+    const st = (BROKER && BROKER.state) || 'stopped';
+    const allotting = st === 'running' || st === 'adopted';
+    crew.mai = {
+        activity: !ROOM_OPEN ? 'sleep' : (allotting || MIND_BUSY) ? 'desk' : null,
+        label: 'มาย',
+        doing: !ROOM_OPEN ? 'ปิดไฟแล้ว' : MIND_BUSY || (allotting ? 'จัดสรรงาน' : SECRETARY?.enabled ? 'เลขาห้อง' : 'ว่าง'),
+        color: '#b9a5ff',
+        off: false,
+    };
+    crew.boss = { activity: ROOM_OPEN ? null : 'sleep', label: 'บอส', doing: '', color: FIXED.owner, off: false };
+    shipPost({ type: 'shipCrew', crew });
+}
+/** A line said in the room, as a bubble over whoever said it. */
+function shipSay(from, text, ms) {
+    const who = shipWho(from);
+    if (who && text) shipPost({ type: 'shipSay', who, text, ms, color: from === 'owner' ? FIXED.owner : agentColor(from) });
+}
+
 /** Lamps and screens, collected while the scene draws, lit in the second pass.
  *  Gathered rather than hardcoded so a desk that moves takes its light with it. */
 let LIGHTS = [];
@@ -3274,6 +3342,11 @@ function onMessage(evt) {
         renderHistory();
         return;
     }
+    if (m.type === 'shipReady' && SHIP_MODE && evt.source === SHIP_FRAME?.contentWindow) {
+        SHIP_READY = true;
+        shipSync();
+        return;
+    }
     if (m.type !== 'officeState') return;
     apply(m.payload || {});
 }
@@ -3333,12 +3406,14 @@ function apply(p) {
             const c = agentColor(m.from);
             if (m.from === 'owner') {
                 BOSS = { until: nowMs() + BOSS_SAY_MS, text: firstLine(m.body) };
+                shipSay('owner', firstLine(m.body), BOSS_SAY_MS);
                 // He says it with his body too. `instruct` runs once and the
                 // pack sends him back to idle on its own, so nothing here has
                 // to remember to put him back.
                 try { BOSS_AV?.play('instruct', { loop: false }); } catch { /* pack still loading */ }
             } else {
                 BUBBLES.push({ agent: m.from, text: firstLine(m.body), color: c, until: nowMs() + SAY_MS });
+                shipSay(m.from, firstLine(m.body), SAY_MS);
                 if (isMind(m.from)) try { MIND_FIG?.setState('talking'); } catch { /* still loading */ }
             }
             if (DESKS.has(m.from) && DESKS.has(m.to)) {
@@ -3366,7 +3441,10 @@ function apply(p) {
         // by here, so every live emote played the moment the room was opened.
         if (wasPrimed) {
             playSound(e.sound);
-            if (e.say) BUBBLES.push({ agent: a.id, text: firstLine(e.say), color: agentColor(a.id), until: nowMs() + SAY_MS });
+            if (e.say) {
+                BUBBLES.push({ agent: a.id, text: firstLine(e.say), color: agentColor(a.id), until: nowMs() + SAY_MS });
+                shipSay(a.id, firstLine(e.say), SAY_MS);
+            }
         }
     }
     // Oldest first, never all of them: clearing the set replayed every emote
@@ -3415,6 +3493,7 @@ function apply(p) {
     renderQuota();
     if (p.secretary && typeof p.secretary === 'object') { SECRETARY = p.secretary; renderMindPanel(); }
     ensureMindFigure();
+    shipSync();
 
     renderLog();
     renderDecisions();
@@ -4984,6 +5063,7 @@ function ensureMindFigure() {
         MIND_BUSY = busy;
         if (busy) try { MIND_FIG?.setState('thinking', 8000); } catch { /* loading */ }
     }
+    if (SHIP_MODE) return;      // มาย is aboard the ship; her VRM belongs to the painted room
     if (!want) {
         if (MIND_FIG) { try { MIND_FIG.dispose(); } catch { /* gone */ } MIND_FIG = null; }
         if (MIND_FIG_STATE === 'ready') MIND_FIG_STATE = '';
@@ -5123,6 +5203,7 @@ function drawMapDebug() {
 // pack should cost the boss his animation, not take the whole office down
 // with it — drawBoss() is still here for exactly that case.
 (async () => {
+    if (SHIP_MODE) return;      // the ship has its own boss
     try {
         const { BrainXAvatar } = await import('./avatar/brainx-avatar.js');
         BOSS_AV = await BrainXAvatar.load('./avatar/', { scale: 1 });
@@ -5167,6 +5248,14 @@ function drawMapDebug() {
 })();
 
 resize();
-requestAnimationFrame(frame);
+if (SHIP_MODE) {
+    // The pixel room is not drawn at all: the frame loop would paint a canvas
+    // nobody can see, every frame, for as long as the room is open.
+    document.body.classList.add('ship-mode');
+    SHIP_FRAME.hidden = false;
+    SHIP_FRAME.src = 'ship/scene/index.html?embed=1&v=' + encodeURIComponent(window.OFFICE_ASSET_V || '0');
+} else {
+    requestAnimationFrame(frame);
+}
 post({ type: 'officeReady' });
 if (new URLSearchParams(location.search).has('demo')) demo();

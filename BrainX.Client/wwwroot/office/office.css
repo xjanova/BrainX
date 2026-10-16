@@ -69,6 +69,19 @@ body {
     image-rendering: crisp-edges;
 }
 
+/* The starship in place of the painted room (office.js, SHIP_MODE). */
+#ship {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    display: block;
+    background: #07060f;
+}
+#ship[hidden] { display: none; }
+body.ship-mode #floor, body.ship-mode #overlay { display: none; }
+
 #overlay {
     position: absolute;
     inset: 0;

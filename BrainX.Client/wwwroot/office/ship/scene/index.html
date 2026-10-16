@@ -1,0 +1,633 @@
+<meta charset="utf-8">
+<title>Starship Deck</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Anuphan:wght@400;600&display=swap">
+<style>
+  /* One night-time stage on purpose: the ship flies through dark space whatever the page theme. */
+  :root { --bg: #07060f; --panel: #141325; --btn: #1f1d36; --line: #2e2b4d; --text: #ecebf7; --dim: #a4a1c4; --accent: #8fd8ff;
+          --font: "Anuphan", "Leelawadee UI", "Noto Sans Thai", system-ui, sans-serif; color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); overflow: hidden; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: crosshair; }
+  #bar { position: fixed; left: 50%; bottom: calc(12px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+         justify-content: center; width: max-content; max-width: calc(100% - 32px); padding: 8px 10px; background: color-mix(in srgb, var(--panel) 88%, transparent);
+         border: 1px solid var(--line); border-radius: 12px; }
+  button, select { font: inherit; font-size: 14px; color: var(--text); background: var(--btn); border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px; cursor: pointer; }
+  #room { max-width: 180px; }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: 0.4; cursor: default; }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button.on { background: color-mix(in srgb, var(--accent) 25%, var(--btn)); border-color: var(--accent); }
+  label { font-size: 13px; color: var(--dim); display: flex; align-items: center; gap: 6px; }
+  input[type=range] { width: 150px; accent-color: var(--accent); }
+  #hint { position: fixed; left: 16px; top: calc(14px + env(safe-area-inset-top, 0px)); width: fit-content; max-width: calc(100% - 32px); padding: 8px 12px; border-radius: 10px; background: rgba(7,6,15,0.76); font-size: 13px; color: var(--dim); line-height: 1.5; pointer-events: none; }
+  #hint b { color: var(--text); font-weight: 600; }
+  /* Inside BrainX's cowork room (?embed=1): the room's own header is above this frame, so only
+     the camera controls stay; who works where comes from the room, not from buttons here. */
+  body.embed #hint, body.embed #activities, body.embed #room-pick, body.embed #free-view,
+  body.embed #bar a, body.embed #clips, body.embed #pop { display: none; }
+  body.embed #bar { padding: 5px 7px; gap: 4px; opacity: 0.82; }
+  body.embed #bar:hover { opacity: 1; }
+  #tags { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
+  .tag { position: absolute; transform: translate(-50%, 0); padding: 2px 8px; border-radius: 8px; white-space: nowrap;
+         font-size: 12px; line-height: 1.35; background: rgba(7,6,15,0.78); border: 1px solid var(--pc, var(--line));
+         pointer-events: auto; cursor: pointer; text-align: center; }
+  .tag b { color: var(--pc, var(--text)); font-weight: 600; }
+  .tag span { display: block; color: var(--dim); font-size: 11px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+  .tag.off { opacity: 0.55; }
+  /* the whole ship in a narrow pane puts six girls a few pixels apart: names only, smaller */
+  .tag.far { font-size: 10px; padding: 0 5px; }
+  .tag.far span { display: none; }
+  .say { position: absolute; transform: translate(-50%, -100%); max-width: 260px; padding: 6px 10px; border-radius: 10px;
+         font-size: 13px; line-height: 1.45; color: #11101c; background: #f4f2ff; border: 2px solid var(--pc, #8fd8ff);
+         box-shadow: 0 4px 14px rgba(0,0,0,0.45); overflow-wrap: anywhere; }
+  .say::after { content: ""; position: absolute; left: 50%; bottom: -8px; margin-left: -6px; border: 6px solid transparent;
+                border-top-color: var(--pc, #8fd8ff); border-bottom: 0; }
+  @media (max-width: 520px) { button { font-size: 13px; padding: 6px 9px; } input[type=range] { width: 110px; } }
+</style>
+<canvas id="c"></canvas>
+<div id="tags"></div>
+<div id="hint"><b>BrainX · <span id="location">ยานของสาวๆ</span></b> · <span id="crew-status" role="status"></span><br><span id="camera-help">เลือกห้องเพื่อชม · แตะพื้นให้คนที่เลือกเดินไป · ลากเมาส์เลื่อนมุมมอง · ล้อเมาส์เพื่อซูม</span> · <span id="fps">–</span></div>
+<div id="bar">
+  <span id="follow"></span>
+  <span id="activities"><button id="work">นั่งทำงาน</button><button id="sleep">นอนพัก</button><button id="relax">นั่งพักบนโซฟา</button><button id="wander">เดินเล่น</button></span>
+  <label id="room-pick">ห้อง <select id="room" aria-label="เลือกห้องบนยาน"><option value="">ตามตัวละคร</option></select></label>
+  <label>ซูม <input id="zoom" type="range" min="0" max="1" step="0.001" value="1" aria-label="ซูม"></label>
+  <button id="z-ship">ทั้งลำ</button>
+  <button id="z-close">ใกล้</button>
+  <button id="free-view" aria-pressed="false">มุมมองอิสระ</button>
+  <a href="./cluadex-study/?crew=boss" style="font-size:13px;color:#d6abff;padding:7px 10px;text-decoration:none;border:1px solid #49355f;border-radius:8px">ดูลูกเรือ 2D ใกล้ ๆ</a>
+  <span id="clips"></span>
+  <button id="pop" title="เปิดเป็นหน้าต่างแยก ลากยืดให้ยาวข้ามหลายจอได้">หน้าต่างยาว</button>
+</div>
+<script type="module">
+// the girls come straight from Avatar Studio's own rig (no copy here): every pose tweak, eraser
+// mask and clip made in the studio shows up in the scene on the next reload
+// ?embed=1: BrainX's cowork room hosts this page in a frame and says who is working (see the
+// "the room's bridge" section). ?v= is the host's asset stamp, so an installed copy is cached
+// until it changes; without it (the studio) every reload fetches fresh.
+const Q = new URLSearchParams(location.search);
+const EMBED = Q.has('embed');
+const ASSET_V = Q.get('v') || String(Date.now());
+if (EMBED) document.body.classList.add('embed');
+const { BossRig } = await import('../rig/boss-rig.js?v=' + ASSET_V);
+const { PosePuppet } = await import('./pose-puppet.js?v=' + ASSET_V);
+const { makeWindowPlate, drawWindowView } = await import('./window-view.js?v=' + ASSET_V);
+const { RoomLighting } = await import('./room-lighting.js?v=' + ASSET_V);
+const { FlatSkin } = await import('./cluadex-study/flat-skin.js?v=' + ASSET_V);
+const { tuneCrew } = await import('./cluadex-study/crew-motion.js?v=' + ASSET_V);
+const crewSkin = new FlatSkin();
+
+// ── the deck ──────────────────────────────────────────────────────────────────
+// One long room seen from the front, cut open: each module is one picture 1536x1024, laid end to
+// end. World units are module pixels. Every module has half a bulkhead pillar at each edge and the
+// same corridor, so any two of them join without a seam; more girls means more modules.
+const MOD_W = 1536, MOD_H = 1024;
+// Each room's furniture that the girls use (her desk chair, for now) is NOT in the picture: it is a
+// separate object cut from the room's own painting (tools/split_object.py), drawn in depth order
+// with the girls, so one can sit on it or walk behind it. objects/<room>-<name>.{webp,json}
+// One room per girl plus engineering and the bridge; missing room images are skipped.
+// The engines are LEFT (aft); the captain's bridge is RIGHT (bow).
+const ALL_MODULES = [
+  { id: 'engine', img: 'modules/engine.webp', name: 'ห้องเครื่อง · ท้ายยาน', objects: [], bayMin: 0.56 },
+  { id: 'server', img: 'modules/server.webp', name: 'เซิร์ฟเวอร์หลัก', objects: [], bayMin: 0.56 },
+  { id: 'codex', img: 'modules/codex.webp', name: 'ห้อง Codex', objects: ['chair'] },
+  { id: 'grok', img: 'modules/grok.webp', name: 'ห้อง Grok', objects: ['chair'] },
+  { id: 'cluadex', img: 'modules/cluadex.webp', name: 'ห้อง CluadeX', objects: ['chair'] },
+  { id: 'claude', img: 'modules/claude.webp', name: 'ห้อง Claude', objects: ['chair'] },
+  { id: 'boss', img: 'modules/boss.webp', name: 'ห้องบอส', objects: ['chair'] },
+  { id: 'lounge', img: 'modules/lounge.webp', name: 'ห้องนั่งเล่นรวม', objects: [] },
+  { id: 'mai', img: 'modules/mai.webp', name: 'ห้องมาย', objects: ['chair'] },
+  { id: 'bridge', img: 'modules/bridge.webp', name: 'ห้องกัปตัน · หัวยาน', objects: [], bayMin: 0.56 },
+];
+// an image, tried again a couple of times (a local server under a burst can refuse a connection)
+const pic = (src, tries = 3) => new Promise((ok) => {
+  const i = new Image(); i.onload = () => ok(i);
+  i.onerror = () => (tries > 1 ? setTimeout(() => pic(src, tries - 1).then(ok), 300) : ok(null));
+  i.src = src + '?v=' + ASSET_V + (tries < 3 ? '-' + tries : '');
+});
+const allImgs = await Promise.all(ALL_MODULES.map((m) => pic(m.img)));
+const MODULES = ALL_MODULES.filter((m, i) => allImgs[i]);
+const modImgs = allImgs.filter(Boolean);
+const windowRooms = new Set(['codex', 'grok', 'cluadex', 'claude', 'boss', 'lounge', 'mai', 'bridge']);
+const windowPlates = await Promise.all(MODULES.map(async (m, i) => {
+  if (!windowRooms.has(m.id)) return null;
+  const extracted = await pic(`windows/${m.id}.webp`, 1);
+  return extracted ? makeWindowPlate(modImgs[i], extracted) : null;
+}));
+const roomLights = MODULES.map((m, i) => new RoomLighting(windowPlates[i] || modImgs[i], i, m.id));
+const DECK_W = MODULES.length * MOD_W;
+// where they can walk: the corridor along the front, and each bay's floor behind it
+const CORRIDOR = { y0: MOD_H * 0.70, y1: MOD_H * 0.93 };
+const BAY = { y0: MOD_H * 0.50, y1: MOD_H * 0.66, inset: 110 };
+// The ship around the cut-open deck: one painted side view (modules/ship.webp, 2172x724) with an
+// empty window band where the deck goes. It is drawn in three slices — the engines, the middle, the
+// prow — scaled so that band is exactly the deck: the ends keep their shape, the middle stretches or
+// squeezes with the number of rooms (with seven rooms it is drawn at its own proportions).
+// She flies to the RIGHT, so the stars stream left.
+const SHIPIMG = { w: 2172, h: 724, band: [549, 324, 1656, 430], nozzles: [[180, 272], [180, 386], [180, 505]] };
+const SK = MOD_H / (SHIPIMG.band[3] - SHIPIMG.band[1]);              // world units per ship-image px, across
+const SHIP = { x0: -SHIPIMG.band[0] * SK, x1: DECK_W + (SHIPIMG.w - SHIPIMG.band[2]) * SK,
+               y0: -SHIPIMG.band[1] * SK, y1: MOD_H + (SHIPIMG.h - SHIPIMG.band[3]) * SK };
+
+function walkable(x, y) {
+  if (x < 40 || x > DECK_W - 40) return false;
+  if (y >= CORRIDOR.y0 && y <= CORRIDOR.y1) return true;
+  const mx = ((x % MOD_W) + MOD_W) % MOD_W;
+  const minY = (MODULES[Math.floor(x / MOD_W)]?.bayMin ?? BAY.y0 / MOD_H) * MOD_H;
+  return y >= minY && y <= BAY.y1 && mx > BAY.inset && mx < MOD_W - BAY.inset;
+}
+function randomSpot() {
+  for (let i = 0; i < 50; i++) {
+    const x = 80 + Math.random() * (DECK_W - 160);
+    const y = Math.random() < 0.65 ? CORRIDOR.y0 + Math.random() * (CORRIDOR.y1 - CORRIDOR.y0) : BAY.y0 + Math.random() * (BAY.y1 - BAY.y0);
+    if (walkable(x, y)) return [x, y];
+  }
+  return [DECK_W / 2, (CORRIDOR.y0 + CORRIDOR.y1) / 2];
+}
+// a girl standing at the front of the corridor is ~0.4 of the module tall; further back, a little smaller
+const BASE_SCALE = 0.40 * MOD_H / 1650;
+const depthScale = (y, rigHeight = 1650) => BASE_SCALE * (1650 / rigHeight) * (0.84 + 0.2 * Math.min(1, Math.max(0, (y - BAY.y0) / (CORRIDOR.y1 - BAY.y0))));
+
+// ── assets ────────────────────────────────────────────────────────────────────
+const loadImg = (src) => pic(src);
+const shipImg = await loadImg('modules/ship.webp');
+const brainImg = await loadImg('objects/brainx-brain.png');
+// furniture objects, placed in world units (module px offset by the module's slot)
+const OBJECTS = (await Promise.all(MODULES.flatMap((m, i) => m.objects.map(async (n) => {
+  const [img, meta] = await Promise.all([loadImg(`objects/${m.id}-${n}.webp`),
+    fetch(`objects/${m.id}-${n}.json?v=${ASSET_V}`).catch(() => fetch(`objects/${m.id}-${n}.json?v=${ASSET_V}r`))
+      .then((r) => (r.ok ? r.json() : null)).catch(() => null)]);
+  if (!img || !meta) return null;
+  const [x, y, w, h] = meta.rect;
+  return { room: m.id, name: n, img, x: i * MOD_W + x, y, w, h, floorY: meta.floor[1] };
+})))).filter(Boolean);
+window.objects = OBJECTS;
+const CREW = [
+  // Native idle heights differ between atlases; normalize before applying camera depth.
+  { who: 'boss', name: 'บอส', base: '../rig/', rigHeight: 1516 },
+  { who: 'claude', name: 'Claude', base: '../claude/rig/', rigHeight: 1613 },
+  { who: 'codex', name: 'Codex', base: '../crew/codex/', rigHeight: 1516 },
+  { who: 'grok', name: 'Grok', base: '../crew/grok/', rigHeight: 1516 },
+  { who: 'cluadex', name: 'CluadeX', base: '../crew/cluadex/', rigHeight: 1516 },
+  { who: 'mai', name: 'มาย', base: '../crew/mai/', rigHeight: 1516 },
+];
+await Promise.all(CREW.map(async c => {
+  c.rig = await BossRig.load(c.base, ASSET_V, c.who).catch(() => null);
+  c.meshes=await fetch(c.who==='cluadex'?'./cluadex-study/joint-meshes.json?v='+ASSET_V:`./cluadex-study/crew/${c.who}.json?v=${ASSET_V}`).then(r=>{if(!r.ok)throw Error('Missing crew mesh');return r.json()});
+  if(c.rig)tuneCrew(c.rig,c.meshes);
+  const poses = await Promise.all(['desk', 'sleep', 'relax'].map((pose) => PosePuppet.load(c.who, pose, ASSET_V)));
+  c.poses = { desk: poses[0], sleep: poses[1], relax: poses[2] };
+  c.route = []; c.posture = null; c.arrivePose = null;
+  c.paint = document.createElement('canvas'); c.paint.width = 1400; c.paint.height = 1300;
+  c.paintCtx = c.paint.getContext('2d');
+}));
+const crew = CREW.filter((c) => c.rig);
+// each starts in her own room
+const HOME = Object.fromEntries(MODULES.map((m, i) => [m.id, i + 0.5]));
+crew.forEach((c, i) => {
+  const [x, y] = [MOD_W * (HOME[c.who] ?? 2.5), CORRIDOR.y0 + 60 + (i % 3) * 40];
+  c.rig.x = x; c.rig.y = y; c.idle = 1 + i; c.manual = 0;
+  c.rig.maxSpeed = 145;   // relaxed stroll; stride cadence and arm swing follow actual speed
+});
+window.crew = crew;
+
+// ── camera ────────────────────────────────────────────────────────────────────
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let W = 0, H = 0, dpr = 1;
+function resize() { dpr = Math.min(2, devicePixelRatio || 1); W = cv.clientWidth; H = cv.clientHeight; cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+addEventListener('resize', resize); resize();
+const cam = { x: crew[0].rig.x, y: MOD_H * 0.55, z: 1, t: 1, tz: 1 };   // t: 0 = the whole ship, 1 = close
+let followIdx = 0;
+let focusRoom = null;
+let freeView = false, cameraDrag = null, zoomAnchor = null;
+const zClose = () => H / (MOD_H * 0.92);   // by height only: a wider window shows more of the ship, never a bigger one
+const zShip = () => Math.min(W / ((SHIP.x1 - SHIP.x0) * 1.06), H / ((SHIP.y1 - SHIP.y0) * 1.4));
+const zoomAt = (t) => Math.exp(Math.log(zShip()) + (Math.log(zClose()) - Math.log(zShip())) * t);
+
+const followBox = document.getElementById('follow'), zoomIn = document.getElementById('zoom');
+const roomSelect = document.getElementById('room');
+MODULES.forEach((m, i) => { const option = document.createElement('option'); option.value = i; option.textContent = m.name; roomSelect.appendChild(option); });
+roomSelect.addEventListener('change', () => {
+  setFreeView(false);
+  focusRoom = roomSelect.value === '' ? null : Number(roomSelect.value);
+  markFollow(); setZoom(1);
+  cam.t = 1; cam.z = zoomAt(1);
+  cam.x = focusRoom === null ? crew[followIdx].rig.x : (focusRoom + 0.5) * MOD_W;
+  cam.y = MOD_H * 0.52;
+});
+function cancelActivity(c) { c.route = []; c.posture = null; c.arrivePose = null; c.rig.target = null; c.rig.playClip(null); c.rig.play('idle'); }
+function sendTo(c, x, y) {
+  c.route = [[c.rig.x, CORRIDOR.y0 + 70], [x, CORRIDOR.y0 + 70], [x, y]];
+  c.rig.target = null;
+}
+function poseRoomX(c, pose) {
+  const room = c.poses[pose].spec.room || c.who;
+  return (HOME[room] - 0.5) * MOD_W;
+}
+function chooseActivity(pose) {
+  const c = crew[followIdx];
+  if (pose && !c.poses[pose]) return;
+  if (pose === 'relax') {
+    const occupied=crew.filter(other=>other!==c && (other.posture==='relax'||other.arrivePose==='relax'))
+      .map(other=>other.poses.relax.spec.position[0]);
+    const seat=[480,680,870,1060].find(x=>occupied.every(taken=>Math.abs(x-taken)>170));
+    if(seat===undefined)return;
+    c.poses.relax.spec.position[0]=seat;c.poses.relax.spec.approach[0]=seat;
+  }
+  setFreeView(false);
+  cancelActivity(c); focusRoom = null; roomSelect.value = ''; markFollow(); setZoom(1);
+  if (!pose) { c.manual = 0; c.idle = 0; return; }
+  const spec = c.poses[pose].spec, roomX = poseRoomX(c, pose);
+  c.arrivePose = pose;
+  sendTo(c, roomX + spec.approach[0], spec.approach[1]);
+}
+document.getElementById('work').addEventListener('click', () => chooseActivity('desk'));
+document.getElementById('sleep').addEventListener('click', () => chooseActivity('sleep'));
+document.getElementById('relax').addEventListener('click', () => chooseActivity('relax'));
+document.getElementById('wander').addEventListener('click', () => chooseActivity(null));
+crew.forEach((c, i) => {
+  const b = document.createElement('button'); b.textContent = c.name; b.dataset.i = i;
+  b.addEventListener('click', () => { setFreeView(false); followIdx = i; focusRoom = null; roomSelect.value = ''; markFollow(); if (cam.tz < 0.55) setZoom(1); });
+  followBox.appendChild(b);
+});
+// poses cloned from video in Avatar Studio: played by the girl the camera follows
+const clipData = new Map();
+(EMBED ? Promise.resolve({ ok: false }) : fetch('../clips/index.json', { cache: 'no-store' })).then((r) => (r.ok ? r.json() : [])).then((list) => {
+  for (const c of list) {
+    const b = document.createElement('button'); b.textContent = '🎬 ' + c.name;
+    b.addEventListener('click', async () => {
+      if (!clipData.has(c.id)) clipData.set(c.id, await fetch(`../clips/${c.id}.json`, { cache: 'no-store' }).then((r) => r.json()));
+      const g = crew[followIdx], d = clipData.get(c.id);
+      setFreeView(false);
+      cancelActivity(g);
+      focusRoom = null; roomSelect.value = ''; markFollow();
+      g.rig.target = null; g.rig.play('idle'); g.rig.playClip(d, { legs: d.legs !== false });
+      g.manual = Math.max(6, d.frames.length / d.fps * 2);   // she dances twice through before wandering off
+      if (cam.tz < 0.55) setZoom(1);
+    });
+    document.getElementById('clips').appendChild(b);
+  }
+}).catch(() => {});
+function markFollow() {
+  followBox.querySelectorAll('button').forEach((b) => b.classList.toggle('on', !freeView && focusRoom === null && +b.dataset.i === followIdx));
+  document.getElementById('work').disabled = !crew[followIdx].poses.desk;
+  document.getElementById('sleep').disabled = !crew[followIdx].poses.sleep;
+  document.getElementById('relax').disabled = !crew[followIdx].poses.relax;
+}
+function setFreeView(on) {
+  freeView = on; zoomAnchor = null;
+  const button = document.getElementById('free-view');
+  button.classList.toggle('on', on); button.setAttribute('aria-pressed', String(on));
+  button.textContent = on ? 'กลับไปตามตัวละคร' : 'มุมมองอิสระ';
+  cv.style.cursor = on ? 'grab' : 'crosshair';
+  document.getElementById('camera-help').textContent = on
+    ? 'มุมมองอิสระ · ลากเมาส์เพื่อเลื่อน · ล้อเมาส์เพื่อซูม · เลือกตัวละครเพื่อกลับไปติดตาม'
+    : 'เลือกห้องเพื่อชม · แตะพื้นให้คนที่เลือกเดินไป · ลากเมาส์เลื่อนมุมมอง · ล้อเมาส์เพื่อซูม';
+  if (on) { focusRoom = null; roomSelect.value = ''; }
+  markFollow();
+}
+document.getElementById('free-view').addEventListener('click', () => {
+  const on = !freeView;
+  if (!on) { focusRoom = null; roomSelect.value = ''; }
+  setFreeView(on);
+});
+markFollow();
+function setZoom(t) { cam.tz = Math.min(1, Math.max(0, t)); zoomIn.value = cam.tz; }
+zoomIn.addEventListener('input', () => { cam.tz = +zoomIn.value; });
+document.getElementById('z-ship').addEventListener('click', () => {
+  setZoom(0); cam.t = 0; cam.z = zoomAt(0);
+  cam.x = (SHIP.x0 + SHIP.x1) / 2; cam.y = (SHIP.y0 + SHIP.y1) / 2;
+});
+document.getElementById('z-close').addEventListener('click', () => setZoom(1));
+document.getElementById('pop').addEventListener('click', () => {
+  // as wide as everything the screen API reports (the whole desktop when it spans several monitors)
+  const w = Math.max(screen.availWidth, window.screen?.width || 0), h = Math.round(Math.min(screen.availHeight, w / 4));
+  window.open(location.href.split('#')[0], 'brainx-deck', `popup=yes,left=0,top=0,width=${w},height=${h}`);
+});
+cv.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  if (freeView) zoomAnchor = { x: e.clientX - W / 2, y: e.clientY - H / 2 };
+  setZoom(cam.tz - Math.sign(e.deltaY) * 0.06);
+}, { passive: false });
+cv.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0 && e.button !== 1) return;
+  e.preventDefault();
+  cameraDrag = { id: e.pointerId, x: e.clientX, y: e.clientY, lastX: e.clientX, lastY: e.clientY, moved: false, pan: freeView || e.button === 1 };
+  cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener('pointermove', (e) => {
+  const d = cameraDrag;
+  if (!d || e.pointerId !== d.id) return;
+  if (!d.moved && Math.hypot(e.clientX - d.x, e.clientY - d.y) > 5) {
+    d.moved = true; d.pan = true; setFreeView(true); cv.style.cursor = 'grabbing';
+  }
+  if (d.moved) {
+    cam.x -= (e.clientX - d.lastX) / cam.z; cam.y -= (e.clientY - d.lastY) / cam.z;
+    cam.x = Math.max(SHIP.x0, Math.min(SHIP.x1, cam.x));
+    cam.y = Math.max(SHIP.y0, Math.min(SHIP.y1, cam.y));
+    zoomAnchor = null;
+  }
+  d.lastX = e.clientX; d.lastY = e.clientY;
+});
+cv.addEventListener('pointerup', (e) => {
+  const d = cameraDrag;
+  if (!d || e.pointerId !== d.id) return;
+  cameraDrag = null; cv.releasePointerCapture(e.pointerId); cv.style.cursor = freeView ? 'grab' : 'crosshair';
+  if (d.moved || d.pan || freeView) return;
+  // A tap still walks; a drag only moves the camera.
+  const wx = (e.clientX - W / 2) / cam.z + cam.x, wy = (e.clientY - H / 2) / cam.z + cam.y;
+  const c = crew[followIdx];
+  if (walkable(wx, wy)) { cancelActivity(c); sendTo(c, wx, wy); c.manual = 6; }
+});
+cv.addEventListener('pointercancel', () => { cameraDrag = null; cv.style.cursor = freeView ? 'grab' : 'crosshair'; });
+
+// ── the room's bridge (?embed=1) ─────────────────────────────────────────────────────────────
+// BrainX's cowork room (office.js) is the one that knows who is connected. It posts
+//   {type:'shipCrew', crew:{<who>:{activity:'desk'|'sleep'|'relax'|null, label, doing, color, off}}}
+//   {type:'shipSay', who, text, ms, color}
+// and this page only acts it out: a girl whose agent is working walks to her desk, an offline one
+// goes to bed, an idle one wanders. Only the parent frame is listened to.
+const DRIVE = new Map();      // who -> what the room last asked for, so a repeated poll is a no-op
+const TAGS = new Map();       // who -> {label, doing, color, off}
+const SAYS = [];              // {who, text, color, until}
+function driveTo(c, pose) {
+  if (pose && !c.poses[pose]) pose = null;
+  if (pose === 'relax') {
+    const taken = crew.filter(o => o !== c && (o.posture === 'relax' || o.arrivePose === 'relax')).map(o => o.poses.relax.spec.position[0]);
+    const seat = [480, 680, 870, 1060].find(x => taken.every(t => Math.abs(x - t) > 170));
+    if (seat === undefined) pose = null;
+    else { c.poses.relax.spec.position[0] = seat; c.poses.relax.spec.approach[0] = seat; }
+  }
+  if ((c.posture || c.arrivePose || null) === pose && pose) return;
+  cancelActivity(c);
+  if (!pose) { c.manual = 0; c.idle = Math.random() * 2; return; }
+  const spec = c.poses[pose].spec;
+  c.arrivePose = pose;
+  sendTo(c, poseRoomX(c, pose) + spec.approach[0], spec.approach[1]);
+}
+function onRoomMessage(e) {
+  if (e.source !== parent || parent === window) return;
+  const m = e.data;
+  if (!m || typeof m !== 'object') return;
+  if (m.type === 'shipCrew' && m.crew) {
+    for (const c of crew) {
+      const s = m.crew[c.who];
+      if (!s) continue;
+      TAGS.set(c.who, { label: String(s.label || c.name), doing: String(s.doing || ''), color: String(s.color || ''), off: !!s.off });
+      const want = s.activity || null;
+      if (DRIVE.has(c.who) && DRIVE.get(c.who) === want) continue;
+      DRIVE.set(c.who, want);
+      driveTo(c, want);
+    }
+  } else if (m.type === 'shipSay' && m.who && m.text) {
+    SAYS.push({ who: String(m.who), text: String(m.text).slice(0, 240), color: String(m.color || ''), until: performance.now() + (+m.ms || 4000) });
+    while (SAYS.length > 12) SAYS.shift();
+  }
+}
+if (EMBED) addEventListener('message', onRoomMessage);
+const tagLayer = document.getElementById('tags');
+const tagNodes = new Map();
+function tagNode(key, cls, html, css) {
+  let n = tagNodes.get(key);
+  if (!n) {
+    n = document.createElement('div'); n.dataset.key = key; tagLayer.appendChild(n); tagNodes.set(key, n);
+    if (cls.startsWith('tag')) n.addEventListener('click', () => {
+      const i = crew.findIndex(c => 'tag:' + c.who === key);
+      if (i < 0) return;
+      setFreeView(false); followIdx = i; focusRoom = null; roomSelect.value = ''; markFollow(); setZoom(1);
+    });
+  }
+  if (n._cls !== cls) { n.className = cls; n._cls = cls; }
+  if (n._html !== html) { n.innerHTML = html; n._html = html; }
+  if (n._css !== css) { n.style.cssText = css; n._css = css; }
+  return n;
+}
+const esc = (t) => String(t).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[ch]);
+const safeColor = (c) => (/^#[0-9a-f]{3,8}$/i.test(c) ? c : '');
+// head and feet of a girl in CSS pixels: standing on her rig, or her painted posture's box
+function screenOf(c) {
+  const toX = (x) => (x - cam.x) * cam.z + W / 2, toY = (y) => (y - cam.y) * cam.z + H / 2;
+  if (c.posture) {
+    const roomX = poseRoomX(c, c.posture), b = c.poses[c.posture].bounds(roomX);
+    return { x: toX(roomX + c.poses[c.posture].spec.position[0]), head: toY(b.y + b.h * 0.12), feet: toY(c.poses[c.posture].spec.floorY) };
+  }
+  const s = depthScale(c.rig.y, c.rigHeight);
+  return { x: toX(c.rig.x), head: toY(c.rig.y - c.rigHeight * s * 0.98), feet: toY(c.rig.y) };
+}
+function drawTags(now) {
+  const seen = new Set();
+  for (const c of crew) {
+    const t = TAGS.get(c.who);
+    if (!t) continue;
+    const p = screenOf(c);
+    if (p.x < -200 || p.x > W + 200) continue;
+    const pc = safeColor(t.color), key = 'tag:' + c.who;
+    seen.add(key);
+    tagNode(key, 'tag' + (t.off ? ' off' : '') + (cam.t < 0.4 ? ' far' : ''), `<b>${esc(t.label)}</b>${t.doing ? `<span>${esc(t.doing)}</span>` : ''}`,
+      `${pc ? `--pc:${pc};` : ''}left:${p.x.toFixed(1)}px;top:${(p.feet + 6).toFixed(1)}px`);
+  }
+  for (let i = SAYS.length - 1; i >= 0; i--) if (now >= SAYS[i].until) SAYS.splice(i, 1);
+  // newest line per girl only: two bubbles on one head would cover each other
+  const latest = new Map();
+  for (const s of SAYS) latest.set(s.who, s);
+  for (const [who, s] of latest) {
+    const c = crew.find(g => g.who === who);
+    if (!c) continue;
+    const p = screenOf(c), pc = safeColor(s.color), key = 'say:' + who + ':' + s.until;
+    seen.add(key);
+    tagNode(key, 'say', esc(s.text), `${pc ? `--pc:${pc};` : ''}left:${p.x.toFixed(1)}px;top:${(p.head - 8).toFixed(1)}px`);
+  }
+  for (const [key, n] of tagNodes) if (!seen.has(key)) { n.remove(); tagNodes.delete(key); }
+}
+
+// ── space: a warp field of streaks, three depths, streaming left past the ship ─────────────────
+const STARS = Array.from({ length: 420 }, () => ({ x: Math.random(), y: Math.random(), d: Math.random() }));
+const NEB = Array.from({ length: 7 }, (_, i) => ({ x: Math.random(), y: Math.random(), r: 0.25 + Math.random() * 0.35, h: [265, 290, 220, 320, 250, 200, 300][i] }));
+function drawSpace(t, dt) {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#05030d'); g.addColorStop(0.5, '#0b0820'); g.addColorStop(1, '#05040e');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.globalCompositeOperation = 'lighter';
+  for (const n of NEB) {
+    n.x -= dt * 0.004; if (n.x < -0.5) n.x += 2;
+    const cx = n.x * W, cy = n.y * H, r = n.r * Math.max(W, H);
+    const rg = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+    rg.addColorStop(0, `hsla(${n.h}, 80%, 45%, 0.20)`); rg.addColorStop(1, `hsla(${n.h}, 80%, 30%, 0)`);
+    ctx.fillStyle = rg; ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+  }
+  const warp = 0.6 + 0.4 * (1 - cam.t);          // the streaks stretch when we pull back to see the ship
+  for (const s of STARS) {
+    const sp = 0.05 + s.d * s.d * 0.9;
+    s.x -= dt * sp * warp; if (s.x < -0.2) { s.x += 1.4; s.y = Math.random(); }
+    const x = s.x * W, y = s.y * H, len = (8 + s.d * 160) * warp, a = 0.25 + s.d * 0.7;
+    const lg = ctx.createLinearGradient(x, y, x + len, y);
+    const hue = 200 + s.d * 90;
+    lg.addColorStop(0, `hsla(${hue}, 100%, 85%, ${a})`); lg.addColorStop(1, `hsla(${hue}, 100%, 70%, 0)`);
+    ctx.strokeStyle = lg; ctx.lineWidth = 0.6 + s.d * 1.8;
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + len, y); ctx.stroke();
+  }
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+// ── the ship around the deck (drawn in world units) ─────────────────────────────────────────
+function drawShip(t) {
+  if (!shipImg) return;
+  const [bx0, by0, bx1, by1] = SHIPIMG.band, iw = SHIPIMG.w, ih = SHIPIMG.h, y = -by0 * SK, h = ih * SK;
+  // engines | middle (stretched to the deck) | prow
+  ctx.drawImage(shipImg, 0, 0, bx0, ih, -bx0 * SK, y, bx0 * SK, h);
+  ctx.drawImage(shipImg, bx0, 0, bx1 - bx0, ih, 0, y, DECK_W, h);
+  ctx.drawImage(shipImg, bx1, 0, iw - bx1, ih, DECK_W, y, (iw - bx1) * SK, h);
+  // the thrusters burn: a flickering core and a plume that breathes
+  ctx.globalCompositeOperation = 'lighter';
+  SHIPIMG.nozzles.forEach(([nx, ny], k) => {
+    const x = (nx - bx0) * SK, cy = (ny - by0) * SK, f = 0.8 + 0.2 * Math.sin(t * 19 + k * 2.3) * Math.sin(t * 7.1 + k);
+    const r = 60 * SK * f;
+    const g = ctx.createRadialGradient(x, cy, 0, x, cy, r);
+    g.addColorStop(0, 'rgba(220,245,255,0.9)'); g.addColorStop(0.4, 'rgba(120,190,255,0.45)'); g.addColorStop(1, 'rgba(80,120,255,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, cy, r, 0, Math.PI * 2); ctx.fill();
+    const L = (900 + 300 * f) * SK * 0.4, pl = ctx.createLinearGradient(x, cy, x - L, cy);
+    pl.addColorStop(0, 'rgba(150,215,255,0.55)'); pl.addColorStop(1, 'rgba(90,110,255,0)');
+    ctx.fillStyle = pl; ctx.beginPath(); ctx.moveTo(x, cy - r * 0.5); ctx.lineTo(x - L, cy); ctx.lineTo(x, cy + r * 0.5); ctx.closePath(); ctx.fill();
+  });
+  ctx.globalCompositeOperation = 'source-over';
+  drawLogo(t);
+}
+
+// One flush LED inlay on the fixed bow slice, below the cockpit glass. Native ship-image
+// coordinates keep the mark attached to this hull panel when the room band stretches.
+function drawLogo(t) {
+  const h = 36 * SK, cy = (428 - SHIPIMG.band[1]) * SK;
+  const x0 = DECK_W + (1734 - SHIPIMG.band[2]) * SK;
+  const font = `600 ${h * 0.78}px Anuphan, "Segoe UI", sans-serif`;
+  ctx.save(); ctx.translate(x0, cy); ctx.transform(1, -0.075, 0, 1, 0, 0); ctx.font = font;
+  const wB = ctx.measureText('Brain').width, icon = brainImg ? h : 0, gap = h * 0.2;
+  const glow = 0.92 + 0.08 * Math.sin(t * 1.2);
+  ctx.globalCompositeOperation = 'screen'; ctx.globalAlpha = glow;
+  // Soft bloom spills onto the existing metal; no plaque or opaque backing.
+  ctx.shadowColor = '#44caff'; ctx.shadowBlur = Math.min(22, h * cam.z * 0.3);
+  if (brainImg) ctx.drawImage(brainImg, 0, -icon / 2, icon, icon);
+  ctx.textBaseline = 'middle'; ctx.fillStyle = '#8ae4ff'; ctx.fillText('Brain', icon + gap, h * 0.04);
+  ctx.fillStyle = '#c7f6ff'; ctx.fillText('X', icon + gap + wB, h * 0.04);
+  ctx.restore();
+}
+
+// ── the crew's own life: wander to a spot, stand a while, sometimes talk ─────────────────────
+function think(c, dt) {
+  const r = c.rig;
+  if (c.posture) return;
+  if (!r.target && c.route.length) { const [x, y] = c.route.shift(); r.walkTo(x, y); return; }
+  if (!r.target && c.arrivePose) { c.posture = c.arrivePose; c.arrivePose = null; return; }
+  c.manual = Math.max(0, c.manual - dt);
+  if (r.target || c.manual > 0) return;
+  c.idle -= dt;
+  if (c.idle > 0) return;
+  if (r.clip) { r.playClip(null); r.play('idle'); }
+  if (Math.random() < 0.3) { r.play('talk'); c.idle = 2.5 + Math.random() * 2; return; }
+  if (r.state !== 'idle') r.play('idle');
+  const [x, y] = randomSpot(); sendTo(c, x, y); c.idle = 3 + Math.random() * 5;
+}
+
+// ── frame ──────────────────────────────────────────────────────────────────────
+let last = performance.now(), frames = 0, fpsT = 0;
+window.__frames = (n = 1, step = 1 / 60) => { for (let i = 0; i < n; i++) frame(last + step * 1000, true); };
+function frame(now, manual) {
+  // A frame that has not been laid out yet (a hidden iframe) has no size: zooming to fit it gives
+  // zero and every camera position after that NaN, for good.
+  if (!W || !H) resize();
+  if (!W || !H) { if (!manual) requestAnimationFrame(frame); return; }
+  const dt = Math.min(0.05, Math.max(0, (now - last) / 1000)); last = Math.max(last, now);
+  frames++; fpsT += dt; if (fpsT > 0.5) { document.getElementById('fps').textContent = Math.round(frames / fpsT) + ' fps'; frames = 0; fpsT = 0; }
+  for (const c of crew) { think(c, dt); c.rig.unitPx = depthScale(c.rig.y, c.rigHeight); c.rig.update(dt); }
+  const people = crew.map(c => c.posture
+    ? { x: poseRoomX(c, c.posture) + c.poses[c.posture].spec.position[0], y: c.poses[c.posture].spec.floorY, activity:c.posture }
+    : { x: c.rig.x, y: c.rig.y, activity:'walk' });
+  roomLights.forEach(light => light.update(dt, people));
+  const selected = crew[followIdx];
+  const activityName = { desk: 'นั่งทำงาน', sleep: 'นอนพัก', relax: 'นั่งพักบนโซฟา' };
+  const destinationName = { desk: 'กำลังกลับไปที่โต๊ะ', sleep: 'กำลังกลับไปที่เตียง', relax: 'กำลังไปห้องนั่งเล่น' };
+  const crewStatus = selected.name + ' · ' + (selected.posture ? activityName[selected.posture] : selected.arrivePose ? destinationName[selected.arrivePose] : selected.rig.target || selected.route.length ? 'กำลังเดิน' : 'พักผ่อน');
+  const statusEl = document.getElementById('crew-status');
+  if (statusEl.textContent !== crewStatus) statusEl.textContent = crewStatus;
+  document.getElementById('work').classList.toggle('on', (selected.posture || selected.arrivePose) === 'desk');
+  document.getElementById('sleep').classList.toggle('on', (selected.posture || selected.arrivePose) === 'sleep');
+  document.getElementById('relax').classList.toggle('on', (selected.posture || selected.arrivePose) === 'relax');
+  const takenSeats=crew.filter(c=>c!==selected&&(c.posture==='relax'||c.arrivePose==='relax')).map(c=>c.poses.relax.spec.position[0]);
+  const sofaAvailable=[480,680,870,1060].some(x=>takenSeats.every(taken=>Math.abs(x-taken)>170));
+  document.getElementById('relax').disabled=!selected.poses.relax||!sofaAvailable;
+  document.getElementById('relax').title=sofaAvailable?'':'โซฟามีคนนั่งครบแล้ว';
+  // camera: zoom eases to its target; close in it rides with the girl it follows, far out it
+  // frames the whole ship
+  if (!Number.isFinite(cam.x) || !Number.isFinite(cam.y)) { cam.x = (SHIP.x0 + SHIP.x1) / 2; cam.y = (SHIP.y0 + SHIP.y1) / 2; }
+  const oldZ = cam.z;
+  cam.t += (cam.tz - cam.t) * (1 - Math.exp(-dt * 6));
+  cam.z = zoomAt(cam.t);
+  if (freeView && zoomAnchor) {
+    cam.x += zoomAnchor.x * (1 / oldZ - 1 / cam.z);
+    cam.y += zoomAnchor.y * (1 / oldZ - 1 / cam.z);
+    if (Math.abs(cam.tz - cam.t) < 0.0001) zoomAnchor = null;
+  }
+  const f = crew[followIdx].rig, k = cam.t * cam.t;
+  const focusX = freeView ? cam.x : focusRoom === null ? f.x : (focusRoom + 0.5) * MOD_W;
+  const shipCx = (SHIP.x0 + SHIP.x1) / 2, shipCy = (SHIP.y0 + SHIP.y1) / 2;
+  const halfW = W / 2 / cam.z;
+  // close in, keep the deck filling the view; a window wider than the whole deck centres it
+  const fx = halfW * 2 >= DECK_W ? DECK_W / 2 : Math.min(Math.max(focusX, halfW - 40), DECK_W - halfW + 40);
+  document.getElementById('location').textContent = cam.t < 0.3 ? 'ทั้งลำ · ' + MODULES.length + ' ห้อง' : MODULES[Math.min(MODULES.length - 1, Math.max(0, Math.floor(focusX / MOD_W)))].name;
+  const tx = shipCx + (fx - shipCx) * k, ty = shipCy + (MOD_H * 0.52 - shipCy) * k;
+  if (!freeView) {
+    cam.x += (tx - cam.x) * (1 - Math.exp(-dt * 4)); cam.y += (ty - cam.y) * (1 - Math.exp(-dt * 4));
+  }
+
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawSpace(now / 1000, dt);
+  ctx.setTransform(dpr * cam.z, 0, 0, dpr * cam.z, dpr * (W / 2 - cam.x * cam.z), dpr * (H / 2 - cam.y * cam.z));
+  drawShip(now / 1000);
+  MODULES.forEach((m, i) => {
+    const roomX = i * MOD_W;
+    // Avoid drawing offscreen star fields when viewing a single room close up.
+    if (roomX + MOD_W < cam.x - W / 2 / cam.z || roomX > cam.x + W / 2 / cam.z) return;
+    if (windowPlates[i]) drawWindowView(ctx, roomX, now / 1000, m.id === 'bridge');
+    roomLights[i].draw(ctx, now / 1000, people, cam.z);
+  });
+  // the crew and the furniture, back to front by where each stands on the floor
+  const order = [...crew.map((c) => ({ y: c.posture ? c.poses[c.posture].spec.floorY : c.rig.y, c })), ...OBJECTS.map((o) => ({ y: o.floorY, o }))].sort((a, b) => a.y - b.y);
+  for (const { c, o } of order) {
+    if (o) {
+      const light = roomLights[Math.floor(o.x / MOD_W)];
+      ctx.save(); ctx.filter = `brightness(${light?.brightnessAt(o.x + o.w/2, o.y + o.h/2) || .23})`;
+      ctx.drawImage(o.img, o.x, o.y, o.w, o.h); ctx.restore(); continue;
+    }
+    const anchorX = c.posture ? poseRoomX(c,c.posture)+c.poses[c.posture].spec.position[0] : c.rig.x;
+    const floorY = c.posture ? c.poses[c.posture].spec.floorY : c.rig.y;
+    const bounds=c.posture ? c.poses[c.posture].bounds(poseRoomX(c,c.posture))
+      : {x:anchorX-350,y:floorY-550,w:700,h:650};
+    if(bounds.x+bounds.w<cam.x-W/2/cam.z || bounds.x>cam.x+W/2/cam.z)continue;
+    const {x:originX,y:originY,w:paintW,h:paintH}=bounds,g=c.paintCtx;
+    if(c.paint.width!==paintW*2||c.paint.height!==paintH*2){c.paint.width=paintW*2;c.paint.height=paintH*2;}
+    g.setTransform(1,0,0,1,0,0);g.clearRect(0,0,c.paint.width,c.paint.height);
+    g.setTransform(2,0,0,2,-originX*2,-originY*2);
+    const skinOrigin=anchorX-768,lightIndex=Math.floor(anchorX/MOD_W);
+    const fixtures=roomLights.flatMap((l,i)=>Math.abs(i-lightIndex)<=1?l.fixtures.map(f=>({...f,at:[i*MOD_W+f.at[0]-skinOrigin,f.at[1]]})):[]);
+    crewSkin.begin(fixtures,[768,floorY-180],true);
+    if(c.posture)crewSkin.paintedPose(c.poses[c.posture],c.posture,now/1000,poseRoomX(c,c.posture),skinOrigin);
+    else {
+    const s = depthScale(c.rig.y, c.rigHeight);
+    ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.beginPath(); ctx.ellipse(c.rig.footX(s), c.rig.y + 3, 150 * s, 30 * s, 0, 0, Math.PI * 2); ctx.fill();
+    crewSkin.rig(c.rig,c.meshes,s,skinOrigin);
+    }
+    g.drawImage(crewSkin.canvas,skinOrigin,0);
+    // The flat mesh shader already shades the assembled skin, clothes and wordmarks together.
+    ctx.drawImage(c.paint,originX,originY,paintW,paintH);
+  }
+  if (EMBED) drawTags(now);
+  if (!manual) requestAnimationFrame(frame);
+}
+if (EMBED) {
+  // the whole ship first: the room is about who is aboard, a close view is one click on a name
+  setZoom(0); cam.t = 0; cam.z = W && H ? zoomAt(0) : 1;
+  cam.x = (SHIP.x0 + SHIP.x1) / 2; cam.y = (SHIP.y0 + SHIP.y1) / 2;
+  try { parent.postMessage({ type: 'shipReady' }, location.origin); } catch { /* not framed */ }
+}
+requestAnimationFrame(frame);
+</script>

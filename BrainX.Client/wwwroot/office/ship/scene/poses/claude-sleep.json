@@ -1,0 +1,9 @@
+{
+  "image": "claude-sleep-v2.webp",
+  "position": [820, 280], "scale": 0.24,
+  "sleepBreath": {"period": 5.2, "amount": 0.018, "centerX": 1100, "spread": 220, "supportY": 780},
+  "approach": [1210, 575], "floorY": 560,
+  "parts": [
+    {"rect": [0, 0, 1536, 1024], "anchor": [0, 780], "at": [0, 0], "motion": "breath"}
+  ]
+}
