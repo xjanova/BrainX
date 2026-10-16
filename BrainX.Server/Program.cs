@@ -116,9 +116,11 @@ BrainX.Server.Hubs.AuditLog.Initialize(
 IBrainStorage? storage = null;
 try
 {
-    var storageDir = !string.IsNullOrWhiteSpace(NodeConfig.VaultPath)
-        ? NodeConfig.VaultPath!
-        : Path.Combine(AppContext.BaseDirectory, "data");
+    // BrainX__StorageDir: a node sharing a LIVE vault with the desktop client
+    // (the owner's PC, serving /mcp to the Gemini app) must not open the
+    // client's own .obsidianx/brain.db and reseed it at startup.
+    var storageDir = NodeConfig.StorageDir
+        ?? (!string.IsNullOrWhiteSpace(NodeConfig.VaultPath) ? NodeConfig.VaultPath! : Path.Combine(AppContext.BaseDirectory, "data"));
     storage = BrainStorageFactory.Create(NodeConfig.StorageProvider, storageDir, NodeConfig.MySqlConnString,
         onFallback: ex => Console.WriteLine($"[storage] MySQL init failed ({ex.GetType().Name}: {ex.Message})"));
     BrainHub.Store = storage;
@@ -1303,6 +1305,8 @@ public static class NodeConfig
 
     /// <summary>"sqlite" (default) or "mysql". Picks the IBrainStorage backend.</summary>
     public static string StorageProvider { get; private set; } = "sqlite";
+    /// <summary>Where SQLite keeps .obsidianx/brain.db. Unset = the vault itself.</summary>
+    public static string? StorageDir { get; private set; }
     /// <summary>MySQL connection string — required when StorageProvider=mysql.
     /// From BrainX:MySqlConnString, else read from BrainX:MySqlConnStringFile.</summary>
     public static string? MySqlConnString { get; private set; }
@@ -1403,6 +1407,7 @@ public static class NodeConfig
         AllowedOrigins = (b["AllowedOrigins"] ?? "")
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         StorageProvider = (FirstNonEmpty(b["StorageProvider"]) ?? "sqlite").ToLowerInvariant();
+        StorageDir = FirstNonEmpty(b["StorageDir"]);
         MySqlConnStringFile = FirstNonEmpty(b["MySqlConnStringFile"]);
         MySqlConnString = FirstNonEmpty(b["MySqlConnString"]) ?? ReadConnStringFile(MySqlConnStringFile);
         CloudStoreProvider = (FirstNonEmpty(b["CloudStoreProvider"]) ?? StorageProvider).ToLowerInvariant();
