@@ -437,7 +437,8 @@
                                 </Border>
                                 <!-- The mascot, outside the clipped disc so it can lean
                                      over the rim, bobbing a little. -->
-                                <Image Source="pack://application:,,,/Assets/CrestMascot.png"
+                                <Image x:Name="CrestMascot"
+                                       Source="pack://application:,,,/Assets/CrestMascot.png"
                                        Width="58" HorizontalAlignment="Right" VerticalAlignment="Bottom"
                                        Margin="0,0,-12,-4" RenderOptions.BitmapScalingMode="HighQuality"
                                        ToolTip="BrainX">

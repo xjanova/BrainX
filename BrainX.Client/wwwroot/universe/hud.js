@@ -256,7 +256,29 @@ function compact(n) {
  *  described a queue. There is no queue: the host pushes these on a tiered
  *  timer and they land in whatever order they finish — the agent roster is
  *  usually first and the Claude meters last, no matter where they sit here. */
+/** Glow per girl - the same table as MainWindow.LoadingGirl.cs. */
+const BOOT_GIRL_GLOW = {
+    brainx: '62, 155, 255', cluadex: '185, 140, 255', mai: '200, 155, 255',
+    grok: '184, 240, 60', claude: '255, 138, 60', codex: '60, 180, 255', gemini: '168, 140, 255',
+};
+
+/** The girl the host drew for this launch stands beside the boot box. The
+ *  name comes from our own host (?girl=), and is still held to a plain slug
+ *  before it becomes a path. No name, or a picture that will not load: she
+ *  simply is not there. */
+function showBootGirl() {
+    const img = $('hud-boot-girl');
+    const name = new URLSearchParams(location.search).get('girl') || '';
+    if (!img || !/^[a-z0-9-]{1,32}$/.test(name)) return;
+    const glow = BOOT_GIRL_GLOW[name];
+    if (glow) img.style.setProperty('--girl-glow', `rgba(${glow}, 0.5)`);
+    img.onload = () => { img.hidden = false; requestAnimationFrame(() => img.classList.add('in')); };
+    img.onerror = () => img.remove();
+    img.src = `/girls/${name}.png`;
+}
+
 function renderBootSteps() {
+    showBootGirl();
     const host = $('hud-boot-steps');
     if (!host) return;
     host.innerHTML = STEPS.map(s =>

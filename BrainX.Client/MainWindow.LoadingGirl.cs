@@ -1,6 +1,5 @@
-using System.Collections;
 using System.IO;
-using System.Resources;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
@@ -9,27 +8,35 @@ using System.Windows.Media.Imaging;
 namespace BrainX.Client;
 
 // ─────────────────────────────────────────────────────────────────────────
-// The girl beside the loading card.
+// The girl beside the loading screens, and the crest's mascot.
 //
 // Owner (2026-10-16): "ให้เธอโผล่มายืนข้าง ฟอร์ม โหลด สวยๆ", then "สุ่มจาก
-// ภาพทั้งหมดนี้ ใช้ทุกคน แต่สุ่ม ในการเข้าแต่ละครั้ง". Every cut-out in
-// Assets/Girls is a candidate (the csproj takes the folder by wildcard, so a
-// new PNG there is in the draw with no code change); one is picked per launch,
-// never the one the last launch showed, and slides up into place with her own
-// colour as the glow.
+// ภาพทั้งหมดนี้ ใช้ทุกคน แต่สุ่ม ในการเข้าแต่ละครั้ง". There are two loading
+// screens in a row - this window's plain-WPF card (the first painted frame)
+// and the Universe HUD's boot screen in the WebView, which is the one the
+// owner watches longest - so one girl is drawn per launch and stands beside
+// BOTH: the WPF card shows her here, and the HUD gets her name in its URL
+// (?girl=) and shows the same picture.
+//
+// The pictures live once, in wwwroot/girls (copied beside the exe and served
+// to the WebView as https://universe.local/girls/<name>.png). Every PNG there
+// is in the draw; a new one needs no code change. Never the girl the last
+// launch showed.
 // ─────────────────────────────────────────────────────────────────────────
 public partial class MainWindow
 {
-    private const string LoadingGirlFolder = "assets/girls/";
+    /// <summary>The girl this launch drew, or null - read by the Universe URL.</summary>
+    private string? _loadingGirl;
+
+    private static readonly Regex LoadingGirlName = new("^[a-z0-9-]{1,32}$", RegexOptions.CultureInvariant);
 
     /// <summary>Glow per girl, from her poster's palette. Anyone not named
-    /// keeps the card's cyan.</summary>
+    /// keeps the card's cyan. hud.js carries the same table.</summary>
     private static readonly Dictionary<string, Color> LoadingGirlGlowColors = new(StringComparer.OrdinalIgnoreCase)
     {
         ["brainx"] = Color.FromRgb(0x3E, 0x9B, 0xFF),
         ["cluadex"] = Color.FromRgb(0xB9, 0x8C, 0xFF),
         ["mai"] = Color.FromRgb(0xC8, 0x9B, 0xFF),
-        ["mind"] = Color.FromRgb(0xC8, 0x9B, 0xFF),
         ["grok"] = Color.FromRgb(0xB8, 0xF0, 0x3C),
         ["claude"] = Color.FromRgb(0xFF, 0x8A, 0x3C),
         ["codex"] = Color.FromRgb(0x3C, 0xB4, 0xFF),
@@ -39,21 +46,29 @@ public partial class MainWindow
     /// <summary>Below this the card needs the room: she steps aside.</summary>
     private const double LoadingGirlMinWidth = 860;
 
+    private static string LoadingGirlDir => Path.Combine(AppContext.BaseDirectory, "wwwroot", "girls");
+
     private void ShowLoadingGirl()
     {
+        HideCrestMascotWhenSidebarIsThin();
         try
         {
-            var names = LoadingGirlNames();
+            var names = Directory.Exists(LoadingGirlDir)
+                ? Directory.GetFiles(LoadingGirlDir, "*.png")
+                    .Select(f => Path.GetFileNameWithoutExtension(f).ToLowerInvariant())
+                    .Where(n => LoadingGirlName.IsMatch(n)).Distinct().ToList()
+                : new List<string>();
             if (names.Count == 0 || LoadingGirl == null) return;
 
             var last = ReadLastLoadingGirl();
-            var pool = names.Count > 1 ? names.Where(n => !n.Equals(last, StringComparison.OrdinalIgnoreCase)).ToList() : names;
+            var pool = names.Count > 1 ? names.Where(n => n != last).ToList() : names;
             var pick = pool[Random.Shared.Next(pool.Count)];
             WriteLastLoadingGirl(pick);
+            _loadingGirl = pick;
 
             var bmp = new BitmapImage();
             bmp.BeginInit();
-            bmp.UriSource = new Uri($"pack://application:,,,/Assets/Girls/{pick}.png");
+            bmp.UriSource = new Uri(Path.Combine(LoadingGirlDir, pick + ".png"));
             bmp.CacheOption = BitmapCacheOption.OnLoad;
             bmp.EndInit();
             bmp.Freeze();
@@ -81,22 +96,22 @@ public partial class MainWindow
         }
     }
 
-    /// <summary>The girls compiled in, by file name: every Assets/Girls/*.png
-    /// in the assembly's WPF resources (keys are lower-cased paths).</summary>
-    private static List<string> LoadingGirlNames()
+    /// <summary>The Universe page URL, carrying this launch's girl.</summary>
+    private string UniverseHudUrl() =>
+        "https://universe.local/universe/index.html?hud=1"
+        + (_loadingGirl != null ? "&girl=" + _loadingGirl : "");
+
+    /// <summary>
+    /// The crest's mascot leans out past the disc. While the sidebar is folded
+    /// to its hairline the disc is clipped away but the mascot's edge was not -
+    /// half a robot face peeking from the window's left edge (seen on 2.0.504).
+    /// </summary>
+    private void HideCrestMascotWhenSidebarIsThin()
     {
-        var list = new List<string>();
-        var asm = typeof(MainWindow).Assembly;
-        using var stream = asm.GetManifestResourceStream(asm.GetName().Name + ".g.resources");
-        if (stream == null) return list;
-        using var reader = new ResourceReader(stream);
-        foreach (DictionaryEntry e in reader)
-        {
-            var key = e.Key as string ?? "";
-            if (key.StartsWith(LoadingGirlFolder, StringComparison.Ordinal) && key.EndsWith(".png", StringComparison.Ordinal))
-                list.Add(key[LoadingGirlFolder.Length..^4]);
-        }
-        return list;
+        if (SidebarBorder == null || CrestMascot == null) return;
+        void Apply() => CrestMascot.Visibility = SidebarBorder.ActualWidth >= 120 ? Visibility.Visible : Visibility.Hidden;
+        SidebarBorder.SizeChanged += (_, _) => Apply();
+        Apply();
     }
 
     private static string LastLoadingGirlPath =>

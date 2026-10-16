@@ -8773,7 +8773,7 @@ public partial class MainWindow : Window
             // ?hud=1 turns on the heads-up dashboard (see MainWindow.UniverseHud.cs).
             // ONLY this view passes it: the wallpaper and the dashboard's embedded
             // mini-galaxy load the same page and must stay bare.
-            UniverseWebView.Source = new Uri("https://universe.local/universe/index.html?hud=1");
+            UniverseWebView.Source = new Uri(UniverseHudUrl());   // ?hud=1, plus this launch's girl
             StartUniverseHud();
             _universeInitialized = true;
         }
