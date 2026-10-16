@@ -1106,7 +1106,9 @@ internal static partial class Program
                 "minutes); poll media_status {job}. Files land in agent-bus/outbox/media/<job>/ — attach them with " +
                 "cowork_say. Costs the owner's Grok quota (about 30k tokens an image); the owner's order to make it is the " +
                 "permission. Video is refused while the Grok account keeps its data private (zero data retention); " +
-                "media_status says so — images are unaffected.",
+                "media_status says so — images are unaffected. engine:'gemini' draws with Gemini's image model and the " +
+                "owner's Google key from Settings instead: images only, up to 4 `references` (absolute paths of images to " +
+                "match — a character sheet, a layout template), finished when the call returns (no polling).",
                 new JObject
                 {
                     ["type"] = "object",
@@ -1117,7 +1119,10 @@ internal static partial class Program
                         ["aspect_ratio"] = new JObject { ["type"] = "string", ["description"] = "image: auto, 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, 2:3" },
                         ["resolution"] = new JObject { ["type"] = "string", ["enum"] = new JArray("480p", "720p"), ["default"] = "480p" },
                         ["duration"] = new JObject { ["type"] = "integer", ["enum"] = new JArray(6, 10), ["default"] = 6 },
-                        ["image"] = new JObject { ["type"] = "string", ["description"] = "video only: absolute path of the image to animate" }
+                        ["image"] = new JObject { ["type"] = "string", ["description"] = "video only: absolute path of the image to animate" },
+                        ["engine"] = new JObject { ["type"] = "string", ["enum"] = new JArray("grok", "gemini"), ["default"] = "grok", ["description"] = "who draws: Grok Imagine (owner's Grok login) or Gemini (owner's Google key)" },
+                        ["references"] = new JObject { ["type"] = "array", ["items"] = new JObject { ["type"] = "string" }, ["description"] = "gemini only: up to 4 absolute paths of .png/.jpg/.webp images to follow" },
+                        ["model"] = new JObject { ["type"] = "string", ["description"] = "gemini only: a Gemini image model id; omit to use the best one the key offers" }
                     },
                     ["required"] = new JArray("prompt")
                 }),

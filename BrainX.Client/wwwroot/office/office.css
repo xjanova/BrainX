@@ -590,7 +590,38 @@ body.ship-mode #floor, body.ship-mode #overlay { display: none; }
 #board-list .st-paused .ico { color: #e0b98a; }
 #model-panel { width: min(380px, calc(100% - 20px)); max-height: calc(100% - 50px); overflow-y: auto; }
 #model-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
-#model-list li { display: grid; gap: 4px; }
+#model-list li {
+    display: grid;
+    gap: 4px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(242, 239, 230, 0.035);
+    border: 1px solid rgba(242, 239, 230, 0.07);
+    /* each card eases in, a beat after the one above it */
+    animation: mcard-in 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation-delay: calc(var(--i, 0) * 45ms);
+}
+@keyframes mcard-in {
+    from { opacity: 0; transform: translateY(6px) scale(0.985); }
+    to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) { #model-list li { animation: none; } }
+#model-list li.mlocked { background: rgba(224, 147, 140, 0.06); border-color: rgba(224, 147, 140, 0.22); }
+#model-list li.mlocked .who { opacity: 0.7; }
+#model-list .mfix { margin: 0; color: #e8c9a0; }
+#model-list .mget {
+    justify-self: start;
+    font: inherit;
+    font-size: 11px;
+    color: #f4d9a8;
+    background: rgba(216, 185, 120, 0.12);
+    border: 1px solid rgba(216, 185, 120, 0.4);
+    border-radius: 6px;
+    padding: 3px 10px;
+    cursor: pointer;
+    transition: background 0.2s ease, border-color 0.2s ease;
+}
+#model-list .mget:hover { background: rgba(216, 185, 120, 0.22); border-color: rgba(216, 185, 120, 0.7); }
 #model-list .who { color: var(--pc, var(--ink)); font-weight: 600; }
 #model-list .tag { color: var(--ink-faint); font-size: 10px; margin-left: 6px; }
 #model-list select {

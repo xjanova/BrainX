@@ -76,12 +76,13 @@ const SHIP_MODE = (() => {
 const SHIP_FRAME = document.getElementById('ship');
 let SHIP_READY = false;
 /** Agent id -> the girl who plays it. claude-code and claude-chat are both
- *  Claude; the broker IS มาย (Mai). Anyone else has no girl yet. */
+ *  Claude; the broker IS มาย (Mai). Gemini's girl boards once she has drawn
+ *  herself (output/boss-rig/tools/intake_gemini.py). Anyone else has none. */
 function shipWho(id) {
     id = String(id || '').toLowerCase();
     if (id === 'owner') return 'boss';
     if (isMind(id) || id.startsWith('mind')) return 'mai';
-    for (const who of ['cluadex', 'claude', 'codex', 'grok']) if (id.startsWith(who)) return who;
+    for (const who of ['cluadex', 'claude', 'codex', 'grok', 'gemini']) if (id.startsWith(who)) return who;
     return null;
 }
 function shipPost(msg) {
@@ -101,7 +102,8 @@ function shipSync() {
         best[who] = a;
     }
     const crew = {};
-    for (const who of ['claude', 'codex', 'grok', 'cluadex']) {
+    // gemini is told too; the ship ignores her until her own art is aboard
+    for (const who of ['claude', 'codex', 'grok', 'cluadex', 'gemini']) {
         const a = best[who];
         const off = !a || a.state === 'offline';
         crew[who] = {
@@ -3626,9 +3628,19 @@ function renderModels() {
     const focusedSel = document.activeElement?.closest?.('#model-list select');
     const focused = focusedSel ? [focusedSel.dataset.agent, focusedSel.dataset.kind] : null;
 
+    // Owner (2026-10-17): an agent BrainX cannot reach (its program is not installed, or Gemini
+    // has no key) offers no model to pick. Its card says what is missing and links to where to get
+    // it; reachable agents come first. `ready` is absent on an app row (CluadeX): those keep theirs.
+    const rows = MODELS.slice().sort((a, b) => (a.ready === false) - (b.ready === false));
     list.innerHTML = !MODELS.length
         ? '<li class="mnote">ยังไม่มี agent ที่มายเรียกเข้ามาทำงานได้ — เพิ่ม runner ใน runners.json</li>'
-        : MODELS.map(row => {
+        : rows.map((row, i) => {
+            if (row.ready === false)
+                return `<li class="mlocked" style="--i:${i}"><div><span class="who" style="--pc:${agentColor(row.agent)}">${esc(label(row.agent))}</span>`
+                    + `<span class="tag">${row.installed ? 'ยังเชื่อมต่อไม่ได้' : 'ยังไม่ได้ติดตั้ง'} — เลือกโมเดลไม่ได้</span></div>`
+                    + `<p class="mfix">${esc(row.fix || '')}</p>`
+                    + (row.fixUrl ? `<button type="button" class="mget" data-url="${esc(row.fixUrl)}">${row.installed ? 'ไปขอคีย์' : 'ไปดาวน์โหลด'} ↗</button>` : '')
+                    + `</li>`;
             const pending = MODEL_PENDING.get(`model:${row.agent}`);
             const value = pending ? pending.value : (row.chosen || '');
             const opts = Array.isArray(row.options) ? row.options : [];
@@ -3676,7 +3688,7 @@ function renderModels() {
             const state = pending || epending ? ' · กำลังบันทึก…'
                 : MODEL_SAVED.has(`model:${row.agent}`) || MODEL_SAVED.has(`effort:${row.agent}`)
                     ? ' · <span class="msave">✓ บันทึกแล้ว</span>' : '';
-            return `<li><div><span class="who" style="--pc:${agentColor(row.agent)}">${esc(label(row.agent))}</span>`
+            return `<li style="--i:${i}"><div><span class="who" style="--pc:${agentColor(row.agent)}">${esc(label(row.agent))}</span>`
                 + `<span class="tag">${row.app ? `แอป ${esc(row.app)} ที่เปิดอยู่ — เลือกแล้วสลับทันที` : row.onCall ? 'ถูกเรียกเมื่อห้องว่าง' : ''}${state}</span></div>`
                 + `<label class="mfield"><span>โมเดล</span><select data-agent="${esc(row.agent)}" data-kind="model" aria-label="โมเดลของ ${esc(row.agent)}"`
                 + `${row.canChoose && opts.length ? '' : ' disabled'}>${options}</select></label>`
@@ -3689,6 +3701,11 @@ function renderModels() {
     if (focused) list.querySelector(`select[data-agent="${CSS.escape(focused[0])}"][data-kind="${CSS.escape(focused[1] || 'model')}"]`)?.focus();
 }
 
+// Where to get an agent that is not installed: the host opens it, and only addresses it sent.
+document.getElementById('model-list')?.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-url]');
+    if (b) post({ type: 'officeOpenUrl', url: b.dataset.url });
+});
 document.getElementById('model-list')?.addEventListener('change', (e) => {
     const sel = e.target.closest('select[data-agent]');
     if (!sel) return;

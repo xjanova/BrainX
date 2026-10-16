@@ -45,6 +45,11 @@ internal static partial class Program
 
     private static JObject MediaGenerate(JObject args)
     {
+        // engine:'gemini' — Gemini's image model with the owner's Google key (Program.GeminiMedia).
+        var engine = (args["engine"]?.ToString() ?? "grok").Trim().ToLowerInvariant();
+        if (engine == "gemini") return MediaGenerateGemini(args);
+        if (engine != "grok") return MediaError("engine must be 'grok' or 'gemini'");
+        if (args["references"] is JArray { Count: > 0 }) return MediaError("references are for engine 'gemini'");
         var kind = (args["kind"]?.ToString() ?? "image").Trim().ToLowerInvariant();
         if (kind is not ("image" or "video")) return MediaError("kind must be 'image' or 'video'");
         var prompt = (args["prompt"]?.ToString() ?? "").Trim();
@@ -138,6 +143,19 @@ internal static partial class Program
         var job = JObject.Parse(File.ReadAllText(path));
         var started = JobUtc(job["startedUtc"]) ?? DateTime.UtcNow;
         var status = job["status"]?.ToString() ?? "running";
+        // A Gemini job finishes inside media_generate; one still "running" means that process died mid-call.
+        if (job["engine"]?.ToString() == "gemini" && status == "running")
+        {
+            if (DateTime.UtcNow - started > TimeSpan.FromMinutes(5))
+            {
+                status = "failed";
+                job["status"] = status;
+                job["error"] = "the process making this image ended before Gemini answered — ask again";
+                job["finishedUtc"] = DateTime.UtcNow.ToString("o");
+                File.WriteAllText(path, job.ToString(), new UTF8Encoding(false));
+            }
+            return new JObject { ["job"] = id, ["status"] = status, ["engine"] = "gemini", ["files"] = job["files"] ?? new JArray(), ["dir"] = dir, ["error"] = job["error"] };
+        }
 
         // Grok's headless run answers DONE (or the refusal) and then lingers for
         // minutes before it exits — measured 2026-10-06: video written at 0:44,

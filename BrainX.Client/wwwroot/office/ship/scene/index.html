@@ -98,6 +98,9 @@ const ALL_MODULES = [
   { id: 'boss', img: 'modules/boss.webp', name: 'ห้องบอส', objects: ['chair'] },
   { id: 'lounge', img: 'modules/lounge.webp', name: 'ห้องนั่งเล่นรวม', objects: [] },
   { id: 'mai', img: 'modules/mai.webp', name: 'ห้องมาย', objects: ['chair'] },
+  // Gemini draws her own room and herself (D:\Cowork\gemini-ship\BRIEF.md); until her files
+  // are in, the missing picture drops the room and the missing rig drops her.
+  { id: 'gemini', img: 'modules/gemini.webp', name: 'ห้อง Gemini', objects: ['chair'] },
   { id: 'bridge', img: 'modules/bridge.webp', name: 'ห้องกัปตัน · หัวยาน', objects: [], bayMin: 0.56 },
 ];
 // an image, tried again a couple of times (a local server under a burst can refuse a connection)
@@ -109,7 +112,7 @@ const pic = (src, tries = 3) => new Promise((ok) => {
 const allImgs = await Promise.all(ALL_MODULES.map((m) => pic(m.img)));
 const MODULES = ALL_MODULES.filter((m, i) => allImgs[i]);
 const modImgs = allImgs.filter(Boolean);
-const windowRooms = new Set(['codex', 'grok', 'cluadex', 'claude', 'boss', 'lounge', 'mai', 'bridge']);
+const windowRooms = new Set(['codex', 'grok', 'cluadex', 'claude', 'boss', 'lounge', 'mai', 'gemini', 'bridge']);
 const windowPlates = await Promise.all(MODULES.map(async (m, i) => {
   if (!windowRooms.has(m.id)) return null;
   const extracted = await pic(`windows/${m.id}.webp`, 1);
@@ -171,9 +174,11 @@ const CREW = [
   { who: 'grok', name: 'Grok', base: '../crew/grok/', rigHeight: 1516 },
   { who: 'cluadex', name: 'CluadeX', base: '../crew/cluadex/', rigHeight: 1516 },
   { who: 'mai', name: 'มาย', base: '../crew/mai/', rigHeight: 1516 },
+  { who: 'gemini', name: 'Gemini', base: '../crew/gemini/', rigHeight: 1516 },
 ];
 await Promise.all(CREW.map(async c => {
   c.rig = await BossRig.load(c.base, ASSET_V, c.who).catch(() => null);
+  if (!c.rig) return;   // a girl whose parts are not drawn yet stays off the ship
   c.meshes=await fetch(c.who==='cluadex'?'./cluadex-study/joint-meshes.json?v='+ASSET_V:`./cluadex-study/crew/${c.who}.json?v=${ASSET_V}`).then(r=>{if(!r.ok)throw Error('Missing crew mesh');return r.json()});
   if(c.rig)tuneCrew(c.rig,c.meshes);
   const poses = await Promise.all(['desk', 'sleep', 'relax'].map((pose) => PosePuppet.load(c.who, pose, ASSET_V)));

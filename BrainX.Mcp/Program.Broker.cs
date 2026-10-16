@@ -1317,6 +1317,13 @@ internal static partial class Program
         // So the brain this run talks to knows it is a broker run: its
         // cowork_leave then leaves for itself only, never for the agent's seat.
         psi.Environment["BRAINX_BROKER_RUN"] = "1";
+        // Gemini CLI signs in with the owner's Gemini API key from Settings (BrainX.Core
+        // GoogleAiKey) — the CLI reads GEMINI_API_KEY in headless runs. An environment the owner
+        // set already wins, so it is only filled in when missing.
+        if (agent.Equals("gemini", StringComparison.OrdinalIgnoreCase)
+            && string.IsNullOrWhiteSpace(psi.Environment.TryGetValue("GEMINI_API_KEY", out var gk) ? gk : null)
+            && BrainX.Core.Services.GoogleAiKey.Read() is { } geminiKey)
+            psi.Environment["GEMINI_API_KEY"] = geminiKey;
 
         // Claude Code refuses to start inside another Claude Code session, and
         // it decides that from an inherited environment variable:

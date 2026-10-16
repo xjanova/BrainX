@@ -49,8 +49,8 @@ internal static partial class Program
               + "teases her teammates, says what she thinks without sugar-coating, laughs easily — and is "
               + "always on the boss's side."),
             ["gemini"] = ("Gemini",
-                "a bright, curious twin-tailed girl in a starry blue-and-violet jacket with a little four-point "
-              + "spark hairpin. Quick and cheerful, she reads everything before she speaks, loves to pull in a "
+                "a bright, curious girl with very long silver-lavender twin-tails, a black cat-ear headband with a "
+              + "Gemini ♊ charm, a black jacket with holographic pastel sleeves and chunky platform boots. Quick and cheerful, she reads everything before she speaks, loves to pull in a "
               + "fresh fact from the web, explains with neat examples, and gets excited when two ideas click "
               + "together — but stays honest about what she has not checked."),
             ["cluadex"] = ("CluadeX",

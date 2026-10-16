@@ -219,6 +219,9 @@ public partial class MainWindow
             // tool call left it at a desk for a fortnight — read as a test stuck
             // in the room (owner, 2026-10-12: "ตอนนี้ก็ค้างอีกแล้ว local -agent").
             if (!online && BusMoonHosts.ContainsKey(id)) continue;
+            // An agent whose program BrainX cannot start (not installed, or Gemini without a key)
+            // gets no desk while it is offline — nobody could call it to one (AgentInstall).
+            if (!online && BusReach().TryGetValue(id, out var reach) && !reach.Ready) continue;
 
             // Per session when the sessions publish themselves: every window of
             // one agent overwrites this file with its own counter, so with two
@@ -624,6 +627,12 @@ public partial class MainWindow
                     if (verb is "uninstall" or "stop") RunBrokerServiceVerb(verb);
                     break;
                 case "officeOpen": CoworkOpen(m["path"]?.ToString()); break;
+                // Where to get an agent that is not installed. Only the addresses BrainX itself put
+                // on the page (AgentInstall.KnownUrls) — a page must not open whatever it names.
+                case "officeOpenUrl":
+                    if (m["url"]?.ToString() is { } url && BrainX.Core.Services.AgentInstall.KnownUrls.Contains(url))
+                        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true }); } catch { }
+                    break;
                 case "officeModel": CoworkSetModel(m["agent"]?.ToString(), m["model"]?.ToString()); break;
                 case "officeEffort": CoworkSetEffort(m["agent"]?.ToString(), m["effort"]?.ToString()); break;
                 // The work window: pause / resume / drop / focus one piece of
@@ -758,7 +767,9 @@ public partial class MainWindow
                     // A moon is mentionable only while it has a desk (CoworkAgents).
                     if (age.TotalDays <= 14
                         && BusWellKnownAgents.Contains(id, StringComparer.OrdinalIgnoreCase)
-                        && (age.TotalSeconds <= 90 || !BusMoonHosts.ContainsKey(id)))
+                        && (age.TotalSeconds <= 90 || !BusMoonHosts.ContainsKey(id))
+                        // …and nobody is addressed who cannot be reached (same rule as the desks)
+                        && (age.TotalSeconds <= 90 || !BusReach().TryGetValue(id, out var reach) || reach.Ready))
                         Add(id);
                 }
 
@@ -1217,18 +1228,25 @@ public partial class MainWindow
                                        && BrainX.Core.Services.RunnerModels.IsValidEffort(r["effort"]!.ToString().Trim())
                     ? r["effort"]!.ToString().Trim() : "";
                 var (runModel, runEffort) = CoworkRunModel(agent);
+                // Owner (2026-10-17): an agent BrainX cannot reach offers no model to pick — it says
+                // what is missing and where to get it instead (BrainX.Core AgentInstall).
+                var reach = BrainX.Core.Services.AgentInstall.Probe(agent, r);
 
                 arr.Add(new JObject
                 {
                     ["agent"] = agent,
-                    ["canChoose"] = BrainX.Core.Services.RunnerModels.CanChoose(args, flag),
+                    ["installed"] = reach.Installed,
+                    ["ready"] = reach.Ready,
+                    ["fix"] = reach.Fix,
+                    ["fixUrl"] = reach.Url,
+                    ["canChoose"] = reach.Ready && BrainX.Core.Services.RunnerModels.CanChoose(args, flag),
                     ["chosen"] = chosen,
                     ["configured"] = configured,
                     ["cliDefault"] = cliDefault ?? "",
                     ["onCall"] = r["onCall"]?.Type == JTokenType.Boolean && r["onCall"]!.ToObject<bool>(),
                     ["running"] = runModel ?? "",
                     ["options"] = Options(options),
-                    ["effortCanChoose"] = BrainX.Core.Services.RunnerModels.CanChooseEffort(args, effortArgs),
+                    ["effortCanChoose"] = reach.Ready && BrainX.Core.Services.RunnerModels.CanChooseEffort(args, effortArgs),
                     ["effortChosen"] = effortPicks.TryGetValue(agent, out var effortPick) ? effortPick : "",
                     ["effortConfigured"] = effortConfigured,
                     ["effortCliDefault"] = effortDefault ?? "",

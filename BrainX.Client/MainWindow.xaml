@@ -1510,6 +1510,16 @@
                                                         Background="Transparent"/>
                                                 <Canvas x:Name="DashAgentBusFxCanvas" ClipToBounds="True"
                                                         Background="Transparent" IsHitTestVisible="False"/>
+                                                <!-- Agents BrainX cannot reach are not drawn; this says which, and how
+                                                     to connect them (BrainX.Core AgentInstall). -->
+                                                <Border x:Name="DashBusMissing" Visibility="Collapsed"
+                                                        HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                                                        Margin="0,0,0,2" Padding="8,3" CornerRadius="9"
+                                                        Background="#1AE0938C" BorderBrush="#40E0938C" BorderThickness="1"
+                                                        Cursor="Hand" MouseLeftButtonUp="DashBusMissing_Click">
+                                                    <TextBlock x:Name="DashBusMissingText" FontSize="10.5"
+                                                               Foreground="#E8C9A0" TextTrimming="CharacterEllipsis"/>
+                                                </Border>
                                             </Grid>
                                             <TextBlock Grid.Row="2" x:Name="DashBusTrafficText"
                                                        Text="ยังไม่มีข้อความวันนี้ — agent คุยกันผ่าน agent_send / agent_inbox"
@@ -6532,6 +6542,46 @@
                                                 </StackPanel>
                                                 <TextBlock x:Name="AiKeysStatus" FontSize="11" Margin="0,8,0,0"
                                                            Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap"/>
+                                            </StackPanel>
+                                        </Border>
+
+                                        <!-- Google Gemini API key (BrainX.Core GoogleAiKey): the Gemini CLI in the
+                                             cowork room and media_generate's Gemini engine. DPAPI, not the vault. -->
+                                        <Border x:Name="SettingsAnchorGemini"
+                                                Style="{StaticResource NeuralCard}"
+                                                Padding="22" Margin="0,0,0,14">
+                                            <StackPanel>
+                                                <StackPanel Margin="0,0,0,14">
+                                                    <TextBlock Text="Google Gemini" FontSize="16" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText}"/>
+                                                    <TextBlock FontSize="12.5" FontWeight="Medium" TextWrapping="Wrap"
+                                                               Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0">
+                                                        คีย์ Gemini API จาก Google AI Studio — ให้ Gemini เข้าห้อง cowork และวาดรูปได้ ·
+                                                        เก็บแบบเข้ารหัสในเครื่องนี้ (ไม่อยู่ใน vault) ·
+                                                        <Hyperlink Click="GeminiGetKey_Click" Foreground="{StaticResource NeonCyanBrush}">ขอคีย์ที่ aistudio.google.com</Hyperlink>
+                                                    </TextBlock>
+                                                </StackPanel>
+                                                <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                                                    <PasswordBox x:Name="GeminiKeyBox" Width="360" Padding="8,4" FontSize="11"
+                                                                 Background="{StaticResource DarkPanelBrush}"
+                                                                 Foreground="{StaticResource TextPrimaryBrush}"
+                                                                 BorderBrush="{StaticResource SurfaceLightBrush}"
+                                                                 CaretBrush="{StaticResource NeonCyanBrush}"
+                                                                 FontFamily="{StaticResource MonoFont}" Margin="0,0,6,0"/>
+                                                    <TextBlock x:Name="GeminiKeyStatus" FontSize="10" VerticalAlignment="Center"
+                                                               FontFamily="{StaticResource MonoFont}"
+                                                               Foreground="{StaticResource TextMutedBrush}" Text="(not set)"/>
+                                                </StackPanel>
+                                                <StackPanel Orientation="Horizontal">
+                                                    <Button x:Name="GeminiSaveBtn" Content="บันทึกและทดสอบ" Style="{StaticResource NeuralBtnPrimary}"
+                                                            Click="GeminiSaveKey_Click" Padding="14,6" Margin="0,0,6,0"/>
+                                                    <Button x:Name="GeminiTestBtn" Content="ทดสอบคีย์ที่บันทึกไว้" Style="{StaticResource NeuralBtnGhost}"
+                                                            Click="GeminiTestKey_Click" Padding="14,6" Margin="0,0,6,0"/>
+                                                    <Button x:Name="GeminiClearBtn" Content="ลบคีย์" Style="{StaticResource NeuralBtnGhost}"
+                                                            Click="GeminiClearKey_Click" Padding="14,6"/>
+                                                </StackPanel>
+                                                <TextBlock x:Name="GeminiKeyNote" FontSize="11" Margin="0,8,0,0" TextWrapping="Wrap"
+                                                           Foreground="{StaticResource TextSecondaryBrush}"/>
                                             </StackPanel>
                                         </Border>
 
