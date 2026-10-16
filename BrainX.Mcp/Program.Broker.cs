@@ -1234,6 +1234,10 @@ internal static partial class Program
     private static readonly string[] StartupSigns =
     {
         "not logged in", "please log in", "authentication", "unauthorized",
+        // Gemini CLI with no login and no key: "Please set an Auth method in
+        // your ~/.gemini/settings.json or specify one of the following
+        // environment variables before running: GEMINI_API_KEY, ...".
+        "set an auth method",
         "is not recognized", "command not found", "no such file",
     };
 
@@ -2835,7 +2839,11 @@ internal static partial class Program
                 {
                     Exe = r["exe"]?.ToString() ?? "",
                     ExeFallbacks = Strings(r["exeFallbacks"]),
-                    Args = Strings(r["args"]),
+                    // %VARS% expanded like exe and cwd, so a runner can name a
+                    // script under %APPDATA% (Gemini's gemini.js). Done here, on
+                    // the owner's config only: {prompt} is substituted later
+                    // and is never expanded.
+                    Args = Strings(r["args"]).Select(Environment.ExpandEnvironmentVariables).ToList(),
                     Cwd = Environment.ExpandEnvironmentVariables(r["cwd"]?.ToString() ?? ""),
                     OnCall = Bool(r["onCall"], false),
                     Model = r["model"]?.Type == JTokenType.String ? r["model"]!.ToString().Trim() : "",
@@ -2948,6 +2956,13 @@ internal static partial class Program
       "exe": "claude",
       "exeFallbacks": [],
       "args": ["-p", "{prompt}", "--allowedTools", "mcp__brainx-brain"],
+      "cwd": "D:\\BrainX"
+    },
+    "gemini": {
+      "//": "Gemini CLI (npm @google/gemini-cli), signed in once by running `gemini` in a terminal. Started as node + gemini.js, never through npm's gemini.cmd: a .cmd runs under cmd.exe, which re-parses the prompt. --approval-mode yolo is REQUIRED for the same reason as codex's flag: headless, nobody can approve a brain tool call. --skip-trust because an untrusted folder runs without its MCP servers. brainx-brain is in ~/.gemini/settings.json (brainx-mcp register-gemini). Gemini CLI has no effort flag.",
+      "exe": "node",
+      "exeFallbacks": ["%ProgramFiles%\\nodejs\\node.exe"],
+      "args": ["%APPDATA%\\npm\\node_modules\\@google\\gemini-cli\\bundle\\gemini.js", "-p", "{prompt}", "--approval-mode", "yolo", "--skip-trust", "--output-format", "text"],
       "cwd": "D:\\BrainX"
     }
   }

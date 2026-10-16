@@ -1071,6 +1071,17 @@ internal static partial class Program
             var seat = await impostor.Call("cowork_join", new JObject());
             Check("a handshake claiming 'owner' is demoted to an ordinary name",
                   seat["joined"]?.ToString() == "owner-agent", seat.ToString());
+
+            // What Gemini CLI 0.55.1 calls itself. It runs as node.exe, so the
+            // name is the only thing that can make it "gemini" on the bus.
+            var gemini = await StartBusSession(exe, vault, key, "gemini-cli-mcp-client");
+            try
+            {
+                var gseat = await gemini.Call("cowork_join", new JObject());
+                Check("Gemini CLI's handshake joins the room as gemini",
+                      gseat["joined"]?.ToString() == "gemini", gseat.ToString());
+            }
+            finally { await gemini.DisposeAsync(); }
         }
         finally
         {

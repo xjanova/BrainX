@@ -107,6 +107,15 @@ internal static partial class Program
                     "code review and a second opinion on design",
                 },
                 Array.Empty<string>()),
+
+            ["gemini"] = (
+                new[]
+                {
+                    "reading a whole repo or a very long document in one go (1M-token context)",
+                    "fresh facts from the web — Google Search grounding",
+                    "reading images, PDFs and screenshots",
+                },
+                new[] { "generate images, video or audio — hand that to codex" }),
         };
 
     /// <summary>What this agent can and cannot do, as the room should see it.

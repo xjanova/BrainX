@@ -542,6 +542,10 @@ internal static partial class Program
         // connection, so the room, the broker's runner and every peer know it
         // by the one name the client already lists: "grok".
         else if (name != null && name.Contains("grok", StringComparison.OrdinalIgnoreCase)) bas = "grok-mcp";
+        // Gemini CLI connects as "gemini-cli-mcp-client" (0.55.1). It runs as
+        // node.exe, so the ancestor walk below can never see it: the name is
+        // the only signal there is, and it makes every Gemini session "gemini".
+        else if (name != null && name.Contains("gemini", StringComparison.OrdinalIgnoreCase)) bas = "gemini-mcp";
         else if (CarriesNoVendorSignal(name) && HostVendor() is { } vendor) bas = vendor + "-mcp";
         else if (string.IsNullOrWhiteSpace(name)) bas = "mcp";
         else
@@ -621,6 +625,7 @@ internal static partial class Program
             // Grok run started from a Claude terminal walked on up and was
             // filed as claude.
             if (ancestor.Contains("grok", StringComparison.OrdinalIgnoreCase)) return "grok";
+            if (ancestor.Contains("gemini", StringComparison.OrdinalIgnoreCase)) return "gemini";
             if (ancestor.Contains("codex", StringComparison.OrdinalIgnoreCase)) return "codex";
             if (ancestor.Contains("claude", StringComparison.OrdinalIgnoreCase)) return "claude";
         }

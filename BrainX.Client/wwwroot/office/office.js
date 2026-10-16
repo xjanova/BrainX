@@ -108,9 +108,11 @@ const DESK_ROWS = [
     { x: 0.335, y: 0.490, face: 'se', count: 2 },
     // Along its top-right edge, under the glass room toward the bookshelf.
     { x: 0.550, y: 0.460, face: 'sw', count: 2 },
-    // No fifth desk. Owner (2026-10-06), when Grok came in: "เอาให้ grok
-    // ดีกว่าไหม จะได้ไม่เยอะเกิน" — the seat a leftover test identity was
-    // holding went to Grok instead, and the room stays at four.
+    // The fifth desk, behind the left row by the cabinets — the spot searched
+    // against the mask when Grok came in (ca0dfa8), then taken out while only
+    // four agents worked here. Gemini is the fifth (2026-10-16): "ให้ห้อง
+    // cowork room และ brainx เชื่อมต่อกับ mcp gemini สมบูรณ์ เหมือนโมเดลเจ้าอื่น".
+    { x: 0.330, y: 0.400, face: 'se', count: 1 },
 ];
 /** Desk to desk along a row, in logical pixels: a desk's length and a gap. */
 const DESK_STEP = 34;

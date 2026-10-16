@@ -169,7 +169,21 @@ internal static partial class Program
                 ArgLine(mine.Select(m => m.Id)) == "gemini-pro gemini-flash" && mine[1].Label == "Flash",
                 ArgLine(mine.Select(m => m.Id)));
             Check("an unknown CLI with no list offers nothing",
-                RunnerModels.Supported("gemini", "gemini", null, out _).Count == 0);
+                RunnerModels.Supported("aider", "aider", null, out _).Count == 0);
+
+            // Gemini's runner is node + gemini.js, so the agent name is what
+            // makes it Gemini; its models come from the CLI's own constants.
+            var gemini = RunnerModels.Supported("gemini", "node", null, out _);
+            Check("gemini (run as node): its models are offered, auto first",
+                gemini.Count > 0 && gemini[0].Id == "auto" && gemini.Any(m => m.Id == "gemini-3.1-pro-preview")
+                && gemini.All(m => RunnerModels.IsValidId(m.Id)), ArgLine(gemini.Select(m => m.Id)));
+            Check("gemini: no effort levels, since the CLI has no effort flag",
+                RunnerModels.SupportedEfforts("gemini", "node", "gemini-2.5-pro", null, out var gemDefault).Count == 0
+                && gemDefault == null && RunnerModels.DefaultEffortArgs("gemini", "node").Count == 0);
+            var line = ArgLine(RunnerModels.ApplyToArgs(
+                new[] { @"C:\npm\gemini.js", "-p", "{prompt}", "--approval-mode", "yolo" }, "gemini-3.5-flash", RunnerModels.DefaultFlag));
+            Check("gemini: --model goes after the script and before -p",
+                line == @"C:\npm\gemini.js --model gemini-3.5-flash -p {prompt} --approval-mode yolo", line);
 
             RunnerModels.WriteEffortChoice(bus, "claude", "high");
             Check("an effort pick reads back, beside the model pick",

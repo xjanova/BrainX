@@ -327,6 +327,7 @@ public static class RunnerModels
         {
             "codex" => CodexDefault(),
             "claude" => ClaudeDefault(),
+            "gemini" => GeminiDefault(),
             _ => null,
         };
 
@@ -338,6 +339,7 @@ public static class RunnerModels
             "codex" => CodexCatalogue(),
             "claude" => ClaudeModels,
             "grok" => GrokModels,
+            "gemini" => GeminiModels,
             _ => Array.Empty<Option>(),
         };
     }
@@ -360,14 +362,53 @@ public static class RunnerModels
     /// on 2026-10-06: these four ran, "max" was refused by name.</summary>
     private static readonly string[] GrokLevels = { "low", "medium", "high", "xhigh" };
 
+    /// <summary>
+    /// The models Gemini CLI 0.55.1 knows by name (its bundle's
+    /// DEFAULT_/PREVIEW_GEMINI_*_MODEL constants, read 2026-10-16), most
+    /// capable first. "auto" is the CLI's own router and its default. Kept
+    /// here for the same reason as Grok's: the CLI keeps no catalogue on disk.
+    /// Gemini CLI takes no effort flag, so it offers no effort levels.
+    /// </summary>
+    public static readonly IReadOnlyList<Option> GeminiModels = new[]
+    {
+        new Option("auto", "Auto", "ให้ Gemini CLI เลือกรุ่นเอง — ค่าเริ่มต้นของ CLI"),
+        new Option("gemini-3.1-pro-preview", "Gemini 3.1 Pro (preview)", "รุ่นใหญ่ล่าสุด — งานยาก อ่าน context ยาว"),
+        new Option("gemini-3-pro-preview", "Gemini 3 Pro (preview)", "รุ่นใหญ่ก่อนหน้า"),
+        new Option("gemini-3.5-flash", "Gemini 3.5 Flash", "เร็ว ประหยัด — งานประจำวัน"),
+        new Option("gemini-3-flash-preview", "Gemini 3 Flash (preview)", "เร็ว — รุ่นก่อนหน้า"),
+        new Option("gemini-2.5-pro", "Gemini 2.5 Pro", "รุ่นเสถียร"),
+        new Option("gemini-2.5-flash", "Gemini 2.5 Flash", "รุ่นเสถียร เร็ว"),
+        new Option("gemini-3.1-flash-lite", "Gemini 3.1 Flash Lite", "เบาที่สุด — งานง่าย"),
+    };
+
+    private static string GeminiHome() =>
+        Environment.GetEnvironmentVariable("GEMINI_CLI_HOME") is { Length: > 0 } h
+            ? Path.Combine(h, ".gemini")
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gemini");
+
+    /// <summary><c>model.name</c> in ~/.gemini/settings.json: what a Gemini run
+    /// not told otherwise starts on (absent: the CLI's own "auto").</summary>
+    private static string? GeminiDefault()
+    {
+        var path = Path.Combine(GeminiHome(), "settings.json");
+        return Cached<string>(path, () =>
+        {
+            var name = JToken.Parse(File.ReadAllText(path))["model"]?["name"]?.ToString();
+            return IsValidId(name) ? name : null;
+        }, "model");
+    }
+
     private static string Vendor(string agent, string exe)
     {
         var name = Path.GetFileNameWithoutExtension(exe ?? "").ToLowerInvariant();
-        if (name is "codex" or "claude" or "grok") return name;
+        if (name is "codex" or "claude" or "grok" or "gemini") return name;
+        // Gemini's runner is `node ...\gemini.js` (its npm shim is a .cmd, and a
+        // prompt must never pass through cmd.exe), so for it the agent decides.
         var a = (agent ?? "").ToLowerInvariant();
         return a.StartsWith("codex", StringComparison.Ordinal) ? "codex"
              : a.StartsWith("claude", StringComparison.Ordinal) ? "claude"
              : a.StartsWith("grok", StringComparison.Ordinal) ? "grok"
+             : a.StartsWith("gemini", StringComparison.Ordinal) ? "gemini"
              : "";
     }
 
