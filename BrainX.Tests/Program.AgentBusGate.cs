@@ -1837,6 +1837,10 @@ internal static partial class Program
               McpRemotePolicy.ArgumentRefusal("agent_send", JObject.Parse("""{"to":"codex","message":"x"}""")) == null);
         Check("an empty attachments list is fine",
               McpRemotePolicy.ArgumentRefusal("agent_send", JObject.Parse("""{"to":"codex","message":"x","attachments":[]}""")) == null);
+        Check("cowork_say with a local path is refused remotely too",
+              McpRemotePolicy.ArgumentRefusal("cowork_say", JObject.Parse("""{"message":"x","attachments":["D:/Cowork/a.png"]}""")) != null);
+        Check("…and a plain cowork_say line is fine",
+              McpRemotePolicy.ArgumentRefusal("cowork_say", JObject.Parse("""{"message":"x"}""")) == null);
         Check("other tools are not affected",
               McpRemotePolicy.ArgumentRefusal("brain_search", JObject.Parse("""{"query":"x","attachments":["y"]}""")) == null);
         return Task.CompletedTask;

@@ -107,6 +107,11 @@ public static class McpRemotePolicy
         "agent_peers",
         "agent_inbox",
         "agent_activity",
+        // The cowork room, read side. Owner (2026-10-16): Gemini desktop has to
+        // take work and talk in the room "like ChatGPT" — and it reaches this
+        // brain over HTTP only. Reading the room is the same disclosure as
+        // agent_activity: what the owner's agents said to each other.
+        "cowork_read",
     };
 
     /// <summary>Mutating tools — require the write token.</summary>
@@ -131,6 +136,12 @@ public static class McpRemotePolicy
         // the reader to treat mail as a peer SUGGESTION and never to run
         // destructive actions on a peer's say-so.
         "agent_send",
+        // The cowork room, write side: the board (add / claim / update a card)
+        // and a line in the room. Both write under the bus root by paths the
+        // MCP derives; cowork_say's attachments are refused below, for the
+        // same reason agent_send's are.
+        "cowork_task",
+        "cowork_say",
     };
 
     public static bool IsHardBlocked(string tool) => HardBlocked.Contains(tool);
@@ -151,7 +162,8 @@ public static class McpRemotePolicy
     public static string? ArgumentRefusal(string tool, JToken? arguments)
     {
         if (arguments is not JObject args) return null;
-        if (tool.Equals("agent_send", StringComparison.OrdinalIgnoreCase)
+        if ((tool.Equals("agent_send", StringComparison.OrdinalIgnoreCase)
+             || tool.Equals("cowork_say", StringComparison.OrdinalIgnoreCase))
             && args["attachments"] is JToken a && a.Type != JTokenType.Null
             && !(a is JArray arr && arr.Count == 0)
             && !(a.Type == JTokenType.String && string.IsNullOrWhiteSpace(a.ToString())))
