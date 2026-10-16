@@ -392,36 +392,8 @@
                                         </RadialGradientBrush>
                                     </Border.Background>
                                     <Grid>
-                                        <!-- Layer 1: Outer RGB fire ring — ROTATING. -->
-                                        <Ellipse Width="160" Height="160" StrokeThickness="3.5"
-                                                 RenderTransformOrigin="0.5,0.5">
-                                            <Ellipse.Stroke>
-                                                <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-                                                    <GradientStop Color="#FF2D3E" Offset="0"/>
-                                                    <GradientStop Color="#FF8A2D" Offset="0.18"/>
-                                                    <GradientStop Color="#FFD23C" Offset="0.33"/>
-                                                    <GradientStop Color="#4AE3A7" Offset="0.5"/>
-                                                    <GradientStop Color="#5BE9E9" Offset="0.66"/>
-                                                    <GradientStop Color="#9D7BFF" Offset="0.83"/>
-                                                    <GradientStop Color="#FF4F9E" Offset="1"/>
-                                                </LinearGradientBrush>
-                                            </Ellipse.Stroke>
-                                            <Ellipse.RenderTransform>
-                                                <RotateTransform x:Name="CrestRingOuter" Angle="0"/>
-                                            </Ellipse.RenderTransform>
-                                            <Ellipse.Triggers>
-                                                <EventTrigger RoutedEvent="Loaded">
-                                                    <BeginStoryboard>
-                                                        <Storyboard RepeatBehavior="Forever">
-                                                            <DoubleAnimation
-                                                                Storyboard.TargetName="CrestRingOuter"
-                                                                Storyboard.TargetProperty="Angle"
-                                                                From="0" To="360" Duration="0:0:8"/>
-                                                        </Storyboard>
-                                                    </BeginStoryboard>
-                                                </EventTrigger>
-                                            </Ellipse.Triggers>
-                                        </Ellipse>
+                                        <!-- The outer RGB fire ring is gone (owner, 2026-10-16:
+                                             "เอาวงกลมนอกออกไปเลย"); the inner ring stays. -->
                                         <!-- Layer 2: Inner ring — ROTATING THE OTHER WAY. -->
                                         <Ellipse Width="140" Height="140" StrokeThickness="1.4" Opacity="0.7"
                                                  RenderTransformOrigin="0.5,0.5">
