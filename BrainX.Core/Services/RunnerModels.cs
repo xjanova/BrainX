@@ -363,21 +363,28 @@ public static class RunnerModels
     private static readonly string[] GrokLevels = { "low", "medium", "high", "xhigh" };
 
     /// <summary>
-    /// The models Gemini CLI 0.55.1 knows by name (its bundle's
-    /// DEFAULT_/PREVIEW_GEMINI_*_MODEL constants, read 2026-10-16), most
-    /// capable first. "auto" is the CLI's own router and its default. Kept
-    /// here for the same reason as Grok's: the CLI keeps no catalogue on disk.
-    /// Gemini CLI takes no effort flag, so it offers no effort levels.
+    /// The models a Gemini CLI run can be started on, most capable first.
+    /// "auto" is the CLI's own router and its default. The rest are the
+    /// DEFAULT_/PREVIEW_/LATEST_GEMINI_*_MODEL constants of Gemini CLI 0.64.0
+    /// (read 2026-10-16), plus Gemini 4 Argon, which the CLI does not name yet
+    /// but the API serves as `gemini-4-argon` (GA 2026-10-13, owner: "ตอนนี้มีรุ่น
+    /// gemini 4 argon แล้วนะ"). The CLI checks no model name, it passes -m to
+    /// the API, so a newer id works before the CLI learns it. Kept here for the
+    /// same reason as Grok's: the CLI keeps no catalogue on disk. Gemini CLI
+    /// takes no effort flag, so it offers no effort levels.
     /// </summary>
     public static readonly IReadOnlyList<Option> GeminiModels = new[]
     {
         new Option("auto", "Auto", "ให้ Gemini CLI เลือกรุ่นเอง — ค่าเริ่มต้นของ CLI"),
-        new Option("gemini-3.1-pro-preview", "Gemini 3.1 Pro (preview)", "รุ่นใหญ่ล่าสุด — งานยาก อ่าน context ยาว"),
-        new Option("gemini-3-pro-preview", "Gemini 3 Pro (preview)", "รุ่นใหญ่ก่อนหน้า"),
+        new Option("gemini-4-argon", "Gemini 4 Argon", "รุ่นใหม่ล่าสุด — งานยากที่สุด"),
+        new Option("gemini-3.1-pro-preview", "Gemini 3.1 Pro (preview)", "รุ่นใหญ่ก่อนหน้า — อ่าน context ยาว"),
+        new Option("gemini-3-pro-preview", "Gemini 3 Pro (preview)", "รุ่นใหญ่รุ่นเก่า"),
+        new Option("gemini-3.8-flash", "Gemini 3.8 Flash", "เร็ว — Flash รุ่นล่าสุด"),
         new Option("gemini-3.5-flash", "Gemini 3.5 Flash", "เร็ว ประหยัด — งานประจำวัน"),
         new Option("gemini-3-flash-preview", "Gemini 3 Flash (preview)", "เร็ว — รุ่นก่อนหน้า"),
         new Option("gemini-2.5-pro", "Gemini 2.5 Pro", "รุ่นเสถียร"),
         new Option("gemini-2.5-flash", "Gemini 2.5 Flash", "รุ่นเสถียร เร็ว"),
+        new Option("gemini-3.5-flash-lite", "Gemini 3.5 Flash Lite", "เบา — งานง่าย"),
         new Option("gemini-3.1-flash-lite", "Gemini 3.1 Flash Lite", "เบาที่สุด — งานง่าย"),
     };
 
