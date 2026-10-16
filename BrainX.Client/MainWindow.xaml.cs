@@ -257,6 +257,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        ShowLoadingGirl();
         // The owner's seal key exists from the first launch of a client that
         // seals, so the MCP starts refusing unsealed "owner" lines right away
         // instead of after the owner's first message (see BusSeal).

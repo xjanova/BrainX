@@ -451,24 +451,43 @@
                                                 </EventTrigger>
                                             </Ellipse.Triggers>
                                         </Ellipse>
-                                        <!-- Layer 3: Brain — ZOOMED IN (90 → 130 px). -->
-                                        <Image Source="pack://application:,,,/Assets/Logo.png"
-                                               Stretch="Uniform" Width="130" Height="130"
-                                               Opacity="0.92"
+                                        <!-- Layer 3: the BrainX sign — the neon brain over the
+                                             wordmark, lifted from the owner's BrainX poster
+                                             (2026-10-16: "เปลี่ยนเป็นโลโก้สมองพร้อมตัวหนังสือเรา
+                                             และมาสคอต"). Laid out to sit inside the rings. -->
+                                        <Image Source="pack://application:,,,/Assets/CrestSign.png"
+                                               Stretch="Uniform" Width="138" Height="138"
                                                HorizontalAlignment="Center" VerticalAlignment="Center"
-                                               RenderOptions.BitmapScalingMode="HighQuality">
-                                            <Image.OpacityMask>
-                                                <RadialGradientBrush Center="0.5,0.5" RadiusX="0.6" RadiusY="0.6">
-                                                    <GradientStop Color="#FFFFFFFF" Offset="0"/>
-                                                    <GradientStop Color="#FFFFFFFF" Offset="0.75"/>
-                                                    <GradientStop Color="#00FFFFFF" Offset="1"/>
-                                                </RadialGradientBrush>
-                                            </Image.OpacityMask>
-                                        </Image>
+                                               RenderOptions.BitmapScalingMode="HighQuality"/>
                                         <!-- Dummy 0-size PulseRing for animation compat. -->
                                         <Ellipse x:Name="PulseRing" Width="0" Height="0" Opacity="0"/>
                                     </Grid>
                                 </Border>
+                                <!-- The mascot, outside the clipped disc so it can lean
+                                     over the rim, bobbing a little. -->
+                                <Image Source="pack://application:,,,/Assets/CrestMascot.png"
+                                       Width="58" HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                                       Margin="0,0,-12,-4" RenderOptions.BitmapScalingMode="HighQuality"
+                                       ToolTip="BrainX">
+                                    <Image.RenderTransform>
+                                        <TranslateTransform x:Name="CrestMascotBob" Y="0"/>
+                                    </Image.RenderTransform>
+                                    <Image.Triggers>
+                                        <EventTrigger RoutedEvent="Loaded">
+                                            <BeginStoryboard>
+                                                <Storyboard RepeatBehavior="Forever" AutoReverse="True">
+                                                    <DoubleAnimation Storyboard.TargetName="CrestMascotBob"
+                                                                     Storyboard.TargetProperty="Y"
+                                                                     From="0" To="-4" Duration="0:0:1.6">
+                                                        <DoubleAnimation.EasingFunction>
+                                                            <SineEase EasingMode="EaseInOut"/>
+                                                        </DoubleAnimation.EasingFunction>
+                                                    </DoubleAnimation>
+                                                </Storyboard>
+                                            </BeginStoryboard>
+                                        </EventTrigger>
+                                    </Image.Triggers>
+                                </Image>
                             </Grid>
 
                             <!-- Nav -->
@@ -4989,6 +5008,24 @@
                                     Background="#DD000308"
                                     Panel.ZIndex="50"
                                     Visibility="Visible">
+                                <!-- One of the girls stands beside the card, a different
+                                     one each launch (owner, 2026-10-16: "ให้เธอโผล่มายืนข้าง
+                                     ฟอร์ม โหลด" … "สุ่มจากภาพทั้งหมดนี้ ใช้ทุกคน").
+                                     MainWindow.LoadingGirl.cs picks her and slides her in. -->
+                                <StackPanel Orientation="Horizontal"
+                                            HorizontalAlignment="Center" VerticalAlignment="Center">
+                                <Image x:Name="LoadingGirl" Visibility="Collapsed"
+                                       Height="560" Stretch="Uniform" VerticalAlignment="Bottom"
+                                       Margin="0,0,-28,-24" Opacity="0"
+                                       RenderOptions.BitmapScalingMode="HighQuality">
+                                    <Image.RenderTransform>
+                                        <TranslateTransform x:Name="LoadingGirlShift" X="0" Y="40"/>
+                                    </Image.RenderTransform>
+                                    <Image.Effect>
+                                        <DropShadowEffect x:Name="LoadingGirlGlow" Color="#FF6CF0FF"
+                                                          BlurRadius="28" ShadowDepth="0" Opacity="0.35"/>
+                                    </Image.Effect>
+                                </Image>
                                 <Border Background="#FF0E0C24"
                                         BorderBrush="#886CF0FF" BorderThickness="1"
                                         CornerRadius="10"
@@ -5106,6 +5143,7 @@
                                         </ScrollViewer>
                                     </StackPanel>
                                 </Border>
+                                </StackPanel>
                             </Border>
 
                             <!-- 2D Graph (WriteableBitmap renderer) — collapsed by default.

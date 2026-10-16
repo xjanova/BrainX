@@ -27,6 +27,11 @@
 
   <ItemGroup>
     <Resource Include="Assets\Logo.png" />
+    <Resource Include="Assets\CrestSign.png" />
+    <Resource Include="Assets\CrestMascot.png" />
+    <!-- The girls on the loading screen: one at random each launch
+         (MainWindow.LoadingGirl.cs). Drop a cut-out PNG here to add one. -->
+    <Resource Include="Assets\Girls\*.png" />
     <Resource Include="Assets\Logo.ico" />
     <Resource Include="Assets\LogoBanner.png" />
     <Resource Include="Assets\bk1.png" />
