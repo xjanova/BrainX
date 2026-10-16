@@ -95,14 +95,17 @@ public sealed class McpCallerResolver
     private readonly string? _readToken;
     private readonly bool _ownerEnabled;
     private readonly CloudService? _cloud;
+    private readonly McpOAuth? _oauth;
 
-    public McpCallerResolver(bool embeddedMode, string? writeToken, string? readToken, bool ownerEnabled, CloudService? cloud)
+    public McpCallerResolver(bool embeddedMode, string? writeToken, string? readToken, bool ownerEnabled, CloudService? cloud,
+                             McpOAuth? oauth = null)
     {
         _embedded = embeddedMode;
         _writeToken = string.IsNullOrEmpty(writeToken) ? null : writeToken;
         _readToken = string.IsNullOrEmpty(readToken) ? null : readToken;
         _ownerEnabled = ownerEnabled;
         _cloud = cloud;
+        _oauth = oauth;
     }
 
     public ValueTask<McpCaller> ResolveAsync(HttpContext ctx)
@@ -112,6 +115,15 @@ public sealed class McpCallerResolver
             return _cloud.ResolveMcpCallerAsync(ctx, presented);
 
         if (!_ownerEnabled) return ValueTask.FromResult(McpCaller.Unauthorized);
+
+        // An OAuth access token (bxo_) is an OWNER token whose scope the owner
+        // chose on the approval page — never compared against the static ones.
+        if (presented != null && presented.StartsWith(McpOAuth.AccessPrefix, StringComparison.Ordinal))
+        {
+            var granted = _oauth?.ResolveAccessToken(presented) ?? McpScope.None;
+            return ValueTask.FromResult(granted == McpScope.None ? McpCaller.Unauthorized : McpCaller.Owner(granted));
+        }
+
         var scope = ResolveOwnerScope(presented);
         return ValueTask.FromResult(scope == McpScope.None ? McpCaller.Unauthorized : McpCaller.Owner(scope));
     }

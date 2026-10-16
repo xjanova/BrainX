@@ -255,11 +255,38 @@ if (ownerMcp || cloudMcp)
         NodeConfig.McpMaxSessions, TimeSpan.FromMinutes(NodeConfig.McpIdleMinutes),
         maxCloudSessions: NodeConfig.CloudMcpMaxSessions,
         maxSessionsPerAccount: NodeConfig.CloudMcpSessionsPerAccount);
+    // OAuth (DCR + PKCE + the owner's approval page) for connectors that only
+    // speak the MCP authorization spec — the Gemini app's custom apps. Owner
+    // tokens only, so only where the owner's /mcp is on.
+    McpOAuth? oauth = null;
+    if (ownerMcp && NodeConfig.OAuthEnabled && !NodeConfig.EmbeddedMode)
+    {
+        try
+        {
+            oauth = new McpOAuth(new McpOAuthOptions
+            {
+                Dir = NodeConfig.OAuthDir,
+                OwnerKey = OAuthOwnerKeyOrCreate(),
+                PublicBaseUrl = NodeConfig.PublicBaseUrl,
+            });
+            oauth.Map(app);
+            Console.WriteLine($"[oauth] /mcp OAuth ENABLED · issuer {NodeConfig.PublicBaseUrl ?? "(from each request)"} · store {NodeConfig.OAuthDir}");
+        }
+        catch (Exception ex)
+        {
+            oauth = null;
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"  [WARN] /mcp OAuth failed to start ({ex.GetType().Name}: {ex.Message}) — static tokens only.");
+            Console.ResetColor();
+        }
+    }
+
     var resolver = new McpCallerResolver(
         NodeConfig.EmbeddedMode, NodeConfig.McpWriteToken, NodeConfig.McpReadToken,
-        ownerEnabled: ownerMcp, cloud: cloudMcp ? cloud : null);
+        ownerEnabled: ownerMcp, cloud: cloudMcp ? cloud : null, oauth: oauth);
 
-    app.MapBrainMcp(mcpSessions, resolver.ResolveAsync, callTimeout: null, tenantHooks: cloudMcp ? cloud : null);
+    app.MapBrainMcp(mcpSessions, resolver.ResolveAsync, callTimeout: null, tenantHooks: cloudMcp ? cloud : null,
+                    resourceMetadataUrl: oauth == null ? null : oauth.ResourceMetadataUrl);
 
     var sessionsToClose = mcpSessions;
     app.Lifetime.ApplicationStopping.Register(() => sessionsToClose.DisposeAsync().AsTask().Wait(5000));
@@ -1166,6 +1193,34 @@ app.MapPost("/api/ai/stats/router/reset", () => { RouterStats.Reset(); return Re
 /// it). Returns null when there is nothing to run, so /mcp stays off rather
 /// than half-working.
 /// </summary>
+// The key the owner types on the OAuth approval page: BrainX__OAuthOwnerKey,
+// else the first line of OAuthOwnerKeyFile, else a new one written there now
+// (the folder locked to SYSTEM + Administrators, like CloudRoot). The value is
+// never logged — only where it lives.
+static string OAuthOwnerKeyOrCreate()
+{
+    if (!string.IsNullOrWhiteSpace(NodeConfig.OAuthOwnerKey)) return NodeConfig.OAuthOwnerKey!;
+    var file = NodeConfig.OAuthOwnerKeyFile!;
+    if (File.Exists(file))
+    {
+        var line = File.ReadLines(file).Select(l => l.Trim()).FirstOrDefault(l => l.Length > 0);
+        if (line != null) return line;
+    }
+    var dir = Path.GetDirectoryName(file)!;
+    var createdNow = !Directory.Exists(dir);
+    Directory.CreateDirectory(dir);
+    var (outcome, msg) = BrainX.Server.Cloud.CloudRootAcl.Apply(dir, enabled: true, createdNow);
+    Console.WriteLine($"[oauth] key folder: {msg} ({outcome})");
+    // 6 groups of 4 from an alphabet with no look-alikes: ~124 bits, typeable.
+    const string alphabet = "abcdefghjkmnpqrstuvwxyz23456789";
+    var bytes = System.Security.Cryptography.RandomNumberGenerator.GetBytes(24);
+    var chars = bytes.Select(b => alphabet[b % alphabet.Length]).ToArray();
+    var key = string.Join('-', Enumerable.Range(0, 6).Select(i => new string(chars, i * 4, 4)));
+    File.WriteAllText(file, key + Environment.NewLine, new System.Text.UTF8Encoding(false));
+    Console.WriteLine($"[oauth] a new owner key was written to {file} — the approval page asks for it");
+    return key;
+}
+
 static string? ResolveMcpExe()
 {
     if (!string.IsNullOrWhiteSpace(NodeConfig.McpExePath))
@@ -1275,6 +1330,16 @@ public static class NodeConfig
     public static int McpMaxSessions { get; private set; } = 8;
     /// <summary>Idle minutes before a /mcp session's child is reaped.</summary>
     public static int McpIdleMinutes { get; private set; } = 30;
+    /// <summary>OAuth 2.1 for /mcp (McpOAuth): on with the owner's /mcp unless turned off.</summary>
+    public static bool OAuthEnabled { get; private set; } = true;
+    /// <summary>"https://serverbrain.xman4289.com" — the issuer and resource the
+    /// OAuth metadata names. Unset = taken from each request.</summary>
+    public static string? PublicBaseUrl { get; private set; }
+    /// <summary>What the owner types on the OAuth approval page.</summary>
+    public static string? OAuthOwnerKey { get; private set; }
+    public static string? OAuthOwnerKeyFile { get; private set; }
+    /// <summary>clients.json / tokens.json (hashes only).</summary>
+    public static string OAuthDir { get; private set; } = "";
 
     // ── BrainX Cloud (/api/cloud/*, and /mcp for bxc_ tokens) ──
     /// <summary>Serve BrainX Cloud. Default: ON for a standalone node, OFF when embedded.</summary>
@@ -1351,6 +1416,12 @@ public static class NodeConfig
         McpReadToken = FirstNonEmpty(b["McpReadToken"]);
         McpMaxSessions = ParseInt(b["McpMaxSessions"], 8);
         McpIdleMinutes = ParseInt(b["McpIdleMinutes"], 30);
+        OAuthEnabled = ParseBool(b["OAuthEnabled"], defaultValue: true);
+        PublicBaseUrl = FirstNonEmpty(b["PublicBaseUrl"])?.TrimEnd('/');
+        OAuthDir = FirstNonEmpty(b["OAuthDir"])
+                   ?? (OperatingSystem.IsWindows() && !EmbeddedMode ? @"C:\brainx\oauth" : Path.Combine(AppContext.BaseDirectory, "oauth"));
+        OAuthOwnerKeyFile = FirstNonEmpty(b["OAuthOwnerKeyFile"]) ?? Path.Combine(OAuthDir, "owner-key.txt");
+        OAuthOwnerKey = FirstNonEmpty(b["OAuthOwnerKey"]);
 
         CloudEnabled = ParseBool(b["CloudEnabled"], defaultValue: !EmbeddedMode);
         CloudRoot = FirstNonEmpty(b["CloudRoot"])

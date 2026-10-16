@@ -13,6 +13,9 @@ namespace BrainX.Server.Services;
 ///     token even when RequireAuth=false; McpCallerResolver owns it.
 ///   • /api/cloud — BrainX Cloud customers are not the owner. Every route there
 ///     authenticates with its own bxc_ token (login with a license key).
+///   • /.well-known, /oauth — the OAuth server for /mcp (McpOAuth): its
+///     metadata is public by definition, and the approval page has its own
+///     lock (the owner key). Neither is under /api, so this is documentation.
 ///   • /api/admin — STRICTER than this gate, not looser: AdminGate demands the
 ///     same token AND a request from this very machine, and answers every
 ///     failure with a plain 404. Letting this gate answer first would turn

@@ -81,6 +81,7 @@ internal static partial class Program
         RegisterMindBridgeChecks(sshChecks);
         RegisterHardeningChecks(sshChecks);
         RegisterMySqlChecks(sshChecks);
+        RegisterOAuthChecks(sshChecks);
         foreach (var (name, check) in sshChecks) await Run(name, check);
 
         // BRAINX_TEST_MYSQL set: the whole cloud surface again, with every test
