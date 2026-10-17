@@ -42,6 +42,8 @@ export class FlatSkin {
     this.uniform={};for(const key of ['image','lamps','colours','radii','ambient','gain','relight','roughness'])this.uniform[key]=gl.getUniformLocation(program,key+(key==='lamps'||key==='colours'||key==='radii'?'[0]':''));
     gl.enable(gl.BLEND);gl.blendFunc(gl.ONE,gl.ONE_MINUS_SRC_ALPHA);gl.disable(gl.DEPTH_TEST);
     this.textures=new Map();this.grids=new Map();this.drawCalls=0;
+    // screen pixels per world unit (camera zoom x device pixel ratio); the deck sets it each frame
+    this.view=0;
   }
   texture(image){
     if(this.textures.has(image))return this.textures.get(image);
@@ -64,10 +66,25 @@ export class FlatSkin {
   draw(image,points,triangles,sourceUV,normals,alpha=null,gain=1,roughness=.82){
     const gl=this.gl,count=triangles.length*3;let buffer=this.vertexBuffer;
     if(!buffer||buffer.length<count*8)this.vertexBuffer=buffer=new Float32Array(count*8);
-    let j=0;
-    for(const face of triangles)for(const i of face){const p=points[i],uv=sourceUV[i],n=normals[i]||[0,0,1];buffer.set([p[0],p[1],uv[0]/image.width,uv[1]/image.height,n[0],n[1],n[2],alpha?alpha[i]:1],j);j+=8;}
+    // Written element by element: a temporary 8-item array per vertex (buffer.set([...])) was
+    // ~120 ms a frame across six girls, the whole cost of the deck stuttering (2026-10-17).
+    let j=0;const iw=1/image.width,ih=1/image.height;
+    for(let t=0;t<triangles.length;t++){const face=triangles[t];
+      for(let q=0;q<3;q++){const i=face[q],p=points[i],uv=sourceUV[i],n=normals[i];
+        buffer[j]=p[0];buffer[j+1]=p[1];buffer[j+2]=uv[0]*iw;buffer[j+3]=uv[1]*ih;
+        if(n){buffer[j+4]=n[0];buffer[j+5]=n[1];buffer[j+6]=n[2];}else{buffer[j+4]=0;buffer[j+5]=0;buffer[j+6]=1;}
+        buffer[j+7]=alpha?alpha[i]:1;j+=8;}}
     gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,this.texture(image));gl.uniform1f(this.uniform.gain,gain);gl.uniform1f(this.uniform.roughness,roughness);
     gl.bindBuffer(gl.ARRAY_BUFFER,this.buffer);gl.bufferData(gl.ARRAY_BUFFER,buffer.subarray(0,j),gl.DYNAMIC_DRAW);gl.drawArrays(gl.TRIANGLES,0,count);this.drawCalls++;
+  }
+  /** The mesh spacing for a piece drawn at `pixels` screen pixels per source pixel. The authored
+   *  steps (6 for the skirt hem and shoes) are for a close-up; a girl 40 px tall on the whole-ship
+   *  view does not need 570,000 vertices a frame. Quantised so the grid cache stays small. */
+  lod(step,pixels){
+    if(!(pixels>0))return step;
+    const want=Math.min(48,1.5/pixels);
+    for(const k of [1,2,3,4,6,8])if(step*k>=want||step*k>=48)return Math.min(48,Math.max(step,step*k));
+    return Math.max(step,48);
   }
   grid(key,w,h,step=28){
     key=`${key}:${w}:${h}:${step}`;
@@ -85,7 +102,7 @@ export class FlatSkin {
     const toWorld=([x,y])=>[rig.x-originX+x*scale*rig.Fv,rig.y+y*scale];
     const normalWorld=(n,a)=>{const [x,y]=rotate(n[0],-n[1],a);return[x*rig.Fv,-y,n[2]]};
     const drawPiece=(key,anchor,at,rotation,k=1,gain=1,frontHem=false,mirror=1,lengthRatio=1)=>{
-      const p=(key==='head'&&rig.hasFaces?rig.P['head_'+rig.mood]:rig.P[key])||rig.P[key],[rx,ry,w,h]=p.rect,m=this.grid(key,w,h,key==='skirt'||key==='foot'?6:key==='torso'?14:key==='head'?18:28),j=p.j[anchor];
+      const p=(key==='head'&&rig.hasFaces?rig.P['head_'+rig.mood]:rig.P[key])||rig.P[key],[rx,ry,w,h]=p.rect,m=this.grid(key,w,h,this.lod(key==='skirt'||key==='foot'?6:key==='torso'?14:key==='head'?18:28,scale*k*this.view)),j=p.j[anchor];
       const points=[],uv=[],normals=[],alphas=[];
       for(const [x,y]of m.uv){
         let sx=x,sy=y;
@@ -128,11 +145,14 @@ export class FlatSkin {
       const upper=angle(S,E),lower=angle(E,W),hand=isArm?lower+(a.hand||0):(a.pitch||0);
       const bones={support:{at:S,origin:0,angle:J.tRot,k:1},upper:{at:S,origin:0,angle:upper,k:Math.hypot(E[0]-S[0],E[1]-S[1])/l1},lower:{at:E,origin:l1,angle:lower,k:Math.hypot(W[0]-E[0],W[1]-E[1])/l2},hand:{at:W,origin:l1+l2,angle:hand,k:1}};
       const points=[],uv=[],normals=[],alphas=[];
+      // The weights never change: listed once per mesh rather than Object.entries per vertex per frame.
+      const W8=m._weights??=m.weights.map(o=>Object.entries(o).filter(([,w])=>w>=.00001));
+      for(const b of Object.values(bones)){b.co=Math.cos(b.angle);b.si=Math.sin(b.angle);}
       for(let i=0;i<m.rest.length;i++){
         let [u,v]=m.rest[i];if(key==='hand'&&side==='F'){u=-u;v=l1+l2+(v-l1-l2)*.82;}
         let cx=0,cy=0,c=0,s=0;
-        for(const [name,weight]of Object.entries(m.weights[i])){
-          if(weight<.00001)continue;const b=bones[name],co=Math.cos(b.angle),si=Math.sin(b.angle);
+        for(const [name,weight]of W8[i]){
+          const b=bones[name],co=b.co,si=b.si;
           cx+=(b.at[0]-(v-b.origin)*si*b.k)*weight;cy+=(b.at[1]+(v-b.origin)*co*b.k)*weight;c+=co*weight;s+=si*weight;
         }
         const length=Math.hypot(c,s)||1;c/=length;s/=length;
@@ -178,7 +198,7 @@ export class FlatSkin {
     };
     // One continuous hair sheet follows the existing damped chain, with a visible trailing edge.
     const drawHair=()=>{
-    const p=rig.P.tail,[rx,ry,w,h]=p.rect,tie=p.j.tie,m=this.grid('tail',w,h,28);
+    const p=rig.P.tail,[rx,ry,w,h]=p.rect,tie=p.j.tie,m=this.grid('tail',w,h,this.lod(28,scale*this.view));
     const points=[],uv=[],normals=[];
     for(const [x,y]of m.uv){
       const f=clamp((y-tie[1])/(h-tie[1]))*(rig.tail.n-1),i=Math.min(rig.tail.n-2,Math.floor(f)),t=f-i;
@@ -211,15 +231,17 @@ export class FlatSkin {
     if(!base){
       const b=puppet.bounds(0),image=document.createElement('canvas');image.width=b.w*2;image.height=b.h*2;
       const ctx=image.getContext('2d');ctx.setTransform(2,0,0,2,-b.x*2,-b.y*2);puppet.draw(ctx,0,0);
-      const mesh=this.grid('assembled-pose',image.width,image.height,24),hands=[];
+      const hands=[];
       const spec=puppet.spec;
       for(const p of spec.parts){
         if(p.motion==='typing'){const [, ,w,h]=p.rect;hands.push([spec.position[0]+(p.at[0]+(w*.5-p.anchor[0])*(p.flipX?-1:1))*spec.scale,spec.position[1]+(p.at[1]+h*.55-p.anchor[1])*spec.scale,w*spec.scale*.55,h*spec.scale*.42]);}
         for(const [x,y,w,h]of spec.typingHands?.regions||[]){hands.push([spec.position[0]+(p.at[0]+x+w*.5-p.anchor[0])*spec.scale,spec.position[1]+(p.at[1]+y+h*.5-p.anchor[1])*spec.scale,w*spec.scale*.5,h*spec.scale*.5]);}
       }
-      base={b,image,mesh,hands,position:[...spec.position]};this.poseCache.set(puppet,base);
+      base={b,image,hands,position:[...spec.position]};this.poseCache.set(puppet,base);
     }
-    const {b,image,mesh,hands}=base,points=[],normals=[],spec=puppet.spec;
+    const {b,image,hands}=base,points=[],normals=[],spec=puppet.spec;
+    // the pose image is drawn at 2x, so one of its pixels is half a world unit
+    const mesh=this.grid('assembled-pose',image.width,image.height,this.lod(24,this.view/2));
     const phase=time*Math.PI*2/5.6,inhale=.5-.5*Math.cos(phase),neck=[b.x+b.w*.52,b.y+b.h*.29];
     const nod=mode==='relax'?.038*(.5-.5*Math.cos(time*Math.PI*2/12))**5:mode==='desk'?.008*Math.sin(time*.8):0;
     for(const [u,v]of mesh.uv){

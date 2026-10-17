@@ -55,6 +55,7 @@
   <label>ซูม <input id="zoom" type="range" min="0" max="1" step="0.001" value="1" aria-label="ซูม"></label>
   <button id="z-ship">ทั้งลำ</button>
   <button id="z-close">ใกล้</button>
+  <button id="power" aria-pressed="true">ประหยัด</button>
   <button id="free-view" aria-pressed="false">มุมมองอิสระ</button>
   <a href="./cluadex-study/?crew=boss" style="font-size:13px;color:#d6abff;padding:7px 10px;text-decoration:none;border:1px solid #49355f;border-radius:8px">ดูลูกเรือ 2D ใกล้ ๆ</a>
   <span id="clips"></span>
@@ -67,6 +68,16 @@
 // "the room's bridge" section). ?v= is the host's asset stamp, so an installed copy is cached
 // until it changes; without it (the studio) every reload fetches fresh.
 const Q = new URLSearchParams(location.search);
+// Power saver (owner, 2026-10-17: "ห้อง Cowork room กระตุกมาก ... ลดการใช้การ์ดจอให้มากที่สุด"). On by
+// default: 30 fps, one canvas pixel per CSS pixel, a cached sky, and stars/meshes thinned to what
+// the zoom can actually show. The bar's button turns full quality back on; ?hq forces it.
+const QUALITY_KEY = 'brainx.ship.quality';
+let LOW_POWER = (() => {
+  if (Q.has('hq')) return false;
+  try { return localStorage.getItem(QUALITY_KEY) !== 'high'; } catch { return true; }
+})();
+const FRAME_MS = () => (LOW_POWER ? 1000 / 30 : 0);
+let SKY_DIRTY = true;   // set by resize(), which runs before the sky cache below exists
 const EMBED = Q.has('embed');
 const ASSET_V = Q.get('v') || String(Date.now());
 if (EMBED) document.body.classList.add('embed');
@@ -200,7 +211,7 @@ window.crew = crew;
 // ── camera ────────────────────────────────────────────────────────────────────
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
 let W = 0, H = 0, dpr = 1;
-function resize() { dpr = Math.min(2, devicePixelRatio || 1); W = cv.clientWidth; H = cv.clientHeight; cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+function resize() { dpr = Math.min(LOW_POWER ? 1 : 2, devicePixelRatio || 1); SKY_DIRTY = true; W = cv.clientWidth; H = cv.clientHeight; cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
 addEventListener('resize', resize); resize();
 const cam = { x: crew[0].rig.x, y: MOD_H * 0.55, z: 1, t: 1, tz: 1 };   // t: 0 = the whole ship, 1 = close
 let followIdx = 0;
@@ -305,6 +316,20 @@ document.getElementById('z-ship').addEventListener('click', () => {
   cam.x = (SHIP.x0 + SHIP.x1) / 2; cam.y = (SHIP.y0 + SHIP.y1) / 2;
 });
 document.getElementById('z-close').addEventListener('click', () => setZoom(1));
+const powerBtn = document.getElementById('power');
+function markPower() {
+  powerBtn.setAttribute('aria-pressed', String(LOW_POWER));
+  powerBtn.textContent = LOW_POWER ? 'ประหยัด' : 'คมชัด';
+  powerBtn.title = LOW_POWER
+    ? 'โหมดประหยัดการ์ดจอ (30 fps) — กดเพื่อกลับเป็นภาพคมชัดเต็ม'
+    : 'ภาพคมชัดเต็ม — กดเพื่อประหยัดการ์ดจอ (30 fps, ลดรายละเอียดตามระยะซูม)';
+}
+powerBtn.addEventListener('click', () => {
+  LOW_POWER = !LOW_POWER;
+  try { localStorage.setItem(QUALITY_KEY, LOW_POWER ? 'low' : 'high'); } catch { /* private window */ }
+  markPower(); resize();
+});
+markPower();
 document.getElementById('pop').addEventListener('click', () => {
   // as wide as everything the screen API reports (the whole desktop when it spans several monitors)
   const w = Math.max(screen.availWidth, window.screen?.width || 0), h = Math.round(Math.min(screen.availHeight, w / 4));
@@ -475,6 +500,62 @@ function drawSpace(t, dt) {
   ctx.globalCompositeOperation = 'source-over';
 }
 
+// Power saver's sky: the gradient and the nebulae drift a few pixels a minute, so they are painted
+// once into a strip twice the view's width and slid along; the stars are one shared streak
+// sprite, a third of them, with no gradient built per star per frame. Same look at arm's length.
+const SKY = { canvas: document.createElement('canvas'), off: 0 };
+const SKY_STARS = STARS.filter((_, i) => i % 3 === 0);
+const SKY_STREAK = (() => {
+  const c = document.createElement('canvas'); c.width = 128; c.height = 4;
+  const g = c.getContext('2d'), lg = g.createLinearGradient(0, 0, 128, 0);
+  lg.addColorStop(0, 'rgba(200,225,255,1)'); lg.addColorStop(1, 'rgba(150,170,255,0)');
+  g.fillStyle = lg; g.fillRect(0, 0, 128, 4); return c;
+})();
+function paintSky() {
+  const c = SKY.canvas, w = Math.max(1, Math.round(W)), h = Math.max(1, Math.round(H));
+  c.width = w * 2; c.height = h; const g = c.getContext('2d');
+  const bg = g.createLinearGradient(0, 0, 0, h);
+  bg.addColorStop(0, '#05030d'); bg.addColorStop(0.5, '#0b0820'); bg.addColorStop(1, '#05040e');
+  g.fillStyle = bg; g.fillRect(0, 0, w * 2, h);
+  g.globalCompositeOperation = 'lighter';
+  // each nebula twice, one view-width apart, so sliding the strip by up to a width never shows an edge
+  for (const n of NEB) for (const shift of [0, w]) {
+    const cx = ((n.x % 1) + 1) % 1 * w + shift, cy = n.y * h, r = n.r * Math.max(w, h);
+    const rg = g.createRadialGradient(cx, cy, 0, cx, cy, r);
+    rg.addColorStop(0, `hsla(${n.h}, 80%, 45%, 0.20)`); rg.addColorStop(1, `hsla(${n.h}, 80%, 30%, 0)`);
+    g.fillStyle = rg; g.fillRect(cx - r, cy - r, r * 2, r * 2);
+  }
+  g.globalCompositeOperation = 'source-over';
+  SKY_DIRTY = false;
+}
+function drawSkyCached(t, dt) {
+  const w = Math.max(1, Math.round(W));
+  if (SKY_DIRTY || SKY.canvas.height !== Math.round(H) || SKY.canvas.width !== w * 2) paintSky();
+  SKY.off = (SKY.off + dt * 0.004 * w) % w;
+  ctx.drawImage(SKY.canvas, SKY.off, 0, w, SKY.canvas.height, 0, 0, W, H);
+  ctx.globalCompositeOperation = 'lighter';
+  const warp = 0.6 + 0.4 * (1 - cam.t);
+  for (const s of SKY_STARS) {
+    const sp = 0.05 + s.d * s.d * 0.9;
+    s.x -= dt * sp * warp; if (s.x < -0.2) { s.x += 1.4; s.y = Math.random(); }
+    const len = (8 + s.d * 160) * warp, th = 0.6 + s.d * 1.8;
+    ctx.globalAlpha = 0.25 + s.d * 0.7;
+    ctx.drawImage(SKY_STREAK, s.x * W, s.y * H - th / 2, len, th);
+  }
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+}
+// A chair under its room's light, at that light's brightness. Re-filtered only when the light has
+// moved by a visible step: ctx.filter on every frame is a GPU pass per chair.
+function litObject(o, b) {
+  const q = Math.round(b * 40) / 40;
+  if (o.lit && o.litAt === q) return o.lit;
+  const c = o.lit || document.createElement('canvas');
+  if (c.width !== o.img.width || c.height !== o.img.height) { c.width = o.img.width; c.height = o.img.height; }
+  const g = c.getContext('2d'); g.clearRect(0, 0, c.width, c.height);
+  g.filter = `brightness(${q})`; g.drawImage(o.img, 0, 0); g.filter = 'none';
+  o.lit = c; o.litAt = q; return c;
+}
+
 // ── the ship around the deck (drawn in world units) ─────────────────────────────────────────
 function drawShip(t) {
   if (!shipImg) return;
@@ -534,13 +615,17 @@ function think(c, dt) {
 }
 
 // ── frame ──────────────────────────────────────────────────────────────────────
-let last = performance.now(), frames = 0, fpsT = 0;
+let last = performance.now(), frames = 0, fpsT = 0, lastDrawn = 0;
 window.__frames = (n = 1, step = 1 / 60) => { for (let i = 0; i < n; i++) frame(last + step * 1000, true); };
 function frame(now, manual) {
   // A frame that has not been laid out yet (a hidden iframe) has no size: zooming to fit it gives
   // zero and every camera position after that NaN, for good.
   if (!W || !H) resize();
   if (!W || !H) { if (!manual) requestAnimationFrame(frame); return; }
+  // At most 30 frames a second in power saver: the girls stroll and the lights fade slowly, and
+  // half the frames is half the GPU. A frame skipped here costs nothing; dt covers the gap.
+  if (!manual && now - lastDrawn < FRAME_MS() - 2) { requestAnimationFrame(frame); return; }
+  lastDrawn = now;
   const dt = Math.min(0.05, Math.max(0, (now - last) / 1000)); last = Math.max(last, now);
   frames++; fpsT += dt; if (fpsT > 0.5) { document.getElementById('fps').textContent = Math.round(frames / fpsT) + ' fps'; frames = 0; fpsT = 0; }
   for (const c of crew) { think(c, dt); c.rig.unitPx = depthScale(c.rig.y, c.rigHeight); c.rig.update(dt); }
@@ -585,14 +670,14 @@ function frame(now, manual) {
   }
 
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  drawSpace(now / 1000, dt);
+  if (LOW_POWER) drawSkyCached(now / 1000, dt); else drawSpace(now / 1000, dt);
   ctx.setTransform(dpr * cam.z, 0, 0, dpr * cam.z, dpr * (W / 2 - cam.x * cam.z), dpr * (H / 2 - cam.y * cam.z));
   drawShip(now / 1000);
   MODULES.forEach((m, i) => {
     const roomX = i * MOD_W;
     // Avoid drawing offscreen star fields when viewing a single room close up.
     if (roomX + MOD_W < cam.x - W / 2 / cam.z || roomX > cam.x + W / 2 / cam.z) return;
-    if (windowPlates[i]) drawWindowView(ctx, roomX, now / 1000, m.id === 'bridge');
+    if (windowPlates[i]) drawWindowView(ctx, roomX, now / 1000, m.id === 'bridge', LOW_POWER ? cam.z * dpr : 1);
     roomLights[i].draw(ctx, now / 1000, people, cam.z);
   });
   // the crew and the furniture, back to front by where each stands on the floor
@@ -600,7 +685,9 @@ function frame(now, manual) {
   for (const { c, o } of order) {
     if (o) {
       const light = roomLights[Math.floor(o.x / MOD_W)];
-      ctx.save(); ctx.filter = `brightness(${light?.brightnessAt(o.x + o.w/2, o.y + o.h/2) || .23})`;
+      const b = light?.brightnessAt(o.x + o.w/2, o.y + o.h/2) || .23;
+      if (LOW_POWER) { ctx.drawImage(litObject(o, b), o.x, o.y, o.w, o.h); continue; }
+      ctx.save(); ctx.filter = `brightness(${b})`;
       ctx.drawImage(o.img, o.x, o.y, o.w, o.h); ctx.restore(); continue;
     }
     const anchorX = c.posture ? poseRoomX(c,c.posture)+c.poses[c.posture].spec.position[0] : c.rig.x;
@@ -609,11 +696,22 @@ function frame(now, manual) {
       : {x:anchorX-350,y:floorY-550,w:700,h:650};
     if(bounds.x+bounds.w<cam.x-W/2/cam.z || bounds.x>cam.x+W/2/cam.z)continue;
     const {x:originX,y:originY,w:paintW,h:paintH}=bounds,g=c.paintCtx;
-    if(c.paint.width!==paintW*2||c.paint.height!==paintH*2){c.paint.width=paintW*2;c.paint.height=paintH*2;}
+    // Her offscreen paint is 2x for a close-up; far out, 1x is still several times the screen.
+    const ps = LOW_POWER && cam.z * dpr < 0.5 ? 1 : 2;
+    // Far out she is ~40 px tall: re-skin her ten times a second and show the last painting in
+    // between, at wherever she stands now. Close in, every frame.
+    const paintKey = (c.posture || 'walk') + ':' + ps + ':' + paintW + 'x' + paintH;
+    if (LOW_POWER && cam.z * dpr < 0.25 && c.paintKey === paintKey && now - c.paintAt < 100) {
+      if (!c.posture) { const s = depthScale(c.rig.y, c.rigHeight); ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.beginPath(); ctx.ellipse(c.rig.footX(s), c.rig.y + 3, 150 * s, 30 * s, 0, 0, Math.PI * 2); ctx.fill(); }
+      ctx.drawImage(c.paint, originX, originY, paintW, paintH); continue;
+    }
+    c.paintKey = paintKey; c.paintAt = now;
+    if(c.paint.width!==paintW*ps||c.paint.height!==paintH*ps){c.paint.width=paintW*ps;c.paint.height=paintH*ps;}
     g.setTransform(1,0,0,1,0,0);g.clearRect(0,0,c.paint.width,c.paint.height);
-    g.setTransform(2,0,0,2,-originX*2,-originY*2);
+    g.setTransform(ps,0,0,ps,-originX*ps,-originY*ps);
     const skinOrigin=anchorX-768,lightIndex=Math.floor(anchorX/MOD_W);
     const fixtures=roomLights.flatMap((l,i)=>Math.abs(i-lightIndex)<=1?l.fixtures.map(f=>({...f,at:[i*MOD_W+f.at[0]-skinOrigin,f.at[1]]})):[]);
+    crewSkin.view = LOW_POWER ? Math.min(1, cam.z * dpr) : 0;
     crewSkin.begin(fixtures,[768,floorY-180],true);
     if(c.posture)crewSkin.paintedPose(c.poses[c.posture],c.posture,now/1000,poseRoomX(c,c.posture),skinOrigin);
     else {
@@ -621,7 +719,12 @@ function frame(now, manual) {
     ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.beginPath(); ctx.ellipse(c.rig.footX(s), c.rig.y + 3, 150 * s, 30 * s, 0, 0, Math.PI * 2); ctx.fill();
     crewSkin.rig(c.rig,c.meshes,s,skinOrigin);
     }
-    g.drawImage(crewSkin.canvas,skinOrigin,0);
+    if (LOW_POWER) {
+      // only her box, not the whole 1536x1024 GL canvas, six times a frame
+      const sx = Math.max(0, Math.floor(originX - skinOrigin)), sy = Math.max(0, Math.floor(originY));
+      const sw = Math.min(1536, Math.ceil(originX - skinOrigin + paintW)) - sx, sh = Math.min(1024, Math.ceil(originY + paintH)) - sy;
+      if (sw > 0 && sh > 0) g.drawImage(crewSkin.canvas, sx, sy, sw, sh, skinOrigin + sx, sy, sw, sh);
+    } else g.drawImage(crewSkin.canvas,skinOrigin,0);
     // The flat mesh shader already shades the assembled skin, clothes and wordmarks together.
     ctx.drawImage(c.paint,originX,originY,paintW,paintH);
   }

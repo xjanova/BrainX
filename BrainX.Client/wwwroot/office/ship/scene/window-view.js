@@ -33,7 +33,10 @@ export function makeWindowPlate(original, extracted) {
   return plate;
 }
 
-export function drawWindowView(ctx, roomX, time, forward = false) {
+/** `pixels` is screen pixels per world unit. Far out the window is a sliver a hundred pixels
+ *  wide and 420 streaks in it are a smear nobody can count; draw as many as the size can show. */
+export function drawWindowView(ctx, roomX, time, forward = false, pixels = 1) {
+  const every = pixels >= 0.6 ? 1 : pixels >= 0.3 ? 2 : pixels >= 0.15 ? 4 : 8;
   ctx.save(); ctx.translate(roomX, 0);
   ctx.beginPath(); ctx.rect(100, 80, 1330, 355); ctx.clip();
   const bg = ctx.createLinearGradient(0, 80, 0, 435);
@@ -46,7 +49,8 @@ export function drawWindowView(ctx, roomX, time, forward = false) {
   glow.addColorStop(.4, 'rgba(39,43,115,.3)'); glow.addColorStop(1, 'rgba(13,16,45,0)');
   ctx.fillStyle = glow; ctx.fillRect(100, 80, 1330, 355);
   ctx.globalCompositeOperation = 'screen'; ctx.lineCap = 'round';
-  for (const s of stars) {
+  for (let si = 0; si < stars.length; si += every) {
+    const s = stars[si];
     let x, y, tx, ty, alpha;
     if (forward) {
       // Perspective flight: points accelerate radially as they approach the cockpit.
