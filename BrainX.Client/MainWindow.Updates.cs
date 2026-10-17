@@ -89,6 +89,12 @@ public partial class MainWindow
             var history = UpdateLog.Describe();
             if (history != null)
                 UpdStatusText.Text = "⚠ " + history;
+            // A window running inside Claude's or Codex's package would install
+            // into that package's private store (2026-10-17). Say so, rather
+            // than reading as "up to date" while a release waits.
+            else if (InsidePackage is string package)
+                UpdStatusText.Text = $"⚠ Updates are paused in this window: it runs inside {PackageDisplayName(package)}'s sandbox. "
+                                   + "Close it and open BrainX from the Desktop or Start menu to update.";
             else if (_vpkPending != null)
                 UpdStatusText.Text = $"✅ Update v{_vpkPending.TargetFullRelease.Version} downloaded — click “Restart & apply”.";
             // Every earlier branch WROTE and none ever cleared, so a "Check
@@ -156,6 +162,15 @@ public partial class MainWindow
         }
     }
 
+    /// <summary>"Claude_2.42304.0.0_x64__pzs8sxrjxfjjc" → "Claude": the name
+    /// the owner knows the package by, for the update card.</summary>
+    private static string PackageDisplayName(string packageFullName)
+    {
+        var name = packageFullName.Split('_')[0];
+        var dot = name.LastIndexOf('.');
+        return dot >= 0 && dot < name.Length - 1 ? name[(dot + 1)..] : name;
+    }
+
     /// <summary>True while UpdCheckNow_Click is awaiting. RefreshUpdatePanel is
     /// re-entered during that await (via UpdateAboutCard) and must not blank the
     /// "Checking…" line the user is reading.</summary>
@@ -164,6 +179,12 @@ public partial class MainWindow
     /// <summary>Apply a staged Velopack update and relaunch.</summary>
     private void UpdApply_Click(object sender, RoutedEventArgs e)
     {
+        if (InsidePackage is string package)
+        {
+            UpdStatusText.Text = $"Can't apply from this window — it runs inside {PackageDisplayName(package)}'s sandbox and the update would "
+                               + "install into that sandbox, not into BrainX. Close it and open BrainX from the Desktop or Start menu.";
+            return;
+        }
         if (_vpkMgr == null || _vpkPending == null) { UpdStatusText.Text = "No staged update to apply yet — press “Check for updates” first."; return; }
         try
         {

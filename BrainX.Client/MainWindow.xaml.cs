@@ -6085,6 +6085,32 @@ public partial class MainWindow : Window
     /// tell them on the update card — never restart the app by itself.</summary>
     private bool _autoUpdateEnabled = true;
 
+    /// <summary>
+    /// The MSIX package whose private store this process's AppData writes land
+    /// in, or null when they reach the real file system.
+    ///
+    /// A window that Claude Desktop or Codex started (through brainx-mcp, or a
+    /// relaunch out of the package that found no shell to hand it to) runs in
+    /// that package's file-system virtualization. Velopack does not know: on
+    /// 2026-10-17 such a window applied 2.0.509 and the whole install —
+    /// current, Update.exe, packages — landed in
+    /// %LOCALAPPDATA%\Packages\Claude_…\LocalCache\Local\BrainX, while the
+    /// real %LOCALAPPDATA%\BrainX was left empty. The Desktop shortcut then
+    /// said "The specified path does not exist" on every click, and every
+    /// in-package relaunch popped the same dialog from the real shell.
+    ///
+    /// So no update is downloaded or applied from inside a package: the
+    /// release is still detected and the card says why it waits. Measured
+    /// once per process — the probe creates and removes a folder.
+    /// </summary>
+    private static readonly Lazy<string?> s_virtualizingPackage = new(() =>
+    {
+        try { return PackageBreakaway.VirtualizingPackage(); }
+        catch { return null; }
+    });
+
+    private static string? InsidePackage => s_virtualizingPackage.Value;
+
     /// <summary>How often a running app looks for a new release. Was four
     /// hours, which meant "we shipped a fix" and "your app has it" were half a
     /// working day apart. Ticks cost nothing once something is staged.</summary>
@@ -6167,6 +6193,14 @@ public partial class MainWindow : Window
         {
             var mgr = NewUpdateManager();
             if (!mgr.IsInstalled) return false;              // dev / portable — nothing to apply
+            if (InsidePackage is string package)
+            {
+                // Applying here would install into the package's private
+                // store, not the real install (2026-10-17). Boot; the card
+                // explains, and a window opened from the Desktop updates.
+                Debug.WriteLine($"Pre-boot update skipped: running inside {package}");
+                return false;
+            }
 
             Services.StartupProgress.Report("Checking for updates", 0.12, tag: "update");
 
@@ -6254,6 +6288,7 @@ public partial class MainWindow : Window
     private async System.Threading.Tasks.Task TryApplyStagedWhenIdleAsync()
     {
         if (_vpkPending == null || _autoUpdateFiring || !_autoUpdateEnabled) return;
+        if (InsidePackage is not null) return;               // would install into the package's store
 
         var target = _vpkPending.TargetFullRelease.Version.ToString();
         if (UpdateLog.ShouldStopTrying(target)) return;      // this package is known bad
@@ -6321,6 +6356,10 @@ public partial class MainWindow : Window
         {
             var mgr = NewUpdateManager();
             if (!mgr.IsInstalled) return;                  // dev/unpacked — nothing to do
+            // The download would land in the package's private store, and
+            // nothing staged here may ever be applied. CheckLatestReleaseAsync
+            // still reads the feed, so the card knows a release exists.
+            if (InsidePackage is not null) return;
             var info = await mgr.CheckForUpdatesAsync().ConfigureAwait(false);
             if (info == null) return;                      // already on the latest release
             await mgr.DownloadUpdatesAsync(info).ConfigureAwait(false);
