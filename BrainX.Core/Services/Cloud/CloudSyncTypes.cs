@@ -50,16 +50,26 @@ public sealed class CloudPushOptions
     /// <summary>Held (lock statement) around each read of note files, so a writer in this process never races the snapshot.</summary>
     public object? FileLock { get; set; }
     public TimeSpan LockTimeout { get; set; } = TimeSpan.FromSeconds(30);
+    /// <summary>Names this machine in a conflict copy ("name (conflict &lt;device&gt; &lt;date&gt;).md"). Default: the machine name.</summary>
+    public string? DeviceName { get; set; }
 }
 
 public sealed class CloudPullOptions
 {
     public string? AccountId { get; set; }
-    /// <summary>Let a pull remove more than half of the cache when the cloud no longer lists those notes (off: held back).</summary>
+    /// <summary>Let a pull remove more than <see cref="CloudSyncEngine.MassDeleteMin"/> local notes the cloud no longer lists (off: held back).</summary>
     public bool AllowMassDelete { get; set; }
     /// <summary>Held around each write/delete of a note file (see <see cref="CloudPushOptions.FileLock"/>).</summary>
     public object? FileLock { get; set; }
     public TimeSpan LockTimeout { get; set; } = TimeSpan.FromSeconds(30);
+    /// <summary>
+    /// A root with no notes and no sync history, facing a cloud that has notes,
+    /// is a fresh install: download everything, tick the cloud's folders, and
+    /// refuse pushes until the download is complete (see <see cref="CloudSyncState.Restoring"/>).
+    /// </summary>
+    public bool RestoreIfEmpty { get; set; } = true;
+    /// <summary>Names this machine in a conflict copy. Default: the machine name.</summary>
+    public string? DeviceName { get; set; }
 }
 
 /// <summary>Outcome of a push or pull. Never thrown: failures are reported in <see cref="ErrorCode"/>.</summary>
@@ -79,6 +89,8 @@ public class CloudSyncResult
     public const string Busy = "BUSY";
     public const string VaultMissing = "VAULT_MISSING";
     public const string LocalIo = "LOCAL_IO";
+    /// <summary>A restore into this root has not finished — nothing may be pushed from it yet (pull again to complete it).</summary>
+    public const string Restoring = "RESTORING";
 }
 
 public sealed class CloudPushResult : CloudSyncResult
@@ -96,6 +108,8 @@ public sealed class CloudPushResult : CloudSyncResult
     /// <summary>Selected folders that do not exist on disk; nothing under them was deleted from the cloud.</summary>
     public List<string> MissingFolders { get; } = new();
     public int Ignored { get; set; }
+    /// <summary>Notes edited on both sides since the last sync: both copies were kept (see <see cref="CloudConflict"/>).</summary>
+    public List<CloudConflict> Conflicts { get; } = new();
 }
 
 public sealed class CloudPullResult : CloudSyncResult
@@ -106,10 +120,25 @@ public sealed class CloudPullResult : CloudSyncResult
     public int Unchanged { get; set; }
     /// <summary>Local notes with changes not yet pushed; kept as they are (the next push sends them).</summary>
     public int KeptLocal { get; set; }
-    /// <summary>Local removals not done because the cloud suddenly lacks over half of the cache.</summary>
+    /// <summary>Local removals not done because the cloud no longer lists more than <see cref="CloudSyncEngine.MassDeleteMin"/> local notes.</summary>
     public int HeldBackDeletes { get; set; }
-    public bool Changed => Fetched > 0 || DeletedLocal > 0;
+    /// <summary>Notes edited on both sides since the last sync: both copies were kept (see <see cref="CloudConflict"/>).</summary>
+    public List<CloudConflict> Conflicts { get; } = new();
+    /// <summary>This pull was a restore into an empty root (fresh install): every cloud note came down.</summary>
+    public bool Restored { get; set; }
+    /// <summary>Top-level folders the restore ticked because the cloud has them.</summary>
+    public List<string> AdoptedFolders { get; } = new();
+    public bool Changed => Fetched > 0 || DeletedLocal > 0 || Conflicts.Count > 0;
 }
+
+/// <summary>
+/// A note changed here AND in the cloud since the two last agreed. The newer
+/// copy keeps the note's name; the older one is saved beside it as
+/// <see cref="ConflictPath"/> ("name (conflict &lt;device&gt; &lt;date&gt;).md") so
+/// nothing is lost and the owner merges at leisure. <see cref="LocalWon"/>
+/// says which copy kept the name.
+/// </summary>
+public sealed record CloudConflict(string Path, string ConflictPath, bool LocalWon);
 
 /// <summary>What a push will do — computed without touching the network, so it can be tested.</summary>
 public sealed class CloudPushPlan
@@ -121,6 +150,8 @@ public sealed class CloudPushPlan
     /// <summary>Entries to forget without a server call (already gone there, or a case-only rename).</summary>
     public List<string> Forget { get; } = new();
     public List<string> HeldBack { get; } = new();
+    /// <summary>Changed on both sides since the last sync — resolved by keeping both copies, never by overwriting.</summary>
+    public List<CloudConflictCandidate> Conflicts { get; } = new();
     public int Unchanged { get; set; }
     public int KeptCloudVersion { get; set; }
     public int HeldForMissingFolder { get; set; }
@@ -134,9 +165,20 @@ public sealed class CloudPullPlan
     public Dictionary<string, string> InSync { get; } = new(StringComparer.Ordinal);
     public List<string> Forget { get; } = new();
     public List<CloudSkip> Skipped { get; } = new();
+    /// <summary>Changed on both sides since the last sync — resolved by keeping both copies, never by overwriting.</summary>
+    public List<CloudConflictCandidate> Conflicts { get; } = new();
     public int KeptLocal { get; set; }
     public int Unchanged { get; set; }
 }
+
+/// <summary>
+/// A local note and the cloud's copy of the same path, both different from
+/// the sha the two sides last agreed on. <see cref="HasAncestor"/> is false
+/// when they never agreed (the note was never synced from here): then the
+/// local copy keeps its name whatever the dates say — a note that was never
+/// uploaded is never overwritten.
+/// </summary>
+public sealed record CloudConflictCandidate(LocalNote Local, CloudManifestFile Server, bool HasAncestor);
 
 /// <summary>Result of a local scan.</summary>
 public sealed class LocalScan

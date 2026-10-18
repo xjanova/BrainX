@@ -142,6 +142,11 @@ public static class McpRemotePolicy
         // same reason agent_send's are.
         "cowork_task",
         "cowork_say",
+        // "Sync my brain to the cloud now" from a chat client. It moves notes
+        // between THIS node's vault and the owner's own cloud account (the
+        // sign-in stored on this machine); a caller cannot point it anywhere
+        // else, and a read-only token must not be able to start uploads.
+        "brain_cloud_sync",
     };
 
     public static bool IsHardBlocked(string tool) => HardBlocked.Contains(tool);

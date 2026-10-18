@@ -6160,9 +6160,16 @@
                                                             <StackPanel x:Name="CloudFolderList"/>
                                                         </ScrollViewer>
                                                     </Border>
-                                                    <CheckBox x:Name="CloudAutoSyncCheck" Click="CloudAutoSync_Click" FontSize="12"
-                                                              Foreground="{StaticResource NeuralText}" Margin="0,0,0,12"
-                                                              Content="Sync automatically — shortly after notes change, and every 30 minutes"/>
+                                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                                                        <CheckBox x:Name="CloudAutoSyncCheck" Click="CloudAutoSync_Click" FontSize="12"
+                                                                  Foreground="{StaticResource NeuralText}" VerticalAlignment="Center"
+                                                                  Content="Sync automatically — shortly after notes change, and every"/>
+                                                        <ComboBox x:Name="CloudIntervalCombo" SelectionChanged="CloudInterval_Changed"
+                                                                  FontSize="12" MinWidth="110" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                                    </StackPanel>
+                                                    <TextBlock Text="Sync now downloads what changed in the cloud, then uploads the ticked folders. On a fresh install with an empty vault it brings your whole cloud brain back first."
+                                                               FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8"
+                                                               Foreground="{StaticResource NeuralText3}"/>
                                                     <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
                                                         <Button x:Name="CloudSyncBtn" Content="Sync now" Style="{StaticResource NeuralBtnPrimary}"
                                                                 Click="CloudSyncNow_Click" Padding="16,8" Margin="0,0,8,0"/>

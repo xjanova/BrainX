@@ -46,7 +46,7 @@ public partial class MainWindow
     private CloudSyncState? _cloudState;
     private readonly CancellationTokenSource _cloudLifetime = new();
     private CancellationTokenSource? _cloudSyncCts;
-    private Task<CloudPushResult>? _cloudSyncTask;
+    private Task? _cloudSyncTask;
     private bool _cloudBusy;            // sign-in / sign-out / token work in flight
     private bool _cloudSyncRunning;
     private bool _cloudSyncAgain;       // a change arrived while a sync was running
@@ -58,8 +58,9 @@ public partial class MainWindow
     private DispatcherTimer? _cloudPeriodicTimer;
 
     private static readonly TimeSpan CloudAfterChangeDelay = TimeSpan.FromSeconds(20);
-    private static readonly TimeSpan CloudPeriodicInterval = TimeSpan.FromMinutes(30);
     private static readonly TimeSpan CloudFirstSyncDelay = TimeSpan.FromSeconds(45);
+    /// <summary>Choices offered for "every N minutes"; the saved value is shown even when it is not one of these.</summary>
+    private static readonly int[] CloudIntervalChoices = { 5, 10, 15, 30, 60, 120, 240, 720 };
     // Frozen: a static brush is shared by every element that uses it, and an
     // unfrozen Freezable is tied to the thread that created it.
     private static readonly Brush CloudWarnBrush = FrozenBrush(0xFF, 0xC0, 0x40);
@@ -88,7 +89,16 @@ public partial class MainWindow
 
     private bool CloudAutoSyncActive =>
         CloudSignedIn && !_cloudClosing && !_cloudSuspended
-        && _cloudState is { AutoSync: true } && CloudHasWork;
+        && _cloudState is { AutoSync: true } && (CloudHasWork || CloudMayRestore);
+
+    /// <summary>
+    /// A vault that has never synced and holds no notes — a fresh install.
+    /// Pressing Sync (or the first automatic sync) restores the cloud into it;
+    /// nothing is uploaded until that restore has completed.
+    /// </summary>
+    private bool CloudMayRestore =>
+        _cloudState is { } s && (s.Restoring || (s.Uploaded.Count == 0 && CloudSyncEngine.TopLevelFolders(_vaultPath).Count == 0
+                                                 && CloudSyncEngine.CountNotes(_vaultPath, CloudSyncState.RootToken) == 0));
 
     /// <summary>
     /// Something for a sync to do: a ticked folder, or notes this vault still
@@ -122,7 +132,10 @@ public partial class MainWindow
                 _cloudDebounceTimer.Stop();
                 _ = RunCloudSyncAsync(manual: false);
             };
-            _cloudPeriodicTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = CloudPeriodicInterval };
+            _cloudPeriodicTimer = new DispatcherTimer(DispatcherPriority.Background)
+            {
+                Interval = TimeSpan.FromMinutes(CloudSyncState.ClampMinutes(_cloudState.AutoSyncMinutes)),
+            };
             _cloudPeriodicTimer.Tick += (_, _) => { if (CloudAutoSyncActive) _ = RunCloudSyncAsync(manual: false); };
             _cloudPeriodicTimer.Start();
 
@@ -215,9 +228,41 @@ public partial class MainWindow
         RenderCloudFolders();
         _cloudUiUpdating = true;
         CloudAutoSyncCheck.IsChecked = _cloudState.AutoSync;
+        RenderCloudInterval();
         _cloudUiUpdating = false;
         RenderCloudLastSync();
         UpdateCloudButtons();
+    }
+
+    /// <summary>The "every N minutes" picker, showing the saved value even when it is not a listed choice.</summary>
+    private void RenderCloudInterval()
+    {
+        if (CloudIntervalCombo == null || _cloudState == null) return;
+        var minutes = CloudSyncState.ClampMinutes(_cloudState.AutoSyncMinutes);
+        var choices = CloudIntervalChoices.Contains(minutes)
+            ? CloudIntervalChoices.ToList()
+            : CloudIntervalChoices.Append(minutes).OrderBy(m => m).ToList();
+        CloudIntervalCombo.Items.Clear();
+        foreach (var m in choices)
+            CloudIntervalCombo.Items.Add(new ComboBoxItem { Content = CloudIntervalLabel(m), Tag = m });
+        CloudIntervalCombo.SelectedIndex = choices.IndexOf(minutes);
+    }
+
+    private static string CloudIntervalLabel(int minutes) =>
+        minutes % 60 == 0 ? (minutes / 60 == 1 ? "1 hour" : $"{minutes / 60} hours") : $"{minutes} minutes";
+
+    private void CloudInterval_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (_cloudUiUpdating || _cloudState == null || _cloudPeriodicTimer == null) return;
+        if (CloudIntervalCombo.SelectedItem is not ComboBoxItem { Tag: int minutes }) return;
+        minutes = CloudSyncState.ClampMinutes(minutes);
+        if (minutes == _cloudState.AutoSyncMinutes) return;
+        _cloudState.AutoSyncMinutes = minutes;
+        SaveCloudState();
+        // Restart so the new period counts from now, not from the last tick.
+        _cloudPeriodicTimer.Stop();
+        _cloudPeriodicTimer.Interval = TimeSpan.FromMinutes(minutes);
+        if (!_cloudSuspended && !_cloudClosing) _cloudPeriodicTimer.Start();
     }
 
     private void RenderCloudAccount(CloudAccount? a)
@@ -358,7 +403,8 @@ public partial class MainWindow
         var inv = CultureInfo.InvariantCulture;
         var when = ls.Utc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", inv);
         CloudLastSyncText.Text = ls.Ok
-            ? $"Last sync {when} — {ls.Uploaded.ToString("N0", inv)} uploaded, {ls.Deleted.ToString("N0", inv)} removed"
+            ? $"Last sync {when} — {ls.Uploaded.ToString("N0", inv)} uploaded, {ls.Fetched.ToString("N0", inv)} downloaded, {ls.Deleted.ToString("N0", inv)} removed"
+              + (ls.Conflicts > 0 ? $", {ls.Conflicts.ToString("N0", inv)} kept twice" : "")
               + (ls.Skipped > 0 ? $", {ls.Skipped.ToString("N0", inv)} skipped" : "")
             : ls.ErrorCode == "CANCELLED"
                 ? $"Last sync {when} — cancelled (the next sync continues)"
@@ -373,7 +419,9 @@ public partial class MainWindow
         CloudSignInBtn.IsEnabled = !busy;
         CloudSignInBtn.Content = busy && !CloudSignedIn ? "Signing in…" : "Sign in";
         CloudKeyBox.IsEnabled = !busy;
-        CloudSyncBtn.IsEnabled = !busy && !syncing && CloudHasWork;
+        // Enabled even with nothing ticked: on a fresh install the first Sync
+        // is what brings the cloud down and ticks the folders.
+        CloudSyncBtn.IsEnabled = !busy && !syncing;
         CloudSyncBtn.Content = syncing ? "Syncing…" : "Sync now";
         CloudCancelBtn.Visibility = syncing ? Visibility.Visible : Visibility.Collapsed;
         CloudCancelBtn.IsEnabled = syncing;
@@ -381,6 +429,7 @@ public partial class MainWindow
         // state file the running sync writes; they wait until it is done.
         CloudFolderList.IsEnabled = !busy && !syncing;
         CloudAutoSyncCheck.IsEnabled = !busy && !syncing;
+        if (CloudIntervalCombo != null) CloudIntervalCombo.IsEnabled = !busy && !syncing;
         CloudCreateTokenBtn.IsEnabled = !busy;
         CloudSignOutBtn.IsEnabled = !busy;
     }
@@ -424,6 +473,11 @@ public partial class MainWindow
                 CloudSyncProgressBar.IsIndeterminate = false;
                 CloudSyncProgressBar.Value = p.Total > 0 ? 100.0 * p.Done / p.Total : 0;
                 CloudSyncProgressText.Text = $"Uploading… {p.Done.ToString("N0", inv)} of {p.Total.ToString("N0", inv)} notes";
+                break;
+            case CloudSyncPhase.Fetch:
+                CloudSyncProgressBar.IsIndeterminate = false;
+                CloudSyncProgressBar.Value = p.Total > 0 ? 100.0 * p.Done / p.Total : 0;
+                CloudSyncProgressText.Text = $"Downloading… {p.Done.ToString("N0", inv)} of {p.Total.ToString("N0", inv)} notes";
                 break;
             case CloudSyncPhase.Done:
                 CloudSyncProgressBar.IsIndeterminate = false;
@@ -695,9 +749,10 @@ public partial class MainWindow
     }
 
     /// <summary>
-    /// One push of the ticked folders. Re-entrant calls (a double click, a
-    /// timer while a sync runs) do not start a second sync — they ask for one
-    /// more pass after this one.
+    /// One sync: a pull of the ticked folders (or a restore of everything,
+    /// when this vault is empty and has never synced), then a push. Re-entrant
+    /// calls (a double click, a timer while a sync runs) do not start a second
+    /// sync — they ask for one more pass after this one.
     /// </summary>
     private async Task RunCloudSyncAsync(bool manual, bool allowMassDelete = false)
     {
@@ -714,7 +769,7 @@ public partial class MainWindow
             else ScheduleCloudSync(TimeSpan.FromSeconds(30));
             return;
         }
-        if (!CloudHasWork)
+        if (!CloudHasWork && !CloudMayRestore)
         {
             if (manual) SetCloudStatus("Tick at least one folder to upload first.", warn: true);
             return;
@@ -733,23 +788,21 @@ public partial class MainWindow
         if (manual) SetCloudStatus(null);
 
         var progress = new Progress<CloudSyncProgress>(OnCloudProgress);
-        CloudPushResult result;
+        var device = string.IsNullOrWhiteSpace(record.DeviceName) ? Environment.MachineName : record.DeviceName;
+        CloudPullResult pull;
+        CloudPushResult? push = null;
         try
         {
-            var task = _cloudEngine.PushAsync(vault, state.Folders.ToList(), state, new CloudPushOptions
-            {
-                AccountId = record.AccountId,
-                AllowMassDelete = allowMassDelete,
-            }, progress, cts.Token);
+            var task = SyncBothWaysAsync();
             _cloudSyncTask = task;
-            result = await task;
+            (pull, push) = await task;
         }
         catch (Exception ex)
         {
             // The engine reports failures in its result; this is the "cannot
             // happen" net, and it still must not put exception text on screen.
             Debug.WriteLine($"cloud sync: {ex.GetType().Name}: {ex.Message}");
-            result = new CloudPushResult { ErrorCode = CloudSyncResult.LocalIo };
+            pull = new CloudPullResult { ErrorCode = CloudSyncResult.LocalIo };
         }
         finally
         {
@@ -757,6 +810,26 @@ public partial class MainWindow
             _cloudSyncCts = null;
             cts.Dispose();
             _cloudSyncRunning = false;
+        }
+
+        async Task<(CloudPullResult, CloudPushResult?)> SyncBothWaysAsync()
+        {
+            var down = await _cloudEngine.PullAsync(vault, state.Folders.ToList(), state, new CloudPullOptions
+            {
+                AccountId = record.AccountId,
+                AllowMassDelete = allowMassDelete,
+                DeviceName = device,
+            }, progress, cts.Token);
+            // Offline, revoked, cancelled: the push would fail the same way,
+            // and after a half-done restore it must not run at all.
+            if (!down.Ok) return (down, null);
+            var up = await _cloudEngine.PushAsync(vault, state.Folders.ToList(), state, new CloudPushOptions
+            {
+                AccountId = record.AccountId,
+                AllowMassDelete = allowMassDelete,
+                DeviceName = device,
+            }, progress, cts.Token);
+            return (down, up);
         }
 
         if (_cloudClosing) return;
@@ -768,29 +841,46 @@ public partial class MainWindow
             || !string.Equals(vault, _vaultPath, StringComparison.OrdinalIgnoreCase))
             return;
 
-        ApplyCloudPushResult(result, manual);
-
-        if (result.Ok && result.HeldBackDeletes > 0)
+        if (pull.Restored || pull.AdoptedFolders.Count > 0) RenderCloudFolders();
+        if (pull.Changed || pull.Restored)
         {
-            var n = result.HeldBackDeletes.ToString("N0", CultureInfo.InvariantCulture);
+            // The vault watcher sees the new files too, but a restore of
+            // thousands of notes should not wait for its debounce: rebuild
+            // the index, then the semantic index behind it, now.
+            _ = ReindexAfterCloudPullAsync();
+        }
+
+        ApplyCloudSyncResult(pull, push, manual);
+
+        var heldPull = pull.Ok ? pull.HeldBackDeletes : 0;
+        var heldPush = push is { Ok: true } ? push.HeldBackDeletes : 0;
+        if (heldPull + heldPush > 0)
+        {
+            var inv = CultureInfo.InvariantCulture;
+            var what = heldPull > 0 && heldPush > 0
+                ? $"{heldPull.ToString("N0", inv)} note(s) are no longer in BrainX Cloud and {heldPush.ToString("N0", inv)} disappeared from this vault"
+                : heldPull > 0
+                    ? $"{heldPull.ToString("N0", inv)} note(s) that this PC synced are no longer in BrainX Cloud"
+                    : $"{heldPush.ToString("N0", inv)} note(s) disappeared from folders you sync";
+            var where = heldPull > 0 && heldPush > 0 ? "from this vault and from the cloud"
+                      : heldPull > 0 ? "from this vault" : "from the cloud";
             if (manual)
             {
                 var answer = CloudAsk(
-                    $"{n} note(s) disappeared from folders you sync — more than half of a folder.\n\n" +
-                    "That can be a folder moved or emptied by mistake, so they have NOT been removed from BrainX Cloud yet.\n\n" +
-                    "Remove them from the cloud too?",
+                    $"{what} — more than {CloudSyncEngine.MassDeleteMin} in one go.\n\n" +
+                    "That can be a folder moved or emptied by mistake, so nothing has been deleted yet.\n\n" +
+                    $"Delete them {where} as well?",
                     MessageBoxButton.YesNo, MessageBoxImage.Warning);
                 if (answer == MessageBoxResult.Yes)
                 {
                     await RunCloudSyncAsync(manual: true, allowMassDelete: true);
                     return;
                 }
-                SetCloudStatus($"Kept {n} note(s) in the cloud. They'll be asked about again at the next manual sync.", warn: true);
+                SetCloudStatus($"Nothing was deleted. You'll be asked again at the next manual sync.", warn: true);
             }
             else
             {
-                SetCloudStatus($"{n} note(s) disappeared from folders you sync, so they were NOT removed from the cloud. " +
-                               "Press Sync now to review.", warn: true);
+                SetCloudStatus($"{what}, so nothing was deleted {where}. Press Sync now to review.", warn: true);
             }
         }
 
@@ -801,54 +891,110 @@ public partial class MainWindow
         }
     }
 
-    private void ApplyCloudPushResult(CloudPushResult result, bool manual)
+    /// <summary>
+    /// After a pull that changed the vault: one full index pass (so the graph,
+    /// the tree and brain-export.json hold every note that landed), then the
+    /// semantic index. The watcher's own pass may have started before the last
+    /// note was written, so a pass of our own runs after it — and the
+    /// embeddings only once that pass has produced the new graph. UI thread
+    /// throughout (the in-flight flag is UI state); the waits are polite
+    /// polls, capped so a stuck index can never hold this forever.
+    /// </summary>
+    private async Task ReindexAfterCloudPullAsync()
+    {
+        for (var i = 0; i < 300 && _vaultIndexInFlight && !_cloudClosing; i++) await Task.Delay(200);
+        if (_cloudClosing) return;
+        OnVaultChanged();                       // sets the in-flight flag before its first await
+        for (var i = 0; i < 300 && _vaultIndexInFlight && !_cloudClosing; i++) await Task.Delay(200);
+        if (_cloudClosing || _vaultIndexInFlight) return;
+        StartEmbeddingPrecompute();
+    }
+
+    /// <summary>One status line for the pull and the push together.</summary>
+    private void ApplyCloudSyncResult(CloudPullResult pull, CloudPushResult? push, bool manual)
     {
         if (!CloudSignedIn) return;
         var inv = CultureInfo.InvariantCulture;
-        if (result.UsedBytes is { } used && _cloudRecord!.LastAccount is { } acct)
+        var usedBytes = push?.UsedBytes ?? pull.UsedBytes;
+        var quota = push?.QuotaBytes ?? pull.QuotaBytes;
+        if (usedBytes is { } used && _cloudRecord!.LastAccount is { } acct)
         {
             acct.UsedBytes = used;
-            if (result.QuotaBytes is { } q && q > 0) acct.QuotaBytes = q;
+            if (quota is { } q && q > 0) acct.QuotaBytes = q;
             RenderCloudAccount(acct);
         }
         RenderCloudLastSync();
 
-        if (result.Cancelled)
+        if (pull.Cancelled || push is { Cancelled: true })
         {
             SetCloudStatus("Sync cancelled. Nothing was lost — the next sync continues where this one stopped.");
             return;
         }
-        if (!result.Ok)
+        if (!pull.Ok)
         {
-            HandleCloudFailure(result.ErrorCode);
+            HandleCloudFailure(pull.ErrorCode);
+            return;
+        }
+        if (push is { Ok: false })
+        {
+            HandleCloudFailure(push.ErrorCode);
             return;
         }
 
-        var parts = new List<string>
-        {
-            result.Uploaded == 0 && result.Deleted == 0
-                ? "Everything is up to date."
-                : $"Synced: {result.Uploaded.ToString("N0", inv)} uploaded, {result.Deleted.ToString("N0", inv)} removed from the cloud.",
-        };
+        var parts = new List<string>();
         var warn = false;
-        if (result.Skipped.Count > 0)
+        if (pull.Restored)
         {
-            var first = result.Skipped[0];
-            parts.Add($"{result.Skipped.Count.ToString("N0", inv)} note(s) skipped — e.g. “{Path.GetFileName(first.Path)}”: {first.Reason}.");
+            parts.Add($"Restored {pull.Fetched.ToString("N0", inv)} note(s) from BrainX Cloud into this vault" +
+                      (pull.AdoptedFolders.Count > 0 ? $" and ticked {string.Join(", ", pull.AdoptedFolders.Select(CloudFolderLabel))}." : "."));
+            if (_cloudState is { Restoring: true })
+            {
+                parts.Add("The restore did not finish — press Sync now again to complete it. Nothing is uploaded until then.");
+                warn = true;
+            }
+        }
+        else
+        {
+            var uploaded = push?.Uploaded ?? 0;
+            var removed = push?.Deleted ?? 0;
+            parts.Add(uploaded == 0 && removed == 0 && pull.Fetched == 0 && pull.DeletedLocal == 0 && pull.Conflicts.Count == 0
+                ? "Everything is up to date."
+                : $"Synced: {uploaded.ToString("N0", inv)} uploaded, {pull.Fetched.ToString("N0", inv)} downloaded, " +
+                  $"{removed.ToString("N0", inv)} removed from the cloud, {pull.DeletedLocal.ToString("N0", inv)} removed here.");
+        }
+
+        var conflicts = pull.Conflicts.Count + (push?.Conflicts.Count ?? 0);
+        if (conflicts > 0)
+        {
+            var first = pull.Conflicts.FirstOrDefault() ?? push!.Conflicts[0];
+            parts.Add($"{conflicts.ToString("N0", inv)} note(s) were edited both here and in the cloud — both copies were kept, " +
+                      $"e.g. “{Path.GetFileName(first.ConflictPath)}”.");
             warn = true;
         }
-        if (result.MissingFolders.Count > 0)
+        var skipped = pull.Skipped.Count + (push?.Skipped.Count ?? 0);
+        if (skipped > 0)
         {
-            parts.Add($"Not found in this vault: {string.Join(", ", result.MissingFolders)} — their cloud notes were kept.");
+            var first = pull.Skipped.FirstOrDefault() ?? push!.Skipped[0];
+            parts.Add($"{skipped.ToString("N0", inv)} note(s) skipped — e.g. “{Path.GetFileName(first.Path)}”: {first.Reason}.");
             warn = true;
         }
-        if (result.KeptCloudVersion > 0)
-            parts.Add($"{result.KeptCloudVersion.ToString("N0", inv)} note(s) were edited in the cloud since this PC sent them; the cloud's copy was kept.");
+        if (push is { MissingFolders.Count: > 0 })
+        {
+            parts.Add($"Not found in this vault: {string.Join(", ", push.MissingFolders)} — their cloud notes were kept.");
+            warn = true;
+        }
+        if (push is { KeptCloudVersion: > 0 })
+            parts.Add($"{push.KeptCloudVersion.ToString("N0", inv)} note(s) were edited in the cloud since this PC sent them; the cloud's copy was kept.");
+        if (pull.KeptLocal > 0 && push == null)
+            parts.Add($"{pull.KeptLocal.ToString("N0", inv)} local change(s) are waiting to be uploaded.");
         if (manual || warn) SetCloudStatus(string.Join(" ", parts), warn);
         else if (CloudStatusText.Foreground == CloudWarnBrush) SetCloudStatus(null);   // a stale error from an earlier run
 
-        if (result.Uploaded + result.Deleted > 0) _ = RefreshCloudAccountAsync();
+        if ((push?.Uploaded ?? 0) + (push?.Deleted ?? 0) + pull.Fetched > 0) _ = RefreshCloudAccountAsync();
     }
+
+    private static string CloudFolderLabel(string token) =>
+        token == CloudSyncState.RootToken ? "the vault root" : $"“{token}”";
 
     /// <summary>Show what a failure means and, where the state must change (sign-in revoked), change it.</summary>
     private void HandleCloudFailure(string? code)
@@ -1082,6 +1228,8 @@ public partial class MainWindow
             "The vault folder can't be found, so nothing was synced.",
         CloudSyncResult.LocalIo =>
             "A note in this vault couldn't be read. Close programs that may be locking it, then sync again.",
+        CloudSyncResult.Restoring =>
+            "The restore from BrainX Cloud hasn't finished, so nothing is uploaded from this vault yet. Press Sync now to complete it.",
         _ => $"BrainX Cloud couldn't finish that just now. Please try again later. (code: {code ?? "unknown"})",
     };
 
@@ -1095,6 +1243,7 @@ public partial class MainWindow
         CloudSyncResult.Busy => "another sync was running",
         CloudSyncResult.VaultMissing => "vault not found",
         CloudSyncResult.LocalIo => "a note couldn't be read",
+        CloudSyncResult.Restoring => "restore not finished",
         _ => code ?? "unknown",
     };
 

@@ -114,6 +114,21 @@ BrainX.Server.Hubs.AuditLog.Initialize(
 // BrainHub scope persistence. SQLite writes <vault>/.obsidianx/brain.db; if no
 // vault is configured, it lands next to the binary so the node still works.
 IBrainStorage? storage = null;
+
+// The hub judges peer reads (PeerGetNote / PeerSearch / PeerBacklinks) and the
+// per-note half of RequestShare against THIS node's vault export, and reads a
+// note body only through VaultPathGuard — never a rooted or climbing path the
+// export happens to name. Set before storage so a storage failure cannot leave
+// the hub without its ACL inputs.
+BrainHub.ExportProvider = LoadExportCached;
+BrainHub.NoteContentProvider = relativePath =>
+{
+    var full = VaultPathGuard.Resolve(ResolveVaultPath(), relativePath);
+    if (full == null || !File.Exists(full)) return null;
+    try { return File.ReadAllText(full); }
+    catch { return null; }
+};
+
 try
 {
     // BrainX__StorageDir: a node sharing a LIVE vault with the desktop client
@@ -513,6 +528,29 @@ static BrainExport? LoadExport()
         return Newtonsoft.Json.JsonConvert.DeserializeObject<BrainExport>(File.ReadAllText(path));
     }
     catch { return null; }
+}
+
+// The hub's peer reads (PeerGetNote / PeerSearch / PeerBacklinks) can arrive at
+// 60 calls a minute per method per connection; parsing a multi-megabyte
+// brain-export.json for each of them would make a chatty peer a CPU problem.
+// One parse per change of the file instead: the (size, mtime) pair is the key,
+// so a fresh export from the desktop client is picked up on the next call.
+static BrainExport? LoadExportCached()
+{
+    var vault = ResolveVaultPath();
+    if (string.IsNullOrWhiteSpace(vault)) return null;
+    var path = Path.Combine(vault, ".obsidianx", "brain-export.json");
+    FileInfo fi;
+    try { fi = new FileInfo(path); if (!fi.Exists) return null; }
+    catch { return null; }
+    lock (ExportCache.Gate)
+    {
+        if (ExportCache.Entry is { } c && c.Path == path && c.Length == fi.Length && c.Mtime == fi.LastWriteTimeUtc)
+            return c.Export;
+        var export = LoadExport();
+        ExportCache.Entry = (path, fi.Length, fi.LastWriteTimeUtc, export);
+        return export;
+    }
 }
 
 // Load the brain export and push it into the storage backend so /api/brain/search
@@ -1278,6 +1316,13 @@ else if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ASPNETCO
 else
 {
     app.Run("http://0.0.0.0:5142");
+}
+
+/// <summary>One parsed brain-export.json, keyed by the file's size and mtime (see LoadExportCached).</summary>
+static class ExportCache
+{
+    public static readonly object Gate = new();
+    public static (string Path, long Length, DateTime Mtime, BrainExport? Export)? Entry;
 }
 
 /// <summary>

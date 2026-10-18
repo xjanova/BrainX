@@ -33,6 +33,23 @@ public sealed class CloudSyncState
 
     [JsonProperty("autoSync")] public bool AutoSync { get; set; } = true;
 
+    /// <summary>How often the periodic auto-sync runs (1 … 1440 minutes). The after-change sync is separate.</summary>
+    [JsonProperty("autoSyncMinutes")] public int AutoSyncMinutes { get; set; } = DefaultAutoSyncMinutes;
+
+    public const int DefaultAutoSyncMinutes = 30;
+    public const int MinAutoSyncMinutes = 1;
+    public const int MaxAutoSyncMinutes = 1440;
+
+    /// <summary>
+    /// A restore into an empty vault is under way (or was interrupted): the
+    /// cloud is the master copy until every note is down. While this is set
+    /// a push from this root is refused — an empty or half-restored vault
+    /// must never be mirrored over the cloud.
+    /// </summary>
+    [JsonProperty("restoring")] public bool Restoring { get; set; }
+
+    [JsonProperty("restoreStartedUtc")] public DateTime? RestoreStartedUtc { get; set; }
+
     /// <summary>cloud path → sha256 (lowercase hex) this vault last uploaded / last saw in sync.</summary>
     [JsonProperty("uploaded")] public Dictionary<string, string> Uploaded { get; set; } = new(StringComparer.Ordinal);
 
@@ -65,6 +82,7 @@ public sealed class CloudSyncState
                 s.Uploaded.Remove(bad);
             s.Folders = s.Folders.Where(f => f == RootToken || CloudPathRules.IsSelectableFolderName(f))
                                  .Distinct(StringComparer.Ordinal).ToList();
+            s.AutoSyncMinutes = ClampMinutes(s.AutoSyncMinutes);
             return s;
         }
         catch
@@ -104,8 +122,13 @@ public sealed class CloudSyncState
         AccountId = accountId;
         Uploaded.Clear();
         LastSync = null;
+        Restoring = false;
+        RestoreStartedUtc = null;
         return true;
     }
+
+    public static int ClampMinutes(int minutes) =>
+        minutes <= 0 ? DefaultAutoSyncMinutes : Math.Clamp(minutes, MinAutoSyncMinutes, MaxAutoSyncMinutes);
 
     /// <summary>
     /// Take the sync bookkeeping (account, uploaded map, last result) from the
@@ -120,6 +143,8 @@ public sealed class CloudSyncState
         AccountId = disk.AccountId;
         Uploaded = new Dictionary<string, string>(disk.Uploaded, StringComparer.Ordinal);
         LastSync = disk.LastSync;
+        Restoring = disk.Restoring;
+        RestoreStartedUtc = disk.RestoreStartedUtc;
     }
 
     public bool IsFolderSelected(string topFolder) =>
@@ -141,5 +166,7 @@ public sealed class CloudLastSync
     [JsonProperty("uploaded")] public int Uploaded { get; set; }
     [JsonProperty("deleted")] public int Deleted { get; set; }
     [JsonProperty("skipped")] public int Skipped { get; set; }
+    [JsonProperty("fetched")] public int Fetched { get; set; }
+    [JsonProperty("conflicts")] public int Conflicts { get; set; }
     [JsonProperty("errorCode")] public string? ErrorCode { get; set; }
 }

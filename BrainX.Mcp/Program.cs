@@ -1255,6 +1255,33 @@ internal static partial class Program
             Tool("brain_stats",
                 "High-level stats: brain name, address, note/word counts, top tags, top categories.",
                 new JObject { ["type"] = "object", ["properties"] = new JObject() }),
+            Tool("brain_cloud_sync",
+                "Sync this brain with BrainX Cloud NOW, from chat. `pull` brings cloud changes into the REAL vault " +
+                "(on a fresh install with an empty vault it restores everything, ticks the cloud's folders and refuses " +
+                "uploads until the restore is complete); `push` uploads the chosen folders; `both` pulls then pushes. " +
+                "Newer side wins, never silently: a note edited on both sides is kept twice " +
+                "('name (conflict <device> <date>).md'). More than 20 deletions in one run are held back until " +
+                "the owner confirms (allow_mass_delete=true). Returns counts (fetched, uploaded, deleted, conflicts, " +
+                "held-back) and never a token. Requires `brainx-mcp cloud login` on this machine.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["direction"] = new JObject
+                        {
+                            ["type"] = "string",
+                            ["enum"] = new JArray("push", "pull", "both"),
+                            ["default"] = "both",
+                        },
+                        ["allow_mass_delete"] = new JObject
+                        {
+                            ["type"] = "boolean",
+                            ["default"] = false,
+                            ["description"] = "only after the owner said yes: let this run delete more than 20 notes (held back otherwise)"
+                        }
+                    }
+                }),
             Tool("brain_bundle",
                 "Load a PRE-BUILT context bundle for a hot topic. Each bundle is ~1200 tokens — way cheaper than " +
                 "brain_synthesize's full-content packing (~8000 tokens). Bundle includes top 5-10 related notes " +
@@ -1857,6 +1884,7 @@ internal static partial class Program
                 "brain_list"                => BrainList(args),
                 "brain_scope_list"          => BrainScopeList(args),
                 "brain_stats"               => BrainStats(),
+                "brain_cloud_sync"          => BrainCloudSync(args),
                 "brain_bundle"              => BrainBundle(args),
                 "brain_bundles_list"        => BrainBundlesList(),
                 "brain_mark_verified"       => BrainMarkVerified(args),

@@ -525,6 +525,7 @@ internal static partial class Program
         CloudSyncResult.Busy => "Another sync of the same folder is running — try again in a moment.",
         CloudSyncResult.VaultMissing => "The vault folder was not found.",
         CloudSyncResult.LocalIo => "A local file could not be read or written.",
+        CloudSyncResult.Restoring => "The restore from the cloud has not finished — nothing is uploaded from here until it has. Pull again to complete it.",
         null => "",
         _ => $"BrainX Cloud returned an unexpected error ({code}). Try again later.",
     };
@@ -854,6 +855,15 @@ internal static partial class Program
             Interlocked.Exchange(ref _cloudPendingPushes, 1);
             return PushOutcome.Retry;
         }
+        if (r.ErrorCode is CloudSyncResult.Restoring)
+        {
+            // The first pull did not finish (offline, killed): the cache is a
+            // part of the cloud, and mirroring it up is exactly what must not
+            // happen. The periodic pull completes the restore; pushes resume then.
+            _cloudStatus = "restoring from the cloud — nothing is uploaded until the download is complete";
+            Interlocked.Exchange(ref _cloudPendingPushes, 1);
+            return PushOutcome.GiveUp;
+        }
         if (r.ErrorCode is CloudErrorCodes.Network or CloudErrorCodes.Timeout) _cloudOnline = false;
         // brain_stats must not keep saying "in sync" while writes are refused.
         _cloudStatus = r.ErrorCode switch
@@ -890,6 +900,212 @@ internal static partial class Program
         }
         catch { }
         try { _cloudCts.Cancel(); } catch { }
+    }
+
+    // ═════════════════════════════════════════════════════════════════
+    // brain_cloud_sync — "sync now" from chat
+    // ═════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Push, pull or both — on the REAL vault in normal mode (the folders the
+    /// owner ticked in BrainX ▸ Settings ▸ BrainX Cloud, read from the vault's
+    /// own cloud-sync.json), on the account cache in --cloud mode. Runs to
+    /// completion inside the tool call so the reply carries real counts.
+    ///
+    /// The request gate is held by this thread while a tool runs, so the
+    /// engine gets no FileLock here: its scan threads would wait for a lock
+    /// this thread already holds. No other tool can write meanwhile anyway.
+    /// </summary>
+    private static JToken BrainCloudSync(JObject args)
+    {
+        var direction = (args["direction"]?.ToString() ?? "both").Trim().ToLowerInvariant();
+        if (direction is not ("push" or "pull" or "both"))
+            throw new ArgumentException("direction must be push, pull or both");
+        var allowMass = args["allow_mass_delete"]?.Type == JTokenType.Boolean && args["allow_mass_delete"]!.Value<bool>();
+
+        var rec = new CloudCredentialStore().Load();
+        var envToken = Environment.GetEnvironmentVariable("BRAINX_CLOUD_TOKEN");
+        var token = _cloudMode && !string.IsNullOrWhiteSpace(envToken) ? envToken.Trim() : rec?.Token;
+        var accountId = _cloudMode ? _cloudAccountId ?? rec?.AccountId : rec?.AccountId;
+        if (string.IsNullOrEmpty(token) || string.IsNullOrEmpty(accountId))
+            return new JObject
+            {
+                ["ok"] = false,
+                ["error"] = CloudErrorCodes.NotSignedIn,
+                ["message"] = CloudFriendly(CloudErrorCodes.NotSignedIn),
+            };
+
+        var root = _vaultPath;
+        var ownsApi = !_cloudMode || _cloudApi == null;
+        var api = ownsApi ? new CloudApiClient(token) : _cloudApi!;
+        try
+        {
+            var engine = ownsApi ? new CloudSyncEngine(api) : _cloudEngine ?? new CloudSyncEngine(api);
+            var state = CloudSyncState.Load(root);
+            var device = rec?.DeviceName ?? Environment.MachineName;
+            var o = new JObject
+            {
+                ["ok"] = true,
+                ["direction"] = direction,
+                ["target"] = _cloudMode ? "cache" : "vault",
+                ["root"] = root,
+                ["folders"] = _cloudMode ? new JArray("*") : new JArray(state.Folders.Select(LabelFolder)),
+            };
+
+            if (direction is "pull" or "both")
+            {
+                // Cache mode mirrors every folder; a vault pulls only what is
+                // ticked — unless it is empty and the cloud is not (a restore).
+                var folders = _cloudMode ? null : state.Folders.ToList();
+                var r = engine.PullAsync(root, folders, state, new CloudPullOptions
+                {
+                    AccountId = accountId,
+                    AllowMassDelete = allowMass,
+                    DeviceName = device,
+                    LockTimeout = TimeSpan.FromSeconds(15),
+                }).GetAwaiter().GetResult();
+                o["pull"] = PullJson(r);
+                if (!r.Ok) o["ok"] = false;
+                if (r.Restored)
+                {
+                    o["restored"] = true;
+                    o["tickedFolders"] = new JArray(r.AdoptedFolders.Select(LabelFolder));
+                    o["folders"] = new JArray(state.Folders.Select(LabelFolder));
+                }
+                if (r.Changed || r.Restored || !File.Exists(Path.Combine(root, ".obsidianx", "brain-export.json")))
+                    o["reindex"] = ReindexAfterPull(root, r.Restored);
+                if (r.Ok)
+                {
+                    _cloudOnline = true;
+                    if (_cloudMode) _cloudLastPullUtc = DateTime.UtcNow;
+                }
+            }
+
+            if (direction is "push" or "both")
+            {
+                var r = engine.PushAsync(root, _cloudMode ? null : state.Folders.ToList(), state, new CloudPushOptions
+                {
+                    AccountId = accountId,
+                    AllowDeletes = !_cloudMode,          // the cache never decides a deletion
+                    HonourIgnoreFile = !_cloudMode,
+                    AllowMassDelete = allowMass,
+                    DeviceName = device,
+                    LockTimeout = TimeSpan.FromSeconds(15),
+                }).GetAwaiter().GetResult();
+                o["push"] = PushJson(r);
+                if (!r.Ok) o["ok"] = false;
+                if (r.Ok)
+                {
+                    _cloudOnline = true;
+                    if (_cloudMode) { _cloudLastPushUtc = DateTime.UtcNow; Interlocked.Exchange(ref _cloudPendingPushes, 0); }
+                }
+            }
+            if (!_cloudMode && state.Folders.Count == 0 && o["restored"] == null)
+                o["hint"] = "no folders are ticked for the cloud — choose them in BrainX ▸ Settings ▸ BrainX Cloud, or `brainx-mcp cloud push --vault DIR --folders A,B`";
+            return o;
+        }
+        finally
+        {
+            if (ownsApi) api.Dispose();
+        }
+    }
+
+    private static JObject PullJson(CloudPullResult r)
+    {
+        var o = new JObject
+        {
+            ["ok"] = r.Ok,
+            ["cloudNotes"] = r.ServerNotes,
+            ["fetched"] = r.Fetched,
+            ["deletedLocal"] = r.DeletedLocal,
+            ["unchanged"] = r.Unchanged,
+            ["keptLocalUnpushed"] = r.KeptLocal,
+            ["conflicts"] = new JArray(r.Conflicts.Select(c => new JObject
+            {
+                ["path"] = c.Path, ["conflictCopy"] = c.ConflictPath, ["kept"] = c.LocalWon ? "local" : "cloud",
+            })),
+            ["heldBackDeletes"] = r.HeldBackDeletes,
+            ["skipped"] = r.Skipped.Count,
+            ["seconds"] = Math.Round(r.Duration.TotalSeconds, 1),
+        };
+        if (r.Cancelled) o["error"] = "CANCELLED";
+        else if (r.ErrorCode != null) { o["error"] = r.ErrorCode; o["message"] = CloudFriendly(r.ErrorCode); }
+        if (r.HeldBackDeletes > 0)
+            o["heldBackWhy"] = $"the cloud no longer lists {r.HeldBackDeletes} local note(s) — more than {CloudSyncEngine.MassDeleteMin} removals wait for the owner; run again with allow_mass_delete=true after they said yes";
+        if (r.Skipped.Count > 0) o["skippedSample"] = new JArray(r.Skipped.Take(5).Select(s => s.Path + ": " + s.Reason));
+        return o;
+    }
+
+    private static JObject PushJson(CloudPushResult r)
+    {
+        var o = new JObject
+        {
+            ["ok"] = r.Ok,
+            ["localNotes"] = r.LocalNotes,
+            ["uploaded"] = r.Uploaded,
+            ["deleted"] = r.Deleted,
+            ["unchanged"] = r.Unchanged,
+            ["keptCloudVersion"] = r.KeptCloudVersion,
+            ["conflicts"] = new JArray(r.Conflicts.Select(c => new JObject
+            {
+                ["path"] = c.Path, ["conflictCopy"] = c.ConflictPath, ["kept"] = c.LocalWon ? "local" : "cloud",
+            })),
+            ["heldBackDeletes"] = r.HeldBackDeletes,
+            ["skipped"] = r.Skipped.Count,
+            ["seconds"] = Math.Round(r.Duration.TotalSeconds, 1),
+        };
+        if (r.NothingToDo) o["nothingToDo"] = true;
+        if (r.Cancelled) o["error"] = "CANCELLED";
+        else if (r.ErrorCode != null) { o["error"] = r.ErrorCode; o["message"] = CloudFriendly(r.ErrorCode); }
+        if (r.HeldBackDeletes > 0)
+            o["heldBackWhy"] = $"{r.HeldBackDeletes} note(s) vanished from the ticked folders — more than {CloudSyncEngine.MassDeleteMin} deletions wait for the owner; run again with allow_mass_delete=true after they said yes";
+        if (r.MissingFolders.Count > 0) o["missingFolders"] = new JArray(r.MissingFolders);
+        if (r.UsedBytes is { } u) o["cloudUsed"] = FormatBytesCloud(u);
+        if (r.Skipped.Count > 0) o["skippedSample"] = new JArray(r.Skipped.Take(5).Select(s => s.Path + ": " + s.Reason));
+        return o;
+    }
+
+    /// <summary>
+    /// Notes landed on disk: rebuild brain-export.json now (the tools read it
+    /// on the next call), and let the semantic index catch up in the
+    /// background — a restore of thousands of notes must not hold the reply.
+    /// </summary>
+    private static JObject ReindexAfterPull(string root, bool restored)
+    {
+        var o = new JObject();
+        try
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            int n;
+            lock (_cloudExportGate) n = ExportVault(root);
+            o["notes"] = n;
+            o["seconds"] = Math.Round(sw.Elapsed.TotalSeconds, 1);
+            Log($"cloud sync tool: re-indexed {n} note(s) in {sw.Elapsed.TotalSeconds:0.0}s" + (restored ? " (restore)" : ""));
+        }
+        catch (Exception ex)
+        {
+            o["error"] = ex.Message;
+            Log($"cloud sync tool: re-index failed: {ex.Message}");
+            return o;
+        }
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var export = LoadExport();
+                if (export == null) return;
+                var svc = new EmbeddingService { AllowInProcessFallback = restored };
+                var nodes = export.Nodes.Select(x => new BrainX.Core.Models.KnowledgeNode
+                {
+                    Id = x.Id, Title = x.Title, FilePath = Path.Combine(export.VaultPath, x.RelativePath), ModifiedAt = x.ModifiedAt,
+                }).ToList();
+                var written = await svc.PrecomputeAsync(root, nodes).ConfigureAwait(false);
+                Log($"cloud sync tool: embeddings {written} written" + (svc.BackendProblem != null ? $" ({svc.BackendProblem})" : ""));
+            }
+            catch (Exception ex) { Log($"cloud sync tool: embeddings skipped: {ex.Message}"); }
+        });
+        o["embeddings"] = "rebuilding in the background";
+        return o;
     }
 
     /// <summary>Stats block for brain_stats in cloud mode.</summary>

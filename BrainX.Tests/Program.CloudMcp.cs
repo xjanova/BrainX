@@ -324,6 +324,243 @@ internal static partial class Program
         }
     }
 
+    /// <summary>
+    /// Peer ACL, enforced on the hub: PeerGetNote / PeerSearch / PeerBacklinks
+    /// answer only what the owner's scope opens, folder rules match whole
+    /// segments, revoke takes effect at once, and SendShareContent relays only
+    /// for an accepted request under a live scope.
+    /// </summary>
+    private static async Task PeerAclChecks()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.Logging.ClearProviders();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        builder.Services.AddSignalR();
+        var app = builder.Build();
+        app.MapHub<BrainHub>("/brain-hub");
+        await app.StartAsync();
+        var url = app.Urls.First() + "/brain-hub";
+        var connections = new List<HubConnection>();
+
+        async Task<(HubConnection Conn, BrainIdentity Id)> Peer(string name)
+        {
+            var id = BrainIdentity.Generate(name);
+            var conn = new HubConnectionBuilder().WithUrl(url).Build();
+            connections.Add(conn);
+            var registered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            conn.On<JsonElement>("Registered", _ => registered.TrySetResult());
+            await conn.StartAsync();
+            var nonce = await conn.InvokeAsync<string>("RequestChallenge");
+            await conn.InvokeAsync("RegisterBrain", new PeerInfo
+            {
+                BrainAddress = id.Address, DisplayName = name, PublicKey = id.PublicKey,
+                ExpertiseScores = new() { [KnowledgeCategory.Programming] = 0.9 },
+            }, id.Sign(nonce));
+            await registered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            return (conn, id);
+        }
+
+        static NodeSummary Node(string id, string path, string title, string preview, string[]? tags = null, string[]? links = null) => new()
+        {
+            Id = id, Title = title, RelativePath = path, PrimaryCategory = "Programming", Preview = preview,
+            Tags = [.. tags ?? []], LinkedNodeIds = [.. links ?? []],
+        };
+
+        static bool Leaks(List<JsonElement> items) => items.Any(i =>
+            (Prop(i, "title")?.GetString() ?? "").Contains("secret", StringComparison.OrdinalIgnoreCase)
+            || (Prop(i, "preview")?.GetString() ?? "").Contains("secret", StringComparison.OrdinalIgnoreCase)
+            || (Prop(i, "relativePath")?.GetString() ?? "").Contains("secret", StringComparison.OrdinalIgnoreCase));
+
+        static string Ids(List<JsonElement> items) => string.Join(",", items.Select(i => Prop(i, "id")?.GetString()));
+
+        try
+        {
+            var (owner, ido) = await Peer("acl-owner");
+            var (peer, idp) = await Peer("acl-peer");
+            var (stranger, _) = await Peer("acl-stranger");
+
+            BrainHub.ExportProvider = () => new BrainExport
+            {
+                BrainAddress = ido.Address,
+                Nodes =
+                [
+                    Node("pub1", "Public/one.md", "one", "first public note", tags: ["shared"]),
+                    Node("pub2", "Public/two.md", "two", "second public note", links: ["pub1"]),
+                    Node("priv1", "Private/secret.md", "SECRET TITLE", "secret snippet", links: ["pub1"]),
+                    Node("pub2x", "Public2/x.md", "x in Public2", "one more"),
+                ],
+            };
+            BrainHub.NoteContentProvider = path => "content of " + path;
+
+            Task<JsonElement> Get(HubConnection c, string id) => c.InvokeAsync<JsonElement>("PeerGetNote", ido.Address, id);
+            Task<List<JsonElement>> Search(HubConnection c, string q) => c.InvokeAsync<List<JsonElement>>("PeerSearch", ido.Address, q, 20);
+            Task<List<JsonElement>> Backlinks(HubConnection c, string id) => c.InvokeAsync<List<JsonElement>>("PeerBacklinks", ido.Address, id);
+
+            // ── no scope yet: everything denied, nothing leaks ──
+            var ex = await Throws(() => Get(peer, "pub1"));
+            Check("no scope: PeerGetNote is refused", ex is HubException h0 && h0.Message.Contains("not shared"), Describe(ex));
+            var none = await Search(peer, "one");
+            Check("no scope: PeerSearch returns nothing", none.Count == 0, Ids(none));
+            ex = await Throws(() => Backlinks(peer, "pub1"));
+            Check("no scope: PeerBacklinks is refused", ex is HubException, Describe(ex));
+
+            // ── Full on the "Public" folder ──
+            var t0 = DateTime.UtcNow;
+            var scope = new ShareScope
+            {
+                OwnerAddress = ido.Address, PeerAddress = idp.Address, Level = ShareLevel.Full,
+                AllowFolders = ["Public"], UpdatedAt = t0,
+            };
+            ShareScopeSigner.Sign(scope, ido);
+            await owner.InvokeAsync("SetScope", scope);
+
+            var pub1 = await Get(peer, "pub1");
+            Check("Full: PeerGetNote returns the body", Prop(pub1, "content")?.GetString() == "content of Public/one.md", pub1.ToString());
+            ex = await Throws(() => Get(peer, "priv1"));
+            Check("Full on Public: a Private note is refused", ex is HubException, Describe(ex));
+            var exUnknown = await Throws(() => Get(peer, "nope"));
+            Check("an unknown id fails with the same message as a private one",
+                  exUnknown is HubException && ex != null && exUnknown.Message == ex.Message, Describe(exUnknown));
+            ex = await Throws(() => Get(peer, "pub2x"));
+            Check("folder rule 'Public' does not cover 'Public2/' (whole-segment match)", ex is HubException, Describe(ex));
+
+            var secret = await Search(peer, "secret");
+            Check("search for 'secret' finds nothing", secret.Count == 0, Ids(secret));
+            var one = await Search(peer, "one");
+            var two = await Search(peer, "two");
+            Check("search 'one' / 'two' never carries a private title, snippet or path",
+                  one.Count > 0 && !Leaks(one) && !Leaks(two), $"one={Ids(one)} two={Ids(two)}");
+            Check("search never returns the Public2 note either", one.All(i => Prop(i, "id")?.GetString() != "pub2x"), Ids(one));
+            Check("search rows carry a preview at Full", one.All(i => !string.IsNullOrEmpty(Prop(i, "preview")?.GetString())), one.FirstOrDefault().ToString());
+
+            var back = await Backlinks(peer, "pub1");
+            Check("backlinks of pub1 = pub2 only (priv1 links to it but stays hidden)",
+                  back.Count == 1 && Prop(back[0], "id")?.GetString() == "pub2", Ids(back));
+
+            // ── stranger (no scope) sees nothing while the peer's scope is live ──
+            ex = await Throws(() => Get(stranger, "pub1"));
+            Check("a stranger with no scope is refused PeerGetNote", ex is HubException, Describe(ex));
+            Check("a stranger with no scope gets an empty search", (await Search(stranger, "one")).Count == 0);
+            ex = await Throws(() => Backlinks(stranger, "pub1"));
+            Check("a stranger with no scope is refused PeerBacklinks", ex is HubException, Describe(ex));
+
+            // ── Preview level: snippet yes, body no ──
+            var preview = new ShareScope
+            {
+                OwnerAddress = ido.Address, PeerAddress = idp.Address, Level = ShareLevel.Preview,
+                AllowFolders = ["Public"], UpdatedAt = t0.AddSeconds(1),
+            };
+            ShareScopeSigner.Sign(preview, ido);
+            await owner.InvokeAsync("SetScope", preview);
+            var pv = await Get(peer, "pub1");
+            Check("Preview: PeerGetNote has the preview but no content",
+                  Prop(pv, "content") == null && Prop(pv, "preview")?.GetString() == "first public note", pv.ToString());
+
+            // ── MetadataOnly: no preview, and a preview-only query does not rank ──
+            var meta = new ShareScope
+            {
+                OwnerAddress = ido.Address, PeerAddress = idp.Address, Level = ShareLevel.MetadataOnly,
+                AllowFolders = ["Public"], UpdatedAt = t0.AddSeconds(2),
+            };
+            ShareScopeSigner.Sign(meta, ido);
+            await owner.InvokeAsync("SetScope", meta);
+            var md = await Get(peer, "pub1");
+            Check("MetadataOnly: no preview, no content", Prop(md, "content") == null && Prop(md, "preview")?.GetString() == "", md.ToString());
+            var viaPreview = await Search(peer, "first public");
+            Check("MetadataOnly: a query that only matches the preview finds nothing", viaPreview.Count == 0, Ids(viaPreview));
+
+            // ── revoke: immediate everywhere ──
+            await owner.InvokeAsync("RevokeScope", idp.Address);
+            ex = await Throws(() => Get(peer, "pub1"));
+            Check("after revoke: PeerGetNote is refused", ex is HubException, Describe(ex));
+            Check("after revoke: PeerSearch returns nothing", (await Search(peer, "one")).Count == 0);
+            ex = await Throws(() => Backlinks(peer, "pub1"));
+            Check("after revoke: PeerBacklinks is refused", ex is HubException, Describe(ex));
+
+            // ── SendShareContent is gated on an accepted request + live scope ──
+            var delivered = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+            peer.On<JsonElement>("ShareContent", e => delivered.TrySetResult(e));
+            var asked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            owner.On<JsonElement>("ShareRequested", _ => asked.TrySetResult());
+            var answered = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+            peer.On<JsonElement>("ShareResponse", r => answered.TrySetResult(r));
+            var denied = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+            peer.On<JsonElement>("ShareDenied", d => denied.TrySetResult(d));
+
+            ShareEnvelope Envelope(string nodeId) => new()
+            {
+                FromAddress = ido.Address, ToAddress = idp.Address, NodeId = nodeId,
+                CiphertextBase64 = Convert.ToBase64String(new byte[] { 1, 2, 3 }),
+                NonceBase64 = Convert.ToBase64String(new byte[12]), TagBase64 = Convert.ToBase64String(new byte[16]),
+            };
+            ShareRequest Request(string nodeId)
+            {
+                var r = new ShareRequest
+                {
+                    FromAddress = idp.Address, ToAddress = ido.Address, NodeId = nodeId, NodeTitle = nodeId,
+                    IssuedAt = DateTime.UtcNow, Nonce = ShareRequestSigner.FreshNonce(),
+                };
+                ShareRequestSigner.Sign(r, idp);
+                return r;
+            }
+
+            ex = await Throws(() => owner.InvokeAsync("SendShareContent", Envelope("pub1")));
+            Check("SendShareContent with no accepted request is refused", ex is HubException, Describe(ex));
+
+            // Grant Full again (revoked above, so any UpdatedAt is fresh), request priv1 → per-note deny at the hub.
+            var full = new ShareScope
+            {
+                OwnerAddress = ido.Address, PeerAddress = idp.Address, Level = ShareLevel.Full,
+                AllowFolders = ["Public"], UpdatedAt = DateTime.UtcNow,
+            };
+            ShareScopeSigner.Sign(full, ido);
+            await owner.InvokeAsync("SetScope", full);
+            await peer.InvokeAsync("RequestShare", Request("priv1"));
+            var wasDenied = await Task.WhenAny(denied.Task, Task.Delay(5000)) == denied.Task;
+            Check("RequestShare for a note outside the scope is denied by the hub per-note (stage=scope)",
+                  wasDenied && Prop(denied.Task.Result, "stage")?.GetString() == "scope"
+                  && Prop(denied.Task.Result, "reason")?.GetString() == "NoMatch",
+                  wasDenied ? denied.Task.Result.ToString() : "(no ShareDenied)");
+            Check("…and the owner was never asked", asked.Task.IsCompleted == false);
+
+            await peer.InvokeAsync("RequestShare", Request("pub1"));
+            Check("RequestShare for an allowed note reaches the owner", await Task.WhenAny(asked.Task, Task.Delay(5000)) == asked.Task);
+            await owner.InvokeAsync("RespondToShare", idp.Address, true);
+            Check("the requester hears the accept", await Task.WhenAny(answered.Task, Task.Delay(5000)) == answered.Task);
+
+            await owner.InvokeAsync("SendShareContent", Envelope("pub1"));
+            var got = await Task.WhenAny(delivered.Task, Task.Delay(5000)) == delivered.Task;
+            Check("accepted request + live scope: the envelope is relayed",
+                  got && Prop(delivered.Task.Result, "nodeId")?.GetString() == "pub1", got ? delivered.Task.Result.ToString() : "(no ShareContent)");
+            ex = await Throws(() => owner.InvokeAsync("SendShareContent", Envelope("pub1")));
+            Check("the same request cannot be used for a second envelope", ex is HubException, Describe(ex));
+            ex = await Throws(() => owner.InvokeAsync("SendShareContent", Envelope("pub2")));
+            Check("an envelope for a note nobody asked for is refused", ex is HubException, Describe(ex));
+
+            // A second accepted request, then revoke: the accept is void.
+            var asked2 = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            owner.On<JsonElement>("ShareRequested", _ => asked2.TrySetResult());
+            var answered2 = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            peer.On<JsonElement>("ShareResponse", _ => answered2.TrySetResult());
+            await peer.InvokeAsync("RequestShare", Request("pub2"));
+            await Task.WhenAny(asked2.Task, Task.Delay(5000));
+            await owner.InvokeAsync("RespondToShare", idp.Address, true);
+            await Task.WhenAny(answered2.Task, Task.Delay(5000));
+            await owner.InvokeAsync("RevokeScope", idp.Address);
+            ex = await Throws(() => owner.InvokeAsync("SendShareContent", Envelope("pub2")));
+            Check("after revoke an already-accepted request no longer relays", ex is HubException, Describe(ex));
+        }
+        finally
+        {
+            BrainHub.ExportProvider = null;
+            BrainHub.NoteContentProvider = null;
+            foreach (var conn in connections)
+                try { await conn.DisposeAsync(); } catch { }
+            await app.StopAsync();
+            await app.DisposeAsync();
+        }
+    }
+
     private static JsonElement? Prop(JsonElement o, string name)
     {
         if (o.ValueKind != JsonValueKind.Object) return null;
