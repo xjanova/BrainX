@@ -18,6 +18,8 @@ internal static partial class Program
         checks.Add(("agent bus end to end: forged owner lines demoted, attachments confined", AgentBusEndToEnd));
         checks.Add(("bridge files: scratch copies a failed move left behind are swept, live ones never", BridgeTempSweepChecks));
         checks.Add(("bridge names: Grok sees unity_x with no '__' anywhere, every other client unity__x, and both spellings route", BridgeNamesPerClient));
+        checks.Add(("bridge discovery: no tools is a failure, not a day of cache — and tools announced later arrive mid-session", BridgeEmptyToolListChecks));
+        checks.Add(("bridge watcher: a program opened after the agent started is bridged in that session, and closing it drops the connection", BridgeProgramWatchChecks));
         checks.Add(("cowork room: the owner's @names become who the order is for", CoworkAddressingChecks));
         checks.Add(("cowork room: the light re-seats, @names route, the board holds who is doing what", CoworkRoomEndToEnd));
         checks.Add(("cowork broker: a call that dies is reported in the room, with the reason", CoworkBrokerReportsFailedCall));
@@ -1772,6 +1774,242 @@ internal static partial class Program
         {
             if (grok != null) await grok.DisposeAsync();
             if (codex != null) await codex.DisposeAsync();
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// The owner opens Unity / Unreal / Roblox Studio AFTER the agent started
+    /// (2026-10-19). Discovery ran once at the handshake and failed, so the
+    /// engine's tools stayed missing until the agent was restarted. The hub now
+    /// watches for the program: it appearing brings the bridge up and tells the
+    /// client to re-read tools/list; it closing drops the connection. A copied
+    /// ping.exe under a unique name stands in for the editor process.
+    /// </summary>
+    private static async Task BridgeProgramWatchChecks()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the check", false); return; }
+        var hub = System.Reflection.Assembly.LoadFrom(Path.ChangeExtension(exe, ".dll")).GetType("BrainX.Mcp.Bridge.McpBridgeHub")!;
+        var log = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        var root = Path.Combine(Path.GetTempPath(), "brainx-bridge-watch-" + Guid.NewGuid().ToString("N"));
+        var vault = Path.Combine(root, "vault");
+        Directory.CreateDirectory(Path.Combine(vault, ".obsidianx"));
+
+        var program = "bx-fake-editor-" + Guid.NewGuid().ToString("N")[..8];
+        var programExe = Path.Combine(root, program + ".exe");
+        File.Copy(Path.Combine(Environment.SystemDirectory, "PING.EXE"), programExe);
+
+        File.WriteAllText(McpBridgeConfig.PathFor(vault), new JObject
+        {
+            ["version"] = 1,
+            ["bridges"] = new JArray
+            {
+                new JObject
+                {
+                    ["id"] = "bxwatch", ["enabled"] = true, ["command"] = SelfExe(), ["timeoutSeconds"] = 30,
+                    ["processes"] = new JArray { program },
+                    ["env"] = new JObject { [StubMcpServer.EnvFlag] = "1", [StubMcpServer.BridgeModeEnv] = "listed" },
+                },
+            },
+        }.ToString(), new UTF8Encoding(false));
+        // The handshake-time attempt failed a minute ago (editor closed), so this
+        // session starts inside the retry window with no tools — the exact state
+        // that used to last until a restart.
+        File.WriteAllText(McpBridgeConfig.CachePathFor(vault), new JObject
+        {
+            ["version"] = 1,
+            ["bridges"] = new JObject
+            {
+                ["bxwatch"] = new JObject
+                {
+                    ["fingerprint"] = McpBridgeConfig.Load(vault, _ => { }, seedIfMissing: false).Single().Fingerprint(),
+                    ["fetchedUtc"] = null, ["failedUtc"] = DateTime.UtcNow.AddMinutes(-1),
+                    ["lastError"] = "editor closed", ["tools"] = null,
+                },
+            },
+        }.ToString(), new UTF8Encoding(false));
+
+        List<string> Listed()
+        {
+            var tools = new JArray();
+            hub.GetMethod("AppendTools")!.Invoke(null, [tools, false]);
+            return tools.Select(t => t["name"]!.ToString()).ToList();
+        }
+        bool Connected() =>
+            ((JObject)hub.GetMethod("StatusJson")!.Invoke(null, null)!)["bridges"]!.OfType<JObject>()
+                .Single(b => b["id"]!.ToString() == "bxwatch")["connected"]?.Value<bool>() == true;
+        bool Logged(string text) => log.Any(l => l.Contains(text, StringComparison.Ordinal));
+        async Task<bool> Until(Func<bool> done)
+        {
+            for (var deadline = DateTime.UtcNow.AddSeconds(30); DateTime.UtcNow < deadline; await Task.Delay(200))
+                if (done()) return true;
+            return false;
+        }
+
+        var told = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        System.Diagnostics.Process? editor = null;
+        try
+        {
+            hub.GetMethod("Initialize")!.Invoke(null, [vault, false, (Action<string>)log.Enqueue, null, (Action)(() => told.TrySetResult())]);
+            Check("program closed at start: nothing advertised, nothing spawned",
+                  !Listed().Any(n => n.StartsWith("bxwatch__")) && Logged("bridge 'bxwatch' skipped — failed"), string.Join(" | ", log));
+
+            await Task.Delay(TimeSpan.FromSeconds(6));      // a watch tick with the program still closed
+            Check("…and the watcher leaves it alone while the program stays closed", !Connected() && !Logged("program opened"), string.Join(" | ", log));
+
+            editor = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(programExe, "-n 120 127.0.0.1")
+            { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true });
+            var heard = await Task.WhenAny(told.Task, Task.Delay(TimeSpan.FromSeconds(30))) == told.Task;
+            Check("program opened → the bridge comes up and the client is told to re-read tools/list", heard && Logged("program opened"), string.Join(" | ", log));
+            Check("…and tools/list now carries its tools, in this same session", Listed().Contains("bxwatch__" + StubMcpServer.BridgeToolName));
+            Check("…over a live connection", Connected());
+
+            editor.Kill();
+            editor.WaitForExit(5000);
+            var dropped = await Until(() => Logged("program closed") && !Connected());
+            Check("program closed → the connection is dropped, not left holding a dead editor", dropped, string.Join(" | ", log));
+        }
+        finally
+        {
+            try { if (editor is { HasExited: false }) editor.Kill(); } catch { }
+            try { hub.GetMethod("Shutdown")!.Invoke(null, null); } catch { }
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// Roblox Studio's MCP proxy (2026-10-05) always completes the handshake,
+    /// then answers tools/list with [] while Studio has no place open. The hub
+    /// stored that as a success, so the roblox__ tools stayed missing for the
+    /// cache's 24 hours after Studio was ready. Driven through the real hub
+    /// against this harness spawned as the bridged server.
+    /// </summary>
+    private static async Task BridgeEmptyToolListChecks()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the check", false); return; }
+        var hub = System.Reflection.Assembly.LoadFrom(Path.ChangeExtension(exe, ".dll")).GetType("BrainX.Mcp.Bridge.McpBridgeHub")!;
+        var self = SelfExe();
+        var log = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        var root = Path.Combine(Path.GetTempPath(), "brainx-bridge-" + Guid.NewGuid().ToString("N"));
+
+        string Vault(string id, string mode, JObject? cachedEntry = null)
+        {
+            var vault = Path.Combine(root, id);
+            Directory.CreateDirectory(Path.Combine(vault, ".obsidianx"));
+            File.WriteAllText(McpBridgeConfig.PathFor(vault), new JObject
+            {
+                ["version"] = 1,
+                ["bridges"] = new JArray
+                {
+                    new JObject
+                    {
+                        ["id"] = id, ["enabled"] = true, ["command"] = self, ["timeoutSeconds"] = 30,
+                        ["env"] = new JObject { [StubMcpServer.EnvFlag] = "1", [StubMcpServer.BridgeModeEnv] = mode },
+                    },
+                },
+            }.ToString(), new UTF8Encoding(false));
+            if (cachedEntry != null)
+            {
+                cachedEntry["fingerprint"] = McpBridgeConfig.Load(vault, _ => { }, seedIfMissing: false).Single().Fingerprint();
+                File.WriteAllText(McpBridgeConfig.CachePathFor(vault),
+                    new JObject { ["version"] = 1, ["bridges"] = new JObject { [id] = cachedEntry } }.ToString(), new UTF8Encoding(false));
+            }
+            return vault;
+        }
+        void Init(string vault, Action? toolsChanged = null) =>
+            hub.GetMethod("Initialize")!.Invoke(null, [vault, false, (Action<string>)log.Enqueue, null, toolsChanged]);
+        void Shutdown() => hub.GetMethod("Shutdown")!.Invoke(null, null);
+        List<string> Listed()
+        {
+            var tools = new JArray();
+            hub.GetMethod("AppendTools")!.Invoke(null, [tools, false]);
+            return tools.Select(t => t["name"]!.ToString()).ToList();
+        }
+        JObject Status(string id) =>
+            ((JObject)hub.GetMethod("StatusJson")!.Invoke(null, null)!)["bridges"]!.OfType<JObject>().Single(b => b["id"]!.ToString() == id);
+        JObject? Cached(string vault, string id) =>
+            JObject.Parse(File.ReadAllText(McpBridgeConfig.CachePathFor(vault)))["bridges"]?[id] as JObject;
+        bool Logged(string text) => log.Any(l => l.Contains(text, StringComparison.Ordinal));
+        async Task<bool> Until(Func<bool> done)
+        {
+            for (var deadline = DateTime.UtcNow.AddSeconds(30); DateTime.UtcNow < deadline; await Task.Delay(100))
+                if (done()) return true;
+            return false;
+        }
+        const string NoToolsText = "returned no tools — is the editor open and its MCP server enabled?";
+
+        try
+        {
+            // 1. A server that never gets ready, behind a cache written by the old
+            //    rule — [] stamped as a fresh fetch.
+            var emptyVault = Vault("bx-empty", "empty", new JObject
+            {
+                ["fetchedUtc"] = DateTime.UtcNow, ["failedUtc"] = null, ["lastError"] = null, ["tools"] = new JArray(),
+            });
+            Init(emptyVault);
+            var listed = Listed();
+            Check("a cached [] is not served as a fresh answer — discovery runs", Logged("bridge 'bx-empty' " + NoToolsText), string.Join(" | ", log));
+            Check("…and advertises nothing", !listed.Any(n => n.StartsWith("bx-empty__")), string.Join(", ", listed));
+            var st = Status("bx-empty");
+            Check("bridge_status says why, in words the owner can act on", st["lastError"]?.ToString() == "bridge 'bx-empty' " + NoToolsText, st.ToString());
+            Check("…and a server that never promised list_changed is let go", st["connected"]?.Value<bool>() == false && st["listeningForTools"]?.Value<bool>() == false, st.ToString());
+            var entry = Cached(emptyVault, "bx-empty");
+            Check("the cache records a failure — no [] to be read back as fresh", entry?["failedUtc"]?.Type == JTokenType.Date
+                  && (entry["tools"]?.Type is null or JTokenType.Null) && !string.IsNullOrEmpty(entry["fingerprint"]?.ToString()), entry?.ToString());
+
+            Shutdown();
+            log.Clear();
+            Init(emptyVault);                       // the next agent session, inside the retry window
+            Check("the next session inside the retry window does not ask again", Logged("bridge 'bx-empty' skipped — failed"), string.Join(" | ", log));
+            Shutdown();
+
+            // 2. The editor was ready yesterday and is not today: the list it
+            //    gave then must survive an empty answer now.
+            var keptVault = Vault("bx-kept", "empty", new JObject
+            {
+                ["fetchedUtc"] = DateTime.UtcNow.AddDays(-2), ["failedUtc"] = null, ["lastError"] = null,
+                ["tools"] = new JArray { new JObject { ["name"] = StubMcpServer.BridgeToolName, ["description"] = "cached" } },
+            });
+            log.Clear();
+            Init(keptVault);
+            var answered = await Until(() => Logged("bridge 'bx-kept' " + NoToolsText));
+            Check("a stale cache is rediscovered and the empty answer recorded", answered, string.Join(" | ", log));
+            Check("…without throwing away the list cached when the editor was ready",
+                  Listed().Contains("bx-kept__" + StubMcpServer.BridgeToolName)
+                  && (Cached(keptVault, "bx-kept")?["tools"] as JArray)?.Count == 1, Cached(keptVault, "bx-kept")?.ToString());
+            Check("…while bridge_status still names the problem", Status("bx-kept")["lastError"]?.ToString()?.Contains(NoToolsText) == true);
+            Shutdown();
+
+            // 3. Roblox's case: empty first, then the server says it has tools.
+            var announceVault = Vault("bx-announce", "announce");
+            var told = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            log.Clear();
+            Init(announceVault, () => told.TrySetResult());
+            listed = Listed();
+            Check("empty at first — nothing advertised", !listed.Any(n => n.StartsWith("bx-announce__")), string.Join(", ", listed));
+            Check("…but a server that promised list_changed is kept open and listened to",
+                  Logged("Listening for it to announce them") && Status("bx-announce")["listeningForTools"]?.Value<bool>() == true,
+                  string.Join(" | ", log));
+            var heard = await Task.WhenAny(told.Task, Task.Delay(TimeSpan.FromSeconds(30))) == told.Task;
+            Check("an announcement while the bridge sits idle is heard, and the client is told to re-read tools/list", heard, string.Join(" | ", log));
+            Check("…which now carries the tools, in this same session", Listed().Contains("bx-announce__" + StubMcpServer.BridgeToolName));
+            var cleared = Status("bx-announce")["lastError"]?.ToString();
+            Check("…and the error is gone", string.IsNullOrEmpty(cleared), cleared);
+            Shutdown();
+
+            // 4. An ordinary server that also promises list_changed (FastMCP
+            //    does — Unity's does): served as before, nothing held open.
+            var listedVault = Vault("bx-listed", "listed");
+            log.Clear();
+            Init(listedVault);
+            Check("a server with tools is served exactly as before", Listed().Contains("bx-listed__" + StubMcpServer.BridgeToolName), string.Join(" | ", log));
+            Check("…and is not listened to", Status("bx-listed")["listeningForTools"]?.Value<bool>() == false, Status("bx-listed").ToString());
+        }
+        finally
+        {
+            try { Shutdown(); } catch { }
             try { Directory.Delete(root, recursive: true); } catch { }
         }
     }

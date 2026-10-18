@@ -85,6 +85,15 @@ public sealed class McpBridgeDef
     /// </summary>
     public McpBridgeProbe? Probe { get; set; }
 
+    /// <summary>
+    /// Process names (no ".exe") whose appearance means "the program just
+    /// opened — bring the bridge up now", so an editor started after the agent
+    /// still reaches this session without a restart. Empty = the hub's own list
+    /// for the ids it knows (unity, unreal, roblox); a bridge with neither this
+    /// nor a probe is only dialled at session start and on first call.
+    /// </summary>
+    public List<string> Processes { get; set; } = new();
+
     /// <summary>Where the owner gets this server. Documentation only.</summary>
     public string? Docs { get; set; }
 

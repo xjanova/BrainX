@@ -422,7 +422,7 @@ internal static partial class Program
         var bridgesInSandbox = sandbox && !cloud
             && Environment.GetEnvironmentVariable("BRAINX_HEADLESS") != "1"
             && Environment.GetEnvironmentVariable("BRAINX_SANDBOX_BRIDGES") == "1";
-        try { McpBridgeHub.Initialize(_vaultPath, headless && !bridgesInSandbox, Log, BusIdentity); }
+        try { McpBridgeHub.Initialize(_vaultPath, headless && !bridgesInSandbox, Log, BusIdentity, NotifyToolsChanged); }
         catch (Exception ex) { Log($"bridge init failed (non-fatal): {ex.Message}"); }
 
         if (!headless)
@@ -861,6 +861,23 @@ internal static partial class Program
     /// <summary>The names <see cref="CoreTools"/> advertises — the ones no bridge may answer for.</summary>
     private static readonly Lazy<HashSet<string>> CoreToolNames = new(() =>
         new HashSet<string>(CoreTools().OfType<JObject>().Select(t => t["name"]!.ToString()), StringComparer.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// A bridge's tools arrived or changed mid-session (an editor opened after
+    /// the agent started, Roblox Studio loading a place): ask the client to read
+    /// tools/list again. The launcher passes the line through like any other
+    /// worker output, and Console.Out is synchronized, so it cannot split a
+    /// response the request loop is writing.
+    /// </summary>
+    private static void NotifyToolsChanged()
+    {
+        try
+        {
+            Console.Out.WriteLine("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}");
+            Console.Out.Flush();
+        }
+        catch (Exception ex) { Log($"tools/list_changed notice failed (non-fatal): {ex.Message}"); }
+    }
 
     /// <summary>The brain's own tools. Bridged ones are appended by ToolsList.</summary>
     private static JArray CoreTools() => new()

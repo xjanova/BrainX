@@ -36,6 +36,18 @@ public sealed class McpBridgeConnection : IMcpBridgeConnection
     private Task<string?>? _pendingRead;
     private int _nextId = 1;
 
+    /// <summary>
+    /// Held for a whole request, write to answer. Two callers on one pipe — a
+    /// tools/call racing a background tools/list, or the listener below — would
+    /// otherwise each skip the other's answer as "not ours" and both time out.
+    /// </summary>
+    private readonly object _io = new();
+
+    /// <summary>initialize said <c>capabilities.tools.listChanged: true</c>.</summary>
+    private bool _announcesToolChanges;
+    private Action? _onToolsChanged;
+    private bool _listening;
+
     /// <summary>Unusable — timed out or died mid-conversation. Never reused.</summary>
     public bool Poisoned { get; private set; }
 
@@ -145,6 +157,12 @@ public sealed class McpBridgeConnection : IMcpBridgeConnection
         ServerName = result?["serverInfo"]?["name"]?.ToString();
         ServerVersion = result?["serverInfo"]?["version"]?.ToString();
 
+        // Roblox Studio's proxy promises this, and answers tools/list with an
+        // empty list until Studio has a place open — the promise is how the hub
+        // knows those tools are worth waiting for on this same pipe.
+        var listChanged = result?["capabilities"]?["tools"]?["listChanged"];
+        _announcesToolChanges = listChanged?.Type == JTokenType.Boolean && listChanged.Value<bool>();
+
         Notify("notifications/initialized");
     }
 
@@ -153,6 +171,64 @@ public sealed class McpBridgeConnection : IMcpBridgeConnection
     {
         var result = Request("tools/list", new JObject(), TimeSpan.FromSeconds(60));
         return result?["tools"] as JArray ?? new JArray();
+    }
+
+    /// <summary>
+    /// Between calls nobody reads this pipe, so a list_changed sent while the
+    /// bridge sits idle would wait unread until the next call — and a server
+    /// that answered with no tools never gets a next call. A listener reads
+    /// it instead, taking the same <see cref="_pendingRead"/> a request would,
+    /// so whichever of them gets the lock first is the one that consumes a line.
+    /// </summary>
+    public bool ListenForToolChanges(Action onChanged)
+    {
+        if (!_announcesToolChanges || !IsAlive) return false;
+        lock (_io)
+        {
+            _onToolsChanged = onChanged;
+            if (_listening) return true;
+            _listening = true;
+        }
+        new Thread(ListenLoop) { IsBackground = true, Name = $"bridge-{_def.Id}-listen" }.Start();
+        return true;
+    }
+
+    private void ListenLoop()
+    {
+        while (IsAlive)
+        {
+            Task<string?> read;
+            lock (_io) read = _pendingRead ??= Task.Run(() => _proc.StandardOutput.ReadLine());
+            try { read.Wait(); } catch { /* surfaced as a null line below */ }
+
+            lock (_io)
+            {
+                // A request held the lock when the line landed and took it —
+                // it was that request's answer, not ours to look at.
+                if (!ReferenceEquals(_pendingRead, read)) continue;
+                _pendingRead = null;
+
+                string? line;
+                try { line = read.Result; } catch { line = null; }
+                if (line == null) return;                    // pipe closed — the next call says why
+
+                // Nothing is waiting on an answer, so anything here is a
+                // notification, a banner, or a reply nobody wants any more.
+                try { NoticeToolsChanged(JObject.Parse(line.TrimStart('﻿'))); }
+                catch { }
+            }
+        }
+    }
+
+    private void NoticeToolsChanged(JObject msg)
+    {
+        if (msg["method"]?.ToString() != "notifications/tools/list_changed") return;
+        var onChanged = _onToolsChanged;
+        if (onChanged == null) return;
+
+        // Never on the reading thread: the answer is a fresh tools/list, which
+        // needs the lock that thread is holding.
+        _ = Task.Run(() => { try { onChanged(); } catch { } });
     }
 
     /// <summary>
@@ -177,6 +253,11 @@ public sealed class McpBridgeConnection : IMcpBridgeConnection
     // ───────────── JSON-RPC plumbing ─────────────
 
     private JToken? Request(string method, JObject parameters, TimeSpan timeout)
+    {
+        lock (_io) return RequestLocked(method, parameters, timeout);
+    }
+
+    private JToken? RequestLocked(string method, JObject parameters, TimeSpan timeout)
     {
         if (Poisoned) throw new InvalidOperationException($"bridge '{_def.Id}' connection is poisoned");
         if (_proc.HasExited) { Poisoned = true; throw new InvalidOperationException($"bridge '{_def.Id}' server exited (code {SafeExitCode()})"); }
@@ -223,7 +304,7 @@ public sealed class McpBridgeConnection : IMcpBridgeConnection
             // Not ours: a notification, a log message, or a response to a
             // request we already gave up on. Skip rather than mis-attribute.
             var msgId = msg["id"];
-            if (msgId == null || msgId.Type == JTokenType.Null) continue;
+            if (msgId == null || msgId.Type == JTokenType.Null) { NoticeToolsChanged(msg); continue; }
             if (msgId.ToObject<int?>() != id) continue;
 
             if (msg["error"] is JObject err)

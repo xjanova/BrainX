@@ -49,8 +49,41 @@ public static class McpBridgeHub
     private static List<McpBridgeDef> _defs = new();
     private static string _vaultPath = "";
     private static bool _enabled;
+    private static volatile bool _stopped;
     private static Action<string> _log = _ => { };
     private static System.Threading.Timer? _statusTimer;
+    private static System.Threading.Timer? _watchTimer;
+    private static int _watchBusy;
+
+    /// <summary>How often the hub looks for a supported program that just
+    /// opened (or closed). A process list is cheap; a probe only runs while
+    /// the program is up and its tools are still missing.</summary>
+    private const int WatchSeconds = 5;
+
+    /// <summary>Gap between attempts while a program is open but its MCP
+    /// server is not answering yet — Unity importing a project, Studio with no
+    /// place loaded.</summary>
+    private const int WatchRetrySeconds = 20;
+
+    /// <summary>
+    /// The programs behind the bridges the hub knows by id. A config entry's
+    /// own <c>processes</c> list wins; anything else is watched by its probe
+    /// alone, or not at all.
+    /// </summary>
+    private static readonly Dictionary<string, string[]> KnownProcesses = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["unity"]  = new[] { "Unity" },
+        ["unreal"] = new[] { "UnrealEditor", "UE4Editor" },
+        ["roblox"] = new[] { "RobloxStudioBeta", "RobloxStudio" },
+    };
+
+    /// <summary>
+    /// Tells this session's client that tools/list now answers differently —
+    /// raised when a bridge's tools arrive or change mid-session (its program
+    /// opened, or its server announced new ones), so the agent gets the tools
+    /// without a restart.
+    /// </summary>
+    private static Action _toolsChanged = () => { };
 
     /// <summary>
     /// This brain session's bus name ("claude", "codex", …), so a status file
@@ -69,6 +102,20 @@ public static class McpBridgeHub
         public string? LastError;
         public Task? InFlight;
         public List<string> Dropped = new();
+
+        /// <summary>The live connection answered with no tools and is being
+        /// held open to hear the server say it has some.</summary>
+        public bool Listening;
+
+        /// <summary>A re-list is already queued behind <see cref="InFlight"/> —
+        /// it will see any further change too.</summary>
+        public bool RelistQueued;
+
+        /// <summary>The program was seen running on the last watch tick.</summary>
+        public bool ProgramRunning;
+
+        /// <summary>When the watcher last tried to bring this bridge up.</summary>
+        public DateTime? WatchAttemptUtc;
 
         /// <summary>Calls forwarded to this bridge by THIS session — the
         /// dashboard diffs it between polls to animate real engine traffic.</summary>
@@ -95,12 +142,16 @@ public static class McpBridgeHub
     /// rather than a policy line someone could relax by accident.
     /// </summary>
     /// <param name="identity">This session's bus name, read lazily — see <see cref="_identity"/>.</param>
-    public static void Initialize(string vaultPath, bool headless, Action<string> log, Func<string>? identity = null)
+    /// <param name="toolsChanged">Sends the client notifications/tools/list_changed — see <see cref="_toolsChanged"/>.</param>
+    public static void Initialize(string vaultPath, bool headless, Action<string> log, Func<string>? identity = null,
+        Action? toolsChanged = null)
     {
         _vaultPath = vaultPath;
         _log = log;
         _enabled = !headless;
+        _stopped = false;
         if (identity != null) _identity = identity;
+        if (toolsChanged != null) _toolsChanged = toolsChanged;
         if (!_enabled) return;
 
         _defs = McpBridgeConfig.Load(vaultPath, log);
@@ -120,6 +171,104 @@ public static class McpBridgeHub
             TimeSpan.FromSeconds(StatusHeartbeatSeconds), TimeSpan.FromSeconds(StatusHeartbeatSeconds));
 
         foreach (var def in on) BeginDiscover(def);
+
+        // Discovery above runs once. An editor opened AFTER the agent started
+        // would otherwise stay unbridged until the agent restarts — the watcher
+        // brings it up the moment the program appears and tells the client its
+        // tools changed.
+        _watchTimer = new System.Threading.Timer(
+            _ => WatchTick(), null,
+            TimeSpan.FromSeconds(WatchSeconds), TimeSpan.FromSeconds(WatchSeconds));
+    }
+
+    // ───────────── program watcher ─────────────
+
+    private static string[] ProcessesFor(McpBridgeDef def) =>
+        def.Processes.Count > 0 ? def.Processes.ToArray()
+        : KnownProcesses.TryGetValue(def.Id, out var names) ? names
+        : Array.Empty<string>();
+
+    private static bool AnyRunning(string[] names)
+    {
+        foreach (var name in names)
+        {
+            System.Diagnostics.Process[] procs;
+            try { procs = System.Diagnostics.Process.GetProcessesByName(name); }
+            catch { continue; }
+            var found = procs.Length > 0;
+            foreach (var p in procs) { try { p.Dispose(); } catch { } }
+            if (found) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// One look at every enabled bridge's program. Opened → bring the bridge up
+    /// (gated on the engine's probe when it has one, so a Unity still importing
+    /// its project does not get a server spawned at it every tick). Closed →
+    /// drop the connection, so the next open dials a fresh one instead of a
+    /// child still holding the dead editor's socket.
+    /// </summary>
+    private static void WatchTick()
+    {
+        if (_stopped || !_enabled) return;
+        if (System.Threading.Interlocked.Exchange(ref _watchBusy, 1) == 1) return;
+        try
+        {
+            foreach (var def in _defs.Where(d => d.Enabled))
+            {
+                if (_stopped) return;
+                var names = ProcessesFor(def);
+                if (names.Length == 0 && def.Probe == null) continue;
+
+                var state = StateFor(def.Id);
+                if (names.Length > 0)
+                {
+                    var running = AnyRunning(names);
+                    if (!running)
+                    {
+                        if (state.ProgramRunning)
+                        {
+                            state.ProgramRunning = false;
+                            DropConnection(def.Id);
+                            _log($"bridge '{def.Id}': program closed — connection dropped");
+                            PublishStatus(def);
+                        }
+                        continue;
+                    }
+                    if (!state.ProgramRunning)
+                    {
+                        state.ProgramRunning = true;
+                        // A failure recorded while the program was closed says
+                        // nothing about it now that it is open.
+                        lock (Gate) { state.FailedUtc = null; state.WatchAttemptUtc = null; }
+                        _log($"bridge '{def.Id}': program opened — bringing the bridge up");
+                    }
+                }
+
+                var fp = def.Fingerprint();
+                lock (Gate)
+                {
+                    if (state.Tools != null && state.Fingerprint == fp) continue;   // already bridged
+                    if (state.Listening || state.RelistQueued) continue;            // the server will say when
+                    if (state.InFlight is { IsCompleted: false }) continue;
+                    if (state.WatchAttemptUtc is { } at &&
+                        DateTime.UtcNow - at < TimeSpan.FromSeconds(WatchRetrySeconds)) continue;
+                }
+
+                // Editor up but its MCP side not listening yet — wait for it
+                // rather than spawn a server that can only fail.
+                if (def.Probe != null && !EngineProbe.IsAlive(def.Probe)) continue;
+
+                lock (Gate)
+                {
+                    state.WatchAttemptUtc = DateTime.UtcNow;
+                    state.InFlight = Task.Run(() => Discover(def, fp, announce: true));
+                }
+            }
+        }
+        catch (Exception ex) { _log($"bridge watcher: {ex.Message}"); }
+        finally { System.Threading.Interlocked.Exchange(ref _watchBusy, 0); }
     }
 
     // ───────────── tools/list ─────────────
@@ -400,12 +549,19 @@ public static class McpBridgeHub
     {
         lock (Gate)
         {
+            // A discovery the watcher started can reach here after Shutdown has
+            // already emptied Live — a child spawned now would never be killed
+            // and would hold the editor's socket against the next session.
+            if (_stopped) throw new InvalidOperationException("the brain session is shutting down");
+
             if (Live.TryGetValue(def.Id, out var existing))
             {
                 if (existing.IsAlive) return existing;
                 existing.Dispose();
                 Live.Remove(def.Id);
             }
+            // Whoever was listening went with the old connection.
+            if (States.TryGetValue(def.Id, out var st)) st.Listening = false;
 
             // Where the server lives decides the transport, and the config says
             // which: a `url` means it is inside the editor (nothing to spawn),
@@ -424,6 +580,7 @@ public static class McpBridgeHub
     {
         lock (Gate)
         {
+            if (States.TryGetValue(id, out var st)) st.Listening = false;
             if (!Live.TryGetValue(id, out var conn)) return;
             Live.Remove(id);
             try { conn.Dispose(); } catch { }
@@ -453,37 +610,122 @@ public static class McpBridgeHub
             return;
         }
 
-        state.InFlight = Task.Run(() =>
+        // Under the gate so a re-list queued by the server's own notice (see
+        // OnToolsChanged) always chains behind THIS task, never beside it.
+        // Announced too: a discovery slower than AppendTools' wait lands after
+        // the client's first tools/list, and without the notice its tools would
+        // wait for the next session. Discover only speaks when the list changed.
+        lock (Gate) state.InFlight = Task.Run(() => Discover(def, fp, announce: true));
+    }
+
+    /// <summary>
+    /// One tools/list against the live server. With <paramref name="announce"/>,
+    /// a list that differs from what this session last advertised makes the
+    /// client read tools/list again; an unchanged one stays silent.
+    /// </summary>
+    private static void Discover(McpBridgeDef def, string fp, bool announce)
+    {
+        var state = StateFor(def.Id);
+        try
         {
-            try
+            var conn = Connect(def);
+            var tools = conn.ListTools();
+
+            if (tools.Count == 0)
             {
-                var conn = Connect(def);
-                var tools = conn.ListTools();
-                lock (Gate)
-                {
-                    state.Tools = tools;
-                    state.Fingerprint = fp;
-                    state.FetchedUtc = DateTime.UtcNow;
-                    state.FailedUtc = null;
-                    state.LastError = null;
-                }
-                SaveCache();
-                PublishStatus(def);
-                _log($"bridge '{def.Id}': {tools.Count} tool(s)");
+                NoTools(def, state, fp, conn);
+                return;
             }
-            catch (Exception ex)
+
+            bool changed;
+            lock (Gate)
             {
-                lock (Gate)
-                {
-                    state.FailedUtc = DateTime.UtcNow;
-                    state.LastError = ex.Message;
-                }
-                DropConnection(def.Id);
-                SaveCache();
-                PublishStatus(def);
-                _log($"bridge '{def.Id}' unavailable: {ex.Message}");
+                changed = state.Tools == null || !JToken.DeepEquals(state.Tools, tools);
+                state.Tools = tools;
+                state.Fingerprint = fp;
+                state.FetchedUtc = DateTime.UtcNow;
+                state.FailedUtc = null;
+                state.LastError = null;
             }
-        });
+            SaveCache();
+            PublishStatus(def);
+            _log($"bridge '{def.Id}': {tools.Count} tool(s)");
+            if (announce && changed) { try { _toolsChanged(); } catch { } }
+        }
+        catch (Exception ex)
+        {
+            lock (Gate)
+            {
+                state.FailedUtc = DateTime.UtcNow;
+                state.LastError = ex.Message;
+            }
+            DropConnection(def.Id);
+            SaveCache();
+            PublishStatus(def);
+            _log($"bridge '{def.Id}' unavailable: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// An empty tool list is not an answer — it is a server whose editor is not
+    /// ready. Roblox Studio's proxy always completes the handshake, then waits
+    /// ~10 s and answers <c>{"tools":[]}</c> while no place is open or "Enable
+    /// Studio as MCP server" is off. Stored as a success, that emptiness was
+    /// cached for 24 hours: every later session read it as fresh, skipped
+    /// discovery, and the roblox__ tools stayed missing for a day after Studio
+    /// was ready.
+    ///
+    /// So it is a failure, on the same retry clock as a server that would not
+    /// start, with two differences. A list cached while the editor WAS ready is
+    /// kept — it is still the truth about what this server offers once the
+    /// editor is back. And a server that promised list_changed keeps its
+    /// connection, so the tools reach THIS session the moment it says so.
+    /// </summary>
+    private static void NoTools(McpBridgeDef def, BridgeState state, string fp, IMcpBridgeConnection conn)
+    {
+        var error = $"bridge '{def.Id}' returned no tools — is the editor open and its MCP server enabled?";
+        lock (Gate)
+        {
+            // Stamped even with no tools to go with it: LoadCache only believes
+            // an entry whose fingerprint matches, and a failure it does not
+            // believe is one the next session walks straight back into.
+            state.Fingerprint = fp;
+            state.FailedUtc = DateTime.UtcNow;
+            state.LastError = error;
+        }
+
+        var listening = conn.ListenForToolChanges(() => OnToolsChanged(def));
+        if (!listening) DropConnection(def.Id);
+        lock (Gate) state.Listening = listening;
+
+        SaveCache();
+        PublishStatus(def);
+        _log(listening ? $"{error} Listening for it to announce them." : error);
+    }
+
+    /// <summary>
+    /// The server said its tool list changed. Queue one re-list behind whatever
+    /// discovery is running instead of skipping because one is: a discovery that
+    /// began before the change answers with the old list, and the notice that
+    /// arrived meanwhile would be lost.
+    /// </summary>
+    private static void OnToolsChanged(McpBridgeDef def)
+    {
+        if (_stopped) return;
+        var state = StateFor(def.Id);
+        var fp = def.Fingerprint();
+        lock (Gate)
+        {
+            if (state.RelistQueued) return;
+            state.RelistQueued = true;
+            state.InFlight = (state.InFlight ?? Task.CompletedTask).ContinueWith(_ =>
+            {
+                lock (Gate) state.RelistQueued = false;
+                if (_stopped) return;
+                _log($"bridge '{def.Id}': server says its tools changed — listing again");
+                Discover(def, fp, announce: true);
+            }, TaskScheduler.Default);
+        }
     }
 
     private static BridgeState StateFor(string id)
@@ -498,6 +740,11 @@ public static class McpBridgeHub
     /// <summary>Kill every child. Called on shutdown — an orphaned engine server holds an editor socket.</summary>
     public static void Shutdown()
     {
+        // First: a server announcing new tools now must not get a fresh child
+        // spawned for a session that is leaving.
+        _stopped = true;
+        try { _watchTimer?.Dispose(); } catch { }
+        _watchTimer = null;
         try { _statusTimer?.Dispose(); } catch { }
         _statusTimer = null;
 
@@ -556,6 +803,9 @@ public static class McpBridgeHub
                     : def.Command + (def.Args.Count > 0 ? " " + string.Join(" ", def.Args) : ""),
                 ["lastFetchedUtc"] = s.FetchedUtc?.ToString("u"),
                 ["lastError"] = s.LastError,
+                // Held open after an empty answer, to hear the server announce
+                // its tools: they arrive in this session, no restart needed.
+                ["listeningForTools"] = live && s.Listening,
                 ["docs"] = def.Docs,
                 ["setup"] = def.Setup,
             });
@@ -725,7 +975,10 @@ public static class McpBridgeHub
 
                 var s = StateFor(prop.Name);
                 s.Fingerprint = fp;
-                s.Tools = entry["tools"] as JArray;
+                // Never an empty list (see NoTools). A cache written before that
+                // rule can still hold one, and loaded as-is it reads as a fresh
+                // 24-hour answer of "this server has no tools".
+                s.Tools = entry["tools"] is JArray { Count: > 0 } cached ? cached : null;
                 s.FetchedUtc = entry["fetchedUtc"]?.ToObject<DateTime?>();
                 s.FailedUtc = entry["failedUtc"]?.ToObject<DateTime?>();
                 // ?.ToString() on a JSON null yields "" — which bridge_status
