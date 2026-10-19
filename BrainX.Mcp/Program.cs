@@ -390,6 +390,17 @@ internal static partial class Program
         }
         catch (Exception ex) { Log($"codex AGENTS.md install failed: {ex.Message}"); }
 
+        // And for Gemini CLI (~/.gemini/GEMINI.md) and Grok Build (~/.grok/AGENTS.md).
+        // Each writes only when that agent's home folder already exists.
+        if (!sandbox) try
+        {
+            var gemini = AgentRulesInstaller.EnsureGemini(_vaultPath);
+            var grok = AgentRulesInstaller.EnsureGrok(_vaultPath);
+            if (gemini == AgentRulesInstaller.InstallResult.Installed || grok == AgentRulesInstaller.InstallResult.Installed)
+                Log($"agent rules: gemini {gemini}, grok {grok} (v{AgentRulesInstaller.RuleVersion})");
+        }
+        catch (Exception ex) { Log($"gemini/grok rules install failed: {ex.Message}"); }
+
         // Self-heal Claude Desktop's claude_desktop_config.json so its UI
         // sidebar shows the version we're actually running. Desktop doesn't
         // render serverInfo.version anywhere visible — owners verify the

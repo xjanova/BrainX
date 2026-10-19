@@ -73,6 +73,7 @@ internal static partial class Program
         RegisterUpdateHolderChecks(sshChecks);
         RegisterLicenseChecks(sshChecks);
         RegisterHookHealthChecks(sshChecks);
+        RegisterAgentOnboardingChecks(sshChecks);
         RegisterIndexerChecks(sshChecks);
         RegisterAvatarChecks(sshChecks);
         RegisterLiveIndexChecks(sshChecks);

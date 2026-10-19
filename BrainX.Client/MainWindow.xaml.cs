@@ -299,7 +299,9 @@ public partial class MainWindow : Window
         // (see MainWindow.AutoOnboard.cs). Runs in the background so it never
         // blocks first paint. The user never has to open Settings and click
         // "Install" — it just works the moment the app opens.
-        _ = Task.Run(EnsureClaudeIntegrationAsync);
+        // After that first run, a light watcher re-runs it whenever an agent is
+        // installed or first opened while BrainX is already up.
+        _ = Task.Run(OnboardAndWatchAgentsAsync);
 
         // F11 toggles a true-fullscreen mode that *covers* the taskbar.
         // Standard WPF Maximize on a WindowStyle=None window only fills
