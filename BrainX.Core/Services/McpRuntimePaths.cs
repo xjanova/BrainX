@@ -82,6 +82,20 @@ public static class McpRuntimePaths
     /// a machine whose first mirror has not run.</summary>
     public static string StableExe => Path.Combine(StableDir, "brainx-mcp.exe");
 
+    /// <summary>
+    /// <paramref name="resolved"/> when the client found an MCP build, else the
+    /// stable mirror when one exists, else null. An install whose
+    /// <c>current</c> has no <c>mcp\</c> (a local client-only publish, as on
+    /// 2026-10-17) resolved nothing, so onboarding stopped at "MCP server not
+    /// built yet" while every agent was in fact running the mirror.
+    /// </summary>
+    public static string? OrStableMirror(string? resolved, string? stableExe = null)
+    {
+        if (!string.IsNullOrEmpty(resolved)) return resolved;
+        var stable = stableExe ?? StableExe;
+        return File.Exists(stable) ? stable : null;
+    }
+
     /// <summary>Where the mirror lived before 2026-10-10. Inside the app root,
     /// so anything still registered here is killed on every update.</summary>
     public static string LegacyStableDir => Path.Combine(AppRoot, "mcp");

@@ -37,12 +37,7 @@ public static class CodexAgentsRulesInstaller
     /// <summary>Bump when either rule body below changes.</summary>
     public const string RuleVersion = "1.2";
 
-    private const string BeginMarker = "<!-- BEGIN BRAINX BRAIN-FIRST (auto-managed by BrainX — do not edit inside this block) -->";
-    private const string EndMarker = "<!-- END BRAINX BRAIN-FIRST -->";
-
     private static string VersionTag => $"<!-- brainx-agents-rules v{RuleVersion} -->";
-
-    private static readonly UTF8Encoding Utf8NoBom = new(false);
 
     public static InstallResult EnsureInstalled(string vaultPath)
     {
@@ -84,66 +79,8 @@ public static class CodexAgentsRulesInstaller
         return string.IsNullOrEmpty(home) ? null : Path.Combine(home, ".codex");
     }
 
-    /// <summary>
-    /// Splice our managed block into an AGENTS.md. Returns true when the file
-    /// was written. A file already carrying the current version tag is skipped
-    /// entirely — no churn on every MCP boot.
-    /// </summary>
-    private static bool EnsureSection(string path, string body)
-    {
-        var injected = BuildBlock(body).TrimEnd('\r', '\n');
-
-        if (!File.Exists(path))
-        {
-            File.WriteAllText(path, injected + "\n", Utf8NoBom);
-            return true;
-        }
-
-        var existing = File.ReadAllText(path);
-        if (existing.Contains(VersionTag, StringComparison.Ordinal))
-            return false;   // already current → leave the user's file alone
-
-        var begin = existing.IndexOf(BeginMarker, StringComparison.Ordinal);
-        var end = existing.IndexOf(EndMarker, StringComparison.Ordinal);
-
-        string updated;
-        if (begin >= 0 && end > begin)
-        {
-            // Surgical replace of an older BrainX block. Trim the prefix's
-            // trailing newlines and the suffix's leading ones so repeated
-            // upgrades never accumulate blank lines.
-            var prefix = existing[..begin].TrimEnd('\r', '\n');
-            var suffix = existing[(end + EndMarker.Length)..].TrimStart('\r', '\n');
-
-            var sb = new StringBuilder();
-            if (prefix.Length > 0) { sb.Append(prefix); sb.Append("\n\n"); }
-            sb.Append(injected);
-            sb.Append('\n');
-            if (suffix.Length > 0) { sb.Append('\n'); sb.Append(suffix.TrimEnd('\r', '\n')); sb.Append('\n'); }
-            updated = sb.ToString();
-        }
-        else
-        {
-            // User has an AGENTS.md but no BrainX block — append, never replace.
-            updated = existing.TrimEnd() + "\n\n" + injected + "\n";
-        }
-
-        File.WriteAllText(path, updated, Utf8NoBom);
-        return true;
-    }
-
-    private static string BuildBlock(string body)
-    {
-        var sb = new StringBuilder();
-        sb.AppendLine(BeginMarker);
-        sb.AppendLine(VersionTag);
-        sb.AppendLine();
-        sb.Append(body.TrimEnd('\r', '\n'));
-        sb.AppendLine();
-        sb.AppendLine();
-        sb.Append(EndMarker);
-        return sb.ToString();
-    }
+    private static bool EnsureSection(string path, string body) =>
+        ManagedRulesBlock.Ensure(path, VersionTag, body);
 
     // ── Rule bodies ──────────────────────────────────────────────────────
 
