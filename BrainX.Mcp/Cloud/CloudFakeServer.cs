@@ -33,6 +33,9 @@ internal sealed class CloudFakeServer : IDisposable
     public long QuotaBytes { get; set; } = 1L << 30;
     /// <summary>Paths containing this are refused with BAD_PATH — a rule the client does not know.</summary>
     public string? RejectPathContaining { get; set; }
+    /// <summary>False = a node from before attachments: it refuses them by name,
+    /// lists none and does not say <c>attachments: true</c>.</summary>
+    public bool SupportsAttachments { get; set; } = true;
     /// <summary>Hold every response this long (timeout tests).</summary>
     public TimeSpan Delay { get; set; }
     /// <summary>Called with the 1-based upload request number before it is processed.</summary>
@@ -241,21 +244,25 @@ internal sealed class CloudFakeServer : IDisposable
             }
 
             var notes = Account(acct);
-            if (method == "GET" && path == "/api/cloud/manifest")
+            if (method == "GET" && (path == "/api/cloud/manifest" || path.StartsWith("/api/cloud/manifest?", StringComparison.Ordinal)))
             {
                 ManifestRequests++;
-                return (200, new JObject
+                // Attachments (stored as their base64 payload) are listed only on request.
+                var listAttachments = SupportsAttachments && path.Contains("attachments=1", StringComparison.Ordinal);
+                var o = new JObject
                 {
-                    ["files"] = new JArray(notes.Select(kv => new JObject
+                    ["files"] = new JArray(notes.Where(kv => listAttachments || !CloudPathRules.IsAttachment(kv.Key)).Select(kv => new JObject
                     {
                         ["path"] = kv.Key,
-                        ["sha256"] = CloudSyncEngine.Sha256Hex(kv.Value),
-                        ["size"] = Encoding.UTF8.GetByteCount(kv.Value),
+                        ["sha256"] = CloudSyncEngine.PayloadSha(kv.Key, kv.Value),
+                        ["size"] = CloudSyncEngine.PayloadBytes(kv.Key, kv.Value),
                         ["modifiedUtc"] = ModifiedOf(acct, kv.Key),
                     })),
                     ["usedBytes"] = Used(notes),
                     ["quotaBytes"] = QuotaBytes,
-                });
+                };
+                if (SupportsAttachments) o["attachments"] = true;
+                return (200, o);
             }
             if (method == "POST" && path == "/api/cloud/notes")
             {
@@ -263,7 +270,7 @@ internal sealed class CloudFakeServer : IDisposable
                 OnUpload?.Invoke(UploadRequests);
                 if (!writable) return Err(403, "FORBIDDEN", "read-only token");
                 if (expired) return Err(402, "LICENSE_EXPIRED", "license expired");
-                if (bodyLength > 8 * 1024 * 1024) return Err(413, "TOO_LARGE", "body over 8 MB");
+                if (bodyLength > 32 * 1024 * 1024) return Err(413, "TOO_LARGE", "body over 32 MB");
                 MaxUploadBody = Math.Max(MaxUploadBody, bodyLength);
                 var files = (JObject.Parse(body)["files"] as JArray) ?? new JArray();
                 MaxFilesPerUpload = Math.Max(MaxFilesPerUpload, files.Count);
@@ -272,19 +279,22 @@ internal sealed class CloudFakeServer : IDisposable
                 foreach (var f in files)
                 {
                     var p = f["path"]?.ToString() ?? "";
-                    var c = f["content"]?.ToString() ?? "";
-                    if (CloudPathRules.Validate(p) != null
+                    var attachment = CloudPathRules.IsAttachment(p);
+                    var c = (attachment ? f["contentBase64"] : f["content"])?.ToString();
+                    if (CloudPathRules.Validate(p) != null || (attachment && !SupportsAttachments)
                         || (!string.IsNullOrEmpty(RejectPathContaining) && p.Contains(RejectPathContaining, StringComparison.Ordinal)))
                         return Err(400, "BAD_PATH", "bad path: " + p);
-                    if (!string.Equals(CloudSyncEngine.Sha256Hex(c), f["sha256"]?.ToString(), StringComparison.OrdinalIgnoreCase))
+                    if (c == null) return Err(400, "BAD_REQUEST", (attachment ? "no contentBase64: " : "no content: ") + p);
+                    if (!string.Equals(CloudSyncEngine.PayloadSha(p, c), f["sha256"]?.ToString(), StringComparison.OrdinalIgnoreCase))
                         return Err(400, "HASH_MISMATCH", "sha256 mismatch: " + p);
-                    if (Encoding.UTF8.GetByteCount(c) > CloudPathRules.MaxNoteBytes) return Err(413, "TOO_LARGE", "note over 2 MB");
-                    delta += Encoding.UTF8.GetByteCount(c) - (notes.TryGetValue(p, out var old) ? Encoding.UTF8.GetByteCount(old) : 0);
+                    if (CloudSyncEngine.PayloadBytes(p, c) > CloudPathRules.MaxBytesFor(p)) return Err(413, "TOO_LARGE", "file over its limit");
+                    delta += CloudSyncEngine.PayloadBytes(p, c) - (notes.TryGetValue(p, out var old) ? CloudSyncEngine.PayloadBytes(p, old) : 0);
                 }
                 if (Used(notes) + delta > QuotaBytes) return Err(413, "QUOTA_EXCEEDED", "quota exceeded");
                 foreach (var f in files)
                 {
-                    notes[f["path"]!.ToString()] = f["content"]!.ToString();
+                    var fp = f["path"]!.ToString();
+                    notes[fp] = (CloudPathRules.IsAttachment(fp) ? f["contentBase64"] : f["content"])!.ToString();
                     _modified[acct + "|" + f["path"]!] = DateTime.UtcNow;
                 }
                 return (200, new JObject { ["written"] = files.Count, ["usedBytes"] = Used(notes), ["quotaBytes"] = QuotaBytes });
@@ -308,7 +318,9 @@ internal sealed class CloudFakeServer : IDisposable
                 {
                     ["files"] = new JArray(paths.Where(notes.ContainsKey).Select(p => new JObject
                     {
-                        ["path"] = p, ["content"] = notes[p], ["sha256"] = CloudSyncEngine.Sha256Hex(notes[p]),
+                        ["path"] = p,
+                        [CloudPathRules.IsAttachment(p) ? "contentBase64" : "content"] = notes[p],
+                        ["sha256"] = CloudSyncEngine.PayloadSha(p, notes[p]),
                     }))
                 });
             }
@@ -362,7 +374,7 @@ internal sealed class CloudFakeServer : IDisposable
         return d;
     }
 
-    private static long Used(Dictionary<string, string> notes) => notes.Values.Sum(v => (long)Encoding.UTF8.GetByteCount(v));
+    private static long Used(Dictionary<string, string> notes) => notes.Sum(kv => CloudSyncEngine.PayloadBytes(kv.Key, kv.Value));
 
     private JObject AccountJson(string acct)
     {

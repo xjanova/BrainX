@@ -106,7 +106,8 @@ public sealed class CloudSyncEngine
             }
 
             progress?.Report(new CloudSyncProgress(CloudSyncPhase.Scan, 0, 0));
-            var scan = await Task.Run(() => ScanLocal(root, folders, options.HonourIgnoreFile, options.FileLock, ct), ct)
+            var scan = await Task.Run(() => ScanLocal(root, folders, options.HonourIgnoreFile, options.FileLock, ct,
+                                                     options.IncludeAttachments), ct)
                 .ConfigureAwait(false);
             result.LocalNotes = scan.Notes.Count;
             result.Ignored = scan.Ignored;
@@ -114,7 +115,7 @@ public sealed class CloudSyncEngine
             result.MissingFolders.AddRange(scan.MissingFolders.OrderBy(f => f, StringComparer.Ordinal));
             foreach (var n in scan.Notes)
             {
-                if (n.TooLarge) result.Skipped.Add(new CloudSkip(n.Path, "larger than 2 MB"));
+                if (n.TooLarge) result.Skipped.Add(new CloudSkip(n.Path, CloudPathRules.TooLargeReason(n.Path)));
                 else if (n.Unreadable) result.Skipped.Add(new CloudSkip(n.Path, "could not be read (open in another program?)"));
             }
 
@@ -134,11 +135,22 @@ public sealed class CloudSyncEngine
             if (state.BindToAccount(accountId)) state.Save(root);
 
             progress?.Report(new CloudSyncProgress(CloudSyncPhase.Compare, 0, scan.Notes.Count));
-            var manifest = await _api.GetManifestAsync(ct).ConfigureAwait(false);
+            var manifest = await _api.GetManifestAsync(ct, options.IncludeAttachments).ConfigureAwait(false);
             result.UsedBytes = manifest.UsedBytes;
             result.QuotaBytes = manifest.QuotaBytes;
 
-            var plan = PlanPush(scan, folders, manifest, state, options.AllowDeletes, options.AllowMassDelete);
+            // A node from before attachments refuses them by name. Sending them
+            // anyway would cost two requests per file on every sync (the split
+            // that isolates a refused file), so they wait for the node's update.
+            var cloudTakesAttachments = options.IncludeAttachments && manifest.Attachments;
+            if (!cloudTakesAttachments)
+            {
+                var dropped = scan.Notes.RemoveAll(n => CloudPathRules.IsAttachment(n.Path));
+                result.Skipped.RemoveAll(sk => CloudPathRules.IsAttachment(sk.Path));
+                result.LocalNotes -= dropped;
+            }
+
+            var plan = PlanPush(scan, folders, manifest, state, options.AllowDeletes, options.AllowMassDelete, cloudTakesAttachments);
             result.Unchanged = plan.Unchanged;
             result.KeptCloudVersion = plan.KeptCloudVersion;
             result.HeldBackDeletes = plan.HeldBack.Count;
@@ -253,7 +265,8 @@ public sealed class CloudSyncEngine
     /// the engine keeps both.
     /// </summary>
     public static CloudPushPlan PlanPush(LocalScan scan, IReadOnlyCollection<string>? folders, CloudManifest manifest,
-                                         CloudSyncState state, bool allowDeletes, bool allowMassDelete)
+                                         CloudSyncState state, bool allowDeletes, bool allowMassDelete,
+                                         bool attachmentsInScope = true)
     {
         var plan = new CloudPushPlan();
         var serverExact = new Dictionary<string, CloudManifestFile>(StringComparer.Ordinal);
@@ -314,6 +327,9 @@ public sealed class CloudSyncEngine
         var deselected = new List<string>();
         foreach (var (p, _) in state.Uploaded)
         {
+            // Attachments this push does not look at (a node that does not
+            // list them, a caller that backs up notes only) are not "gone".
+            if (!attachmentsInScope && CloudPathRules.IsAttachment(p)) continue;
             var top = CloudPathRules.TopFolderOf(p);
             // Case- and normalization-insensitive (CloudNameComparer), like the
             // scan's folder lookup: a selection saved as "programming" (or in NFD)
@@ -362,6 +378,8 @@ public sealed class CloudSyncEngine
         return false;
     }
 
+    /// <summary>A file on its way up. Content is the payload: a note's text,
+    /// or the base64 of an attachment's bytes.</summary>
     private sealed record UploadItem(string Path, string Content, string Sha);
 
     private List<UploadItem> ReadForUpload(List<LocalNote> batch, object? fileLock, CloudPushResult result)
@@ -370,7 +388,7 @@ public sealed class CloudSyncEngine
         foreach (var n in batch)
         {
             string content;
-            try { content = ReadText(n.FullPath, fileLock); }
+            try { content = ReadPayload(n.Path, n.FullPath, fileLock); }
             catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
             {
                 result.Skipped.Add(new CloudSkip(n.Path, "removed during sync — next sync handles it"));
@@ -381,13 +399,13 @@ public sealed class CloudSyncEngine
                 result.Skipped.Add(new CloudSkip(n.Path, "could not be read (open in another program?)"));
                 continue;
             }
-            if (Encoding.UTF8.GetByteCount(content) > CloudPathRules.MaxNoteBytes)
+            if (PayloadBytes(n.Path, content) > CloudPathRules.MaxBytesFor(n.Path))
             {
-                result.Skipped.Add(new CloudSkip(n.Path, "larger than 2 MB"));
+                result.Skipped.Add(new CloudSkip(n.Path, CloudPathRules.TooLargeReason(n.Path)));
                 continue;
             }
             // Hash what is actually being sent — the file may have changed since the scan.
-            items.Add(new UploadItem(n.Path, content, Sha256Hex(content)));
+            items.Add(new UploadItem(n.Path, content, PayloadSha(n.Path, content)));
         }
         return items;
     }
@@ -483,11 +501,14 @@ public sealed class CloudSyncEngine
             progress?.Report(new CloudSyncProgress(CloudSyncPhase.Scan, 0, 0));
             // The emptiness test looks at the whole root, not only the chosen
             // folders: a vault with notes in an unticked folder is not "new".
-            var whole = await Task.Run(() => ScanLocal(root, null, honourIgnoreFile: false, options.FileLock, ct), ct)
+            var whole = await Task.Run(() => ScanLocal(root, null, honourIgnoreFile: false, options.FileLock, ct,
+                                                      options.IncludeAttachments), ct)
                 .ConfigureAwait(false);
 
             progress?.Report(new CloudSyncProgress(CloudSyncPhase.Compare, 0, 0));
-            var manifest = await _api.GetManifestAsync(ct).ConfigureAwait(false);
+            var manifest = await _api.GetManifestAsync(ct, options.IncludeAttachments).ConfigureAwait(false);
+            if (options.IncludeAttachments && !manifest.Attachments)
+                whole.Notes.RemoveAll(n => CloudPathRules.IsAttachment(n.Path));   // an older node lists none
             result.ServerNotes = manifest.Files.Count;
             result.UsedBytes = manifest.UsedBytes;
             result.QuotaBytes = manifest.QuotaBytes;
@@ -514,7 +535,8 @@ public sealed class CloudSyncEngine
             }
 
             var scan = folders == null ? whole
-                     : await Task.Run(() => ScanLocal(root, folders, honourIgnoreFile: false, options.FileLock, ct), ct).ConfigureAwait(false);
+                     : await Task.Run(() => ScanLocal(root, folders, honourIgnoreFile: false, options.FileLock, ct,
+                                                      options.IncludeAttachments && manifest.Attachments), ct).ConfigureAwait(false);
 
             var plan = PlanPull(scan, manifest, state, options.AllowMassDelete, folders);
             result.Skipped.AddRange(plan.Skipped);
@@ -549,18 +571,19 @@ public sealed class CloudSyncEngine
 
             var before = new Dictionary<string, string?>(PathCase);
             foreach (var n in scan.Notes) before.TryAdd(n.Path, n.Sha256);
-            var batches = Batch(plan.Fetch, f => Math.Max(0, f.Size) + 256, MaxBatchFiles, MaxBatchBytes);
+            var batches = Batch(plan.Fetch, f => WireSize(f) + 256, MaxBatchFiles, MaxBatchBytes);
             var done = 0;
             foreach (var batch in batches)
             {
                 ct.ThrowIfCancellationRequested();
                 progress?.Report(new CloudSyncProgress(CloudSyncPhase.Fetch, done, plan.Fetch.Count));
                 var wanted = batch.ToDictionary(f => f.Path, StringComparer.Ordinal);
-                var files = await _api.FetchNotesAsync(batch.Select(f => f.Path).ToList(), ct).ConfigureAwait(false);
+                var files = await _api.FetchNotesAsync(batch.Select(f => f.Path).ToList(), ct,
+                                                       batch.Sum(f => Math.Max(0, f.Size))).ConfigureAwait(false);
                 foreach (var file in files)
                 {
                     if (!wanted.ContainsKey(file.Path)) continue;          // never write what we did not ask for
-                    var sha = Sha256Hex(file.Content ?? "");
+                    var sha = PayloadSha(file.Path, file.Content ?? "");
                     if (!string.Equals(sha, file.Sha256, StringComparison.OrdinalIgnoreCase))
                     {
                         result.Skipped.Add(new CloudSkip(file.Path, "download did not match its checksum"));
@@ -773,10 +796,11 @@ public sealed class CloudSyncEngine
         var resolved = new List<ResolvedConflict>();
         var device = SafeDeviceName(deviceName);
         var stamp = DateTime.Now;
-        foreach (var batch in Batch(conflicts, c => Math.Max(0, c.Server.Size) + 256, MaxBatchFiles, MaxBatchBytes))
+        foreach (var batch in Batch(conflicts, c => WireSize(c.Server) + 256, MaxBatchFiles, MaxBatchBytes))
         {
             ct.ThrowIfCancellationRequested();
-            var fetched = (await _api.FetchNotesAsync(batch.Select(c => c.Server.Path).ToList(), ct).ConfigureAwait(false))
+            var fetched = (await _api.FetchNotesAsync(batch.Select(c => c.Server.Path).ToList(), ct,
+                                                      batch.Sum(c => Math.Max(0, c.Server.Size))).ConfigureAwait(false))
                 .ToDictionary(f => f.Path, StringComparer.Ordinal);
             foreach (var c in batch)
             {
@@ -787,7 +811,7 @@ public sealed class CloudSyncEngine
                     continue;
                 }
                 var cloudContent = cloud.Content ?? "";
-                var cloudSha = Sha256Hex(cloudContent);
+                var cloudSha = PayloadSha(path, cloudContent);
                 if (!string.Equals(cloudSha, cloud.Sha256, StringComparison.OrdinalIgnoreCase))
                 {
                     skipped.Add(new CloudSkip(path, "download did not match its checksum"));
@@ -800,7 +824,7 @@ public sealed class CloudSyncEngine
                 {
                     lock (fileLock ?? new object())
                     {
-                        localContent = ReadText(c.Local.FullPath);
+                        localContent = ReadPayload(path, c.Local.FullPath, null);
                         localMtime = File.GetLastWriteTimeUtc(c.Local.FullPath);
                     }
                 }
@@ -809,7 +833,7 @@ public sealed class CloudSyncEngine
                     skipped.Add(new CloudSkip(path, "could not be read (open in another program?)"));
                     continue;
                 }
-                var localSha = Sha256Hex(localContent);
+                var localSha = PayloadSha(path, localContent);
                 if (!string.Equals(localSha, c.Local.Sha256, StringComparison.Ordinal))
                 {
                     skipped.Add(new CloudSkip(path, "changed locally during sync — next sync handles it"));
@@ -869,7 +893,10 @@ public sealed class CloudSyncEngine
         var slash = cloudPath.LastIndexOf('/');
         var dir = slash < 0 ? "" : cloudPath[..(slash + 1)];
         var name = slash < 0 ? cloudPath : cloudPath[(slash + 1)..];
-        var stem = name.EndsWith(".md", StringComparison.OrdinalIgnoreCase) ? name[..^3] : name;
+        // A note keeps ".md"; an attachment keeps its own extension, so
+        // "photo (conflict ...).png" still opens as a picture.
+        var ext = CloudPathRules.IsAttachment(cloudPath) ? name[name.LastIndexOf('.')..] : ".md";
+        var stem = name.EndsWith(ext, StringComparison.OrdinalIgnoreCase) ? name[..^ext.Length] : name;
         // Invariant: on a Thai-locale PC the default calendar would stamp
         // "2569", and the same conflict would carry two names on two machines.
         var tag = $" (conflict {device} {when.ToString("yyyy-MM-dd HHmm", System.Globalization.CultureInfo.InvariantCulture)}";
@@ -878,7 +905,7 @@ public sealed class CloudSyncEngine
             // A second conflict of the same note in the same minute counts
             // inside the brackets: "… 1432 2).md", so the name still ends
             // in the one "(conflict …)" tag the owner is told to look for.
-            var suffix = tag + (n == 0 ? "" : $" {n + 1}") + ").md";
+            var suffix = tag + (n == 0 ? "" : $" {n + 1}") + ")" + ext;
             var room = CloudPathRules.MaxSegmentLength - suffix.Length;
             if (room < 1) return null;
             var head = stem.Length > room ? stem[..room].TrimEnd() : stem;
@@ -922,7 +949,7 @@ public sealed class CloudSyncEngine
                 }
                 Directory.CreateDirectory(Path.GetDirectoryName(full)!);
                 var tmp = full + "." + Environment.ProcessId + ".pulltmp";
-                File.WriteAllBytes(tmp, EncodeForDisk(content));
+                File.WriteAllBytes(tmp, PayloadToDisk(cloudPath, content));
                 File.Move(tmp, full, overwrite: true);
                 _hashes.TryRemove(full, out _);
             }
@@ -931,6 +958,10 @@ public sealed class CloudSyncEngine
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             return "could not be written here";
+        }
+        catch (FormatException)
+        {
+            return "download was not valid";
         }
     }
 
@@ -999,7 +1030,7 @@ public sealed class CloudSyncEngine
     /// down (Imported/.claude) is notes like any other, as the indexer sees it.
     /// </summary>
     public LocalScan ScanLocal(string root, IReadOnlyCollection<string>? folders, bool honourIgnoreFile,
-                               object? fileLock = null, CancellationToken ct = default)
+                               object? fileLock = null, CancellationToken ct = default, bool includeAttachments = false)
     {
         var scan = new LocalScan();
         var rootFull = Path.GetFullPath(root);
@@ -1026,7 +1057,7 @@ public sealed class CloudSyncEngine
 
         foreach (var (dir, recursive) in sources)
         {
-            foreach (var file in EnumerateMarkdown(rootFull, dir, recursive))
+            foreach (var file in EnumerateMarkdown(rootFull, dir, recursive, includeAttachments))
             {
                 ct.ThrowIfCancellationRequested();
                 var rel = CloudPathRules.ToCloudPath(rootFull, file);
@@ -1087,7 +1118,8 @@ public sealed class CloudSyncEngine
         return list;
     }
 
-    private static IEnumerable<string> EnumerateMarkdown(string rootFull, string start, bool recursive)
+    private static IEnumerable<string> EnumerateMarkdown(string rootFull, string start, bool recursive,
+                                                         bool includeAttachments = false)
     {
         rootFull = Path.TrimEndingDirectorySeparator(rootFull);
         var opts = new EnumerationOptions
@@ -1106,7 +1138,7 @@ public sealed class CloudSyncEngine
             try { files = Directory.GetFiles(dir, "*", opts); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { continue; }
             foreach (var f in files)
-                if (f.EndsWith(".md", StringComparison.OrdinalIgnoreCase)) yield return f;
+                if (CloudPathRules.IsNote(f) || (includeAttachments && CloudPathRules.IsAttachment(f))) yield return f;
 
             if (!recursive) continue;
             string[] subs;
@@ -1141,12 +1173,35 @@ public sealed class CloudSyncEngine
             return new LocalNote { Path = rel, FullPath = full };
         }
 
+        var limit = CloudPathRules.MaxBytesFor(rel);
         if (_hashes.TryGetValue(full, out var c) && c.Length == len && c.MtimeTicks == mtime)
             return new LocalNote
             {
                 Path = rel, FullPath = full, Sha256 = c.Sha, Utf8Bytes = c.Utf8Bytes, WireBytes = c.WireBytes,
-                TooLarge = c.Utf8Bytes > CloudPathRules.MaxNoteBytes,
+                TooLarge = c.Utf8Bytes > limit,
             };
+
+        if (CloudPathRules.IsAttachment(rel))
+        {
+            // Bytes, hashed as they are. Over the limit it is not read at all:
+            // it will be reported, never sent.
+            if (len > limit) return new LocalNote { Path = rel, FullPath = full, TooLarge = true, Sha256 = "", Utf8Bytes = len };
+            string raw;
+            try { raw = HashBytes(full, fileLock); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return new LocalNote { Path = rel, FullPath = full };
+            }
+            var wireBytes = (len + 2) / 3 * 4;   // base64
+            try
+            {
+                var after = new FileInfo(full);
+                if (after.Length == len && after.LastWriteTimeUtc.Ticks == mtime)
+                    _hashes[full] = new CachedHash(len, mtime, raw, len, wireBytes);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            return new LocalNote { Path = rel, FullPath = full, Sha256 = raw, Utf8Bytes = len, WireBytes = wireBytes };
+        }
 
         if (len > SkipReadAboveBytes)
             return new LocalNote { Path = rel, FullPath = full, TooLarge = true, Sha256 = "" };
@@ -1196,6 +1251,68 @@ public sealed class CloudSyncEngine
         using var reader = new StreamReader(fs, new UTF8Encoding(false), detectEncodingFromByteOrderMarks: true);
         return reader.ReadToEnd();
     }
+
+    // ═════════════════════════════════════════════════════════════════
+    // PAYLOAD — a note travels as its text, an attachment as base64 of its bytes
+    // ═════════════════════════════════════════════════════════════════
+
+    /// <summary>sha256 of an attachment's bytes, read with shared access.</summary>
+    private static string HashBytes(string full, object? fileLock)
+    {
+        if (fileLock == null) return HashBytesCore(full);
+        lock (fileLock) return HashBytesCore(full);
+    }
+
+    private static string HashBytesCore(string full)
+    {
+        using var fs = new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 64 * 1024);
+        return Convert.ToHexString(SHA256.HashData(fs)).ToLowerInvariant();
+    }
+
+    private static byte[] ReadBytes(string full, object? fileLock)
+    {
+        if (fileLock == null) return ReadBytesCore(full);
+        lock (fileLock) return ReadBytesCore(full);
+    }
+
+    private static byte[] ReadBytesCore(string full)
+    {
+        using var fs = new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 64 * 1024);
+        var bytes = new byte[fs.Length];
+        fs.ReadExactly(bytes);
+        return bytes;
+    }
+
+    /// <summary>What travels for this file: a note's text as <see cref="ReadText"/>
+    /// reads it, or the base64 of an attachment's bytes.</summary>
+    public static string ReadPayload(string cloudPath, string full, object? fileLock) =>
+        CloudPathRules.IsAttachment(cloudPath) ? Convert.ToBase64String(ReadBytes(full, fileLock)) : ReadText(full, fileLock);
+
+    /// <summary>The contract's checksum of a payload: over a note's UTF-8 text, or
+    /// over an attachment's raw bytes. A payload that is not valid base64 gets a
+    /// checksum no server sends, so it is refused like any other mismatch.</summary>
+    public static string PayloadSha(string cloudPath, string payload)
+    {
+        if (!CloudPathRules.IsAttachment(cloudPath)) return Sha256Hex(payload);
+        try { return Convert.ToHexString(SHA256.HashData(Convert.FromBase64String(payload))).ToLowerInvariant(); }
+        catch (FormatException) { return "invalid"; }
+    }
+
+    /// <summary>The size the file has on disk (a note: its UTF-8 bytes).</summary>
+    public static long PayloadBytes(string cloudPath, string payload)
+    {
+        if (!CloudPathRules.IsAttachment(cloudPath)) return Encoding.UTF8.GetByteCount(payload);
+        var pad = payload.EndsWith("==", StringComparison.Ordinal) ? 2 : payload.EndsWith('=') ? 1 : 0;
+        return payload.Length / 4 * 3 - pad;
+    }
+
+    /// <summary>The bytes to write for a payload. Throws FormatException for bad base64.</summary>
+    private static byte[] PayloadToDisk(string cloudPath, string payload) =>
+        CloudPathRules.IsAttachment(cloudPath) ? Convert.FromBase64String(payload) : EncodeForDisk(payload);
+
+    /// <summary>How big a cloud file is on the wire (an attachment grows by base64).</summary>
+    private static long WireSize(CloudManifestFile f) =>
+        CloudPathRules.IsAttachment(f.Path) ? Math.Max(0, f.Size) / 3 * 4 + 4 : Math.Max(0, f.Size);
 
     // ═════════════════════════════════════════════════════════════════
     // HELPERS

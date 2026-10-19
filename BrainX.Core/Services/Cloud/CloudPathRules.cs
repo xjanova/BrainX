@@ -16,6 +16,52 @@ public static class CloudPathRules
     /// <summary>One note may not exceed this many UTF-8 bytes (contract: ≤ 2 MB).</summary>
     public const int MaxNoteBytes = 2 * 1024 * 1024;
 
+    /// <summary>
+    /// One attachment may not exceed this many bytes. It travels base64 in a
+    /// JSON body (×4/3), and the node sits behind a Cloudflare tunnel that
+    /// refuses bodies over 100 MB — 20 MB keeps one file well inside the
+    /// upload route's 32 MB limit. Anything bigger is reported, not sent.
+    /// </summary>
+    public const int MaxAttachmentBytes = 20 * 1024 * 1024;
+
+    /// <summary>
+    /// The files that travel beside the notes (owner, 2026-10-19: "back up
+    /// attachments too — images, files in Attachments and notes' embedded
+    /// files"). What a note embeds or links to: pictures, documents, audio,
+    /// video, archives, Obsidian canvases. Never programs or scripts — the
+    /// cloud stores them for one owner only, but a backup is not a way to
+    /// carry executables around. Matched on the last extension, case-insensitive.
+    /// </summary>
+    public static readonly IReadOnlySet<string> AttachmentExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico", ".avif", ".heic", ".tif", ".tiff",
+        ".pdf", ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp", ".rtf",
+        ".mp3", ".wav", ".m4a", ".ogg", ".flac", ".opus",
+        ".mp4", ".webm", ".mov", ".mkv", ".m4v",
+        ".zip", ".7z",
+        ".canvas",
+    };
+
+    /// <summary>A note: the text the brain indexes.</summary>
+    public static bool IsNote(string? path) =>
+        path != null && path.EndsWith(".md", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>An attachment: bytes that travel beside the notes (<see cref="AttachmentExtensions"/>).</summary>
+    public static bool IsAttachment(string? path)
+    {
+        if (string.IsNullOrEmpty(path) || IsNote(path)) return false;
+        var slash = path.LastIndexOf('/');
+        var name = slash < 0 ? path : path[(slash + 1)..];
+        var dot = name.LastIndexOf('.');
+        return dot > 0 && AttachmentExtensions.Contains(name[dot..]);
+    }
+
+    /// <summary>The size limit of this kind of file.</summary>
+    public static long MaxBytesFor(string path) => IsAttachment(path) ? MaxAttachmentBytes : MaxNoteBytes;
+
+    /// <summary>What the skipped-files report says for a file over its limit.</summary>
+    public static string TooLargeReason(string path) => IsAttachment(path) ? "larger than 20 MB" : "larger than 2 MB";
+
     public const int MaxSegmentLength = 200;
     public const int MaxPathLength = 400;
 
@@ -84,7 +130,8 @@ public static class CloudPathRules
             else if (char.IsLowSurrogate(c)) return "path is not valid Unicode";
         }
 
-        if (!path.EndsWith(".md", StringComparison.OrdinalIgnoreCase)) return "not a .md file";
+        var attachment = IsAttachment(path);
+        if (!attachment && !IsNote(path)) return "not a note or a supported attachment";
 
         var segments = path.Split('/');
         for (var i = 0; i < segments.Length; i++)
@@ -97,7 +144,7 @@ public static class CloudPathRules
             // (Imported/.claude, ".NET x.md") — unless it is a system folder.
             if (seg[0] == '.' && (i == 0 || IsSystemFolderName(seg)))
                 return i == 0 ? "path starts with '.'" : "system folder";
-            if (i == segments.Length - 1 && seg.Length <= 3) return "no name before .md";
+            if (i == segments.Length - 1 && (attachment ? seg.LastIndexOf('.') < 1 : seg.Length <= 3)) return "no name before the extension";
             if (seg.Length > MaxSegmentLength) return "segment longer than 200 characters";
             // Windows silently drops a trailing dot or space, so "notes." and
             // "notes" are the same folder there and different ones elsewhere —

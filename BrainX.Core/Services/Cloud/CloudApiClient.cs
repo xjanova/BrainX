@@ -139,14 +139,18 @@ public sealed class CloudApiClient : IDisposable
         SendAsync<JObject>(HttpMethod.Delete, "/api/cloud/tokens/" + Uri.EscapeDataString(id), null,
             auth: true, _timeout, ct);
 
-    /// <summary>GET /api/cloud/manifest — every note the account holds, with its sha256.</summary>
-    public Task<CloudManifest> GetManifestAsync(CancellationToken ct = default) =>
+    /// <summary>GET /api/cloud/manifest — every note the account holds, with its sha256.
+    /// <paramref name="includeAttachments"/> also lists attachments, on a node that
+    /// stores them (<see cref="CloudManifest.Attachments"/> says whether it does).</summary>
+    public Task<CloudManifest> GetManifestAsync(CancellationToken ct = default, bool includeAttachments = false) =>
         // A manifest of tens of thousands of entries is a few MB; give it the
         // same allowance an upload of that size would get.
-        SendAsync<CloudManifest>(HttpMethod.Get, "/api/cloud/manifest", null, auth: true,
+        SendAsync<CloudManifest>(HttpMethod.Get, "/api/cloud/manifest" + (includeAttachments ? "?attachments=1" : ""), null, auth: true,
             _timeout + TimeSpan.FromSeconds(30), ct);
 
-    /// <summary>POST /api/cloud/notes — ≤200 files, ≤8 MB body.</summary>
+    /// <summary>POST /api/cloud/notes — ≤200 files. A note's text goes as
+    /// <c>content</c>; an attachment's <see cref="CloudNoteContent.Content"/> is
+    /// already base64 and goes as <c>contentBase64</c>.</summary>
     public Task<CloudUploadResult> UploadNotesAsync(IReadOnlyList<CloudNoteContent> files, CancellationToken ct = default)
     {
         long bytes = 0;
@@ -154,7 +158,12 @@ public sealed class CloudApiClient : IDisposable
         foreach (var f in files)
         {
             bytes += Encoding.UTF8.GetByteCount(f.Content);
-            arr.Add(new JObject { ["path"] = f.Path, ["content"] = f.Content, ["sha256"] = f.Sha256 });
+            arr.Add(new JObject
+            {
+                ["path"] = f.Path,
+                [CloudPathRules.IsAttachment(f.Path) ? "contentBase64" : "content"] = f.Content,
+                ["sha256"] = f.Sha256,
+            });
         }
         return SendAsync<CloudUploadResult>(HttpMethod.Post, "/api/cloud/notes",
             new JObject { ["files"] = arr }, auth: true, TimeoutFor(bytes, _timeout), ct);
@@ -165,15 +174,23 @@ public sealed class CloudApiClient : IDisposable
         SendAsync<CloudDeleteResult>(HttpMethod.Post, "/api/cloud/notes/delete",
             new JObject { ["paths"] = new JArray(paths) }, auth: true, _timeout, ct);
 
-    /// <summary>POST /api/cloud/notes/fetch — ≤200 paths; paths the server does not have are omitted.</summary>
-    public async Task<List<CloudNoteContent>> FetchNotesAsync(IReadOnlyList<string> paths, CancellationToken ct = default)
+    /// <summary>POST /api/cloud/notes/fetch — ≤200 paths; paths the server does not have are omitted.
+    /// An attachment comes back as <c>contentBase64</c>, which lands in
+    /// <see cref="CloudNoteContent.Content"/> (still base64 — the sync engine
+    /// decodes it when it writes the file). <paramref name="expectedBytes"/>:
+    /// what the manifest says the files weigh, so a big attachment gets the time it needs.</summary>
+    public async Task<List<CloudNoteContent>> FetchNotesAsync(IReadOnlyList<string> paths, CancellationToken ct = default,
+                                                              long expectedBytes = 0)
     {
         var o = await SendAsync<JObject>(HttpMethod.Post, "/api/cloud/notes/fetch",
                 new JObject { ["paths"] = new JArray(paths) }, auth: true,
                 // 200 notes can be up to a few MB coming back.
-                _timeout + TimeSpan.FromSeconds(60), ct)
+                TimeoutFor(expectedBytes * 4 / 3, _timeout + TimeSpan.FromSeconds(60)), ct)
             .ConfigureAwait(false);
-        return o["files"]?.ToObject<List<CloudNoteContent>>(JsonSerializer.Create(Json)) ?? new List<CloudNoteContent>();
+        var files = o["files"]?.ToObject<List<CloudNoteContent>>(JsonSerializer.Create(Json)) ?? new List<CloudNoteContent>();
+        foreach (var f in files)
+            if (f.ContentBase64 is { } b64) { f.Content = b64; f.ContentBase64 = null; }
+        return files;
     }
 
     /// <summary>POST /api/cloud/reindex — the server also does this by itself ~10 s after writes.</summary>

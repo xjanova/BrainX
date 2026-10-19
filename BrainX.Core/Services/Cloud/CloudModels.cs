@@ -81,12 +81,18 @@ public sealed class CloudManifest
     [JsonProperty("files")] public List<CloudManifestFile> Files { get; set; } = new();
     [JsonProperty("usedBytes")] public long UsedBytes { get; set; }
     [JsonProperty("quotaBytes")] public long QuotaBytes { get; set; }
+    /// <summary>The node stores attachments (and listed them if asked). False from an older node.</summary>
+    [JsonProperty("attachments")] public bool Attachments { get; set; }
 }
 
 public sealed class CloudNoteContent
 {
     [JsonProperty("path")] public string Path { get; set; } = "";
+    /// <summary>A note's text — or, for an attachment, the base64 of its bytes.</summary>
     [JsonProperty("content")] public string Content { get; set; } = "";
+    /// <summary>On the wire only: an attachment's bytes as the server sends them;
+    /// moved into <see cref="Content"/> by CloudApiClient.FetchNotesAsync.</summary>
+    [JsonProperty("contentBase64", NullValueHandling = NullValueHandling.Ignore)] public string? ContentBase64 { get; set; }
     [JsonProperty("sha256")] public string Sha256 { get; set; } = "";
 }
 

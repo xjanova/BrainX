@@ -372,6 +372,7 @@ internal static partial class Program
             {
                 AccountId = accountId,
                 AllowMassDelete = allowMass,
+                IncludeAttachments = true,
             }, ConsoleProgress()).ConfigureAwait(false);
             PrintPush(r);
             return r.Ok ? (r.HeldBackDeletes > 0 ? 4 : 0) : 3;
@@ -963,6 +964,7 @@ internal static partial class Program
                     AllowMassDelete = allowMass,
                     DeviceName = device,
                     LockTimeout = TimeSpan.FromSeconds(15),
+                    IncludeAttachments = !_cloudMode,    // the owner's vault backs up its attachments; the cache is notes
                 }).GetAwaiter().GetResult();
                 o["pull"] = PullJson(r);
                 if (!r.Ok) o["ok"] = false;
@@ -991,6 +993,7 @@ internal static partial class Program
                     AllowMassDelete = allowMass,
                     DeviceName = device,
                     LockTimeout = TimeSpan.FromSeconds(15),
+                    IncludeAttachments = !_cloudMode,
                 }).GetAwaiter().GetResult();
                 o["push"] = PushJson(r);
                 if (!r.Ok) o["ok"] = false;
