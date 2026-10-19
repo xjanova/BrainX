@@ -309,7 +309,7 @@ internal static partial class Program
     /// Service (SCM stop) can each end it their own way without three copies
     /// of the tick, the supervision and the cleanup.
     /// </summary>
-    internal static async Task<int> BrokerRunLoop(bool once, bool dryRun, CancellationToken ct)
+    internal static async Task<int> BrokerRunLoop(bool once, bool dryRun, CancellationToken ct, bool exitWhenUpdated = true)
     {
         Directory.CreateDirectory(BrokerDir);
         var cfg = LoadBrokerConfig();
@@ -319,6 +319,14 @@ internal static partial class Program
 
         BrokerLog($"broker up · vault={_vaultPath} · runners={string.Join(", ", cfg.Runners.Keys)}"
                   + (dryRun ? " · DRY RUN" : ""));
+
+        // Who this broker is, for the app's "Claude is running an old MCP"
+        // check: a broker is not an MCP session, and restarting Claude can
+        // never refresh it. Written only by the long-running loop.
+        var startedUtc = Process.GetCurrentProcess().StartTime.ToUniversalTime();
+        if (!once && !dryRun) WriteBrokerPidFile(startedUtc);
+        DateTime? updateSeenUtc = null;
+        var exitCode = 0;
 
         // Owner (2026-10-06): "ระบบ cowork ตอนนี้ต้องต่องานได้ทันทีเมื่อเปิด
         // โปรแกรมมาใหม่ ไม่ต้องมาสั่ง". A run still on record whose process is
@@ -368,6 +376,30 @@ internal static partial class Program
                     PruneBrokerLogs();
                 }
 
+                // Replaced on disk by an update since this broker started: hand
+                // the vault to the new build instead of running the old one for
+                // the rest of the day. Its runs finish first (up to a grace
+                // period); a run cut off by the grace is picked up again by the
+                // next broker (FindInterruptedRuns). The app's supervisor starts
+                // the new build at once; an orphan's successor is the app's
+                // adopt re-check. The Windows Service passes false — its own
+                // loop would only take the mutex back with the same old code.
+                if (exitWhenUpdated && !once && !dryRun
+                    && BuildStaleness.RewrittenSince(Environment.ProcessPath, startedUtc) is { } rebuilt)
+                {
+                    if (updateSeenUtc is null)
+                    {
+                        updateSeenUtc = DateTime.UtcNow;
+                        BrokerLog($"brainx-mcp was updated on disk ({rebuilt:u}) — handing over to the new build"
+                                  + (live.Count > 0 ? $" once {live.Count} run(s) finish" : ""));
+                    }
+                    if (live.Count == 0 || DateTime.UtcNow - updateSeenUtc > BrokerUpdateGrace)
+                    {
+                        exitCode = BrokerExitUpdated;
+                        break;
+                    }
+                }
+
                 try { await BrokerTick(cfg, live, dryRun).ConfigureAwait(false); }
                 catch (Exception ex) { BrokerLog("tick failed: " + Redact(ex.Message)); }
 
@@ -383,10 +415,52 @@ internal static partial class Program
         {
             AppDomain.CurrentDomain.ProcessExit -= OnExit;
             KillAll(live);
+            if (!once && !dryRun) DeleteBrokerPidFile();
         }
 
-        BrokerLog("broker down");
-        return 0;
+        BrokerLog(exitCode == BrokerExitUpdated ? "broker down — restarting on the updated build" : "broker down");
+        return exitCode;
+    }
+
+    /// <summary>Exit code of a broker that stopped because its build was
+    /// replaced on disk. Distinct from 3 (another broker holds the vault).</summary>
+    internal const int BrokerExitUpdated = 4;
+
+    /// <summary>How long an updated broker waits for its running agents
+    /// before handing over anyway.</summary>
+    private static readonly TimeSpan BrokerUpdateGrace = TimeSpan.FromMinutes(30);
+
+    /// <summary>agent-bus/broker/broker.pid.json — read by the app
+    /// (MainWindow.McpFreshness) so the broker is never reported as a stale
+    /// MCP client.</summary>
+    private static string BrokerPidFile => Path.Combine(BrokerDir, "broker.pid.json");
+
+    private static void WriteBrokerPidFile(DateTime startedUtc)
+    {
+        try
+        {
+            var o = new JObject
+            {
+                ["pid"] = Environment.ProcessId,
+                ["startedUtc"] = startedUtc.ToString("O", CultureInfo.InvariantCulture),
+                ["exe"] = Environment.ProcessPath ?? "",
+                ["version"] = ServerVersion,
+            };
+            File.WriteAllText(BrokerPidFile, o.ToString());
+        }
+        catch (Exception ex) { BrokerLog("could not write broker.pid.json: " + Redact(ex.Message)); }
+    }
+
+    private static void DeleteBrokerPidFile()
+    {
+        try
+        {
+            // Only our own: a successor may already have written its pid.
+            if (!File.Exists(BrokerPidFile)) return;
+            var o = JObject.Parse(File.ReadAllText(BrokerPidFile));
+            if (o["pid"]?.ToObject<int>() == Environment.ProcessId) File.Delete(BrokerPidFile);
+        }
+        catch { /* the next broker overwrites it */ }
     }
 
     /// <summary>

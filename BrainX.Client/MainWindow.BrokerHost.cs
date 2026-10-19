@@ -221,6 +221,17 @@ public partial class MainWindow
         }
         if (_brokerStopRequested) return;
 
+        // Exit 4: its build was replaced by an update (Program.Broker.cs ·
+        // BrokerExitUpdated). Not a crash — start the new build now rather
+        // than at the next supervisor tick.
+        if (code == 4)
+        {
+            _brokerRestarts = 0;
+            RememberBrokerLine("broker handed over after an update — starting the new build");
+            _ = Task.Run(() => SpawnBroker(manual: false));
+            return;
+        }
+
         // A broker that dies in the first few seconds is misconfigured, not
         // unlucky; backing off on the restart is what keeps a bad build from
         // spawning a process every twenty seconds all afternoon.

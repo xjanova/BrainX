@@ -97,6 +97,7 @@ internal static partial class Program
         RegisterCloudFollowupChecks(sshChecks);
         RegisterMindBridgeChecks(sshChecks);
         RegisterHardeningChecks(sshChecks);
+        RegisterBuildStalenessChecks(sshChecks);
         RegisterMySqlChecks(sshChecks);
         RegisterChromeBridgeChecks(sshChecks);
         RegisterOAuthChecks(sshChecks);
