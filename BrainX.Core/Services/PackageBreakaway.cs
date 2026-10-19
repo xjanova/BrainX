@@ -138,17 +138,121 @@ public static class PackageBreakaway
     }
 
     /// <summary>
+    /// The path the file system really opened for <paramref name="path"/>
+    /// (GetFinalPathNameByHandle), or null when it cannot be opened.
+    ///
+    /// Inside a package's virtualization this is the only honest answer to
+    /// "does this file exist for everyone": File.Exists, ls and Test-Path all
+    /// say yes for a file that lives only in the package's private store, but
+    /// the handle's final path names the store. Measured 2026-10-19 from a
+    /// Claude Code shell: %LOCALAPPDATA%\BrainX\current\sq.version resolved to
+    /// %LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Local\BrainX\current\sq.version.
+    /// </summary>
+    public static string? ResolvedPath(string path)
+    {
+        if (!OperatingSystem.IsWindows()) return null;
+        try
+        {
+            using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            var buffer = new char[1024];
+            var length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Length, 0);
+            if (length == 0 || length >= buffer.Length) return null;
+            var final = new string(buffer, 0, (int)length);
+            if (final.StartsWith(@"\\?\UNC\", StringComparison.Ordinal)) return @"\\" + final[8..];
+            return final.StartsWith(@"\\?\", StringComparison.Ordinal) ? final[4..] : final;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// The package store (folder name under %LOCALAPPDATA%\Packages) that
+    /// <paramref name="resolved"/> lies in, when <paramref name="requested"/>
+    /// did not ask for that store — that is, when the file was redirected.
+    /// Null when the file is where it was asked for.
+    /// </summary>
+    public static string? StoreOf(string requested, string resolved, string localAppData)
+    {
+        var packages = Path.Combine(localAppData, "Packages").TrimEnd('\\') + "\\";
+        if (string.IsNullOrEmpty(resolved) || !resolved.StartsWith(packages, StringComparison.OrdinalIgnoreCase)) return null;
+        if (requested.StartsWith(packages, StringComparison.OrdinalIgnoreCase)) return null;
+        var rest = resolved[packages.Length..];
+        var cut = rest.IndexOf('\\');
+        return cut > 0 ? rest[..cut] : null;
+    }
+
+    /// <summary>
+    /// The package whose private store really holds <paramref name="path"/>,
+    /// or null when the file is real for every process (or missing). A file
+    /// for which this is not null does NOT exist for the shell, the owner's
+    /// Explorer, or a Desktop shortcut.
+    /// </summary>
+    public static string? PackageStoreHolding(string path)
+    {
+        if (!OperatingSystem.IsWindows() || string.IsNullOrEmpty(path)) return null;
+        string full;
+        try { full = Path.GetFullPath(path); } catch { return null; }
+        return ResolvedPath(full) is string resolved
+            ? StoreOf(full, resolved, Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData))
+            : null;
+    }
+
+    /// <summary>
+    /// Start <paramref name="commandLine"/> through WMI (Win32_Process.Create).
+    /// The WMI provider host is outside every package and every job, so the
+    /// new process is too, with or without an identity here — and unlike the
+    /// shell route it keeps its arguments. Returns its pid, or null when WMI
+    /// did not start it. The window is hidden.
+    /// </summary>
+    public static int? StartOutsideViaWmi(string commandLine, TimeSpan? timeout = null)
+    {
+        if (!OperatingSystem.IsWindows()) return null;
+        static string Q(string s) => "'" + s.Replace("'", "''") + "'";
+        var ps = string.Join("\n",
+            "$ErrorActionPreference = 'Stop'",
+            "$si = New-CimInstance -Namespace root/cimv2 -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }",
+            $"$r = Invoke-CimMethod -Namespace root/cimv2 -ClassName Win32_Process -MethodName Create -Arguments @{{ CommandLine = {Q(commandLine)}; ProcessStartupInformation = $si }}",
+            "[Console]::Out.Write(\"$($r.ReturnValue) $($r.ProcessId)\")");
+        var encoded = Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(ps));
+        var powershell = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
+        try
+        {
+            using var p = Process.Start(new ProcessStartInfo(powershell,
+                $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {encoded}")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            });
+            if (p is null) return null;
+            var output = p.StandardOutput.ReadToEndAsync();
+            if (!p.WaitForExit(timeout ?? TimeSpan.FromSeconds(20))) { try { p.Kill(); } catch { } return null; }
+            var parts = output.Result.Trim().Split(' ');
+            return parts.Length == 2 && parts[0] == "0" && int.TryParse(parts[1], out var pid) && pid > 0 ? pid : null;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
     /// Ask the running shell to start <paramref name="exe"/> (no arguments).
     /// The new explorer.exe hands the request to the desktop's explorer and
     /// exits, so the program's parent is the shell: outside every package and
     /// every job. False when there is no shell to hand it to — then a new
     /// explorer.exe would become a desktop of its own instead.
+    ///
+    /// Also false when the exe lives only in a package's private store. The
+    /// shell looks for it at the real path, finds nothing, and shows "The
+    /// specified path does not exist" — on 2026-10-19 every brainx-mcp a
+    /// Claude session started did that once, after an agent had run
+    /// BrainX-win-Setup.exe from a Claude Code shell and the install landed in
+    /// Claude's store.
     /// </summary>
     public static bool StartViaShell(string exe)
     {
         if (!OperatingSystem.IsWindows() || GetShellWindow() == IntPtr.Zero) return false;
         var explorer = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
         if (!File.Exists(explorer) || !File.Exists(exe)) return false;
+        if (PackageStoreHolding(exe) is not null) return false;
         using var p = Process.Start(new ProcessStartInfo(explorer) { ArgumentList = { exe }, UseShellExecute = false });
         return p is not null;
     }
@@ -207,4 +311,8 @@ public static class PackageBreakaway
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetShellWindow();
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint GetFinalPathNameByHandleW(Microsoft.Win32.SafeHandles.SafeFileHandle file,
+        [Out] char[] path, uint length, uint flags);
 }

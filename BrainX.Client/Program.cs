@@ -20,6 +20,11 @@ public static class Program
         try { Velopack.VelopackApp.Build().Run(); }
         catch (Exception ex) { Debug.WriteLine($"Velopack init: {ex.Message}"); }
 
+        // An install that exists only in a package's private store goes back
+        // to the real folder first — no route out can start a file the world
+        // outside the package cannot see.
+        if (MoveInstallOutOfPackageStore()) return;
+
         // Out of any MSIX package before anything else is written. Before the
         // single-instance mutex, so the instance started outside can take it.
         if (RelaunchOutsidePackage(args)) return;
@@ -73,6 +78,11 @@ public static class Program
             var exe = Environment.ProcessPath;
             if (package is null || string.IsNullOrEmpty(exe)) return false;
 
+            // This very exe exists only in the store: outside, the path is
+            // empty, and the shell would show "path does not exist" instead of
+            // a window. Stay; MoveInstallOutOfPackageStore tries again later.
+            if (BrainX.Core.Services.PackageBreakaway.PackageStoreHolding(exe) is not null) return false;
+
             // In the profile root, which no package redirects, so the new
             // instance reads the same file whichever side it starts on.
             Directory.CreateDirectory(Path.GetDirectoryName(marker)!);
@@ -102,6 +112,58 @@ public static class Program
 
         try { File.Delete(marker); } catch { }
         return false;
+    }
+
+    /// <summary>
+    /// When this exe is an install living only in an MSIX package's store
+    /// (OverlayInstall has how it gets there), hand the move back to the real
+    /// %LOCALAPPDATA%\BrainX to a script started outside the package, and
+    /// return true so this window exits; the script opens the real install
+    /// when it is done. False — boot here as before — for a dev build, a
+    /// portable copy, a real install, another BrainX window already running
+    /// (it would hold the files), a move tried less than 30 minutes ago, or
+    /// WMI not starting the script.
+    /// </summary>
+    private static bool MoveInstallOutOfPackageStore()
+    {
+        try
+        {
+            var exe = Environment.ProcessPath;
+            if (string.IsNullOrEmpty(exe)) return false;
+            var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            var realRoot = Path.Combine(local, "BrainX");
+            if (!Path.GetFullPath(exe).StartsWith(realRoot + "\\", StringComparison.OrdinalIgnoreCase)) return false;
+            if (BrainX.Core.Services.PackageBreakaway.PackageStoreHolding(exe) is not string store) return false;
+
+            var self = Environment.ProcessId;
+            foreach (var p in Process.GetProcessesByName("BrainX.Client"))
+                using (p) if (p.Id != self) return false;
+
+            var work = BrainX.Core.Services.OverlayInstall.WorkDir;
+            if (BrainX.Core.Services.OverlayInstall.Refusal(work, DateTime.UtcNow) is string refusal)
+            {
+                Debug.WriteLine($"install in {store}'s store, not moved: {refusal}");
+                return false;
+            }
+
+            Directory.CreateDirectory(work);
+            var script = Path.Combine(work, "promote.ps1");
+            File.WriteAllText(script,
+                BrainX.Core.Services.OverlayInstall.BuildPromoteScript(self,
+                    BrainX.Core.Services.OverlayInstall.OverlayRoot(local, store), realRoot,
+                    Path.Combine(work, "promote.log"), Path.Combine(realRoot, "current", "BrainX.Client.exe")),
+                new System.Text.UTF8Encoding(true));   // BOM: Windows PowerShell 5.1 reads a BOM-less script as ANSI
+            BrainX.Core.Services.OverlayInstall.RecordAttempt(work, DateTime.UtcNow);
+
+            var powershell = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
+            return BrainX.Core.Services.PackageBreakaway.StartOutsideViaWmi(
+                $"\"{powershell}\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{script}\"") is not null;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"install move: {ex.Message}");
+            return false;
+        }
     }
 
     private static bool AnotherInstanceStarted(DateTime since)

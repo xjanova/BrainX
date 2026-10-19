@@ -86,6 +86,7 @@ internal static partial class Program
         RegisterCoworkTriageChecks(sshChecks);
         RegisterCoworkRelayChecks(sshChecks);
         RegisterUpdateHolderChecks(sshChecks);
+        RegisterOverlayInstallChecks(sshChecks);
         RegisterLicenseChecks(sshChecks);
         RegisterHookHealthChecks(sshChecks);
         RegisterAgentOnboardingChecks(sshChecks);
