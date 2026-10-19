@@ -819,6 +819,7 @@ public partial class MainWindow
                 AccountId = record.AccountId,
                 AllowMassDelete = allowMassDelete,
                 DeviceName = device,
+                IncludeAttachments = true,   // pictures and files the notes embed (owner, 2026-10-19)
             }, progress, cts.Token);
             // Offline, revoked, cancelled: the push would fail the same way,
             // and after a half-done restore it must not run at all.
@@ -828,6 +829,7 @@ public partial class MainWindow
                 AccountId = record.AccountId,
                 AllowMassDelete = allowMassDelete,
                 DeviceName = device,
+                IncludeAttachments = true,
             }, progress, cts.Token);
             return (down, up);
         }

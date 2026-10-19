@@ -35,6 +35,10 @@ public sealed class CloudPushOptions
 {
     /// <summary>The signed-in account. When null the engine asks the server (one extra call).</summary>
     public string? AccountId { get; set; }
+    /// <summary>Also back up attachments (CloudPathRules.AttachmentExtensions) — the
+    /// owner's vault does; the brainx-mcp cache mirrors notes only. Sent only to a
+    /// node whose manifest says it stores them.</summary>
+    public bool IncludeAttachments { get; set; }
     /// <summary>Delete from the cloud what this vault uploaded and no longer has (off for the brainx-mcp cache).</summary>
     public bool AllowDeletes { get; set; } = true;
     /// <summary>
@@ -57,6 +61,8 @@ public sealed class CloudPushOptions
 public sealed class CloudPullOptions
 {
     public string? AccountId { get; set; }
+    /// <summary>Also bring attachments down (see <see cref="CloudPushOptions.IncludeAttachments"/>).</summary>
+    public bool IncludeAttachments { get; set; }
     /// <summary>Let a pull remove more than <see cref="CloudSyncEngine.MassDeleteMin"/> local notes the cloud no longer lists (off: held back).</summary>
     public bool AllowMassDelete { get; set; }
     /// <summary>Held around each write/delete of a note file (see <see cref="CloudPushOptions.FileLock"/>).</summary>

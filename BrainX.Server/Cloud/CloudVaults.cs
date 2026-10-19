@@ -3,13 +3,16 @@ using System.IO.Enumeration;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Unicode;
+using BrainX.Core.Services.Cloud;
 
 namespace BrainX.Server.Cloud;
 
 /// <summary>A refusal the HTTP layer turns into <c>{code, message}</c>.</summary>
 public sealed record CloudError(int Status, string Code, string Message);
 
-public sealed record UploadItem(string Path, string Content, string Sha256);
+/// <summary>One file of an upload: a note's text in <paramref name="Content"/>,
+/// or an attachment's bytes in <paramref name="Raw"/> (Content is then "").</summary>
+public sealed record UploadItem(string Path, string Content, string Sha256, byte[]? Raw = null);
 
 public sealed record UploadSummary(int Written, int Unchanged, int Changed, long UsedBytes);
 
@@ -130,7 +133,7 @@ public sealed class CloudVaults
     public const long MaxNoteBytes = 2L * 1024 * 1024;
     /// <summary>Largest file fetch will read back (only a file the MCP child
     /// wrote could be bigger than MaxNoteBytes).</summary>
-    public const long MaxFetchFileBytes = 16L * 1024 * 1024;
+    public const long MaxFetchFileBytes = 24L * 1024 * 1024;   // ≥ CloudPathRules.MaxAttachmentBytes
     public static readonly TimeSpan LockWait = TimeSpan.FromSeconds(30);
     public static readonly TimeSpan RescanAfter = TimeSpan.FromMinutes(5);
 
@@ -178,6 +181,18 @@ public sealed class CloudVaults
     /// <summary>Decode for fetch. Encoding.GetString keeps a leading U+FEFF, so a
     /// file with a BOM round-trips to the same bytes and the same sha.</summary>
     public static string DecodeContent(byte[] bytes) => Utf8NoBom.GetString(bytes);
+
+    /// <summary>The checksum of a stored file: a note's as <see cref="ContentSha"/>
+    /// (what fetch returns as text), an attachment's over its raw bytes.</summary>
+    public static string ShaFor(string path, byte[] bytes)
+        => CloudPathRules.IsAttachment(path) ? Hex(SHA256.HashData(bytes)) : ContentSha(bytes);
+
+    /// <summary>A file the scan indexes: a note or a supported attachment.</summary>
+    private static bool IsSyncable(ReadOnlySpan<char> fileName)
+    {
+        var name = fileName.ToString();
+        return CloudPathRules.IsNote(name) || CloudPathRules.IsAttachment(name);
+    }
 
     // ───────────────────────── scanning ─────────────────────────
 
@@ -231,8 +246,7 @@ public sealed class CloudVaults
                     AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.System,
                 })
             {
-                ShouldIncludePredicate = (ref FileSystemEntry e) =>
-                    !e.IsDirectory && e.FileName.EndsWith(".md", StringComparison.OrdinalIgnoreCase),
+                ShouldIncludePredicate = (ref FileSystemEntry e) => !e.IsDirectory && IsSyncable(e.FileName),
                 // .obsidianx (index, journal, agent bus) and every other dot
                 // folder at the vault root is server-side state, never a note;
                 // deeper dot folders (Imported/.claude) are the owner's notes.
@@ -253,7 +267,7 @@ public sealed class CloudVaults
                               && old.Size == size && old.MtimeTicks == mtime
                               && string.Equals(old.DiskPath, disk, StringComparison.Ordinal)
                         ? old.Sha256
-                        : TryHashFile(full);
+                        : TryHashFile(full, api);
                     if (sha is null) continue;                           // vanished or unreadable mid-scan
 
                     entries[api] = new NoteEntry(api, disk, size, mtime, sha);
@@ -271,20 +285,21 @@ public sealed class CloudVaults
         foreach (var (k, e) in entries) v.Entries[k] = e;
         v.Dirs.Clear();
         foreach (var (k, d) in dirs) v.Dirs[k] = d;
-        v.SetTotals(used, entries.Count);
+        // Used bytes count attachments too (they take quota); the note count is notes.
+        v.SetTotals(used, entries.Keys.Count(CloudPathRules.IsNote));
         if (complete) v.SettlePending(pendingBefore);
         v.Scanned = true;
         v.ScannedUtc = _clock.GetUtcNow();
         v.Dirty = !complete;
     }
 
-    private static string? TryHashFile(string full)
+    private static string? TryHashFile(string full, string apiPath)
     {
         try
         {
             using var fs = new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            if (fs.Length > MaxFetchFileBytes)
-                return Hex(SHA256.HashData(fs));   // too big to fetch anyway; raw-bytes hash
+            if (fs.Length > MaxFetchFileBytes || CloudPathRules.IsAttachment(apiPath))
+                return Hex(SHA256.HashData(fs));   // raw-bytes hash: an attachment's checksum, or too big to fetch anyway
             var bytes = new byte[fs.Length];
             fs.ReadExactly(bytes);
             return ContentSha(bytes);
@@ -347,11 +362,11 @@ public sealed class CloudVaults
                 (ref FileSystemEntry e) => e.Length,
                 new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.System })
             {
-                ShouldIncludePredicate = (ref FileSystemEntry e) => !e.IsDirectory && e.FileName.EndsWith(".md", StringComparison.OrdinalIgnoreCase),
+                ShouldIncludePredicate = (ref FileSystemEntry e) => !e.IsDirectory && IsSyncable(e.FileName),
                 ShouldRecursePredicate = (ref FileSystemEntry e) =>
                     CloudPaths.MayEnterFolder(e.FileName.ToString(), topLevel: e.Directory.Length <= e.RootDirectory.Length),
             };
-            foreach (var size in walk) { used += size; count++; }
+            foreach (var size in walk) { used += size; count++; }   // a rough count until the first scan
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         return (used, count);
@@ -429,11 +444,13 @@ public sealed class CloudVaults
     }
 
     /// <summary>
-    /// Read one note for fetch: (content, sha256) or null when it does not exist.
+    /// Read one file for fetch: (content, sha256) or null when it does not exist.
+    /// A note's content is its text; an attachment's is the base64 of its bytes
+    /// (<paramref name="IsBase64"/>), its sha256 over the raw bytes.
     /// Lock-free on purpose — every write is an atomic rename, so a reader sees
     /// either the old note or the new one, and hashes exactly the bytes it read.
     /// </summary>
-    public (string Content, string Sha256)? ReadNote(string accountId, string validatedPath)
+    public (string Content, string Sha256, bool IsBase64)? ReadNote(string accountId, string validatedPath)
     {
         var v = For(accountId);
         validatedPath = CloudPaths.Normalize(validatedPath);
@@ -453,7 +470,9 @@ public sealed class CloudVaults
             if (fs.Length > MaxFetchFileBytes) return null;
             var bytes = new byte[fs.Length];
             fs.ReadExactly(bytes);
-            return (DecodeContent(bytes), ContentSha(bytes));
+            return CloudPathRules.IsAttachment(validatedPath)
+                ? (Convert.ToBase64String(bytes), Hex(SHA256.HashData(bytes)), true)
+                : (DecodeContent(bytes), ContentSha(bytes), false);
         }
         catch (FileNotFoundException) { return null; }
         catch (DirectoryNotFoundException) { return null; }
@@ -509,10 +528,23 @@ public sealed class CloudVaults
                 return (null, new CloudError(400, "BAD_PATH", $"'{Show(it.Path)}' appears twice in one batch (paths are compared case-insensitively, in NFC)"));
 
             byte[] bytes;
-            try { bytes = StrictUtf8.GetBytes(it.Content); }
-            catch (EncoderFallbackException) { return (null, new CloudError(400, "BAD_REQUEST", $"content of '{Show(it.Path)}' is not valid Unicode")); }
-            if (bytes.LongLength > MaxNoteBytes)
-                return (null, new CloudError(413, "TOO_LARGE", $"'{Show(it.Path)}' is {bytes.LongLength} bytes; one note may be at most 2 MB"));
+            if (CloudPathRules.IsAttachment(path))
+            {
+                if (it.Raw is null)
+                    return (null, new CloudError(400, "BAD_REQUEST", $"'{Show(it.Path)}' is an attachment — send its bytes as contentBase64"));
+                bytes = it.Raw;
+                if (bytes.LongLength > CloudPathRules.MaxAttachmentBytes)
+                    return (null, new CloudError(413, "TOO_LARGE", $"'{Show(it.Path)}' is {bytes.LongLength} bytes; one attachment may be at most 20 MB"));
+            }
+            else
+            {
+                if (it.Raw is not null)
+                    return (null, new CloudError(400, "BAD_REQUEST", $"'{Show(it.Path)}' is a note — send its text as content"));
+                try { bytes = StrictUtf8.GetBytes(it.Content); }
+                catch (EncoderFallbackException) { return (null, new CloudError(400, "BAD_REQUEST", $"content of '{Show(it.Path)}' is not valid Unicode")); }
+                if (bytes.LongLength > MaxNoteBytes)
+                    return (null, new CloudError(413, "TOO_LARGE", $"'{Show(it.Path)}' is {bytes.LongLength} bytes; one note may be at most 2 MB"));
+            }
 
             var sha = Hex(SHA256.HashData(bytes));
             if (!string.Equals(sha, it.Sha256.Trim(), StringComparison.OrdinalIgnoreCase))
@@ -620,7 +652,7 @@ public sealed class CloudVaults
                 written++;
                 changed++;
             }
-            v.SetTotals(used, v.Entries.Count);
+            v.SetTotals(used, v.Entries.Keys.Count(CloudPathRules.IsNote));
 
             return failure is null
                 ? (new UploadSummary(written, unchanged, changed, used), null)
@@ -715,7 +747,7 @@ public sealed class CloudVaults
                 v.Entries.Remove(p);
                 PruneEmptyDirs(v, Path.GetDirectoryName(full)!);
             }
-            v.SetTotals(Math.Max(0, used), v.Entries.Count);
+            v.SetTotals(Math.Max(0, used), v.Entries.Keys.Count(CloudPathRules.IsNote));
             return (new DeleteSummary(deleted, v.UsedBytes, failed), null);
         }
         finally

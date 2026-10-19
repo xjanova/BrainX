@@ -22,7 +22,7 @@ namespace BrainX.Mcp;
 ///                    and its log checked for the token.
 /// Never touches the owner's sign-in or cache: every path is redirected into DIR.
 /// </summary>
-internal static class CloudSelfTest
+internal static partial class CloudSelfTest
 {
     private static int _pass, _fail;
     private static bool _verbose;
@@ -60,6 +60,7 @@ internal static class CloudSelfTest
             Section("credential store"); CredentialStore(root);
             Section("end to end against the fake server"); await EndToEndAsync(root);
             Section("restore into an empty vault, conflicts, mass-delete guard"); await RestoreAndConflictsAsync(root);
+            Section("attachments: bytes exact, 20 MB limit, type list, older node, restore, conflicts, cache"); await AttachmentsAsync(root);
             Section("brainx-mcp cloud … commands"); await CliAsync(root);
             if (!args.Contains("--no-mcp"))
             {

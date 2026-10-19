@@ -10,7 +10,7 @@ namespace BrainX.Server.Cloud;
 ///
 /// Two layers, deliberately redundant:
 ///   1. <see cref="Validate"/> — the lexical rules (relative, forward slashes,
-///      .md only, no '.'/'..' segments, no dot entry at the root and no
+///      .md notes and the attachment types of CloudPathRules, no '.'/'..' segments, no dot entry at the root and no
 ///      system dot folder anywhere, no reserved device names, no characters
 ///      Windows cannot store, length caps).
 ///   2. <see cref="ResolveInside"/> — after Path.GetFullPath the target must
@@ -92,7 +92,11 @@ public static class CloudPaths
                 return $"the character '{c}' is not allowed";
         }
 
-        if (!path.EndsWith(".md", StringComparison.OrdinalIgnoreCase)) return "only .md files are accepted";
+        // Notes, and the attachments that travel beside them — one list, the
+        // client's (BrainX.Core CloudPathRules), so the two can never disagree.
+        var attachment = BrainX.Core.Services.Cloud.CloudPathRules.IsAttachment(path);
+        if (!attachment && !path.EndsWith(".md", StringComparison.OrdinalIgnoreCase))
+            return "only .md notes and supported attachments are accepted";
 
         var segments = path.Split('/');
         for (var i = 0; i < segments.Length; i++)
@@ -106,7 +110,8 @@ public static class CloudPaths
             // title — and the brain indexes them, so the cloud must carry them.
             if (seg[0] == '.' && (i == 0 || IsSystemFolderName(seg)))
                 return i == 0 ? "a path may not start with '.'" : $"'{seg}' is a system folder";
-            if (i == segments.Length - 1 && seg.Length <= 3) return "a note needs a name before .md";
+            if (i == segments.Length - 1 && (attachment ? seg.LastIndexOf('.') < 1 : seg.Length <= 3))
+                return "a file needs a name before its extension";
             if (seg.Length > MaxSegmentLength) return $"a path segment is longer than {MaxSegmentLength} characters";
             // Win32 silently strips trailing dots and spaces, so "a./x.md",
             // "a /x.md" and "a/x.md" would be three names for one folder.

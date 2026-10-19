@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Globalization;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using BrainX.Core.Services.Cloud;
 
 namespace BrainX.Server.Cloud;
 
@@ -17,6 +18,9 @@ namespace BrainX.Server.Cloud;
 public static class CloudRoutes
 {
     public const int MaxBodyBytes = 8 * 1024 * 1024;
+    /// <summary>The upload route alone: one 20 MB attachment travels as ~27 MB
+    /// of base64 (CloudPathRules.MaxAttachmentBytes); notes still batch by 6 MB.</summary>
+    public const int MaxUploadBodyBytes = 32 * 1024 * 1024;
     public const int MaxSmallBodyBytes = 64 * 1024;
     public const int MaxFilesPerUpload = 200;
     public const int MaxFetchPaths = 200;
@@ -375,11 +379,19 @@ public static class CloudRoutes
         if (err != null) return err;
         var snap = await cloud.Vaults.ManifestAsync(caller!.Account.Id, ctx.RequestAborted).ConfigureAwait(false);
         if (snap is null) return Error(503, "BUSY", "this account is busy with another operation — retry shortly");
+        // Attachments are listed only to a client that asks (?attachments=1):
+        // an older client knows only notes, and a manifest full of paths it
+        // refuses would fill its skipped-files report on every pull.
+        // `attachments: true` tells a new client this node stores them.
+        var withAttachments = ctx.Request.Query["attachments"].ToString() is "1" or "true";
         return Ok(new
         {
-            files = snap.Files.Select(f => new { path = f.Path, sha256 = f.Sha256, size = f.Size, modifiedUtc = f.ModifiedUtc }),
+            files = snap.Files
+                .Where(f => withAttachments || !CloudPathRules.IsAttachment(f.Path))
+                .Select(f => new { path = f.Path, sha256 = f.Sha256, size = f.Size, modifiedUtc = f.ModifiedUtc }),
             usedBytes = snap.UsedBytes,
             quotaBytes = cloud.QuotaFor(caller.Account),
+            attachments = true,
         });
     }
 
@@ -392,7 +404,7 @@ public static class CloudRoutes
 
         // The whole body is read before anything is written: a client that
         // disconnects mid-upload leaves no trace.
-        var (doc, bodyErr) = await ReadJsonAsync(ctx, MaxBodyBytes).ConfigureAwait(false);
+        var (doc, bodyErr) = await ReadJsonAsync(ctx, MaxUploadBodyBytes).ConfigureAwait(false);
         if (bodyErr != null) return bodyErr;
         using var body = doc;
         var root = doc!.RootElement;
@@ -405,13 +417,23 @@ public static class CloudRoutes
         var items = new List<UploadItem>(files.GetArrayLength());
         foreach (var f in files.EnumerateArray())
         {
-            if (f.ValueKind != JsonValueKind.Object) return Error(400, "BAD_REQUEST", "each file must be an object {path, content, sha256}");
+            if (f.ValueKind != JsonValueKind.Object) return Error(400, "BAD_REQUEST", "each file must be an object {path, content|contentBase64, sha256}");
             var path = Str(f, "path");
-            var content = Str(f, "content");
             var sha = Str(f, "sha256");
             if (path is null) return Error(400, "BAD_PATH", "a file has no path (or it is not valid Unicode)");
-            if (content is null) return Error(400, "BAD_REQUEST", $"'{CloudVaults.Show(path)}' has no content (or it is not valid Unicode)");
             if (sha is null) return Error(400, "BAD_REQUEST", $"'{CloudVaults.Show(path)}' has no sha256");
+            // An attachment's bytes arrive as base64; a note's text as content.
+            // Which one a path must use is the vault's rule (UploadAsync).
+            if (Str(f, "contentBase64") is { } b64)
+            {
+                byte[] raw;
+                try { raw = Convert.FromBase64String(b64); }
+                catch (FormatException) { return Error(400, "BAD_REQUEST", $"contentBase64 of '{CloudVaults.Show(path)}' is not valid base64"); }
+                items.Add(new UploadItem(path, "", sha, raw));
+                continue;
+            }
+            var content = Str(f, "content");
+            if (content is null) return Error(400, "BAD_REQUEST", $"'{CloudVaults.Show(path)}' has no content (or it is not valid Unicode)");
             items.Add(new UploadItem(path, content, sha));
         }
 
@@ -489,7 +511,7 @@ public static class CloudRoutes
         {
             if (!seen.Add(p)) continue;
             if (sent >= MaxFetchResponseBytes) { omitted.Add(p); continue; }
-            (string Content, string Sha256)? note;
+            (string Content, string Sha256, bool IsBase64)? note;
             try { note = cloud.Vaults.ReadNote(accountId, p); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -499,7 +521,7 @@ public static class CloudRoutes
             if (note is null) continue;                                  // missing paths are omitted
             w.WriteStartObject();
             w.WriteString("path", p);
-            w.WriteString("content", note.Value.Content);
+            w.WriteString(note.Value.IsBase64 ? "contentBase64" : "content", note.Value.Content);
             w.WriteString("sha256", note.Value.Sha256);
             w.WriteEndObject();
             sent += note.Value.Content.Length;

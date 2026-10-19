@@ -35,6 +35,7 @@ internal static partial class Program
         checks.Add(("cloud: accounts cannot see, fetch or delete each other's notes", CloudIsolationChecks));
         checks.Add(("cloud: an expired license blocks writes (402) but never the way back to your data", CloudExpiredLicenseChecks));
         checks.Add(("cloud: quota = owner override, else the space xman sold with the key, else the node default (4 GB)", CloudStorageQuotaChecks));
+        checks.Add(("cloud: attachments — base64 up, exact bytes down, listed only on request, 20 MB cap, counted in quota not in notes", CloudAttachmentChecks));
         checks.Add(("cloud: re-index is debounced, never overlaps per account, and the real export leaves no CLAUDE.md", CloudReindexChecks));
         checks.Add(("cloud /mcp: sessions bound to their account, account vault + sandbox, caps, quota, 402, DELETE auth", CloudMcpChecks));
         checks.Add(("owner gate + vault containment: /api/cloud is exempt, export paths cannot leave the vault", OwnerGateAndContainmentChecks));
@@ -1000,6 +1001,73 @@ internal static partial class Program
             SqliteConnection.ClearAllPools();
             try { Directory.Delete(dbDir, recursive: true); } catch { }
         }
+    }
+
+    // ───────────────────────── attachments ─────────────────────────
+
+    private static async Task CloudAttachmentChecks()
+    {
+        await using var node = await CloudNode.StartAsync(quotaBytes: 64L * 1024 * 1024);
+        const string key = "ATTACH-0000-0001";
+        var token = await node.NewAccountAsync(key);
+
+        var png = new byte[200_000];
+        new Random(3).NextBytes(png);
+        png[0] = 0xFF; png[1] = 0xFE;   // not UTF-8 — a text path would corrupt it
+        var b64 = Convert.ToBase64String(png);
+        var sha = Convert.ToHexString(SHA256.HashData(png)).ToLowerInvariant();
+
+        var up = await node.Post("/api/cloud/notes", new
+        {
+            files = new object[]
+            {
+                new { path = "Notes/a.md", content = "# A", sha256 = Sha("# A") },
+                new { path = "Attachments/pic.png", contentBase64 = b64, sha256 = sha },
+            },
+        }, token);
+        Check("upload: a note and a base64 picture in one batch", up.Status == HttpStatusCode.OK, up.ToString());
+        var onDisk = Path.Combine(node.VaultOf(key), "Attachments", "pic.png");
+        Check("…the picture is stored as its exact bytes", File.Exists(onDisk) && File.ReadAllBytes(onDisk).AsSpan().SequenceEqual(png));
+
+        var plain = await node.Get("/api/cloud/manifest", token);
+        Check("manifest without ?attachments=1: notes only (an older client sees what it knows), attachments:true",
+              ManifestFiles(plain).Select(f => f["path"]!.ToString()).SequenceEqual(new[] { "Notes/a.md" })
+              && plain.Body["attachments"]?.ToObject<bool>() == true, plain.ToString());
+        var full = await node.Get("/api/cloud/manifest?attachments=1", token);
+        var entry = ManifestFiles(full).FirstOrDefault(f => f["path"]?.ToString() == "Attachments/pic.png");
+        Check("manifest with ?attachments=1: the picture, its raw-bytes sha and size",
+              entry != null && entry["sha256"]?.ToString() == sha && entry["size"]?.ToObject<long>() == png.Length, full.ToString());
+
+        var fetch = await node.Post("/api/cloud/notes/fetch", new { paths = new[] { "Attachments/pic.png", "Notes/a.md" } }, token);
+        var fpic = (fetch.Body["files"] as JArray)?.FirstOrDefault(f => f["path"]?.ToString() == "Attachments/pic.png");
+        var fnote = (fetch.Body["files"] as JArray)?.FirstOrDefault(f => f["path"]?.ToString() == "Notes/a.md");
+        Check("fetch: the picture comes back as contentBase64, byte for byte",
+              fpic?["contentBase64"] is { } got && Convert.FromBase64String(got.ToString()).AsSpan().SequenceEqual(png)
+              && fpic["content"] == null && fpic["sha256"]?.ToString() == sha, fetch.ToString());
+        Check("…and the note still as content", fnote?["content"]?.ToString() == "# A");
+
+        var account = await node.Get("/api/cloud/account", token);
+        Check("quota counts the picture's bytes; the note count is notes",
+              account.Body["usedBytes"]?.ToObject<long>() >= png.Length && account.Body["noteCount"]?.ToObject<int>() == 1, account.ToString());
+
+        var asText = await node.Post("/api/cloud/notes", Files(("Attachments/x.png", "text")), token);
+        Check("an attachment sent as text → 400", asText.Status == HttpStatusCode.BadRequest, asText.ToString());
+        var noteAsB64 = await node.Post("/api/cloud/notes", new { files = new[] { new { path = "Notes/b.md", contentBase64 = Convert.ToBase64String("x"u8.ToArray()), sha256 = Sha("x") } } }, token);
+        Check("a note sent as base64 → 400", noteAsB64.Status == HttpStatusCode.BadRequest, noteAsB64.ToString());
+        var badB64 = await node.Post("/api/cloud/notes", new { files = new[] { new { path = "Attachments/y.png", contentBase64 = "@@not base64@@", sha256 = sha } } }, token);
+        Check("broken base64 → 400", badB64.Status == HttpStatusCode.BadRequest, badB64.ToString());
+        var wrongSha = await node.Post("/api/cloud/notes", new { files = new[] { new { path = "Attachments/z.png", contentBase64 = b64, sha256 = Sha("other") } } }, token);
+        Check("a wrong sha → HASH_MISMATCH", wrongSha.Code == "HASH_MISMATCH", wrongSha.ToString());
+        var exe = await node.Post("/api/cloud/notes", new { files = new[] { new { path = "Attachments/tool.exe", contentBase64 = b64, sha256 = sha } } }, token);
+        Check("a program → BAD_PATH", exe.Code == "BAD_PATH", exe.ToString());
+
+        var big = new byte[BrainX.Core.Services.Cloud.CloudPathRules.MaxAttachmentBytes + 1];
+        var tooBig = await node.Post("/api/cloud/notes", new { files = new[] { new { path = "Attachments/big.zip", contentBase64 = Convert.ToBase64String(big), sha256 = Convert.ToHexString(SHA256.HashData(big)).ToLowerInvariant() } } }, token);
+        Check("an attachment over 20 MB → 413 TOO_LARGE (the 32 MB body still arrives)",
+              tooBig.Status == HttpStatusCode.RequestEntityTooLarge && tooBig.Code == "TOO_LARGE", tooBig.ToString());
+
+        var del = await node.Post("/api/cloud/notes/delete", new { paths = new[] { "Attachments/pic.png" } }, token);
+        Check("delete removes an attachment like a note", del.Status == HttpStatusCode.OK && !File.Exists(onDisk), del.ToString());
     }
 
     // ───────────────────────── re-index ─────────────────────────
