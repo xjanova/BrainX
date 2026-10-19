@@ -36,9 +36,10 @@ public partial class MainWindow
         return new[]
         {
             // Stable mirror first: outside the app root, so an update does not
-            // kill the assistant's server mid-conversation. The legacy mirror
+            // kill the assistant's server mid-conversation. The retired mirrors
             // and `current` stay as fallbacks for a machine not yet migrated.
             BrainX.Core.Services.McpRuntimePaths.StableExe,
+            Path.Combine(BrainX.Core.Services.McpRuntimePaths.PreviousStableDir, "brainx-mcp.exe"),
             Path.Combine(local, "BrainX", "mcp", "brainx-mcp.exe"),
             Path.Combine(local, "BrainX", "current", "mcp", "brainx-mcp.exe"),
             Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "mcp", "brainx-mcp.exe"),
@@ -164,8 +165,16 @@ public partial class MainWindow
     /// not close her, which is the whole reason she stopped being a panel in it.
     /// </summary>
     /// <returns>A line to show the owner, or null if she was already up.</returns>
-    private string? LaunchMind()
+    /// <param name="interactive">False for the unattended autostart: a locked
+    /// Mind must not greet a launch with a dialog nobody asked for.</param>
+    private string? LaunchMind(bool interactive = true)
     {
+        // BrainX Pro (ProGate). Mind checks again at her own start.
+        var mindAllowed = interactive
+            ? RequirePro(BrainX.Core.Services.License.ProFeature.Mind)
+            : BrainX.Core.Services.License.ProGate.Allows(BrainX.Core.Services.License.ProFeature.Mind);
+        if (!mindAllowed) return BrainX.Core.Services.License.ProGate.LockedMessage(BrainX.Core.Services.License.ProFeature.Mind);
+
         try
         {
             // Already up? Bring HER up — to the front, restored if minimised —
@@ -229,7 +238,7 @@ public partial class MainWindow
         try
         {
             if (!AssistantSvc.LoadConfig().AutoStart) return;
-            var msg = LaunchMind();
+            var msg = LaunchMind(interactive: false);
             if (msg != null) Debug.WriteLine($"[assistant] autostart: {msg}");
         }
         catch (Exception ex) { Debug.WriteLine($"[assistant] autostart failed: {ex.Message}"); }

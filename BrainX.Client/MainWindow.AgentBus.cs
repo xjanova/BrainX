@@ -319,6 +319,17 @@ public partial class MainWindow
             }
         }
 
+        // Owner (2026-10-17): "เชื่อมอะไรได้จึงจะแสดง" — an agent that never connected, or whose
+        // program BrainX cannot find (or Gemini without a key), is not drawn; DashBusMissing says
+        // which ones and how to connect them.
+        var reach = BusReach();
+        _busMissing = byName.Values
+            .Where(a => a.MoonOf == null && (!a.EverSeen || reach.TryGetValue(a.Name, out var r) && !r.Ready))
+            .Select(a => (a.Name, reach.TryGetValue(a.Name, out var r) ? r : null))
+            .OrderBy(m => m.Name, StringComparer.Ordinal).ToList();
+        foreach (var (name, _) in _busMissing) byName.Remove(name);
+        foreach (var moon in byName.Values.Where(a => a.MoonOf != null && !a.EverSeen).ToList()) byName.Remove(moon.Name);
+
         // Agents first, then bridges — so the outbound half of the map lands
         // together on the ellipse instead of interleaving with the clients.
         var all = byName.Values.OrderBy(a => a.Name, StringComparer.Ordinal).ToList();
@@ -985,8 +996,55 @@ public partial class MainWindow
 
     // ───────────── header + traffic summary ─────────────
 
+    private List<(string Name, BrainX.Core.Services.AgentInstall.Reach? Reach)> _busMissing = new();
+    private Dictionary<string, BrainX.Core.Services.AgentInstall.Reach>? _busReach;
+    private DateTime _busReachAt;
+
+    /// <summary>Who of runners.json BrainX can actually start, probed at most every 30 seconds —
+    /// the card ticks every two, and a wildcard probe walks folders.</summary>
+    private Dictionary<string, BrainX.Core.Services.AgentInstall.Reach> BusReach()
+    {
+        if (_busReach != null && DateTime.UtcNow - _busReachAt < TimeSpan.FromSeconds(30)) return _busReach;
+        var map = new Dictionary<string, BrainX.Core.Services.AgentInstall.Reach>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (var (name, val) in CoworkRunners() ?? new JObject())
+                if (val is JObject r && !name.StartsWith("//", StringComparison.Ordinal))
+                    map[name] = BrainX.Core.Services.AgentInstall.Probe(name, r);
+        }
+        catch { /* an unreadable runners.json hides nobody */ }
+        _busReachAt = DateTime.UtcNow;
+        return _busReach = map;
+    }
+
+    private void DashBusMissing_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        var menu = new ContextMenu { PlacementTarget = DashBusMissing, Placement = System.Windows.Controls.Primitives.PlacementMode.Top };
+        foreach (var (name, reach) in _busMissing)
+        {
+            var (fix, url) = reach is { } r ? (r.Fix, r.Url) : BrainX.Core.Services.AgentInstall.GuideFor(name);
+            var item = new MenuItem
+            {
+                Header = $"{name} — {(reach == null ? "ยังไม่เคยเชื่อมต่อ: " : "")}{fix}{(url != null ? "  ↗" : "")}",
+                IsEnabled = url != null,
+            };
+            if (url != null)
+                item.Click += (_, _) =>
+                {
+                    try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true }); } catch { }
+                };
+            menu.Items.Add(item);
+        }
+        menu.IsOpen = true;
+    }
+
     private void UpdateBusHeaderAndTraffic(List<BusAgentState> agents)
     {
+        DashBusMissing.Visibility = _busMissing.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        DashBusMissingText.Text = _busMissing.Count > 0
+            ? $"ยังไม่ได้เชื่อม: {string.Join(", ", _busMissing.Select(m => m.Name))} · วิธีเชื่อม ▴"
+            : "";
+
         var clients = agents.Where(a => !a.IsBridge).ToList();
         var bridges = agents.Where(a => a.IsBridge).ToList();
 

@@ -889,65 +889,31 @@ internal static class CliInstall
             return Task.FromResult(2);
         }
 
-        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        var dir = Path.Combine(home, ".gemini");
+        var dir = AgentHomes.GeminiHome;
         var path = Path.Combine(dir, "settings.json");
+        if (!File.Exists(path)) Console.WriteLine($"  ⓘ  no settings file yet — creating {path}");
 
-        JObject json;
-        if (File.Exists(path))
-        {
-            try
-            {
-                json = JObject.Parse(File.ReadAllText(path));
-            }
-            catch (Exception ex)
-            {
-                // Refuse rather than overwrite. A settings file that will not
-                // parse is either hand-edited or half-written, and replacing it
-                // with our one key would silently delete the owner's config.
-                Console.WriteLine($"  ✗ {path} exists but is not valid JSON: {ex.Message}");
-                Console.WriteLine("     Fix or move that file, then re-run. Nothing was written.");
-                return Task.FromResult(4);
-            }
-        }
-        else
-        {
-            json = new JObject();
-            Console.WriteLine($"  ⓘ  no settings file yet — creating {path}");
-        }
-
-        if (json["mcpServers"] is not JObject servers)
-        {
-            servers = new JObject();
-            json["mcpServers"] = servers;
-        }
-
-        // Same stale-key sweep as the Desktop path: a version-suffixed key from
-        // an older build must not survive as a second, dead entry.
-        foreach (var k in servers.Properties()
-                     .Where(p => p.Name.StartsWith(McpServerName, StringComparison.OrdinalIgnoreCase))
-                     .Select(p => p.Name).ToList())
-            servers.Remove(k);
-
-        servers[McpServerName] = new JObject
-        {
-            ["command"] = exePath,
-            ["args"] = new JArray(),
-            ["env"] = new JObject
-            {
-                ["BRAINX_VAULT"] = vault,
-                ["BRAINX_MCP_VERSION"] = Program.ServerVersion,
-            },
-        };
-
+        // Same merge the client's zero-touch onboarding uses (AgentMcpRegistration):
+        // every unrelated key is kept, a version-suffixed key from an older build is
+        // swept, and an explicit register always points the entry at THIS binary.
         try
         {
-            Directory.CreateDirectory(dir);
-            // File.WriteAllText is UTF-8 WITHOUT a BOM on .NET, which is what
-            // this file needs: a BOM in front of `{` is a parse error for every
-            // JSON reader that does not special-case it.
-            File.WriteAllText(path, json.ToString(Newtonsoft.Json.Formatting.Indented));
-            Console.WriteLine($"  ✓ registered \"{McpServerName}\"");
+            switch (AgentMcpRegistration.EnsureGemini(path, exePath, vault, Program.ServerVersion))
+            {
+                case AgentMcpRegistration.Result.Corrupt:
+                    // Refuse rather than overwrite. A settings file that will not
+                    // parse is either hand-edited or half-written, and replacing it
+                    // with our one key would silently delete the owner's config.
+                    Console.WriteLine($"  ✗ {path} exists but is not valid JSON.");
+                    Console.WriteLine("     Fix or move that file, then re-run. Nothing was written.");
+                    return Task.FromResult(4);
+                case AgentMcpRegistration.Result.Unchanged:
+                    Console.WriteLine($"  ✓ \"{McpServerName}\" already registered here");
+                    break;
+                default:
+                    Console.WriteLine($"  ✓ registered \"{McpServerName}\"");
+                    break;
+            }
             Console.WriteLine($"  → {path}");
         }
         catch (Exception ex)
@@ -958,6 +924,8 @@ internal static class CliInstall
 
         var rules = CodexAgentsRulesInstaller.EnsureInstalled(vault);
         Console.WriteLine($"  brain-first rules (AGENTS.md): {rules} (v{CodexAgentsRulesInstaller.RuleVersion})");
+        var geminiRules = AgentRulesInstaller.EnsureGemini(vault);
+        Console.WriteLine($"  brain-first rules (GEMINI.md): {geminiRules} (v{AgentRulesInstaller.RuleVersion})");
 
         Console.WriteLine();
         Console.WriteLine("✓ Done. Start the Gemini CLI and run /mcp to confirm it sees the brain.");

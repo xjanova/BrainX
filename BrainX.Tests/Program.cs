@@ -70,16 +70,20 @@ internal static partial class Program
         RegisterSshGateChecks(sshChecks);
         RegisterSshEndToEnd(sshChecks);
         RegisterAgentBusChecks(sshChecks);
+        RegisterInstallRepairChecks(sshChecks);
         RegisterEmbeddingChecks(sshChecks);
         RegisterNoteWriteChecks(sshChecks);
         RegisterLearningLoopChecks(sshChecks);
         RegisterShieldChecks(sshChecks);
         RegisterRunnerModelChecks(sshChecks);
+        RegisterCluadeXModelChecks(sshChecks);
         RegisterAssistantChecks(sshChecks);
         RegisterCoworkSnapshotChecks(sshChecks);
         RegisterCoworkTriageChecks(sshChecks);
         RegisterUpdateHolderChecks(sshChecks);
+        RegisterLicenseChecks(sshChecks);
         RegisterHookHealthChecks(sshChecks);
+        RegisterAgentOnboardingChecks(sshChecks);
         RegisterIndexerChecks(sshChecks);
         RegisterAvatarChecks(sshChecks);
         RegisterLiveIndexChecks(sshChecks);
@@ -89,6 +93,7 @@ internal static partial class Program
         RegisterHardeningChecks(sshChecks);
         RegisterMySqlChecks(sshChecks);
         RegisterChromeBridgeChecks(sshChecks);
+        RegisterOAuthChecks(sshChecks);
         foreach (var (name, check) in sshChecks) await Run(name, check);
 
         // BRAINX_TEST_MYSQL set: the whole cloud surface again, with every test
@@ -381,6 +386,13 @@ internal static partial class Program
               McpRemotePolicy.IsAllowed("task_handoff", McpScope.ReadWrite));
         Check("task_update is allowed with a read-write token",
               McpRemotePolicy.IsAllowed("task_update", McpScope.ReadWrite));
+        Check("cowork_read is readable with a read token (Gemini desktop reads the room)",
+              McpRemotePolicy.IsAllowed("cowork_read", McpScope.Read));
+        Check("cowork_task and cowork_say need a read-write token",
+              !McpRemotePolicy.IsAllowed("cowork_task", McpScope.Read) && !McpRemotePolicy.IsAllowed("cowork_say", McpScope.Read)
+              && McpRemotePolicy.IsAllowed("cowork_task", McpScope.ReadWrite) && McpRemotePolicy.IsAllowed("cowork_say", McpScope.ReadWrite));
+        Check("joining or leaving the room stays local",
+              !McpRemotePolicy.IsAllowed("cowork_join", McpScope.ReadWrite) && !McpRemotePolicy.IsAllowed("cowork_leave", McpScope.ReadWrite));
         Check("no task tool survives a missing credential",
               !McpRemotePolicy.IsAllowed("task_queue", McpScope.None)
               && !McpRemotePolicy.IsAllowed("task_handoff", McpScope.None)

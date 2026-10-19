@@ -73,10 +73,25 @@ internal sealed class CloudFakeServer : IDisposable
         lock (_gate) return new Dictionary<string, string>(Account(accountId), StringComparer.Ordinal);
     }
 
-    public void PutNote(string accountId, string path, string content)
+    public void PutNote(string accountId, string path, string content, DateTime? modifiedUtc = null)
     {
-        lock (_gate) Account(accountId)[path] = content;
+        lock (_gate)
+        {
+            Account(accountId)[path] = content;
+            _modified[accountId + "|" + path] = modifiedUtc ?? DateTime.UtcNow;
+        }
     }
+
+    /// <summary>Backdate or postdate a note's cloud timestamp (conflict tests).</summary>
+    public void SetModified(string accountId, string path, DateTime modifiedUtc)
+    {
+        lock (_gate) _modified[accountId + "|" + path] = modifiedUtc;
+    }
+
+    private readonly Dictionary<string, DateTime> _modified = new(StringComparer.Ordinal);   // account|path → modifiedUtc
+
+    private DateTime ModifiedOf(string accountId, string path) =>
+        _modified.TryGetValue(accountId + "|" + path, out var t) ? t : DateTime.UtcNow;
 
     public void RemoveNote(string accountId, string path)
     {
@@ -236,7 +251,7 @@ internal sealed class CloudFakeServer : IDisposable
                         ["path"] = kv.Key,
                         ["sha256"] = CloudSyncEngine.Sha256Hex(kv.Value),
                         ["size"] = Encoding.UTF8.GetByteCount(kv.Value),
-                        ["modifiedUtc"] = DateTime.UtcNow,
+                        ["modifiedUtc"] = ModifiedOf(acct, kv.Key),
                     })),
                     ["usedBytes"] = Used(notes),
                     ["quotaBytes"] = QuotaBytes,
@@ -267,7 +282,11 @@ internal sealed class CloudFakeServer : IDisposable
                     delta += Encoding.UTF8.GetByteCount(c) - (notes.TryGetValue(p, out var old) ? Encoding.UTF8.GetByteCount(old) : 0);
                 }
                 if (Used(notes) + delta > QuotaBytes) return Err(413, "QUOTA_EXCEEDED", "quota exceeded");
-                foreach (var f in files) notes[f["path"]!.ToString()] = f["content"]!.ToString();
+                foreach (var f in files)
+                {
+                    notes[f["path"]!.ToString()] = f["content"]!.ToString();
+                    _modified[acct + "|" + f["path"]!] = DateTime.UtcNow;
+                }
                 return (200, new JObject { ["written"] = files.Count, ["usedBytes"] = Used(notes), ["quotaBytes"] = QuotaBytes });
             }
             if (method == "POST" && path == "/api/cloud/notes/delete")

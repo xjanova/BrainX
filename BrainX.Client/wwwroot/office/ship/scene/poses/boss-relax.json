@@ -1,0 +1,69 @@
+{
+  "room": "lounge",
+  "position": [
+    480,
+    530
+  ],
+  "scale": 0.23,
+  "approach": [
+    480,
+    665
+  ],
+  "floorY": 665,
+  "parts": [
+    {
+      "rect": [
+        0,
+        0,
+        1024,
+        1536
+      ],
+      "anchor": [
+        600,
+        955
+      ],
+      "at": [
+        0,
+        0
+      ]
+    }
+  ],
+  "doze": {
+    "phase": 0,
+    "breathPeriod": 5.8,
+    "breathAmount": 11,
+    "chestY": 530,
+    "chestSpread": 210,
+    "supportY": 955,
+    "neck": [
+      590,
+      355
+    ],
+    "neckFade": 280,
+    "nodPeriod": 17,
+    "nodDelay": 1.5,
+    "nodDuration": 5.2,
+    "nodAngle": -0.065,
+    "sink": 9
+  },
+  "decals": [
+    {
+      "image": "../rig/boss-parts.webp",
+      "rect": [
+        1563,
+        750,
+        187,
+        68
+      ],
+      "at": [
+        606,
+        554
+      ],
+      "size": [
+        193,
+        70
+      ],
+      "angle": 0.06
+    }
+  ]
+}

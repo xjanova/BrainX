@@ -1,0 +1,8 @@
+{
+  "position": [690, 420], "scale": 0.24,
+  "approach": [880, 575], "floorY": 560,
+  "parts": [
+    {"rect": [0, 440, 1536, 584], "anchor": [0, 520], "at": [0, 0], "motion": "breath"},
+    {"rect": [990, 0, 546, 440], "anchor": [280, 410], "at": [1260, -460], "motion": "head"}
+  ]
+}

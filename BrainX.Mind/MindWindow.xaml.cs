@@ -131,6 +131,7 @@ public partial class MindWindow : Window
         {
             // Outside the app root first: an update kills whatever runs under it.
             McpRuntimePaths.StableExe,
+            Path.Combine(McpRuntimePaths.PreviousStableDir, "brainx-mcp.exe"),
             Path.Combine(local, "BrainX", "mcp", "brainx-mcp.exe"),
             Path.Combine(local, "BrainX", "current", "mcp", "brainx-mcp.exe"),
             Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "brainx-mcp.exe"),

@@ -59,6 +59,7 @@ internal static class CloudSelfTest
             Section("pull planning"); PullPlanning();
             Section("credential store"); CredentialStore(root);
             Section("end to end against the fake server"); await EndToEndAsync(root);
+            Section("restore into an empty vault, conflicts, mass-delete guard"); await RestoreAndConflictsAsync(root);
             Section("brainx-mcp cloud … commands"); await CliAsync(root);
             if (!args.Contains("--no-mcp"))
             {
@@ -332,7 +333,10 @@ internal static class CloudSelfTest
               string.Join(",", fetch));
         Check("delete here only what the cloud removed and we never touched",
               plan.DeleteLocal.Select(n => n.Path).SequenceEqual(new[] { "A/gone.md" }));
-        Check("unpushed local changes are kept (3)", plan.KeptLocal == 3, plan.KeptLocal.ToString());
+        Check("unpushed local changes are kept (2)", plan.KeptLocal == 2, plan.KeptLocal.ToString());
+        Check("changed on both sides is a conflict, not a silent keep",
+              plan.Conflicts.Count == 1 && plan.Conflicts[0].Local.Path == "A/dirty.md" && plan.Conflicts[0].HasAncestor,
+              plan.Conflicts.Count.ToString());
         Check("identical note is recorded in sync", plan.InSync.ContainsKey("A/same.md"));
         Check("a cloud path escaping the cache is refused", plan.Skipped.Any(s => s.Path == "../evil.md")
                                                            && !plan.Fetch.Any(f => f.Path == "../evil.md"));
@@ -370,6 +374,189 @@ internal static class CloudSelfTest
         var expected = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
             Encoding.UTF8.GetBytes("brainx-cloud-v1|" + key.Trim().ToUpperInvariant()))).ToLowerInvariant()[..32];
         Check("account id follows the contract formula", CloudCredentialStore.AccountIdForKey("  " + key + " ") == expected);
+    }
+
+    // ── 2b. restore, conflicts, mass delete ─────────────────────────
+
+    private sealed class TestProgress(Action<CloudSyncProgress> report) : IProgress<CloudSyncProgress>
+    {
+        public void Report(CloudSyncProgress value) => report(value);
+    }
+
+    /// <summary>
+    /// The owner's rules (2026-10-18): a fresh install restores the cloud into
+    /// the REAL vault and uploads nothing until that is complete; the newer
+    /// side wins but never silently (both copies kept); a never-uploaded local
+    /// note is never overwritten or deleted; more than 20 deletions in one run
+    /// wait for a yes.
+    /// </summary>
+    private static async Task RestoreAndConflictsAsync(string root)
+    {
+        using var fake = new CloudFakeServer();
+        fake.ValidKeys.Add(Key);
+        using var api = new CloudApiClient(null, fake.BaseUrl, timeout: TimeSpan.FromSeconds(10));
+        var login = await api.LoginAsync(Key, "pc-a");
+        api.SetToken(login.Token);
+        var acct = login.Account.Id;
+        var engine = new CloudSyncEngine(api);
+
+        // The cloud as another machine left it: 25 notes, 3 more, one in the root.
+        for (var i = 0; i < 25; i++) fake.PutNote(acct, $"Notes/n{i:00}.md", $"# n{i}\nbody\n");
+        for (var i = 1; i <= 3; i++) fake.PutNote(acct, $"Programming/p{i}.md", $"# p{i}\n");
+        fake.PutNote(acct, "root.md", "root note");
+        const int cloudCount = 29;
+
+        string F(string vault, string rel) => Path.Combine(vault, rel.Replace('/', Path.DirectorySeparatorChar));
+        void Write(string vault, string rel, string content)
+        {
+            var f = F(vault, rel);
+            Directory.CreateDirectory(Path.GetDirectoryName(f)!);
+            File.WriteAllText(f, content, new UTF8Encoding(false));
+        }
+        string ReadF(string vault, string rel) => File.Exists(F(vault, rel)) ? File.ReadAllText(F(vault, rel)) : "<missing>";
+        CloudPullOptions PullOpts(bool mass = false) => new() { AccountId = acct, AllowMassDelete = mass, DeviceName = "pc-a" };
+        CloudPushOptions PushOpts(bool mass = false) => new() { AccountId = acct, AllowMassDelete = mass, DeviceName = "pc-a" };
+
+        // ── 1. a fresh install: empty vault, key entered, Sync pressed ──
+        var vault = Path.Combine(root, "restore-vault");
+        Directory.CreateDirectory(vault);
+        var state = CloudSyncState.Load(vault);
+        var up0 = fake.UploadRequests;
+        var r1 = await engine.PullAsync(vault, state.Folders, state, PullOpts());
+        Check("restore: the pull restores and fetches every cloud note", r1.Ok && r1.Restored && r1.Fetched == cloudCount,
+              $"{r1.ErrorCode} restored={r1.Restored} fetched={r1.Fetched}");
+        Check("restore: notes land in the REAL vault, not a cache",
+              ReadF(vault, "Notes/n00.md") == "# n0\nbody\n" && ReadF(vault, "Programming/p2.md") == "# p2\n" && ReadF(vault, "root.md") == "root note");
+        Check("restore: the cloud's folders are ticked by itself",
+              state.Folders.Contains("Notes") && state.Folders.Contains("Programming") && state.Folders.Contains(CloudSyncState.RootToken)
+              && r1.AdoptedFolders.Count == 3, string.Join(",", state.Folders));
+        var onDisk = CloudSyncState.Load(vault);
+        Check("restore: the manifest (path → sha) is written and the restore flag cleared",
+              onDisk.Uploaded.Count == cloudCount && !onDisk.Restoring && onDisk.Uploaded["root.md"] == H("root note"));
+        Check("restore: ZERO uploads happened during the restore", fake.UploadRequests == up0);
+        var r2 = await engine.PushAsync(vault, state.Folders, state, PushOpts());
+        Check("the push after a restore re-uploads nothing (manifest prevents it)",
+              r2.Ok && r2.Uploaded == 0 && r2.Unchanged == cloudCount && fake.UploadRequests == up0,
+              $"{r2.ErrorCode} uploaded={r2.Uploaded} unchanged={r2.Unchanged}");
+        Check("a second pull is a no-op", (await engine.PullAsync(vault, state.Folders, state, PullOpts())) is { Ok: true, Fetched: 0, Restored: false });
+
+        // ── 1b. a restore interrupted half-way blocks every push until it completes ──
+        var v2 = Path.Combine(root, "restore-vault-2");
+        Directory.CreateDirectory(v2);
+        var s2 = CloudSyncState.Load(v2);
+        using (var cts = new CancellationTokenSource())
+        {
+            var cancelAtFetch = new TestProgress(p => { if (p.Phase == CloudSyncPhase.Fetch) cts.Cancel(); });
+            var r3 = await engine.PullAsync(v2, s2.Folders, s2, PullOpts(), cancelAtFetch, cts.Token);
+            Check("interrupted restore: cancelled before any note landed, restore flag stays on disk",
+                  r3.Cancelled && CloudSyncState.Load(v2).Restoring && CloudSyncState.Load(v2).Folders.Count == 3,
+                  $"cancelled={r3.Cancelled} restoring={CloudSyncState.Load(v2).Restoring}");
+        }
+        Write(v2, "Notes/written-meanwhile.md", "typed while the restore was incomplete");
+        var r4 = await engine.PushAsync(v2, s2.Folders, s2, PushOpts());
+        Check("push is REFUSED while the restore is incomplete — an empty vault never overwrites the cloud",
+              r4.ErrorCode == CloudSyncResult.Restoring && fake.UploadRequests == up0 && fake.DeleteRequests == 0,
+              $"{r4.ErrorCode} uploads={fake.UploadRequests - up0}");
+        var r5 = await engine.PullAsync(v2, s2.Folders, s2, PullOpts());
+        Check("the next pull completes the restore", r5.Ok && r5.Restored && r5.Fetched == cloudCount && !CloudSyncState.Load(v2).Restoring,
+              $"{r5.ErrorCode} fetched={r5.Fetched}");
+        Check("a note written during the restore survived it", ReadF(v2, "Notes/written-meanwhile.md").StartsWith("typed"));
+        var r6 = await engine.PushAsync(v2, s2.Folders, s2, PushOpts());
+        Check("pushes resume after the restore and send only the new note", r6.Ok && r6.Uploaded == 1 && r6.Unchanged == cloudCount,
+              $"{r6.ErrorCode} uploaded={r6.Uploaded}");
+        fake.RemoveNote(acct, "Notes/written-meanwhile.md");   // keep the first vault's view simple
+
+        // ── 2. edited on both sides: both copies kept, the newer keeps the name ──
+        // a) cloud newer, seen by a PUSH
+        Write(vault, "Notes/n00.md", "local edit A");
+        fake.PutNote(acct, "Notes/n00.md", "cloud edit A", DateTime.UtcNow.AddMinutes(5));
+        var c1 = await engine.PushAsync(vault, state.Folders, state, PushOpts());
+        var k1 = c1.Conflicts.FirstOrDefault();
+        Check("push sees a both-sides edit as a conflict, not an overwrite", c1.Ok && c1.Conflicts.Count == 1 && k1 is { LocalWon: false },
+              $"{c1.ErrorCode} conflicts={c1.Conflicts.Count} uploaded={c1.Uploaded}");
+        Check("cloud newer: the cloud's text keeps the name, ours is beside it as a conflict copy",
+              k1 != null && ReadF(vault, "Notes/n00.md") == "cloud edit A" && ReadF(vault, k1.ConflictPath) == "local edit A"
+              && k1.ConflictPath.StartsWith("Notes/n00 (conflict pc-a ", StringComparison.Ordinal),
+              k1?.ConflictPath);
+        var cloud1 = fake.NotesOf(acct);
+        Check("…and the cloud holds both copies too",
+              k1 != null && cloud1.GetValueOrDefault("Notes/n00.md") == "cloud edit A" && cloud1.GetValueOrDefault(k1.ConflictPath) == "local edit A");
+        Check("the next push is quiet (no ping-pong after a conflict)",
+              (await engine.PushAsync(vault, state.Folders, state, PushOpts())) is { Ok: true, Uploaded: 0, Conflicts.Count: 0 });
+
+        // b) local newer, seen by a PULL
+        fake.PutNote(acct, "Notes/n01.md", "cloud edit B", DateTime.UtcNow.AddMinutes(-5));
+        Write(vault, "Notes/n01.md", "local edit B");
+        var c2 = await engine.PullAsync(vault, state.Folders, state, PullOpts());
+        var k2 = c2.Conflicts.FirstOrDefault();
+        Check("pull sees a both-sides edit as a conflict", c2.Ok && c2.Conflicts.Count == 1 && k2 is { LocalWon: true },
+              $"{c2.ErrorCode} conflicts={c2.Conflicts.Count}");
+        Check("local newer: ours keeps the name, the cloud's text lands as '(conflict cloud …)'",
+              k2 != null && ReadF(vault, "Notes/n01.md") == "local edit B" && ReadF(vault, k2.ConflictPath) == "cloud edit B"
+              && k2.ConflictPath.StartsWith("Notes/n01 (conflict cloud ", StringComparison.Ordinal),
+              k2?.ConflictPath);
+        var c3 = await engine.PushAsync(vault, state.Folders, state, PushOpts());
+        var cloud2 = fake.NotesOf(acct);
+        Check("the push then sends the winner and the conflict copy — two files, none lost",
+              c3.Ok && k2 != null && cloud2.GetValueOrDefault("Notes/n01.md") == "local edit B" && cloud2.GetValueOrDefault(k2.ConflictPath) == "cloud edit B",
+              $"{c3.ErrorCode} uploaded={c3.Uploaded}");
+
+        // c) a note written here that was NEVER uploaded, same path as a newer cloud note: ours keeps its name regardless
+        Write(vault, "Programming/new-here.md", "mine, never uploaded");
+        fake.PutNote(acct, "Programming/new-here.md", "theirs", DateTime.UtcNow.AddMinutes(10));
+        var c4 = await engine.PullAsync(vault, state.Folders, state, PullOpts());
+        var k4 = c4.Conflicts.FirstOrDefault();
+        Check("a never-uploaded local note is not overwritten even by a newer cloud note",
+              c4.Ok && k4 is { LocalWon: true } && ReadF(vault, "Programming/new-here.md") == "mine, never uploaded"
+              && ReadF(vault, k4.ConflictPath) == "theirs", k4?.ConflictPath);
+
+        // ── 3. a never-uploaded local note survives a pull; a synced note the cloud deleted goes ──
+        Write(vault, "Notes/only-here.md", "only on this pc");
+        fake.RemoveNote(acct, "Notes/n02.md");
+        var p1 = await engine.PullAsync(vault, state.Folders, state, PullOpts());
+        Check("pull: the never-uploaded note survives, the cloud-deleted synced note is removed",
+              p1.Ok && p1.KeptLocal >= 1 && p1.DeletedLocal == 1 && File.Exists(F(vault, "Notes/only-here.md")) && !File.Exists(F(vault, "Notes/n02.md"))
+              && !state.Uploaded.ContainsKey("Notes/only-here.md"),
+              $"{p1.ErrorCode} kept={p1.KeptLocal} deleted={p1.DeletedLocal}");
+
+        // ── 4. more than 20 deletions in one run wait for the owner ──
+        // pull side: the cloud loses 21 synced notes at once
+        for (var i = 3; i < 24; i++) fake.RemoveNote(acct, $"Notes/n{i:00}.md");
+        var p2 = await engine.PullAsync(vault, state.Folders, state, PullOpts());
+        Check("pull: 21 cloud deletions are held back, nothing removed here",
+              p2.Ok && p2.HeldBackDeletes == 21 && p2.DeletedLocal == 0 && File.Exists(F(vault, "Notes/n10.md")),
+              $"held={p2.HeldBackDeletes} deleted={p2.DeletedLocal}");
+        var p3 = await engine.PullAsync(vault, state.Folders, state, PullOpts(mass: true));
+        Check("pull: after the owner's yes they are removed", p3.Ok && p3.DeletedLocal == 21 && !File.Exists(F(vault, "Notes/n10.md")),
+              $"deleted={p3.DeletedLocal}");
+        // push side: 21 notes vanish from a ticked folder
+        for (var i = 0; i < 25; i++) Write(vault, $"Bulk/b{i:00}.md", $"bulk {i}");
+        state.Folders.Add("Bulk");
+        var b1 = await engine.PushAsync(vault, state.Folders, state, PushOpts());
+        Check("(setup) the 25 bulk notes are uploaded (plus whatever was still pending)",
+              b1.Ok && b1.Uploaded >= 25 && fake.NotesOf(acct).ContainsKey("Bulk/b24.md"), $"{b1.ErrorCode} uploaded={b1.Uploaded}");
+        for (var i = 0; i < 21; i++) File.Delete(F(vault, $"Bulk/b{i:00}.md"));
+        var b2 = await engine.PushAsync(vault, state.Folders, state, PushOpts());
+        Check("push: 21 vanished notes are held back, the cloud keeps all 25",
+              b2.Ok && b2.HeldBackDeletes == 21 && b2.Deleted == 0 && fake.NotesOf(acct).ContainsKey("Bulk/b00.md"),
+              $"held={b2.HeldBackDeletes} deleted={b2.Deleted}");
+        var b3 = await engine.PushAsync(vault, state.Folders, state, PushOpts(mass: true));
+        Check("push: after the owner's yes they are deleted from the cloud", b3.Ok && b3.Deleted == 21 && !fake.NotesOf(acct).ContainsKey("Bulk/b00.md"),
+              $"deleted={b3.Deleted}");
+        File.Delete(F(vault, "Bulk/b21.md"));
+        File.Delete(F(vault, "Bulk/b22.md"));
+        var b4 = await engine.PushAsync(vault, state.Folders, state, PushOpts());
+        Check("push: 2 deletions need no confirmation", b4.Ok && b4.Deleted == 2 && b4.HeldBackDeletes == 0, $"deleted={b4.Deleted} held={b4.HeldBackDeletes}");
+
+        // ── 5. the conflict name is a legal cloud path even for long or odd names ──
+        var taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var longName = "Notes/" + new string('ก', 195) + ".md";
+        var cp = CloudSyncEngine.ConflictPathFor(longName, "pc-a", new DateTime(2026, 10, 18, 14, 32, 0), taken);
+        Check("a conflict name for a 195-char note is still a legal path", cp != null && CloudPathRules.IsValid(cp), cp);
+        taken.Add("Notes/x (conflict pc-a 2026-10-18 1432).md");
+        var cp2 = CloudSyncEngine.ConflictPathFor("Notes/x.md", "pc-a", new DateTime(2026, 10, 18, 14, 32, 0), taken);
+        Check("a second conflict in the same minute gets a counter", cp2 == "Notes/x (conflict pc-a 2026-10-18 1432 2).md", cp2);
+        Check("a device name is reduced to file-safe characters", CloudSyncEngine.SafeDeviceName("My PC: <office>/2") == "MyPCoffice2");
     }
 
     // ── 2. end to end ────────────────────────────────────────────────
@@ -814,6 +1001,22 @@ internal static class CloudSelfTest
             var content = fake.NotesOf(acct).FirstOrDefault(kv => kv.Key.Contains("Cloud selftest")).Value ?? "";
             Check("…with its content", content.Contains("written through the cloud cache"));
 
+            // "Sync now" from chat, cloud mode: a note another machine put in
+            // the cloud comes down with pull; push has nothing left to send.
+            fake.PutNote(acct, "Knowledge/from-another-pc.md", "# From another PC\n");
+            var pulled = Json(await mcp.CallToolAsync("brain_cloud_sync", new JObject { ["direction"] = "pull" }));
+            Check("brain_cloud_sync pull (cloud mode) fetches the other machine's note into the cache",
+                  // fetched is 1 unless the serve loop's own periodic pull got there first — the file is the proof either way
+                  pulled?["ok"]?.Value<bool>() == true && pulled["target"]?.ToString() == "cache"
+                  && pulled["pull"]?["fetched"]?.Value<int>() <= 1 && File.Exists(Path.Combine(cache, "Knowledge", "from-another-pc.md")),
+                  Trim(pulled?.ToString(Formatting.None) ?? "no json"));
+            var pushed = Json(await mcp.CallToolAsync("brain_cloud_sync", new JObject { ["direction"] = "push" }));
+            Check("brain_cloud_sync push (cloud mode) then has nothing to upload",
+                  pushed?["ok"]?.Value<bool>() == true && pushed["push"]?["uploaded"]?.Value<int>() == 0,
+                  Trim(pushed?.ToString(Formatting.None) ?? "no json"));
+            Check("brain_cloud_sync refuses an unknown direction",
+                  (await mcp.CallToolAsync("brain_cloud_sync", new JObject { ["direction"] = "sideways" })).StartsWith("ERROR"));
+
             // Written and hung up at once (inside the push debounce): the
             // shutdown flush must still get it to the cloud.
             var last = await mcp.CallToolAsync("brain_create_note", new JObject
@@ -830,6 +1033,63 @@ internal static class CloudSelfTest
             Check("the server exits when the client hangs up", mcp.Exited);
             Check("the log never contains the token", !mcp.Stderr.Contains(login.Token), "token found in stderr");
             Check("the log never contains the license key", !mcp.Stderr.Contains(Key, StringComparison.OrdinalIgnoreCase));
+        }
+
+        // Normal mode on the REAL vault — a fresh install: an empty vault, the
+        // key entered (the sign-in above), and "sync now" asked for from chat.
+        // The cloud now holds the two Knowledge notes, the two written through
+        // the cache, and the other machine's note.
+        var vault = Path.Combine(root, "mcp-vault");
+        Directory.CreateDirectory(vault);
+        await using (var mcp = await McpChild.StartAsync(fake.BaseUrl, vault))
+        {
+            var init = await mcp.RequestAsync("initialize", new JObject
+            {
+                ["protocolVersion"] = "2025-06-18",
+                ["capabilities"] = new JObject(),
+                ["clientInfo"] = new JObject { ["name"] = "cloud-selftest", ["version"] = "1" },
+            }, TimeSpan.FromSeconds(60));
+            Check("normal mode on an empty vault answers initialize", init?["result"]?["serverInfo"] != null, init?.ToString(Formatting.None));
+            await mcp.NotifyAsync("notifications/initialized");
+
+            var up0 = fake.UploadRequests;
+            var cloudCount = fake.NotesOf(acct).Count;
+            var text = await mcp.CallToolAsync("brain_cloud_sync", new JObject { ["direction"] = "pull" });
+            var r = Json(text);
+            Check("brain_cloud_sync pull into an empty vault is a restore of every cloud note",
+                  r?["ok"]?.Value<bool>() == true && r["restored"]?.Value<bool>() == true && r["target"]?.ToString() == "vault"
+                  && r["pull"]?["fetched"]?.Value<int>() == cloudCount, Trim(text));
+            Check("…the notes land in the REAL vault",
+                  File.Exists(Path.Combine(vault, "Knowledge", "cloud-first.md")) && File.Exists(Path.Combine(vault, "Knowledge", "from-another-pc.md"))
+                  && Directory.EnumerateFiles(Path.Combine(vault, "Notes"), "*.md").Count() == 2);
+            var st = CloudSyncState.Load(vault);
+            Check("…the cloud's folders are ticked, the manifest written, the restore flag cleared",
+                  st.Folders.Contains("Knowledge") && st.Folders.Contains("Notes") && st.Uploaded.Count == cloudCount && !st.Restoring,
+                  $"folders={string.Join(",", st.Folders)} manifest={st.Uploaded.Count} restoring={st.Restoring}");
+            Check("…nothing was uploaded during the restore", fake.UploadRequests == up0);
+            Check("…and the vault was re-indexed in the same call",
+                  r?["reindex"]?["notes"]?.Value<int>() == cloudCount && File.Exists(Path.Combine(vault, ".obsidianx", "brain-export.json")),
+                  Trim(r?["reindex"]?.ToString(Formatting.None) ?? "no reindex"));
+            Check("the restored notes answer a search at once",
+                  (await mcp.CallToolAsync("brain_search", new JObject { ["query"] = "another PC" })).Contains("from-another-pc", StringComparison.OrdinalIgnoreCase));
+
+            text = await mcp.CallToolAsync("brain_cloud_sync", new JObject { ["direction"] = "push" });
+            r = Json(text);
+            Check("brain_cloud_sync push after the restore re-uploads nothing",
+                  r?["ok"]?.Value<bool>() == true && r["push"]?["uploaded"]?.Value<int>() == 0 && r["push"]?["unchanged"]?.Value<int>() == cloudCount
+                  && fake.UploadRequests == up0, Trim(text));
+
+            Directory.CreateDirectory(Path.Combine(vault, "Notes"));
+            File.WriteAllText(Path.Combine(vault, "Notes", "from-chat.md"), "# From chat\nwritten in the vault\n", new UTF8Encoding(false));
+            text = await mcp.CallToolAsync("brain_cloud_sync", new JObject());        // default: both
+            r = Json(text);
+            Check("brain_cloud_sync (both) uploads a note written in the vault and reports the count",
+                  r?["ok"]?.Value<bool>() == true && r["direction"]?.ToString() == "both" && r["push"]?["uploaded"]?.Value<int>() == 1
+                  && fake.NotesOf(acct).ContainsKey("Notes/from-chat.md"), Trim(text));
+            Check("the tool's replies never carry the token", !text.Contains(login.Token) && !text.Contains(Key, StringComparison.OrdinalIgnoreCase));
+            await mcp.CloseAsync();
+            Check("the normal-mode log never contains the token", !mcp.Stderr.Contains(login.Token));
+            fake.RemoveNote(acct, "Notes/from-chat.md");   // the cache below is compared against the earlier cloud
         }
 
         // Offline start: the cache from above is served, and the log says so.
@@ -899,7 +1159,12 @@ internal static class CloudSelfTest
             _p.BeginErrorReadLine();
         }
 
-        public static Task<McpChild> StartAsync(string baseUrl)
+        /// <summary>
+        /// <paramref name="vault"/> null: `--serve --cloud` (the account cache).
+        /// Otherwise normal mode on that vault — what a desktop install runs —
+        /// so brain_cloud_sync can be exercised against the REAL vault.
+        /// </summary>
+        public static Task<McpChild> StartAsync(string baseUrl, string? vault = null)
         {
             var host = Environment.ProcessPath ?? "brainx-mcp";
             var psi = new ProcessStartInfo
@@ -915,13 +1180,14 @@ internal static class CloudSelfTest
             if (Path.GetFileNameWithoutExtension(host).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
                 psi.ArgumentList.Add(Path.Combine(AppContext.BaseDirectory, "brainx-mcp.dll"));
             psi.ArgumentList.Add("--serve");
-            psi.ArgumentList.Add("--cloud");
+            if (vault == null) psi.ArgumentList.Add("--cloud");
             psi.Environment["BRAINX_CLOUD_URL"] = baseUrl;
             psi.Environment["BRAINX_CLOUD_STARTUP_WAIT_SEC"] = "20";
             psi.Environment["BRAINX_SANDBOX"] = "1";
             psi.Environment["BRAINX_HEADLESS"] = "1";
             psi.Environment["BRAINX_MCP_LAUNCHER_CHILD"] = "1";
-            psi.Environment.Remove("BRAINX_VAULT");
+            if (vault == null) psi.Environment.Remove("BRAINX_VAULT");
+            else psi.Environment["BRAINX_VAULT"] = vault;
             psi.Environment.Remove("BRAINX_CLOUD_TOKEN");
             var p = Process.Start(psi) ?? throw new InvalidOperationException("could not start brainx-mcp");
             return Task.FromResult(new McpChild(p));

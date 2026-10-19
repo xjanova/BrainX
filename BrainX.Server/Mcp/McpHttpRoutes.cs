@@ -65,7 +65,8 @@ public static class McpHttpRoutes
         McpSessionManager sessions,
         Func<HttpContext, ValueTask<McpCaller>> resolveCaller,
         TimeSpan? callTimeout,
-        IMcpTenantHooks? tenantHooks)
+        IMcpTenantHooks? tenantHooks,
+        Func<HttpContext, string>? resourceMetadataUrl = null)
     {
         var deadline = callTimeout ?? DefaultCallTimeout;
 
@@ -87,7 +88,7 @@ public static class McpHttpRoutes
                 // until the idle reaper notices.
                 if (caller.IsLicenseDenial && sessions.RemoveIfOwnedBy(sessionId, caller.AccountId))
                     Console.WriteLine($"[mcp] session {Short(sessionId)} closed · account {CloudIds.ShortId(caller.AccountId)} license not active");
-                return Deny(ctx, caller);
+                return Deny(ctx, caller, resourceMetadataUrl);
             }
             var scope = caller.Scope;
             var who = caller.IsCloud ? $" · cloud {CloudIds.ShortId(caller.AccountId)}" : "";
@@ -287,7 +288,7 @@ public static class McpHttpRoutes
         app.MapDelete("/mcp", async (HttpContext ctx) =>
         {
             var caller = await resolveCaller(ctx);
-            if (caller.IsDenied && !caller.IsLicenseDenial) return Deny(ctx, caller);
+            if (caller.IsDenied && !caller.IsLicenseDenial) return Deny(ctx, caller, resourceMetadataUrl);
 
             var sessionId = ctx.Request.Headers[SessionHeader].ToString();
             if (!sessions.RemoveIfOwnedBy(sessionId, caller.AccountId))
@@ -296,11 +297,15 @@ public static class McpHttpRoutes
         });
     }
 
-    private static IResult Deny(HttpContext ctx, McpCaller caller)
+    private static IResult Deny(HttpContext ctx, McpCaller caller, Func<HttpContext, string>? resourceMetadataUrl = null)
     {
         var status = caller.DenyStatus == 0 ? StatusCodes.Status401Unauthorized : caller.DenyStatus;
+        // resource_metadata is how an MCP client that knows only the URL finds
+        // the OAuth server (RFC 9728) — the Gemini app's custom apps start here.
         if (status == StatusCodes.Status401Unauthorized)
-            ctx.Response.Headers["WWW-Authenticate"] = "Bearer realm=\"brainx-mcp\"";
+            ctx.Response.Headers["WWW-Authenticate"] = resourceMetadataUrl == null
+                ? "Bearer realm=\"brainx-mcp\""
+                : $"Bearer realm=\"brainx-mcp\", resource_metadata=\"{resourceMetadataUrl(ctx)}\"";
         if (caller.RetryAfter is { } retry)
             ctx.Response.Headers["Retry-After"] = Math.Max(1, (int)Math.Ceiling(retry.TotalSeconds)).ToString(CultureInfo.InvariantCulture);
         var rpcCode = status switch

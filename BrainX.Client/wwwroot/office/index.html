@@ -50,6 +50,11 @@
          they stay crisp at any scale. office.js positions them from the same
          isometric projection the canvas draws with. -->
     <div id="overlay"></div>
+    <!-- The girls' starship (ship/, copied from the Avatar Studio by
+         output/boss-rig/tools/sync_office_ship.py). It replaces the painted
+         room and its pixel crew unless the page is opened with ?classic;
+         office.js tells it who is working, and it acts that out. -->
+    <iframe id="ship" title="ยานของสาว ๆ — ลูกเรือ BrainX" hidden></iframe>
 
     <div id="room-head">
       <span class="dot" id="room-dot"></span>
@@ -60,7 +65,7 @@
            "nobody answered" and "nothing was ever going to". Clicking asks the
            CLIENT to start or stop it — the page cannot, and must not, run a
            process that spawns agents. -->
-      <button id="room-broker" type="button" title="บอสจัดสรรงาน (broker)">—</button>
+      <button id="room-broker" type="button" title="มายจัดสรรงาน (broker)">—</button>
       <!-- What is being worked on, and the owner's hand on it: pause, resume,
            cancel, focus one piece, stop a run the boss started. -->
       <button id="room-work" type="button" aria-expanded="false" aria-controls="work-panel"
@@ -77,16 +82,19 @@
       <!-- Which model the boss starts each agent on. Only runs the broker
            starts — a session the owner opened keeps its own app's model. -->
       <button id="room-model" type="button" aria-expanded="false" aria-controls="model-panel"
-              title="เลือกโมเดลที่บอสใช้เรียก agent เข้ามาทำงาน">🧠 โมเดล</button>
+              title="เลือกโมเดลที่มายใช้เรียก agent เข้ามาทำงาน">🧠 โมเดล</button>
       <!-- The Windows Service the boss used to have. Retired 2026-09-21: it ran
            as SYSTEM, which cannot reach the owner's agents. The chip stays so an
            install left over from before is visible, and removable. -->
       <button id="room-service" type="button" aria-expanded="false" aria-controls="service-panel"
-              title="Windows Service ของบอส — ติดตั้ง / สิทธิ์ / สั่งงาน">service</button>
+              title="Windows Service ของมาย — ติดตั้ง / สิทธิ์ / สั่งงาน">service</button>
       <!-- The map the room runs on. Opened in this same WebView so the plate
            loads from the same virtual host the room uses; painting it is how
            the walkable floor, the blocked furniture and the occluders are
            defined, instead of being measured off the picture by eye. -->
+      <!-- Ship or the painted room. On the ship every agent talks as her girl:
+           a woman, in her own character (BrainX.Mcp Program.Persona.cs). -->
+      <button id="room-view" type="button">🚀</button>
       <button id="room-map" type="button" title="ระบายผังห้อง — เดินได้ / ห้ามเข้า / ต้องบัง">ผังห้อง</button>
       <!-- The light. Dark means nobody is seated, nothing is announced and
            nobody is called in — the stop that keeps a circle of agents from
@@ -127,15 +135,15 @@
         โน้ตที่ agent เขียนไว้ในสมองไม่ถูกลบ · ลบได้เฉพาะงานที่จบแล้ว</p>
     </section>
 
-    <section id="model-panel" hidden aria-label="โมเดลและ effort ที่บอสใช้เรียก agent">
+    <section id="model-panel" hidden aria-label="โมเดลและ effort ที่มายใช้เรียก agent">
       <header>โมเดลและ effort ของ agent <span>— ตอนบอสเรียกเข้ามาทำงาน</span></header>
       <ol id="model-list"></ol>
       <p id="model-note" role="status"></p>
-      <p class="model-foot">มีผลกับรอบถัดไปที่บอสเรียก agent เข้ามาเอง (ห้องว่าง / รอบศึกษา) ไม่ต้องรีสตาร์ต ·
+      <p class="model-foot">มีผลกับรอบถัดไปที่มายเรียก agent เข้ามาเอง (ห้องว่าง / รอบศึกษา) ไม่ต้องรีสตาร์ต ·
         เซสชันที่คุณเปิดเองใช้โมเดลตามแอปของมัน</p>
     </section>
 
-    <section id="service-panel" hidden aria-label="Windows Service ของบอส">
+    <section id="service-panel" hidden aria-label="Windows Service ของมาย">
       <header>Windows Service <span>— แบบเก่า เลิกใช้แล้ว</span></header>
       <dl id="service-facts"></dl>
       <ul id="service-warn"></ul>

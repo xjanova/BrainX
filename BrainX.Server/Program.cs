@@ -114,11 +114,28 @@ BrainX.Server.Hubs.AuditLog.Initialize(
 // BrainHub scope persistence. SQLite writes <vault>/.obsidianx/brain.db; if no
 // vault is configured, it lands next to the binary so the node still works.
 IBrainStorage? storage = null;
+
+// The hub judges peer reads (PeerGetNote / PeerSearch / PeerBacklinks) and the
+// per-note half of RequestShare against THIS node's vault export, and reads a
+// note body only through VaultPathGuard — never a rooted or climbing path the
+// export happens to name. Set before storage so a storage failure cannot leave
+// the hub without its ACL inputs.
+BrainHub.ExportProvider = LoadExportCached;
+BrainHub.NoteContentProvider = relativePath =>
+{
+    var full = VaultPathGuard.Resolve(ResolveVaultPath(), relativePath);
+    if (full == null || !File.Exists(full)) return null;
+    try { return File.ReadAllText(full); }
+    catch { return null; }
+};
+
 try
 {
-    var storageDir = !string.IsNullOrWhiteSpace(NodeConfig.VaultPath)
-        ? NodeConfig.VaultPath!
-        : Path.Combine(AppContext.BaseDirectory, "data");
+    // BrainX__StorageDir: a node sharing a LIVE vault with the desktop client
+    // (the owner's PC, serving /mcp to the Gemini app) must not open the
+    // client's own .obsidianx/brain.db and reseed it at startup.
+    var storageDir = NodeConfig.StorageDir
+        ?? (!string.IsNullOrWhiteSpace(NodeConfig.VaultPath) ? NodeConfig.VaultPath! : Path.Combine(AppContext.BaseDirectory, "data"));
     storage = BrainStorageFactory.Create(NodeConfig.StorageProvider, storageDir, NodeConfig.MySqlConnString,
         onFallback: ex => Console.WriteLine($"[storage] MySQL init failed ({ex.GetType().Name}: {ex.Message})"));
     BrainHub.Store = storage;
@@ -255,11 +272,38 @@ if (ownerMcp || cloudMcp)
         NodeConfig.McpMaxSessions, TimeSpan.FromMinutes(NodeConfig.McpIdleMinutes),
         maxCloudSessions: NodeConfig.CloudMcpMaxSessions,
         maxSessionsPerAccount: NodeConfig.CloudMcpSessionsPerAccount);
+    // OAuth (DCR + PKCE + the owner's approval page) for connectors that only
+    // speak the MCP authorization spec — the Gemini app's custom apps. Owner
+    // tokens only, so only where the owner's /mcp is on.
+    McpOAuth? oauth = null;
+    if (ownerMcp && NodeConfig.OAuthEnabled && !NodeConfig.EmbeddedMode)
+    {
+        try
+        {
+            oauth = new McpOAuth(new McpOAuthOptions
+            {
+                Dir = NodeConfig.OAuthDir,
+                OwnerKey = OAuthOwnerKeyOrCreate(),
+                PublicBaseUrl = NodeConfig.PublicBaseUrl,
+            });
+            oauth.Map(app);
+            Console.WriteLine($"[oauth] /mcp OAuth ENABLED · issuer {NodeConfig.PublicBaseUrl ?? "(from each request)"} · store {NodeConfig.OAuthDir}");
+        }
+        catch (Exception ex)
+        {
+            oauth = null;
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"  [WARN] /mcp OAuth failed to start ({ex.GetType().Name}: {ex.Message}) — static tokens only.");
+            Console.ResetColor();
+        }
+    }
+
     var resolver = new McpCallerResolver(
         NodeConfig.EmbeddedMode, NodeConfig.McpWriteToken, NodeConfig.McpReadToken,
-        ownerEnabled: ownerMcp, cloud: cloudMcp ? cloud : null);
+        ownerEnabled: ownerMcp, cloud: cloudMcp ? cloud : null, oauth: oauth);
 
-    app.MapBrainMcp(mcpSessions, resolver.ResolveAsync, callTimeout: null, tenantHooks: cloudMcp ? cloud : null);
+    app.MapBrainMcp(mcpSessions, resolver.ResolveAsync, callTimeout: null, tenantHooks: cloudMcp ? cloud : null,
+                    resourceMetadataUrl: oauth == null ? null : oauth.ResourceMetadataUrl);
 
     var sessionsToClose = mcpSessions;
     app.Lifetime.ApplicationStopping.Register(() => sessionsToClose.DisposeAsync().AsTask().Wait(5000));
@@ -484,6 +528,29 @@ static BrainExport? LoadExport()
         return Newtonsoft.Json.JsonConvert.DeserializeObject<BrainExport>(File.ReadAllText(path));
     }
     catch { return null; }
+}
+
+// The hub's peer reads (PeerGetNote / PeerSearch / PeerBacklinks) can arrive at
+// 60 calls a minute per method per connection; parsing a multi-megabyte
+// brain-export.json for each of them would make a chatty peer a CPU problem.
+// One parse per change of the file instead: the (size, mtime) pair is the key,
+// so a fresh export from the desktop client is picked up on the next call.
+static BrainExport? LoadExportCached()
+{
+    var vault = ResolveVaultPath();
+    if (string.IsNullOrWhiteSpace(vault)) return null;
+    var path = Path.Combine(vault, ".obsidianx", "brain-export.json");
+    FileInfo fi;
+    try { fi = new FileInfo(path); if (!fi.Exists) return null; }
+    catch { return null; }
+    lock (ExportCache.Gate)
+    {
+        if (ExportCache.Entry is { } c && c.Path == path && c.Length == fi.Length && c.Mtime == fi.LastWriteTimeUtc)
+            return c.Export;
+        var export = LoadExport();
+        ExportCache.Entry = (path, fi.Length, fi.LastWriteTimeUtc, export);
+        return export;
+    }
 }
 
 // Load the brain export and push it into the storage backend so /api/brain/search
@@ -1166,6 +1233,34 @@ app.MapPost("/api/ai/stats/router/reset", () => { RouterStats.Reset(); return Re
 /// it). Returns null when there is nothing to run, so /mcp stays off rather
 /// than half-working.
 /// </summary>
+// The key the owner types on the OAuth approval page: BrainX__OAuthOwnerKey,
+// else the first line of OAuthOwnerKeyFile, else a new one written there now
+// (the folder locked to SYSTEM + Administrators, like CloudRoot). The value is
+// never logged — only where it lives.
+static string OAuthOwnerKeyOrCreate()
+{
+    if (!string.IsNullOrWhiteSpace(NodeConfig.OAuthOwnerKey)) return NodeConfig.OAuthOwnerKey!;
+    var file = NodeConfig.OAuthOwnerKeyFile!;
+    if (File.Exists(file))
+    {
+        var line = File.ReadLines(file).Select(l => l.Trim()).FirstOrDefault(l => l.Length > 0);
+        if (line != null) return line;
+    }
+    var dir = Path.GetDirectoryName(file)!;
+    var createdNow = !Directory.Exists(dir);
+    Directory.CreateDirectory(dir);
+    var (outcome, msg) = BrainX.Server.Cloud.CloudRootAcl.Apply(dir, enabled: true, createdNow);
+    Console.WriteLine($"[oauth] key folder: {msg} ({outcome})");
+    // 6 groups of 4 from an alphabet with no look-alikes: ~124 bits, typeable.
+    const string alphabet = "abcdefghjkmnpqrstuvwxyz23456789";
+    var bytes = System.Security.Cryptography.RandomNumberGenerator.GetBytes(24);
+    var chars = bytes.Select(b => alphabet[b % alphabet.Length]).ToArray();
+    var key = string.Join('-', Enumerable.Range(0, 6).Select(i => new string(chars, i * 4, 4)));
+    File.WriteAllText(file, key + Environment.NewLine, new System.Text.UTF8Encoding(false));
+    Console.WriteLine($"[oauth] a new owner key was written to {file} — the approval page asks for it");
+    return key;
+}
+
 static string? ResolveMcpExe()
 {
     if (!string.IsNullOrWhiteSpace(NodeConfig.McpExePath))
@@ -1223,6 +1318,13 @@ else
     app.Run("http://0.0.0.0:5142");
 }
 
+/// <summary>One parsed brain-export.json, keyed by the file's size and mtime (see LoadExportCached).</summary>
+static class ExportCache
+{
+    public static readonly object Gate = new();
+    public static (string Path, long Length, DateTime Mtime, BrainExport? Export)? Entry;
+}
+
 /// <summary>
 /// Node configuration resolved once at startup from IConfiguration (appsettings
 /// + environment, env winning). The single switch between "embedded with the
@@ -1248,6 +1350,8 @@ public static class NodeConfig
 
     /// <summary>"sqlite" (default) or "mysql". Picks the IBrainStorage backend.</summary>
     public static string StorageProvider { get; private set; } = "sqlite";
+    /// <summary>Where SQLite keeps .obsidianx/brain.db. Unset = the vault itself.</summary>
+    public static string? StorageDir { get; private set; }
     /// <summary>MySQL connection string — required when StorageProvider=mysql.
     /// From BrainX:MySqlConnString, else read from BrainX:MySqlConnStringFile.</summary>
     public static string? MySqlConnString { get; private set; }
@@ -1275,6 +1379,16 @@ public static class NodeConfig
     public static int McpMaxSessions { get; private set; } = 8;
     /// <summary>Idle minutes before a /mcp session's child is reaped.</summary>
     public static int McpIdleMinutes { get; private set; } = 30;
+    /// <summary>OAuth 2.1 for /mcp (McpOAuth): on with the owner's /mcp unless turned off.</summary>
+    public static bool OAuthEnabled { get; private set; } = true;
+    /// <summary>"https://serverbrain.xman4289.com" — the issuer and resource the
+    /// OAuth metadata names. Unset = taken from each request.</summary>
+    public static string? PublicBaseUrl { get; private set; }
+    /// <summary>What the owner types on the OAuth approval page.</summary>
+    public static string? OAuthOwnerKey { get; private set; }
+    public static string? OAuthOwnerKeyFile { get; private set; }
+    /// <summary>clients.json / tokens.json (hashes only).</summary>
+    public static string OAuthDir { get; private set; } = "";
 
     // ── BrainX Cloud (/api/cloud/*, and /mcp for bxc_ tokens) ──
     /// <summary>Serve BrainX Cloud. Default: ON for a standalone node, OFF when embedded.</summary>
@@ -1338,6 +1452,7 @@ public static class NodeConfig
         AllowedOrigins = (b["AllowedOrigins"] ?? "")
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         StorageProvider = (FirstNonEmpty(b["StorageProvider"]) ?? "sqlite").ToLowerInvariant();
+        StorageDir = FirstNonEmpty(b["StorageDir"]);
         MySqlConnStringFile = FirstNonEmpty(b["MySqlConnStringFile"]);
         MySqlConnString = FirstNonEmpty(b["MySqlConnString"]) ?? ReadConnStringFile(MySqlConnStringFile);
         CloudStoreProvider = (FirstNonEmpty(b["CloudStoreProvider"]) ?? StorageProvider).ToLowerInvariant();
@@ -1351,6 +1466,12 @@ public static class NodeConfig
         McpReadToken = FirstNonEmpty(b["McpReadToken"]);
         McpMaxSessions = ParseInt(b["McpMaxSessions"], 8);
         McpIdleMinutes = ParseInt(b["McpIdleMinutes"], 30);
+        OAuthEnabled = ParseBool(b["OAuthEnabled"], defaultValue: true);
+        PublicBaseUrl = FirstNonEmpty(b["PublicBaseUrl"])?.TrimEnd('/');
+        OAuthDir = FirstNonEmpty(b["OAuthDir"])
+                   ?? (OperatingSystem.IsWindows() && !EmbeddedMode ? @"C:\brainx\oauth" : Path.Combine(AppContext.BaseDirectory, "oauth"));
+        OAuthOwnerKeyFile = FirstNonEmpty(b["OAuthOwnerKeyFile"]) ?? Path.Combine(OAuthDir, "owner-key.txt");
+        OAuthOwnerKey = FirstNonEmpty(b["OAuthOwnerKey"]);
 
         CloudEnabled = ParseBool(b["CloudEnabled"], defaultValue: !EmbeddedMode);
         CloudRoot = FirstNonEmpty(b["CloudRoot"])

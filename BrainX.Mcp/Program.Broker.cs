@@ -70,10 +70,12 @@ internal static partial class Program
     /// the temp vaults was unlabelled, so this path was not once exercised.
     /// The oldest stuck message was three days old.
     /// </summary>
-    private static string BuildSpawnPrompt(WaitingWork work, int maxRunSeconds = 0)
+    private static string BuildSpawnPrompt(WaitingWork work, int maxRunSeconds = 0, string? agent = null)
     {
         var sb = new StringBuilder(
             "BrainX broker: work is queued for you on this brain and nobody is driving this session. ");
+        // Who she is in the room, before anything she will say there (Program.Persona.cs).
+        if (agent != null) sb.Append(CoworkPersonaInstruction(agent));
 
         // How long it has. Codex drew four of fifteen images and was cut off at
         // the ceiling without a word anywhere about where it had got to.
@@ -1234,6 +1236,10 @@ internal static partial class Program
     private static readonly string[] StartupSigns =
     {
         "not logged in", "please log in", "authentication", "unauthorized",
+        // Gemini CLI with no login and no key: "Please set an Auth method in
+        // your ~/.gemini/settings.json or specify one of the following
+        // environment variables before running: GEMINI_API_KEY, ...".
+        "set an auth method",
         "is not recognized", "command not found", "no such file",
     };
 
@@ -1311,7 +1317,7 @@ internal static partial class Program
         if (UnattendedRuns.IsCodex(exe) && launch.CodexServers.Count == 0)
             BrokerSay(agent + ":codex-brain", $"{agent}: no BrainX server with a command in codex's config.toml — its runs are recognised by the run registry alone");
         foreach (var a in launch.Args)
-            psi.ArgumentList.Add(a.Replace("{prompt}", BuildSpawnPrompt(work, cfg.MaxRunSeconds))
+            psi.ArgumentList.Add(a.Replace("{prompt}", BuildSpawnPrompt(work, cfg.MaxRunSeconds, agent))
                                   .Replace("{cwd}", psi.WorkingDirectory)
                                   .Replace("{agent}", agent));
 
@@ -1320,6 +1326,13 @@ internal static partial class Program
         // always reads the same brain the broker is watching.
         psi.Environment["BRAINX_VAULT"] = _vaultPath;
         foreach (var (k, v) in launch.Env) psi.Environment[k] = v;
+        // Gemini CLI signs in with the owner's Gemini API key from Settings (BrainX.Core
+        // GoogleAiKey) — the CLI reads GEMINI_API_KEY in headless runs. An environment the owner
+        // set already wins, so it is only filled in when missing.
+        if (agent.Equals("gemini", StringComparison.OrdinalIgnoreCase)
+            && string.IsNullOrWhiteSpace(psi.Environment.TryGetValue("GEMINI_API_KEY", out var gk) ? gk : null)
+            && BrainX.Core.Services.GoogleAiKey.Read() is { } geminiKey)
+            psi.Environment["GEMINI_API_KEY"] = geminiKey;
 
         // Claude Code refuses to start inside another Claude Code session, and
         // it decides that from an inherited environment variable:
@@ -2851,7 +2864,11 @@ internal static partial class Program
                 {
                     Exe = r["exe"]?.ToString() ?? "",
                     ExeFallbacks = Strings(r["exeFallbacks"]),
-                    Args = Strings(r["args"]),
+                    // %VARS% expanded like exe and cwd, so a runner can name a
+                    // script under %APPDATA% (Gemini's gemini.js). Done here, on
+                    // the owner's config only: {prompt} is substituted later
+                    // and is never expanded.
+                    Args = Strings(r["args"]).Select(Environment.ExpandEnvironmentVariables).ToList(),
                     Cwd = Environment.ExpandEnvironmentVariables(r["cwd"]?.ToString() ?? ""),
                     OnCall = Bool(r["onCall"], false),
                     Model = r["model"]?.Type == JTokenType.String ? r["model"]!.ToString().Trim() : "",
@@ -2964,6 +2981,13 @@ internal static partial class Program
       "exe": "claude",
       "exeFallbacks": [],
       "args": ["-p", "{prompt}", "--allowedTools", "mcp__brainx-brain"],
+      "cwd": "D:\\BrainX"
+    },
+    "gemini": {
+      "//": "Gemini CLI (npm @google/gemini-cli), signed in once by running `gemini` in a terminal. Started as node + gemini.js, never through npm's gemini.cmd: a .cmd runs under cmd.exe, which re-parses the prompt. --approval-mode yolo is REQUIRED for the same reason as codex's flag: headless, nobody can approve a brain tool call. --skip-trust because an untrusted folder runs without its MCP servers. brainx-brain is in ~/.gemini/settings.json (brainx-mcp register-gemini). Gemini CLI has no effort flag.",
+      "exe": "node",
+      "exeFallbacks": ["%ProgramFiles%\\nodejs\\node.exe"],
+      "args": ["%APPDATA%\\npm\\node_modules\\@google\\gemini-cli\\bundle\\gemini.js", "-p", "{prompt}", "--approval-mode", "yolo", "--skip-trust", "--output-format", "text"],
       "cwd": "D:\\BrainX"
     }
   }

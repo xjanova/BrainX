@@ -586,6 +586,11 @@
     <!-- Boot sequence: the bar fills as each section's data arrives, so a slow
          section looks slow instead of the whole window looking frozen. -->
     <div id="hud-boot">
+        <!-- The girl the host drew for this launch (?girl=), the same one that
+             stood beside its own first card. hud.js fills it; without a name
+             it stays empty and takes no room. -->
+        <div class="hud-boot-stage">
+        <img class="hud-boot-girl" id="hud-boot-girl" alt="" hidden>
         <div class="hud-boot-box">
             <div class="hud-boot-brand">BRAINX</div>
             <div class="hud-boot-tag">Neural knowledge engine</div>
@@ -599,6 +604,7 @@
                 <span class="hud-boot-count" id="hud-boot-count"></span>
             </div>
             <div class="hud-boot-steps" id="hud-boot-steps"></div>
+        </div>
         </div>
     </div>
 

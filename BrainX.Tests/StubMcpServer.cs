@@ -39,9 +39,22 @@ internal static class StubMcpServer
     public const string SlowPayload = "SLOW-CALL-PAYLOAD-DO-NOT-DELIVER-LATE";
     public const string FastPayload = "FAST-CALL-PAYLOAD";
 
+    /// <summary>
+    /// Plays an engine server behind a bridge instead of the brain.
+    /// <c>empty</c>: tools/list is always [] — an editor that never gets ready.
+    /// <c>announce</c>: promises list_changed, answers [] once, then announces
+    /// and serves <see cref="BridgeToolName"/> — Roblox Studio's proxy before
+    /// and after a place is opened. <c>listed</c>: promises list_changed and
+    /// serves the tool from the start — an ordinary engine server.
+    /// </summary>
+    public const string BridgeModeEnv = "BRAINX_STUB_BRIDGE";
+    public const string BridgeToolName = "get_studio_state";
+
     public static async Task<int> RunAsync()
     {
         var stdout = Console.Out;
+        var bridgeMode = Environment.GetEnvironmentVariable(BridgeModeEnv);
+        var listings = 0;
         string? line;
         while ((line = await Console.In.ReadLineAsync()) != null)
         {
@@ -58,15 +71,37 @@ internal static class StubMcpServer
             if (id == null || id.Type == JTokenType.Null) continue;
 
             string response;
+            string? announce = null;
             switch (method)
             {
                 case "initialize":
                     response = Result(id, new JObject
                     {
                         ["protocolVersion"] = "2025-06-18",
-                        ["capabilities"] = new JObject { ["tools"] = new JObject() },
+                        ["capabilities"] = new JObject
+                        {
+                            ["tools"] = bridgeMode is "announce" or "listed"
+                                ? new JObject { ["listChanged"] = true }
+                                : new JObject(),
+                        },
                         ["serverInfo"] = new JObject { ["name"] = "brainx-stub", ["version"] = "0.0.0" },
                     });
+                    break;
+
+                case "tools/list" when bridgeMode != null:
+                    var ready = bridgeMode == "listed" || (bridgeMode == "announce" && listings++ > 0);
+                    response = Result(id, new JObject
+                    {
+                        ["tools"] = ready
+                            ? new JArray { new JObject { ["name"] = BridgeToolName, ["description"] = "stub" } }
+                            : new JArray(),
+                    });
+                    if (bridgeMode == "announce" && !ready)
+                        announce = new JObject
+                        {
+                            ["jsonrpc"] = "2.0",
+                            ["method"] = "notifications/tools/list_changed",
+                        }.ToString(Formatting.None);
                     break;
 
                 case "tools/list":
@@ -96,6 +131,16 @@ internal static class StubMcpServer
 
             await stdout.WriteLineAsync(response);
             await stdout.FlushAsync();
+
+            if (announce != null)
+            {
+                // Long enough after the empty answer that the bridge is sitting
+                // idle — nobody asking — when the notice lands, which is the
+                // case a reader that only reads during a request would miss.
+                await Task.Delay(1500);
+                await stdout.WriteLineAsync(announce);
+                await stdout.FlushAsync();
+            }
         }
         return 0;
     }

@@ -37,6 +37,16 @@ public interface IMcpBridgeConnection : IDisposable
     JArray ListTools();
 
     /// <summary>
+    /// Keep hearing the server between calls, and run <paramref name="onChanged"/>
+    /// (off this connection's own thread) whenever it sends
+    /// <c>notifications/tools/list_changed</c>. False — and nothing started — when
+    /// the server never promised that notice, or this transport cannot hear one
+    /// nobody asked for: over HTTP it would take the standing GET stream, which
+    /// this hub does not open.
+    /// </summary>
+    bool ListenForToolChanges(Action onChanged) => false;
+
+    /// <summary>
     /// Call one tool and return the server's whole <c>result</c> envelope —
     /// content blocks and isError intact, so images and structured payloads
     /// survive the trip instead of being flattened into a string.

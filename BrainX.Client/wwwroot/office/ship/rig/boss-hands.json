@@ -1,0 +1,1 @@
+{"character":"boss","reference":"boss-props.webp","walkHand":{"image":"boss-walk-hand.png","rect":[0,0,1254,1254],"j":{"wrist":[610,120],"knuckle":[595,650]},"scale":0.14},"farHand":{"image":"boss-props.webp","rect":[707,4,213,110],"j":{"wrist":[25.9,77.2],"knuckle":[126.4,58.5],"thumb":[102,12]},"scale":0.9,"surface":"left palm / original palmHand"}}

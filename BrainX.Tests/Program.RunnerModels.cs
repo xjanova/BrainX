@@ -15,6 +15,58 @@ internal static partial class Program
         checks.Add(("runner models: a pick round-trips and a flag dressed as a model never does", RunnerModelChoices));
         checks.Add(("runner effort: each CLI is told its level its own way, and only a plain level ever goes", RunnerEffortArgs));
         checks.Add(("bus seal: a sealed line is only the owner's under the name it was written as", SealWrittenAsChecks));
+        checks.Add(("agent install: a runner BrainX cannot start says so, with where to get it", AgentInstallChecks));
+        checks.Add(("google ai: image models are read from the key's own list, newest first", GoogleImageModelChecks));
+    }
+
+    private static Task AgentInstallChecks()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "bx-agentinstall-" + Guid.NewGuid().ToString("N")[..6]);
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var exe = Path.Combine(dir, "grok.exe");
+            File.WriteAllText(exe, "");
+            var there = AgentInstall.Probe("grok", new JObject { ["exe"] = exe });
+            Check("an exe that exists is installed and ready", there.Installed && there.Ready && there.Url == null);
+
+            var gone = AgentInstall.Probe("grok", new JObject { ["exe"] = Path.Combine(dir, "nope", "grok.exe") });
+            Check("a missing exe is not installed, and the card links to where Grok comes from",
+                  !gone.Installed && !gone.Ready && gone.Url == "https://x.ai/cli" && gone.Fix.Length > 0);
+
+            var fallback = AgentInstall.Probe("codex", new JObject { ["exe"] = "bx-no-such-exe-anywhere", ["exeFallbacks"] = new JArray(exe) });
+            Check("exeFallbacks are tried like the broker tries them", fallback.Installed);
+
+            var nodeExe = Path.Combine(dir, "node.exe");
+            File.WriteAllText(nodeExe, "");
+            var noScript = AgentInstall.Probe("x", new JObject { ["exe"] = nodeExe, ["args"] = new JArray(Path.Combine(dir, "gemini.js"), "-p") });
+            Check("a node runner whose script is missing is not installed", !noScript.Installed);
+
+            Check("the room may open only the guide links BrainX itself wrote",
+                  AgentInstall.KnownUrls.Contains("https://x.ai/cli") && AgentInstall.KnownUrls.Contains(GoogleAiKey.GetKeyUrl)
+                  && !AgentInstall.KnownUrls.Contains("https://example.com/"));
+            Check("an agent without a guide still gets a line to act on", AgentInstall.GuideFor("someone").Fix.Contains("someone"));
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+        return Task.CompletedTask;
+    }
+
+    private static Task GoogleImageModelChecks()
+    {
+        var list = JObject.Parse("""
+        {"models":[
+          {"name":"models/gemini-2.5-flash","supportedGenerationMethods":["generateContent"]},
+          {"name":"models/gemini-2.5-flash-image","supportedGenerationMethods":["generateContent","countTokens"]},
+          {"name":"models/gemini-3-pro-image-preview","supportedGenerationMethods":["generateContent"]},
+          {"name":"models/imagen-4.0-generate-001","supportedGenerationMethods":["predict"]},
+          {"name":"models/gemini-2.0-flash-image-embed","supportedGenerationMethods":["embedContent"]}
+        ]}
+        """);
+        var models = GoogleAiKey.ImageModels(list);
+        Check("only Gemini image models that generate content are offered", models.Count == 2, string.Join(",", models));
+        Check("the newest is tried first", models.FirstOrDefault() == "gemini-3-pro-image-preview", string.Join(",", models));
+        Check("a key is shown masked, never whole", GoogleAiKey.Mask("AIzaSyABCDEFGHIJKLMN") == "AIza…KLMN");
+        return Task.CompletedTask;
     }
 
     private static Task SealWrittenAsChecks()
@@ -169,7 +221,21 @@ internal static partial class Program
                 ArgLine(mine.Select(m => m.Id)) == "gemini-pro gemini-flash" && mine[1].Label == "Flash",
                 ArgLine(mine.Select(m => m.Id)));
             Check("an unknown CLI with no list offers nothing",
-                RunnerModels.Supported("gemini", "gemini", null, out _).Count == 0);
+                RunnerModels.Supported("aider", "aider", null, out _).Count == 0);
+
+            // Gemini's runner is node + gemini.js, so the agent name is what
+            // makes it Gemini; its models come from the CLI's own constants.
+            var gemini = RunnerModels.Supported("gemini", "node", null, out _);
+            Check("gemini (run as node): its models are offered, auto first, then Gemini 4 Argon",
+                gemini.Count > 0 && gemini[0].Id == "auto" && gemini[1].Id == "gemini-4-argon" && gemini.Any(m => m.Id == "gemini-3.1-pro-preview")
+                && gemini.All(m => RunnerModels.IsValidId(m.Id)), ArgLine(gemini.Select(m => m.Id)));
+            Check("gemini: no effort levels, since the CLI has no effort flag",
+                RunnerModels.SupportedEfforts("gemini", "node", "gemini-2.5-pro", null, out var gemDefault).Count == 0
+                && gemDefault == null && RunnerModels.DefaultEffortArgs("gemini", "node").Count == 0);
+            var line = ArgLine(RunnerModels.ApplyToArgs(
+                new[] { @"C:\npm\gemini.js", "-p", "{prompt}", "--approval-mode", "yolo" }, "gemini-3.5-flash", RunnerModels.DefaultFlag));
+            Check("gemini: --model goes after the script and before -p",
+                line == @"C:\npm\gemini.js --model gemini-3.5-flash -p {prompt} --approval-mode yolo", line);
 
             RunnerModels.WriteEffortChoice(bus, "claude", "high");
             Check("an effort pick reads back, beside the model pick",

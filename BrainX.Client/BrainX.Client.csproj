@@ -27,6 +27,8 @@
 
   <ItemGroup>
     <Resource Include="Assets\Logo.png" />
+    <Resource Include="Assets\CrestSign.png" />
+    <Resource Include="Assets\CrestMascot.png" />
     <Resource Include="Assets\Logo.ico" />
     <Resource Include="Assets\LogoBanner.png" />
     <Resource Include="Assets\bk1.png" />

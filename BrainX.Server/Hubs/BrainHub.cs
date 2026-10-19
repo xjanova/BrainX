@@ -32,6 +32,30 @@ public class BrainHub : Hub
     /// </summary>
     public static BrainX.Core.Services.IBrainStorage? Store;
 
+    /// <summary>
+    /// The vault this node hosts, as its brain-export (set in Program.cs). The
+    /// peer-facing read methods (<see cref="PeerGetNote"/>, <see cref="PeerSearch"/>,
+    /// <see cref="PeerBacklinks"/>) and the per-note check in <see cref="RequestShare"/>
+    /// evaluate the owner's <see cref="ShareScope"/> against these rows, so a
+    /// peer never learns a title, path or snippet the owner did not open to
+    /// them. Null, or a null return, means "this hub hosts no vault" — every
+    /// peer read is denied and RequestShare falls back to the preflight only.
+    /// </summary>
+    public static Func<BrainExport?>? ExportProvider;
+
+    /// <summary>
+    /// Vault-relative path → full markdown body, or null when the file is not
+    /// readable inside the vault (Program.cs resolves through VaultPathGuard).
+    /// Only consulted after the evaluator allowed the note at Full/ReadWrite.
+    /// </summary>
+    public static Func<string, string?>? NoteContentProvider;
+
+    /// <summary>Thrown for every peer read that is not allowed — one message
+    /// for "no such note" and "not yours to see", so a probe cannot tell the
+    /// two apart and enumerate the vault.</summary>
+    private const string NotShared = "not shared";
+    private const int MaxPeerSearchResults = 50;
+
     // Join Brain v2 — Phase 3 hardening #1: challenge-response register.
     // Per-connection nonces issued by RequestChallenge and consumed by
     // RegisterBrain. Without this, RegisterBrain trusted the client's
@@ -449,27 +473,30 @@ public class BrainHub : Hub
         // Full per-note evaluation still happens on the owner's client
         // (where the note content lives) — see ShareScopeEvaluator. The
         // hub only does the rules that don't need note metadata.
-        Scopes.TryGetValue(new ScopeKey(request.ToAddress, request.FromAddress), out var scope);
-        if (scope == null && Store != null)
-            scope = await Store.GetScopeAsync(request.ToAddress, request.FromAddress);  // cold cache after restart
+        var scope = await ScopeFor(request.ToAddress, request.FromAddress);
         var preflightReason = PreflightDeny(scope);
         if (preflightReason != ShareDenyReason.None)
         {
-            Interlocked.Increment(ref _totalShareDenials);
-            await Clients.Caller.SendAsync("ShareDenied", new
-            {
-                request.FromAddress,
-                request.ToAddress,
-                request.NodeTitle,
-                Reason = preflightReason.ToString(),
-                Stage = "preflight"
-            });
-            var shortAddr = request.ToAddress.Length > 18 ? request.ToAddress[..18] + "..." : request.ToAddress;
-            LogActivity($"Share DENIED ({preflightReason}): → {shortAddr}");
-            Console.WriteLine($"[!] Share denied {preflightReason}: {request.FromAddress} -> {request.ToAddress}");
-            AuditLog.Record("share.deny", request.FromAddress,
-                $"to={request.ToAddress} nodeId={request.NodeId} reason={preflightReason}");
+            await DenyShare(request, preflightReason, "preflight");
             return;
+        }
+
+        // When this hub hosts the owner's vault it also knows the notes, so
+        // the per-note rules (folders, tags, allow/block lists) are enforced
+        // HERE as well — an owner's client that is offline, buggy or hostile
+        // to its own user can no longer be the only line of defence. The
+        // export must belong to request.ToAddress: a relay hub holding some
+        // other brain's export must not judge requests with that vault's rows.
+        var export = HostedExportFor(request.ToAddress);
+        if (export != null)
+        {
+            var node = FindNode(export, request.NodeId);
+            var decision = ShareScopeEvaluator.Evaluate(scope, node);   // null node → NoMatch
+            if (!decision.Allowed)
+            {
+                await DenyShare(request, decision.Reason, "scope");
+                return;
+            }
         }
 
         lock (PendingRequests)
@@ -509,6 +536,210 @@ public class BrainHub : Hub
         if (scope.ExpiresAt.HasValue && scope.ExpiresAt.Value < DateTime.UtcNow)
             return ShareDenyReason.Expired;
         return ShareDenyReason.None;
+    }
+
+    /// <summary>One denial path for RequestShare: counter, ShareDenied to the
+    /// caller, activity line, audit row. <paramref name="stage"/> is "preflight"
+    /// (scope-level rules) or "scope" (per-note rules against the export).</summary>
+    private async Task DenyShare(ShareRequest request, ShareDenyReason reason, string stage)
+    {
+        Interlocked.Increment(ref _totalShareDenials);
+        await Clients.Caller.SendAsync("ShareDenied", new
+        {
+            request.FromAddress,
+            request.ToAddress,
+            request.NodeTitle,
+            Reason = reason.ToString(),
+            Stage = stage
+        });
+        var shortAddr = request.ToAddress.Length > 18 ? request.ToAddress[..18] + "..." : request.ToAddress;
+        LogActivity($"Share DENIED ({reason}): → {shortAddr}");
+        Console.WriteLine($"[!] Share denied {reason}: {request.FromAddress} -> {request.ToAddress}");
+        AuditLog.Record("share.deny", request.FromAddress,
+            $"to={request.ToAddress} nodeId={request.NodeId} reason={reason} stage={stage}");
+    }
+
+    /// <summary>
+    /// The scope <paramref name="owner"/> granted <paramref name="peer"/>: hot
+    /// cache first, then the durable store so a cold cache after a restart
+    /// still answers. Null when the owner never granted anything (or revoked).
+    /// Not written back into the cache: RevokeScope clears both layers, and a
+    /// pool of hubs on one MySQL must see a revoke made through another hub.
+    /// </summary>
+    private static async Task<ShareScope?> ScopeFor(string owner, string peer)
+    {
+        if (Scopes.TryGetValue(new ScopeKey(owner, peer), out var cached)) return cached;
+        if (Store != null) return await Store.GetScopeAsync(owner, peer);
+        return null;
+    }
+
+    /// <summary>
+    /// The hosted export, but only when it is <paramref name="ownerAddress"/>'s
+    /// brain. Scopes are keyed by (owner, peer) and any registered identity may
+    /// SetScope as "owner", so without this check a peer could register a second
+    /// identity, grant itself Full on everything, and read this node's vault
+    /// under that made-up owner. An export with no BrainAddress is never served.
+    /// </summary>
+    private static BrainExport? HostedExportFor(string ownerAddress)
+    {
+        if (string.IsNullOrWhiteSpace(ownerAddress)) return null;
+        BrainExport? export;
+        try { export = ExportProvider?.Invoke(); }
+        catch { return null; }
+        if (export?.Nodes == null) return null;
+        if (string.IsNullOrWhiteSpace(export.BrainAddress)) return null;
+        return string.Equals(export.BrainAddress, ownerAddress, StringComparison.Ordinal) ? export : null;
+    }
+
+    private static NodeSummary? FindNode(BrainExport? export, string? nodeId)
+    {
+        if (export?.Nodes == null || string.IsNullOrWhiteSpace(nodeId)) return null;
+        return export.Nodes.FirstOrDefault(n => string.Equals(n.Id, nodeId, StringComparison.Ordinal));
+    }
+
+    /// <summary>Caller identity + per-method budget for the peer read methods.</summary>
+    private string RequireRegisteredPeer(string method)
+    {
+        var caller = CallerBrainAddress();
+        if (string.IsNullOrEmpty(caller))
+            throw new HubException("RegisterBrain first — caller has no identity");
+        if (!RateLimiter.TryConsume(Context.ConnectionId, method, 60, TimeSpan.FromMinutes(1)))
+        {
+            AuditLog.Record("rate.limit", caller, $"method={method}");
+            throw new HubException("rate limited — slow down");
+        }
+        return caller;
+    }
+
+    /// <summary>
+    /// What a peer gets to see of an allowed note, by level. MetadataOnly:
+    /// id, title, path, category, tags. Preview adds the snippet. Full and
+    /// ReadWrite add the body (falling back to the snippet when the file is
+    /// not readable). Search/backlink rows use the same shape without Content.
+    /// </summary>
+    private static object ShapeNote(NodeSummary node, ShareLevel level, bool withContent)
+    {
+        var preview = level >= ShareLevel.Preview ? node.Preview ?? "" : "";
+        if (!withContent || level < ShareLevel.Full)
+            return new { node.Id, node.Title, node.RelativePath, node.PrimaryCategory, node.Tags, Preview = preview };
+
+        string? content = null;
+        try { content = NoteContentProvider?.Invoke(node.RelativePath); }
+        catch { content = null; }
+        return new
+        {
+            node.Id, node.Title, node.RelativePath, node.PrimaryCategory, node.Tags,
+            Preview = preview,
+            Content = content ?? node.Preview ?? ""
+        };
+    }
+
+    // ── Peer reads (hub-enforced ACL) ─────────────────────────────────────
+    //
+    // Every method below answers only from the vault this hub hosts, only for
+    // the owner that vault belongs to, and only after ShareScopeEvaluator said
+    // yes for the exact note. Denials all look the same ("not shared") so a
+    // peer cannot tell "no such note" from "not yours" and walk the id space.
+
+    /// <summary>One note, shaped by the peer's effective level.</summary>
+    public async Task<object> PeerGetNote(string? ownerAddress, string? nodeId)
+    {
+        var caller = RequireRegisteredPeer("PeerGetNote");
+        var owner = ownerAddress ?? "";
+        var scope = await ScopeFor(owner, caller);
+        var node = FindNode(HostedExportFor(owner), nodeId);
+        var decision = ShareScopeEvaluator.Evaluate(scope, node);
+        if (!decision.Allowed)
+        {
+            AuditLog.Record("peer.deny", caller, $"owner={owner} nodeId={nodeId} reason={decision.Reason} method=PeerGetNote");
+            throw new HubException(NotShared);
+        }
+        AuditLog.Record("peer.get", caller, $"owner={owner} nodeId={node!.Id} level={decision.EffectiveLevel}");
+        return ShapeNote(node, decision.EffectiveLevel, withContent: true);
+    }
+
+    /// <summary>
+    /// Search the owner's notes the way /api/brain/search's JSON fallback does
+    /// (title, tags, preview, category contains). The evaluator runs BEFORE
+    /// scoring, so a note the peer may not see never contributes a title or a
+    /// snippet — not even by its position in the ranking. No scope, unknown
+    /// owner, no export: an empty list, the same answer a scope with no match
+    /// gives, so a probe learns nothing about whether a scope exists.
+    /// </summary>
+    public async Task<List<object>> PeerSearch(string? ownerAddress, string? query, int limit)
+    {
+        var caller = RequireRegisteredPeer("PeerSearch");
+        var owner = ownerAddress ?? "";
+        var max = Math.Clamp(limit, 1, MaxPeerSearchResults);
+        var q = (query ?? "").Trim();
+        var export = HostedExportFor(owner);
+        if (export == null || q.Length == 0) return [];
+
+        var scope = await ScopeFor(owner, caller);
+        var hits = new List<(double Score, NodeSummary Node, ShareLevel Level)>();
+        foreach (var node in export.Nodes)
+        {
+            var decision = ShareScopeEvaluator.Evaluate(scope, node);
+            if (!decision.Allowed) continue;                      // filtered before scoring
+            var score = ScoreNode(node, q, decision.EffectiveLevel);
+            if (score > 0) hits.Add((score, node, decision.EffectiveLevel));
+        }
+
+        AuditLog.Record("peer.search", caller, $"owner={owner} q={Sanitize(q, 60)} hits={hits.Count}");
+        return hits
+            .OrderByDescending(h => h.Score)
+            .ThenBy(h => h.Node.Title, StringComparer.OrdinalIgnoreCase)
+            .Take(max)
+            .Select(h => ShapeNote(h.Node, h.Level, withContent: false))
+            .ToList();
+    }
+
+    /// <summary>
+    /// Notes that link INTO <paramref name="nodeId"/> (hand-written or auto
+    /// links). The target itself must be visible to the peer, and each
+    /// backlink is filtered through the evaluator again — a private note that
+    /// cites a public one stays private.
+    /// </summary>
+    public async Task<List<object>> PeerBacklinks(string? ownerAddress, string? nodeId)
+    {
+        var caller = RequireRegisteredPeer("PeerBacklinks");
+        var owner = ownerAddress ?? "";
+        var scope = await ScopeFor(owner, caller);
+        var export = HostedExportFor(owner);
+        var target = FindNode(export, nodeId);
+        var targetDecision = ShareScopeEvaluator.Evaluate(scope, target);
+        if (!targetDecision.Allowed)
+        {
+            AuditLog.Record("peer.deny", caller, $"owner={owner} nodeId={nodeId} reason={targetDecision.Reason} method=PeerBacklinks");
+            throw new HubException(NotShared);
+        }
+
+        var id = target!.Id;
+        var result = new List<object>();
+        foreach (var node in export!.Nodes)
+        {
+            if (string.Equals(node.Id, id, StringComparison.Ordinal)) continue;
+            var links = (node.LinkedNodeIds?.Contains(id) ?? false) || (node.AutoLinkedNodeIds?.Contains(id) ?? false);
+            if (!links) continue;
+            var decision = ShareScopeEvaluator.Evaluate(scope, node);
+            if (!decision.Allowed) continue;
+            result.Add(ShapeNote(node, decision.EffectiveLevel, withContent: false));
+        }
+        AuditLog.Record("peer.backlinks", caller, $"owner={owner} nodeId={id} hits={result.Count}");
+        return result;
+    }
+
+    /// <summary>Same weights as /api/brain/search's JSON fallback. The preview
+    /// only counts when the level lets the peer see it — otherwise a query
+    /// could probe snippet text through the ranking of a MetadataOnly share.</summary>
+    private static double ScoreNode(NodeSummary n, string q, ShareLevel level)
+    {
+        double s = 0;
+        if (n.Title?.Contains(q, StringComparison.OrdinalIgnoreCase) == true) s += 3;
+        if (n.Tags?.Any(t => t?.Contains(q, StringComparison.OrdinalIgnoreCase) == true) == true) s += 2;
+        if (level >= ShareLevel.Preview && n.Preview?.Contains(q, StringComparison.OrdinalIgnoreCase) == true) s += 1;
+        if (n.PrimaryCategory?.Contains(q, StringComparison.OrdinalIgnoreCase) == true) s += 1.5;
+        return s;
     }
 
     // ── Scope management (Join Brain v2 Phase 1) ──────────────────────────
@@ -600,9 +831,29 @@ public class BrainHub : Hub
 
         Scopes.TryRemove(new ScopeKey(caller, peerAddress), out _);
         if (Store != null) await Store.DeleteScopeAsync(caller, peerAddress);   // durable
+
+        // Revoke is immediate everywhere: a request this peer still has open
+        // with the owner — waiting, or already accepted but not yet delivered —
+        // is rejected now, so SendShareContent cannot ride on an old "yes".
+        int cascaded;
+        lock (PendingRequests)
+        {
+            cascaded = 0;
+            foreach (var r in PendingRequests)
+            {
+                if (string.Equals(r.ToAddress, caller, StringComparison.Ordinal)
+                    && string.Equals(r.FromAddress, peerAddress, StringComparison.Ordinal)
+                    && r.Status is ShareStatus.Pending or ShareStatus.Accepted)
+                {
+                    r.Status = ShareStatus.Rejected;
+                    cascaded++;
+                }
+            }
+        }
+
         var shortPeer = peerAddress.Length > 18 ? peerAddress[..18] + "..." : peerAddress;
         LogActivity($"Scope revoked: → {shortPeer}");
-        AuditLog.Record("scope.revoke", caller, $"peer={peerAddress}");
+        AuditLog.Record("scope.revoke", caller, $"peer={peerAddress} requestsRejected={cascaded}");
     }
 
     private string CallerBrainAddress()
@@ -640,6 +891,29 @@ public class BrainHub : Hub
         if (!string.Equals(caller, envelope.FromAddress, StringComparison.Ordinal))
             throw new HubException("envelope.FromAddress must match the caller's registered brain address");
 
+        // The relay only carries content the requester asked for, the owner
+        // accepted, and the owner's scope still covers. Without this an owner
+        // could push unsolicited blobs at any peer, and content accepted before
+        // a revoke would still go out afterwards. The request is matched on
+        // (requester, owner, NodeId) — ShareEnvelope carries NodeId — and must
+        // be Accepted; RevokeScope flips open ones to Rejected, so it fails here.
+        ShareRequest? accepted;
+        lock (PendingRequests)
+        {
+            accepted = PendingRequests.FirstOrDefault(r =>
+                string.Equals(r.FromAddress, envelope.ToAddress, StringComparison.Ordinal)
+                && string.Equals(r.ToAddress, envelope.FromAddress, StringComparison.Ordinal)
+                && string.Equals(r.NodeId, envelope.NodeId, StringComparison.Ordinal)
+                && r.Status == ShareStatus.Accepted);
+        }
+        var scope = await ScopeFor(caller, envelope.ToAddress);
+        if (accepted == null || PreflightDeny(scope) != ShareDenyReason.None)
+        {
+            AuditLog.Record("share.content.deny", caller,
+                $"to={envelope.ToAddress} nodeId={envelope.NodeId} request={(accepted == null ? "none" : "ok")} scope={PreflightDeny(scope)}");
+            throw new HubException("no accepted request for this envelope");
+        }
+
         PeerInfo? target;
         lock (ConnectedPeers)
         {
@@ -648,8 +922,16 @@ public class BrainHub : Hub
         if (target == null) return; // requester offline — drop; client retries on reconnect
 
         await Clients.Client(target.Endpoint).SendAsync("ShareContent", envelope);
+        // One envelope per accepted request (NetworkClient.SendShareContentAsync
+        // ships a single blob). Consumed only after the relay actually went out,
+        // so the "requester offline → retry on reconnect" path above still works.
+        lock (PendingRequests)
+        {
+            if (accepted.Status == ShareStatus.Accepted) accepted.Status = ShareStatus.Completed;
+        }
         var shortTo = envelope.ToAddress.Length > 18 ? envelope.ToAddress[..18] + "..." : envelope.ToAddress;
         LogActivity($"Share content relayed: → {shortTo}");
+        AuditLog.Record("share.content", caller, $"to={envelope.ToAddress} nodeId={envelope.NodeId}");
     }
 
     public async Task RespondToShare(string? fromAddress, bool accepted)

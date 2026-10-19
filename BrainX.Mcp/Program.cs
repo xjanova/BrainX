@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using BrainX.Core.Services;
+using BrainX.Core.Services.License;
 using BrainX.Mcp.Bridge;
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -395,6 +396,17 @@ internal static partial class Program
         }
         catch (Exception ex) { Log($"codex AGENTS.md install failed: {ex.Message}"); }
 
+        // And for Gemini CLI (~/.gemini/GEMINI.md) and Grok Build (~/.grok/AGENTS.md).
+        // Each writes only when that agent's home folder already exists.
+        if (!sandbox) try
+        {
+            var gemini = AgentRulesInstaller.EnsureGemini(_vaultPath);
+            var grok = AgentRulesInstaller.EnsureGrok(_vaultPath);
+            if (gemini == AgentRulesInstaller.InstallResult.Installed || grok == AgentRulesInstaller.InstallResult.Installed)
+                Log($"agent rules: gemini {gemini}, grok {grok} (v{AgentRulesInstaller.RuleVersion})");
+        }
+        catch (Exception ex) { Log($"gemini/grok rules install failed: {ex.Message}"); }
+
         // Self-heal Claude Desktop's claude_desktop_config.json so its UI
         // sidebar shows the version we're actually running. Desktop doesn't
         // render serverInfo.version anywhere visible — owners verify the
@@ -427,7 +439,7 @@ internal static partial class Program
         var bridgesInSandbox = sandbox && !cloud
             && Environment.GetEnvironmentVariable("BRAINX_HEADLESS") != "1"
             && Environment.GetEnvironmentVariable("BRAINX_SANDBOX_BRIDGES") == "1";
-        try { McpBridgeHub.Initialize(_vaultPath, headless && !bridgesInSandbox, Log, BusIdentity); }
+        try { McpBridgeHub.Initialize(_vaultPath, headless && !bridgesInSandbox, Log, BusIdentity, NotifyToolsChanged); }
         catch (Exception ex) { Log($"bridge init failed (non-fatal): {ex.Message}"); }
 
         if (!headless)
@@ -547,6 +559,10 @@ internal static partial class Program
         // connection, so the room, the broker's runner and every peer know it
         // by the one name the client already lists: "grok".
         else if (name != null && name.Contains("grok", StringComparison.OrdinalIgnoreCase)) bas = "grok-mcp";
+        // Gemini CLI connects as "gemini-cli-mcp-client" (0.55.1). It runs as
+        // node.exe, so the ancestor walk below can never see it: the name is
+        // the only signal there is, and it makes every Gemini session "gemini".
+        else if (name != null && name.Contains("gemini", StringComparison.OrdinalIgnoreCase)) bas = "gemini-mcp";
         else if (CarriesNoVendorSignal(name) && HostVendor() is { } vendor) bas = vendor + "-mcp";
         else if (string.IsNullOrWhiteSpace(name)) bas = "mcp";
         else
@@ -626,6 +642,7 @@ internal static partial class Program
             // Grok run started from a Claude terminal walked on up and was
             // filed as claude.
             if (ancestor.Contains("grok", StringComparison.OrdinalIgnoreCase)) return "grok";
+            if (ancestor.Contains("gemini", StringComparison.OrdinalIgnoreCase)) return "gemini";
             if (ancestor.Contains("codex", StringComparison.OrdinalIgnoreCase)) return "codex";
             if (ancestor.Contains("claude", StringComparison.OrdinalIgnoreCase)) return "claude";
         }
@@ -912,6 +929,23 @@ internal static partial class Program
     private static readonly Lazy<HashSet<string>> CoreToolNames = new(() =>
         new HashSet<string>(CoreTools().OfType<JObject>().Select(t => t["name"]!.ToString()), StringComparer.OrdinalIgnoreCase));
 
+    /// <summary>
+    /// A bridge's tools arrived or changed mid-session (an editor opened after
+    /// the agent started, Roblox Studio loading a place): ask the client to read
+    /// tools/list again. The launcher passes the line through like any other
+    /// worker output, and Console.Out is synchronized, so it cannot split a
+    /// response the request loop is writing.
+    /// </summary>
+    private static void NotifyToolsChanged()
+    {
+        try
+        {
+            Console.Out.WriteLine("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}");
+            Console.Out.Flush();
+        }
+        catch (Exception ex) { Log($"tools/list_changed notice failed (non-fatal): {ex.Message}"); }
+    }
+
     /// <summary>The brain's own tools. Bridged ones are appended by ToolsList.</summary>
     private static JArray CoreTools() => new()
         {
@@ -1156,7 +1190,9 @@ internal static partial class Program
                 "minutes); poll media_status {job}. Files land in agent-bus/outbox/media/<job>/ — attach them with " +
                 "cowork_say. Costs the owner's Grok quota (about 30k tokens an image); the owner's order to make it is the " +
                 "permission. Video is refused while the Grok account keeps its data private (zero data retention); " +
-                "media_status says so — images are unaffected.",
+                "media_status says so — images are unaffected. engine:'gemini' draws with Gemini's image model and the " +
+                "owner's Google key from Settings instead: images only, up to 4 `references` (absolute paths of images to " +
+                "match — a character sheet, a layout template), finished when the call returns (no polling).",
                 new JObject
                 {
                     ["type"] = "object",
@@ -1167,7 +1203,10 @@ internal static partial class Program
                         ["aspect_ratio"] = new JObject { ["type"] = "string", ["description"] = "image: auto, 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, 2:3" },
                         ["resolution"] = new JObject { ["type"] = "string", ["enum"] = new JArray("480p", "720p"), ["default"] = "480p" },
                         ["duration"] = new JObject { ["type"] = "integer", ["enum"] = new JArray(6, 10), ["default"] = 6 },
-                        ["image"] = new JObject { ["type"] = "string", ["description"] = "video only: absolute path of the image to animate" }
+                        ["image"] = new JObject { ["type"] = "string", ["description"] = "video only: absolute path of the image to animate" },
+                        ["engine"] = new JObject { ["type"] = "string", ["enum"] = new JArray("grok", "gemini"), ["default"] = "grok", ["description"] = "who draws: Grok Imagine (owner's Grok login) or Gemini (owner's Google key)" },
+                        ["references"] = new JObject { ["type"] = "array", ["items"] = new JObject { ["type"] = "string" }, ["description"] = "gemini only: up to 4 absolute paths of .png/.jpg/.webp images to follow" },
+                        ["model"] = new JObject { ["type"] = "string", ["description"] = "gemini only: a Gemini image model id; omit to use the best one the key offers" }
                     },
                     ["required"] = new JArray("prompt")
                 }),
@@ -1300,6 +1339,33 @@ internal static partial class Program
             Tool("brain_stats",
                 "High-level stats: brain name, address, note/word counts, top tags, top categories — and `hooks`: which brain hooks are broken, when the instructions say HOOKS BROKEN.",
                 new JObject { ["type"] = "object", ["properties"] = new JObject() }),
+            Tool("brain_cloud_sync",
+                "Sync this brain with BrainX Cloud NOW, from chat. `pull` brings cloud changes into the REAL vault " +
+                "(on a fresh install with an empty vault it restores everything, ticks the cloud's folders and refuses " +
+                "uploads until the restore is complete); `push` uploads the chosen folders; `both` pulls then pushes. " +
+                "Newer side wins, never silently: a note edited on both sides is kept twice " +
+                "('name (conflict <device> <date>).md'). More than 20 deletions in one run are held back until " +
+                "the owner confirms (allow_mass_delete=true). Returns counts (fetched, uploaded, deleted, conflicts, " +
+                "held-back) and never a token. Requires `brainx-mcp cloud login` on this machine.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["direction"] = new JObject
+                        {
+                            ["type"] = "string",
+                            ["enum"] = new JArray("push", "pull", "both"),
+                            ["default"] = "both",
+                        },
+                        ["allow_mass_delete"] = new JObject
+                        {
+                            ["type"] = "boolean",
+                            ["default"] = false,
+                            ["description"] = "only after the owner said yes: let this run delete more than 20 notes (held back otherwise)"
+                        }
+                    }
+                }),
             Tool("brain_bundle",
                 "Load a PRE-BUILT context bundle for a hot topic. Each bundle is ~1200 tokens — way cheaper than " +
                 "brain_synthesize's full-content packing (~8000 tokens). Bundle includes top 5-10 related notes " +
@@ -1879,6 +1945,25 @@ internal static partial class Program
         var name = parameters?["name"]?.ToString();
         var args = parameters?["arguments"] as JObject ?? new JObject();
 
+        // Owner, 2026-10-10: a PC that has not registered with xman does not
+        // run BrainX at all, free part included. The window registers on its
+        // first online start (and this server opens the window), so the answer
+        // says exactly that; afterwards everything works offline.
+        if (LicenseGatesApply() && !ProGate.IsRegistered)
+        {
+            // Not journalled for the private browsing log or a chrome__ call:
+            // their arguments are URLs and searches over private browsing,
+            // which the activity feed must never hold (see below).
+            if (!string.Equals(name, BrainX.Core.Services.Chrome.ChromeBridgeIds.PrivateSearchTool, StringComparison.OrdinalIgnoreCase)
+                && !BrainX.Core.Services.Chrome.ChromeBridgeIds.IsChromeToolName(name))
+                NoteActivity(name, SummarizeArgs(name, args), ok: false, error: "device not registered");
+            return BuildResult(id, new JObject
+            {
+                ["isError"] = true,
+                ["content"] = new JArray { new JObject { ["type"] = "text", ["text"] = ProGate.NotRegisteredMessage } },
+            });
+        }
+
         // The private browsing log. Handled before everything else and outside
         // the switch below, because that path journals the arguments, feeds the
         // activity log and piggybacks bus notices — none of which a search over
@@ -1906,6 +1991,19 @@ internal static partial class Program
                 "no such Claude in Chrome tool, or the bridge is not available in this session — call bridge_status for details " +
                 "(ไม่มีเครื่องมือ Claude in Chrome ชื่อนี้ หรือการเชื่อมใช้ไม่ได้ในเซสชันนี้ — เรียก bridge_status เพื่อดูรายละเอียด)");
 
+        // BrainX Pro: every brain tool stays free for every agent; joining the
+        // cowork room, posting to it, and generating media need Pro on this PC
+        // (ProGate reads the license the BrainX window saved).
+        if (ProFeatureOf(name) is { } proFeature && !ProGate.Allows(proFeature))
+        {
+            NoteActivity(name, SummarizeArgs(name, args), ok: false, error: "BrainX Pro required");
+            return BuildResult(id, new JObject
+            {
+                ["isError"] = true,
+                ["content"] = new JArray { new JObject { ["type"] = "text", ["text"] = ProGate.LockedMessage(proFeature) } },
+            });
+        }
+
         try
         {
             JToken result = name switch
@@ -1917,6 +2015,7 @@ internal static partial class Program
                 "brain_list"                => BrainList(args),
                 "brain_scope_list"          => BrainScopeList(args),
                 "brain_stats"               => BrainStats(),
+                "brain_cloud_sync"          => BrainCloudSync(args),
                 "brain_bundle"              => BrainBundle(args),
                 "brain_bundles_list"        => BrainBundlesList(),
                 "brain_mark_verified"       => BrainMarkVerified(args),
@@ -2041,6 +2140,33 @@ internal static partial class Program
                 }}
             });
         }
+    }
+
+    /// <summary>
+    /// The desktop license applies here: not a BrainX Cloud session (--cloud,
+    /// or a customer's child on the server with BRAINX_SANDBOX=1), which
+    /// already proved a paid key to get in, and not a node's headless child,
+    /// which serves its owner's remote /mcp. Neither has a desktop license
+    /// file to read. (Tests run the server sandboxed for the same reason.)
+    /// </summary>
+    private static bool LicenseGatesApply() =>
+        !_cloudMode
+        && Environment.GetEnvironmentVariable("BRAINX_SANDBOX") != "1"
+        && Environment.GetEnvironmentVariable("BRAINX_HEADLESS") != "1";
+
+    /// <summary>
+    /// The Pro feature a tool belongs to, or null for a free one. Reading the
+    /// room, seeing who is in it and leaving it stay free; taking part does not.
+    /// </summary>
+    private static ProFeature? ProFeatureOf(string? tool)
+    {
+        if (!LicenseGatesApply()) return null;
+        return tool switch
+        {
+            "cowork_join" or "cowork_say" or "cowork_task" => ProFeature.Cowork,
+            "media_generate" => ProFeature.Media,
+            _ => null,
+        };
     }
 
     /// <summary>
@@ -8951,6 +9077,15 @@ internal static partial class Program
                 continue;
             if (prop.Value is not JObject entry) continue;
 
+            // Only an entry that launches THIS copy. Any running server used to
+            // stamp its own version on every entry, so on 2026-10-10 a 2.9.490
+            // Claude Code session wrote "2.9.490" onto a Desktop entry that
+            // still launched the 2.9.484 copy at BrainX\mcp — the one place an
+            // owner can read the version agreed with the new build and hid the
+            // stale one. An in-place upgrade keeps the directory, so the case
+            // this method exists for still matches.
+            if (!LaunchesThisCopy(entry["command"]?.ToString())) continue;
+
             var env = entry["env"] as JObject;
             if (env == null)
             {
@@ -8972,6 +9107,20 @@ internal static partial class Program
             try { File.WriteAllText(configPath, json.ToString(Newtonsoft.Json.Formatting.Indented)); }
             catch (IOException ex) { Log($"desktop config write failed: {ex.Message}"); }
         }
+    }
+
+    /// <summary>True when <paramref name="command"/> is a brainx-mcp in the
+    /// directory this server runs from.</summary>
+    private static bool LaunchesThisCopy(string? command)
+    {
+        if (string.IsNullOrWhiteSpace(command)) return false;
+        try
+        {
+            var theirs = Path.GetDirectoryName(Path.GetFullPath(command))?.TrimEnd('\\', '/');
+            var ours = Path.GetFullPath(AppContext.BaseDirectory).TrimEnd('\\', '/');
+            return string.Equals(theirs, ours, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
     }
 
     /// <summary>
@@ -9157,12 +9306,21 @@ internal static partial class Program
     ///
     /// `cmd /c start` breaks the link: cmd exits immediately, so by the time
     /// anyone walks the tree the GUI's recorded parent is already gone.
+    ///
+    /// It does not break the MSIX link. This server is started by Claude or
+    /// Codex, and a window it opens with `cmd /c start` runs in that package's
+    /// file-system virtualization, where a new top-level AppData folder the
+    /// window creates exists for no one else (PackageBreakaway has the
+    /// 2026-10-10 measurements). So a virtualized server opens the window
+    /// from outside the package first, and only falls back to `start`.
     /// </summary>
     private static void StartDetached(string exe)
     {
         var dir = Path.GetDirectoryName(exe)!;
         if (OperatingSystem.IsWindows())
         {
+            if (StartOutsidePackage(exe, dir)) return;
+
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = "cmd.exe",
@@ -9184,6 +9342,39 @@ internal static partial class Program
             UseShellExecute = true,
             CreateNoWindow = false,
         });
+    }
+
+    /// <summary>
+    /// Open the window outside the package this server is virtualized by.
+    /// False when it is not virtualized, or no route out worked — the caller
+    /// then starts it as before, and the window relaunches itself.
+    /// </summary>
+    private static bool StartOutsidePackage(string exe, string dir)
+    {
+        try
+        {
+            var package = PackageBreakaway.VirtualizingPackage();
+            if (package is null) return false;
+
+            if (PackageBreakaway.CurrentPackage() is not null)
+            {
+                // `start` still keeps the window off this worker's tree; the
+                // policy takes cmd, and so the window, out of the package.
+                PackageBreakaway.StartWithBreakawayPolicy($"cmd.exe /c start \"\" \"{exe}\"", dir, hidden: true);
+                Log($"client launch: outside package {package} (breakaway policy)");
+                return true;
+            }
+            // No identity, so the policy does nothing here; the shell is
+            // outside every package, and its child is in no one's tree.
+            if (PackageBreakaway.StartViaShell(exe))
+            {
+                Log($"client launch: outside package {package} (through the shell)");
+                return true;
+            }
+            Log($"client launch: still inside package {package} — no shell to hand it to");
+        }
+        catch (Exception ex) { Log($"client launch: could not leave the package ({ex.Message})"); }
+        return false;
     }
 
     private static string? FindSolutionRoot(string startDir)

@@ -1518,6 +1518,7 @@ public partial class MainWindow
         // A cloud sync in flight stops here too (its finished batches are
         // already saved; the next launch resumes the rest).
         try { ShutdownCloud(); } catch { }
+        StopAgentArrivalWatcher();
         base.OnClosed(e);
     }
 

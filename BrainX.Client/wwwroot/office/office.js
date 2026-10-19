@@ -58,6 +58,80 @@ const scene = document.createElement('canvas');
 const ctx = scene.getContext('2d');                   // logical, sprites only, TRANSPARENT
 const overlay = document.getElementById('overlay');
 
+// ── the starship ────────────────────────────────────────────────────
+/*
+ * Owner (2026-10-16): the cowork room becomes the girls' warp ship, with the
+ * girls in it instead of the pixel crew. The ship is its own page (ship/,
+ * copied from the Avatar Studio by output/boss-rig/tools/sync_office_ship.py)
+ * in a frame over the room; this file still owns every fact — who is
+ * connected, who is working, what was said — and only tells the ship, which
+ * acts it out: working = at her desk, idle = wandering the deck, offline or
+ * lights out = asleep in her bed. `?classic` brings the painted room back.
+ */
+const SHIP_VIEW_KEY = 'brainx.office.view';
+const SHIP_MODE = (() => {
+    if (new URLSearchParams(location.search).has('classic')) return false;
+    try { return localStorage.getItem(SHIP_VIEW_KEY) !== 'classic'; } catch { return true; }
+})();
+const SHIP_FRAME = document.getElementById('ship');
+let SHIP_READY = false;
+/** Agent id -> the girl who plays it. claude-code and claude-chat are both
+ *  Claude; the broker IS มาย (Mai). Gemini's girl boards once she has drawn
+ *  herself (output/boss-rig/tools/intake_gemini.py). Anyone else has none. */
+function shipWho(id) {
+    id = String(id || '').toLowerCase();
+    if (id === 'owner') return 'boss';
+    if (isMind(id) || id.startsWith('mind')) return 'mai';
+    for (const who of ['cluadex', 'claude', 'codex', 'grok', 'gemini']) if (id.startsWith(who)) return who;
+    return null;
+}
+function shipPost(msg) {
+    if (!SHIP_MODE || !SHIP_READY) return;
+    try { SHIP_FRAME.contentWindow.postMessage(msg, location.origin); } catch { /* frame gone */ }
+}
+/** What each girl should be doing, from the same payload the room draws. */
+function shipSync() {
+    // Not before the first payload: an empty roster would send every girl to bed.
+    if (!SHIP_MODE || !SHIP_READY || !PRIMED) return;
+    const rank = { working: 3, idle: 2, offline: 1 };
+    const best = {};
+    for (const a of ROSTER) {
+        const who = a.bridge ? null : shipWho(a.id);
+        if (!who || who === 'boss' || who === 'mai') continue;
+        if (best[who] && (rank[best[who].state] || 0) >= (rank[a.state] || 0)) continue;
+        best[who] = a;
+    }
+    const crew = {};
+    // gemini is told too; the ship ignores her until her own art is aboard
+    for (const who of ['claude', 'codex', 'grok', 'cluadex', 'gemini']) {
+        const a = best[who];
+        const off = !a || a.state === 'offline';
+        crew[who] = {
+            activity: !ROOM_OPEN || off ? 'sleep' : a.state === 'working' ? 'desk' : null,
+            label: a ? label(a.label || a.id) : label(who),
+            doing: !ROOM_OPEN ? 'ปิดไฟแล้ว' : off ? 'ไม่อยู่' : a.state === 'working' ? (a.lastTool || 'ทำงานอยู่') : 'ว่าง',
+            color: agentColor(a ? a.id : who),
+            off,
+        };
+    }
+    const st = (BROKER && BROKER.state) || 'stopped';
+    const allotting = st === 'running' || st === 'adopted';
+    crew.mai = {
+        activity: !ROOM_OPEN ? 'sleep' : (allotting || MIND_BUSY) ? 'desk' : null,
+        label: 'มาย',
+        doing: !ROOM_OPEN ? 'ปิดไฟแล้ว' : MIND_BUSY || (allotting ? 'จัดสรรงาน' : SECRETARY?.enabled ? 'เลขาห้อง' : 'ว่าง'),
+        color: '#b9a5ff',
+        off: false,
+    };
+    crew.boss = { activity: ROOM_OPEN ? null : 'sleep', label: 'บอส', doing: '', color: FIXED.owner, off: false };
+    shipPost({ type: 'shipCrew', crew });
+}
+/** A line said in the room, as a bubble over whoever said it. */
+function shipSay(from, text, ms) {
+    const who = shipWho(from);
+    if (who && text) shipPost({ type: 'shipSay', who, text, ms, color: from === 'owner' ? FIXED.owner : agentColor(from) });
+}
+
 /** Lamps and screens, collected while the scene draws, lit in the second pass.
  *  Gathered rather than hardcoded so a desk that moves takes its light with it. */
 let LIGHTS = [];
@@ -108,9 +182,11 @@ const DESK_ROWS = [
     { x: 0.335, y: 0.490, face: 'se', count: 2 },
     // Along its top-right edge, under the glass room toward the bookshelf.
     { x: 0.550, y: 0.460, face: 'sw', count: 2 },
-    // No fifth desk. Owner (2026-10-06), when Grok came in: "เอาให้ grok
-    // ดีกว่าไหม จะได้ไม่เยอะเกิน" — the seat a leftover test identity was
-    // holding went to Grok instead, and the room stays at four.
+    // The fifth desk, behind the left row by the cabinets — the spot searched
+    // against the mask when Grok came in (ca0dfa8), then taken out while only
+    // four agents worked here. Gemini is the fifth (2026-10-16): "ให้ห้อง
+    // cowork room และ brainx เชื่อมต่อกับ mcp gemini สมบูรณ์ เหมือนโมเดลเจ้าอื่น".
+    { x: 0.330, y: 0.400, face: 'se', count: 1 },
 ];
 /** Desk to desk along a row, in logical pixels: a desk's length and a gap. */
 const DESK_STEP = 34;
@@ -228,8 +304,14 @@ function bossRelayout() {
  *  bus card uses, so an agent is the same colour everywhere in the app. */
 const FIXED = {
     claude: '#d98b5f', codex: '#6cf0ff', cluadex: '#b98cff',
-    gemini: '#7fd4ff', grok: '#9fe870', owner: '#ffb86c', broker: '#8a90b8',
+    gemini: '#7fd4ff', grok: '#9fe870', owner: '#ffb86c',
+    // The broker IS มาย (owner, 2026-10-12: "Broker ก็คือน้องมายด์ นั่นเอง"):
+    // one person, her plate's colour, whichever of the two ids said it.
+    broker: '#b9a5ff', mind: '#b9a5ff',
 };
+/** Who speaks for the room. The bus keeps "broker" as the sender id (agents
+ *  and tests key on it); only the owner's view gives it her name. */
+const isMind = (name) => name === 'mind' || name === 'broker';
 function agentColor(name) {
     const key = (name || '').toLowerCase();
     for (const k in FIXED) if (key === k || key.startsWith(k)) return FIXED[k];
@@ -239,6 +321,7 @@ function agentColor(name) {
 }
 function label(name) {
     if (!name) return '?';
+    if (isMind(name)) return 'มาย';
     return name.length > 14 ? name.slice(0, 13) + '…' : name;
 }
 
@@ -2816,6 +2899,8 @@ function drawOverlay() {
             (a.bridge ? `<span class="badge rig">เครื่องมือ</span>` : '') +
             (a.spawned ? `<span class="badge">AUTO</span>` : '') +
             (a.pending ? `<span class="badge">${a.pending}</span>` : '') +
+            // The model it answers with (CluadeX reports it); the vendor prefix is the agent's name already.
+            (a.model ? `<span class="badge model" title="โมเดลที่ใช้อยู่ — ${esc(a.model)}">${esc(a.model.replace(/^(claude|gpt|gemini)-/, ''))}</span>` : '') +
             `<span class="doing">${esc(doing)}</span>`);
     }
 
@@ -2823,7 +2908,7 @@ function drawOverlay() {
     for (const b of BUBBLES) {
         if (now >= b.until) continue;
         const d = DESKS.get(b.agent);
-        const at = d ? d.screen : (b.agent === 'mind' && MIND_FIG ? mindHead() : null);
+        const at = d ? d.screen : (isMind(b.agent) && MIND_FIG ? mindHead() : null);
         if (!at) continue;
         overlayPut(seen, `b:${b.agent}:${b.until}`, 'bubble',
             `--bc:${b.color};left:${(at.x * sx).toFixed(1)}px;top:${((at.y - 6) * sy).toFixed(1)}px`,
@@ -3257,9 +3342,15 @@ function onMessage(evt) {
     if (!m || typeof m !== 'object') return;
     if (m.type === 'officeSayFailed') { sayFailed(m.text, m.reason); return; }
     if (m.type === 'officeHistory') { applyHistory(m); return; }
+    if (m.type === 'officeHistoryTopic') { applyHistoryTopic(m); return; }
     if (m.type === 'officeHistorySummary') {
         if (typeof m.project === 'string') HIST.summary[m.project] = { text: m.text || '', error: m.error || '' };
         renderHistory();
+        return;
+    }
+    if (m.type === 'shipReady' && SHIP_MODE && evt.source === SHIP_FRAME?.contentWindow) {
+        SHIP_READY = true;
+        shipSync();
         return;
     }
     if (m.type !== 'officeState') return;
@@ -3321,13 +3412,15 @@ function apply(p) {
             const c = agentColor(m.from);
             if (m.from === 'owner') {
                 BOSS = { until: nowMs() + BOSS_SAY_MS, text: firstLine(m.body) };
+                shipSay('owner', firstLine(m.body), BOSS_SAY_MS);
                 // He says it with his body too. `instruct` runs once and the
                 // pack sends him back to idle on its own, so nothing here has
                 // to remember to put him back.
                 try { BOSS_AV?.play('instruct', { loop: false }); } catch { /* pack still loading */ }
             } else {
                 BUBBLES.push({ agent: m.from, text: firstLine(m.body), color: c, until: nowMs() + SAY_MS });
-                if (m.from === 'mind') try { MIND_FIG?.setState('talking'); } catch { /* still loading */ }
+                shipSay(m.from, firstLine(m.body), SAY_MS);
+                if (isMind(m.from)) try { MIND_FIG?.setState('talking'); } catch { /* still loading */ }
             }
             if (DESKS.has(m.from) && DESKS.has(m.to)) {
                 PACKETS.push({ from: m.from, to: m.to, color: c, t0: performance.now(), ms: 900 });
@@ -3354,7 +3447,10 @@ function apply(p) {
         // by here, so every live emote played the moment the room was opened.
         if (wasPrimed) {
             playSound(e.sound);
-            if (e.say) BUBBLES.push({ agent: a.id, text: firstLine(e.say), color: agentColor(a.id), until: nowMs() + SAY_MS });
+            if (e.say) {
+                BUBBLES.push({ agent: a.id, text: firstLine(e.say), color: agentColor(a.id), until: nowMs() + SAY_MS });
+                shipSay(a.id, firstLine(e.say), SAY_MS);
+            }
         }
     }
     // Oldest first, never all of them: clearing the set replayed every emote
@@ -3375,12 +3471,12 @@ function apply(p) {
         if (BROKER_CLICK && (st !== BROKER_CLICK.from || Date.now() - BROKER_CLICK.at > 10000)) BROKER_CLICK = null;
         bb.disabled = !!BROKER_CLICK;
         const svc = (BROKER && BROKER.service) || null;
-        const label = { running: 'บอสจัดสรรงาน ✓', adopted: 'บอสจัดสรรงาน (ตัวอื่นคุม)',
-                        stopped: 'บอสหยุด — กดเพื่อเริ่ม', failed: 'บอสเริ่มไม่ขึ้น' }[st] || st;
+        const label = { running: 'มายจัดสรรงาน ✓', adopted: 'มายจัดสรรงาน (ตัวอื่นคุม)',
+                        stopped: 'มายหยุด — กดเพื่อเริ่ม', failed: 'มายเริ่มไม่ขึ้น' }[st] || st;
         bb.textContent = label;
         bb.className = st === 'running' ? 'on' : st === 'adopted' ? 'warn' : st === 'failed' ? 'warn' : 'off';
         bb.title = [
-            'คลิก = เริ่ม/หยุดบอสในแอปนี้',
+            'คลิก = เริ่ม/หยุดมาย (ตัวจัดสรรงาน) ในแอปนี้',
             'Windows Service (ทำงานต่อแม้ปิดแอป) อยู่ที่ปุ่ม service ข้าง ๆ',
             '', ...((BROKER && BROKER.tail) || []),
         ].join('\n');
@@ -3403,6 +3499,7 @@ function apply(p) {
     renderQuota();
     if (p.secretary && typeof p.secretary === 'object') { SECRETARY = p.secretary; renderMindPanel(); }
     ensureMindFigure();
+    shipSync();
 
     renderLog();
     renderDecisions();
@@ -3473,6 +3570,10 @@ function effortLabel(row, id) {
 /** What "no pick" means for this runner, in words — runners.json's model if
  *  it names one, else whatever the CLI itself is set to. */
 function modelDefaultText(row) {
+    // An app the owner runs (CluadeX): no default to fall back to — what it answers with now.
+    if (row.app) return row.current
+        ? `ตอนนี้ใช้ ${row.current}${row.currentProvider ? ` (${row.currentProvider})` : ''}`
+        : `${row.app} ยังไม่ได้เลือกโมเดล`;
     if (row.configured) return `ค่าเริ่มต้น — ${modelLabel(row, row.configured)} (runners.json)`;
     if (row.cliDefault) return `ค่าเริ่มต้นของ CLI — ${modelLabel(row, row.cliDefault)}`;
     return 'ค่าเริ่มต้นของ CLI';
@@ -3481,6 +3582,7 @@ function modelDefaultText(row) {
 /** The same for the effort: runners.json's level, else what the next model
  *  starts at by itself (claude: the model's own, codex: config.toml). */
 function effortDefaultText(row) {
+    if (row.app) return 'อัตโนมัติ — ให้โมเดลเลือกเอง';
     if (row.effortConfigured) return `ค่าเริ่มต้น — ${effortLabel(row, row.effortConfigured)} (runners.json)`;
     if (row.effortCliDefault) return `ค่าเริ่มต้นของ CLI — ${effortLabel(row, row.effortCliDefault)}`;
     return 'ค่าเริ่มต้นของ CLI';
@@ -3508,10 +3610,10 @@ function renderModels() {
     if (chip) {
         chip.classList.toggle('set', MODELS.some(m => m.chosen || m.effortChosen));
         chip.title = MODELS.length
-            ? 'โมเดลและ effort ที่บอสใช้เรียก agent เข้ามาทำงาน\n' + MODELS.map(m =>
+            ? 'โมเดลและ effort ที่มายใช้เรียก agent เข้ามาทำงาน\n' + MODELS.map(m =>
                 `${m.agent}: ${m.chosen ? modelLabel(m, m.chosen) : modelDefaultText(m)}`
                 + ` · effort ${m.effortChosen ? effortLabel(m, m.effortChosen) : effortDefaultText(m)}`).join('\n')
-            : 'ยังไม่มี agent ที่บอสเรียกได้ (runners.json)';
+            : 'ยังไม่มี agent ที่มายเรียกได้ (runners.json)';
     }
     const note = document.getElementById('model-note');
     if (note) note.textContent = MODEL_NOTE;
@@ -3526,22 +3628,36 @@ function renderModels() {
     const focusedSel = document.activeElement?.closest?.('#model-list select');
     const focused = focusedSel ? [focusedSel.dataset.agent, focusedSel.dataset.kind] : null;
 
+    // Owner (2026-10-17): an agent BrainX cannot reach (its program is not installed, or Gemini
+    // has no key) offers no model to pick. Its card says what is missing and links to where to get
+    // it; reachable agents come first. `ready` is absent on an app row (CluadeX): those keep theirs.
+    const rows = MODELS.slice().sort((a, b) => (a.ready === false) - (b.ready === false));
     list.innerHTML = !MODELS.length
-        ? '<li class="mnote">ยังไม่มี agent ที่บอสเรียกเข้ามาทำงานได้ — เพิ่ม runner ใน runners.json</li>'
-        : MODELS.map(row => {
+        ? '<li class="mnote">ยังไม่มี agent ที่มายเรียกเข้ามาทำงานได้ — เพิ่ม runner ใน runners.json</li>'
+        : rows.map((row, i) => {
+            if (row.ready === false)
+                return `<li class="mlocked" style="--i:${i}"><div><span class="who" style="--pc:${agentColor(row.agent)}">${esc(label(row.agent))}</span>`
+                    + `<span class="tag">${row.installed ? 'ยังเชื่อมต่อไม่ได้' : 'ยังไม่ได้ติดตั้ง'} — เลือกโมเดลไม่ได้</span></div>`
+                    + `<p class="mfix">${esc(row.fix || '')}</p>`
+                    + (row.fixUrl ? `<button type="button" class="mget" data-url="${esc(row.fixUrl)}">${row.installed ? 'ไปขอคีย์' : 'ไปดาวน์โหลด'} ↗</button>` : '')
+                    + `</li>`;
             const pending = MODEL_PENDING.get(`model:${row.agent}`);
             const value = pending ? pending.value : (row.chosen || '');
             const opts = Array.isArray(row.options) ? row.options : [];
             // A pick the CLI no longer offers still shows as what it is,
             // rather than silently reading as the default.
             const stale = value && !opts.some(o => o.id === value);
-            const options = [`<option value="">${esc(modelDefaultText(row))}</option>`]
+            // An app's row has no "default" pick once it answers with a listed model: there is nothing to fall back to.
+            const options = (row.app && value ? [] : [`<option value="">${esc(modelDefaultText(row))}</option>`])
                 .concat(stale ? [`<option value="${esc(value)}" selected>${esc(value)} (ไม่อยู่ในรายการแล้ว)</option>`] : [])
                 .concat(opts.map(o => `<option value="${esc(o.id)}"${o.id === value ? ' selected' : ''}>${esc(o.label)}</option>`))
                 .join('');
             const picked = opts.find(o => o.id === value);
-            const why = !row.canChoose ? 'runner นี้ไม่รับการเลือกโมเดล (modelFlag ว่างใน runners.json)'
+            const why = row.note ? row.note
+                : !row.canChoose ? (row.app ? `${row.app} ยังไม่มีโมเดล API ที่ใส่คีย์ไว้ — ตั้งใน ${row.app} ก่อน`
+                    : 'runner นี้ไม่รับการเลือกโมเดล (modelFlag ว่างใน runners.json)')
                 : !opts.length ? 'ไม่พบรายการโมเดลของ runner นี้ — ใส่ "models" ใน runners.json'
+                : row.app && !value ? `โมเดลในเครื่องเลือกจากที่นี่ไม่ได้ — เลือกโมเดล API เพื่อสลับ ${row.app}`
                 : picked ? (picked.note || '') : '';
 
             // The effort, offered for the model the NEXT run starts on. A level
@@ -3556,7 +3672,8 @@ function renderModels() {
                 .concat(eopts.map(o => `<option value="${esc(o.id)}"${o.id === evalue ? ' selected' : ''}>${esc(o.label)}</option>`))
                 .join('');
             const epicked = eopts.find(o => o.id === evalue);
-            const ewhy = !row.effortCanChoose ? 'runner นี้ไม่รับการตั้ง effort (effortArgs ว่างใน runners.json)'
+            const ewhy = !row.effortCanChoose ? (row.app ? `${row.app} รุ่นนี้ยังไม่บอกระดับ effort`
+                    : 'runner นี้ไม่รับการตั้ง effort (effortArgs ว่างใน runners.json)')
                 : !eopts.length ? 'โมเดลนี้ไม่มีระดับ effort ให้เลือก'
                 : epicked ? (epicked.note || '') : '';
 
@@ -3571,8 +3688,8 @@ function renderModels() {
             const state = pending || epending ? ' · กำลังบันทึก…'
                 : MODEL_SAVED.has(`model:${row.agent}`) || MODEL_SAVED.has(`effort:${row.agent}`)
                     ? ' · <span class="msave">✓ บันทึกแล้ว</span>' : '';
-            return `<li><div><span class="who" style="--pc:${agentColor(row.agent)}">${esc(label(row.agent))}</span>`
-                + `<span class="tag">${row.onCall ? 'ถูกเรียกเมื่อห้องว่าง' : ''}${state}</span></div>`
+            return `<li style="--i:${i}"><div><span class="who" style="--pc:${agentColor(row.agent)}">${esc(label(row.agent))}</span>`
+                + `<span class="tag">${row.app ? `แอป ${esc(row.app)} ที่เปิดอยู่ — เลือกแล้วสลับทันที` : row.onCall ? 'ถูกเรียกเมื่อห้องว่าง' : ''}${state}</span></div>`
                 + `<label class="mfield"><span>โมเดล</span><select data-agent="${esc(row.agent)}" data-kind="model" aria-label="โมเดลของ ${esc(row.agent)}"`
                 + `${row.canChoose && opts.length ? '' : ' disabled'}>${options}</select></label>`
                 + `<p class="mnote">${esc(why)}</p>`
@@ -3584,6 +3701,11 @@ function renderModels() {
     if (focused) list.querySelector(`select[data-agent="${CSS.escape(focused[0])}"][data-kind="${CSS.escape(focused[1] || 'model')}"]`)?.focus();
 }
 
+// Where to get an agent that is not installed: the host opens it, and only addresses it sent.
+document.getElementById('model-list')?.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-url]');
+    if (b) post({ type: 'officeOpenUrl', url: b.dataset.url });
+});
 document.getElementById('model-list')?.addEventListener('change', (e) => {
     const sel = e.target.closest('select[data-agent]');
     if (!sel) return;
@@ -3700,7 +3822,7 @@ function renderWork() {
         return `<li class="wrun"><span class="who" style="--pc:${agentColor(r.agent)}">${esc(label(r.agent))}</span>`
             + `<span class="what">${esc(runWhat(r))}</span>`
             + `<button type="button" class="wbtn" data-stop="${esc(r.agent)}"${held ? ' disabled' : ''}`
-            + ` title="หยุดรอบที่บอสเรียก ${esc(r.agent)} เข้ามาทำ — งานบนบอร์ดยังอยู่">${held ? 'กำลังหยุด…' : '⏹ หยุดรอบนี้'}</button></li>`;
+            + ` title="หยุดรอบที่มายเรียก ${esc(r.agent)} เข้ามาทำ — งานบนบอร์ดยังอยู่">${held ? 'กำลังหยุด…' : '⏹ หยุดรอบนี้'}</button></li>`;
     }).concat(AGENTS.filter(a => !a.bridge && a.state !== 'offline' && a.inRoom && !RUNS.some(r => r.agent === a.id)).map(a =>
         `<li class="wrun"><span class="who" style="--pc:${agentColor(a.id)}">${esc(label(a.id))}</span>`
         + `<span class="what">อยู่ในห้อง${a.state === 'working' ? ' · กำลังทำงาน' : ''} — session ที่เปิดเอง หยุดจากที่นี่ไม่ได้ แต่จะได้ยินคำสั่งพัก/เลิก</span></li>`));
@@ -3736,7 +3858,7 @@ function renderWork() {
 
     list.innerHTML =
         `<li class="whead">กำลังทำงานอยู่ตอนนี้</li>`
-        + (running.length ? running.join('') : '<li class="wempty">ไม่มีใครรันอยู่ — บอสจะเรียกเข้ามาเองเมื่อมีงานรอ</li>')
+        + (running.length ? running.join('') : '<li class="wempty">ไม่มีใครรันอยู่ — มายจะเรียกเข้ามาเองเมื่อมีงานรอ</li>')
         + `<li class="whead">งานที่สั่งไว้ (${active.length})</li>`
         + (rows.length ? rows.join('') : '<li class="wempty">ไม่มีงานค้างบนบอร์ด</li>');
 }
@@ -3745,7 +3867,7 @@ document.getElementById('work-list')?.addEventListener('click', (e) => {
     const stop = e.target.closest('button[data-stop]');
     if (stop && !stop.disabled) {
         const agent = stop.dataset.stop;
-        if (!confirm(`หยุดรอบที่ ${agent} กำลังทำอยู่ตอนนี้?\n\nงานบนบอร์ดยังอยู่ตามเดิม บอสจะตามให้ทำต่อเมื่อเงียบไปสักพัก — ถ้าไม่ต้องการให้ทำต่อ ให้กด "พัก" หรือ "เลิก" ที่ตัวงาน`)) return;
+        if (!confirm(`หยุดรอบที่ ${agent} กำลังทำอยู่ตอนนี้?\n\nงานบนบอร์ดยังอยู่ตามเดิม มายจะตามให้ทำต่อเมื่อเงียบไปสักพัก — ถ้าไม่ต้องการให้ทำต่อ ให้กด "พัก" หรือ "เลิก" ที่ตัวงาน`)) return;
         WORK_NOTE = '';
         WORK_PENDING.set('run:' + agent, { sig: '', at: Date.now() });
         post({ type: 'officeStopRun', agent });
@@ -3759,7 +3881,7 @@ document.getElementById('work-list')?.addEventListener('click', (e) => {
     const t = TASKS.find(x => x.id === id);
     if (!t) return;
     const active = TASKS.filter(x => !['done', 'dropped'].includes(x.status));
-    const stopsRun = `\n\nคนที่ถืองานจะถูกบอกให้หยุดทันที และถ้าไม่เหลืองานอื่นบนบอร์ด รอบที่บอสเรียกเข้ามาทำอยู่จะถูกหยุดด้วย`;
+    const stopsRun = `\n\nคนที่ถืองานจะถูกบอกให้หยุดทันที และถ้าไม่เหลืองานอื่นบนบอร์ด รอบที่มายเรียกเข้ามาทำอยู่จะถูกหยุดด้วย`;
 
     let watch = [t];
     if (act === 'drop'
@@ -3820,7 +3942,16 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeWorkP
 // Deleting asks the host to move finished work into the room's trash; the
 // notes the agents wrote into the brain are never part of it.
 
-const HIST = { projects: [], detail: null, sel: null, view: 'tasks', open: new Set(), note: '', loading: false, busy: false, busyAt: 0, summary: {} };
+// Owner (2026-10-10): "ถ้าเยอะแล้วโหลดหน้าเดียวมันนานมาก ให้แบ่งหน้า และ ดูไทม์ไลน์
+// รวมควรสรุปหัวข้อแล้วสร้างผังอนิเมชั่นสวยๆ … จะกางออก (โหลดเฉพาะเรื่องนั้นที่กาง)".
+// The host now sends a project as light TOPICS (a task, or a group of loose
+// lines); a topic's story is fetched on its own when it is opened, and cached
+// in `topics` for as long as the project stays picked.
+const HIST_PAGE = 20;
+const HIST = {
+    projects: [], detail: null, sel: null, view: 'tasks', open: new Set(), note: '', loading: false, busy: false, busyAt: 0, summary: {},
+    page: 1, filter: 'all', order: 'new', topics: {}, focus: null,
+};
 
 function histSummaryBox(key) {
     const s = HIST.summary[key];
@@ -3837,9 +3968,6 @@ function histWhen(ms, withDay = true) {
     return d.toLocaleString('th-TH', withDay
         ? { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }
         : { hour: '2-digit', minute: '2-digit' });
-}
-function histDay(ms) {
-    return new Date(ms).toLocaleDateString('th-TH', { weekday: 'short', day: 'numeric', month: 'long', year: 'numeric' });
 }
 function histSpan(ms) {
     const m = Math.max(0, ms) / 60e3;
@@ -3880,7 +4008,14 @@ function pickProject(key) {
 /** host → page: {type:"officeHistory", projects, detail, note}. */
 function applyHistory(m) {
     HIST.projects = Array.isArray(m.projects) ? m.projects : [];
+    const prevKey = HIST.detail?.key;
     HIST.detail = m.detail || null;
+    // Another project, or the same one after a delete: what was fetched for
+    // its topics no longer describes it.
+    if (!HIST.detail || HIST.detail.key !== prevKey || m.note) {
+        HIST.topics = {};
+        if (HIST.detail?.key !== prevKey) { HIST.page = 1; HIST.focus = null; HIST.open.clear(); }
+    }
     if (HIST.sel != null && !HIST.projects.some(p => p.key === HIST.sel)) { HIST.sel = null; HIST.detail = null; }
     if (HIST.sel == null && HIST.detail) HIST.sel = HIST.detail.key;
     HIST.note = m.note || '';
@@ -3921,8 +4056,8 @@ function renderHistory() {
     const finished = (p.done || 0) + (p.dropped || 0);
     const head = `<div class="hx-head"><span class="hx-title">${esc(histName(p.key))}</span>`
         + `<span class="hx-tabs">`
-        + `<button type="button" class="hbtn${HIST.view === 'tasks' ? ' on' : ''}" data-view="tasks" title="งานทีละชิ้น — กดชื่องานเพื่อดูไทม์ไลน์ของมัน">งาน</button>`
-        + `<button type="button" class="hbtn${HIST.view === 'timeline' ? ' on' : ''}" data-view="timeline" title="ทุกเหตุการณ์ของโปรเจคเรียงตามเวลา">ไทม์ไลน์รวม</button></span>`
+        + `<button type="button" class="hbtn${HIST.view === 'tasks' ? ' on' : ''}" data-view="tasks" title="หัวข้อทีละหน้า — กดชื่อเพื่อกางดูเรื่องนั้น (โหลดเฉพาะเรื่องที่กาง)">หัวข้อ</button>`
+        + `<button type="button" class="hbtn${HIST.view === 'timeline' ? ' on' : ''}" data-view="timeline" title="ผังทุกหัวข้อตามเวลา — กดแท่งเพื่อกางเรื่องนั้น">ไทม์ไลน์รวม</button></span>`
         + (SECRETARY?.enabled && SECRETARY.can?.summarize
             ? `<button type="button" class="hbtn" data-summary="1"${HIST.summary[p.key]?.loading ? ' disabled' : ''}`
               + ` title="ให้มาย (โมเดลในเครื่อง) สรุปโปรเจคนี้ในไม่กี่บรรทัด">✨ ให้มายสรุป</button>`
@@ -3937,19 +4072,63 @@ function renderHistory() {
         box.innerHTML = head + `<div class="hx-empty">กำลังโหลด…</div>`;
         return;
     }
-    box.innerHTML = head + (HIST.view === 'timeline' ? histTimeline(d) : histTasks(d));
+    box.innerHTML = head + (HIST.view === 'timeline' ? histChart(d) : histTasks(d));
+    if (HIST.view === 'timeline') {
+        wireRail();
+        // The focused topic's story may already be cached; fetch it if not.
+        if (HIST.focus) { requestTopic(HIST.focus); railReveal(HIST.focus); }
+    }
 }
 
-function histEvents(t) {
-    const ev = [{ ts: t.created, who: t.createdBy, kind: 'made', text: `📌 สร้างงาน${t.assignee ? ` → ${label(t.assignee)}` : ''}` }];
-    for (const h of t.history || []) {
+/** Every event of one topic, from its fetched story `s` ({history, lines}). */
+function histEvents(t, s) {
+    const ev = [];
+    if (t.kind !== 'talk')
+        ev.push({ ts: t.created, who: t.createdBy, kind: 'made', text: `📌 สร้างงาน${t.assignee ? ` → ${label(t.assignee)}` : ''}` });
+    for (const h of s?.history || []) {
         const st = TASK_STATE[h.status] || { ico: '•', th: h.status };
         ev.push({ ts: h.ts, who: h.by, kind: 'move',
                   text: `${st.ico} ${st.th}${h.assignee && h.assignee !== h.by ? ` (${label(h.assignee)})` : ''}${h.note ? ' — ' + h.note : ''}` });
     }
-    for (const l of t.lines || [])
+    for (const l of s?.lines || [])
         ev.push({ ts: l.ts, who: l.from, kind: 'line', text: `💬 ${l.to ? `→ ${label(l.to)}: ` : ''}${l.body}` });
     return ev.sort((a, b) => a.ts - b.ts);
+}
+
+/** The project's topics: its tasks, then its loose-line groups, as one list. */
+function histTopicList(d) {
+    if (!d) return [];
+    if (d._topics) return d._topics;
+    const talk = (d.talk || []).map(t => ({ ...t, kind: 'talk' }));
+    const tasks = (d.tasks || []).map(t => ({ ...t, kind: 'task' }));
+    return (d._topics = tasks.concat(talk));
+}
+function histTopic(id) { return histTopicList(HIST.detail).find(t => t.id === id); }
+function histLive(t) { return t.kind === 'task' && t.status !== 'done' && t.status !== 'dropped'; }
+
+/** Ask the host for one topic's story, once. */
+function requestTopic(id) {
+    if (!id || HIST.sel == null || HIST.topics[id]) return;
+    HIST.topics[id] = { loading: true };
+    post({ type: 'officeHistoryTopic', project: HIST.sel, id });
+}
+/** host → page: {type:"officeHistoryTopic", project, id, detail?, history?, lines?, error?}. */
+function applyHistoryTopic(m) {
+    if (m.project !== HIST.sel || typeof m.id !== 'string') return;
+    HIST.topics[m.id] = m.error ? { error: m.error } : { data: m };
+    refreshTopicRow(m.id);
+    if (HIST.focus === m.id) refreshFocus();
+}
+
+/** What an opened topic shows: its story, or why it is not there yet. */
+function histTopicStory(t) {
+    const c = HIST.topics[t.id];
+    if (!c || c.loading) return '<div class="hx-loading"><span class="hx-spin"></span>กำลังโหลดเรื่องนี้…</div>';
+    if (c.error) return `<div class="hx-empty">${esc(c.error)}</div>`;
+    const s = c.data;
+    const ev = histEvents(t, s);
+    return (s.detail ? `<div class="ht-detail">${esc(s.detail)}</div>` : '')
+        + (ev.length ? ev.map(e => evRow(e)).join('') : '<div class="hx-empty">ไม่มีเหตุการณ์</div>');
 }
 
 function evRow(e, tag) {
@@ -3958,47 +4137,296 @@ function evRow(e, tag) {
         + `<span class="who" style="--pc:${agentColor(e.who || '')}">${esc(e.who ? label(e.who) : '')}</span> ${esc(e.text)}</span></div>`;
 }
 
-function histTasks(d) {
-    if (!d.tasks.length && !d.lines.length) return '<div class="hx-empty">ไม่มีงานในโปรเจคนี้แล้ว</div>';
-    const rows = d.tasks.map(t => {
-        const st = taskState(t);
-        const done = t.status === 'done' || t.status === 'dropped';
-        const open = HIST.open.has(t.id);
-        const end = done ? `${histWhen(t.updated)} (${histSpan(t.updated - t.created)})` : 'ยังไม่จบ';
-        const more = open
-            ? `<div class="ht-more">${t.detail ? `<div class="ht-detail">${esc(t.detail)}</div>` : ''}`
-              + histEvents(t).map(e => evRow(e)).join('') + `</div>`
-            : '';
-        return `<li class="ht st-${esc(t.status)}" data-id="${esc(t.id)}">`
-            + `<div class="ht-top"><span class="ico">${st.ico}</span>`
-            + `<span class="tt" data-toggle="${esc(t.id)}" title="${open ? 'ซ่อนไทม์ไลน์' : 'ดูไทม์ไลน์ของงานนี้'}">${open ? '▾' : '▸'} ${esc(t.title)}</span>`
-            + `<span class="who" style="--pc:${t.assignee ? agentColor(t.assignee) : 'var(--ink-faint)'}">${esc(t.assignee ? label(t.assignee) : 'ว่าง')}</span>`
-            + `<button type="button" class="hbtn danger" data-del-task="${esc(t.id)}"${done && !HIST.busy ? '' : ' disabled'}`
-            + ` title="${done ? 'ลบงานนี้ออกจากประวัติของห้อง' : 'ยังไม่จบ — เลิกงานจากหน้าต่าง 📋 งาน ก่อน'}">🗑</button></div>`
-            + `<div class="ht-sub">${esc(t.id)} · ${esc(st.th)} · ${esc(histWhen(t.created))} → ${esc(end)}`
-            + `${(t.history || []).length ? ` · ${t.history.length} ขั้น` : ''}${(t.lines || []).length ? ` · ${t.lines.length} ข้อความ` : ''}`
-            + `${t.note ? ` — ${esc(t.note)}` : ''}</div>${more}</li>`;
-    });
-    const loose = d.lines.length
-        ? `<li class="ht"><div class="ht-top"><span class="ico">💬</span><span class="tt">ข้อความในห้องที่พูดถึงโปรเจคนี้ (ไม่ผูกกับงานไหน)</span><span></span><span></span></div>`
-          + `<div class="ht-more">${d.lines.map(l => evRow({ ts: l.ts, who: l.from, kind: 'line', text: `${l.to ? `→ ${label(l.to)}: ` : ''}${l.body}` })).join('')}</div></li>`
-        : '';
-    return `<ol>${rows.join('')}${loose}</ol>`;
+// ── the topic list, a page at a time ─────────────────────────────────
+
+const HIST_FILTERS = [
+    ['all', 'ทั้งหมด', () => true],
+    ['live', 'ยังไม่จบ', t => histLive(t)],
+    ['done', 'เสร็จ', t => t.status === 'done'],
+    ['dropped', 'ยกเลิก', t => t.status === 'dropped'],
+    ['talk', 'คุยในห้อง', t => t.kind === 'talk'],
+];
+
+function histRow(t) {
+    const talk = t.kind === 'talk';
+    const st = talk ? { ico: '💬', th: 'คุยในห้อง' } : taskState(t);
+    const done = t.status === 'done' || t.status === 'dropped';
+    const open = HIST.open.has(t.id);
+    const end = talk ? histWhen(t.updated) : done ? `${histWhen(t.updated)} (${histSpan(t.updated - t.created)})` : 'ยังไม่จบ';
+    const who = talk ? (t.agents || []).map(a => label(a)).join(', ') : (t.assignee ? label(t.assignee) : 'ว่าง');
+    const color = talk ? 'var(--ink-dim)' : (t.assignee ? agentColor(t.assignee) : 'var(--ink-faint)');
+    const counts = [t.steps ? `${t.steps} ขั้น` : '', t.lines ? `${t.lines} ข้อความ` : ''].filter(Boolean).join(' · ');
+    return `<li class="ht st-${esc(t.status)}${talk ? ' talk' : ''}" data-id="${esc(t.id)}">`
+        + `<div class="ht-top"><span class="ico">${st.ico}</span>`
+        + `<span class="tt" data-toggle="${esc(t.id)}" title="${open ? 'พับเรื่องนี้' : 'กางดูเรื่องนี้ (โหลดเฉพาะเรื่องนี้)'}">${open ? '▾' : '▸'} ${esc(t.title)}</span>`
+        + `<span class="who" style="--pc:${color}">${esc(who)}</span>`
+        + (talk ? '<span></span>'
+            : `<button type="button" class="hbtn danger" data-del-task="${esc(t.id)}"${done && !HIST.busy ? '' : ' disabled'}`
+              + ` title="${done ? 'ลบงานนี้ออกจากประวัติของห้อง' : 'ยังไม่จบ — เลิกงานจากหน้าต่าง 📋 งาน ก่อน'}">🗑</button>`)
+        + `</div><div class="ht-sub">${talk ? '' : `${esc(t.id)} · `}${esc(st.th)} · ${esc(histWhen(t.created))} → ${esc(end)}`
+        + `${counts ? ` · ${counts}` : ''}${t.note ? ` — ${esc(t.note)}` : ''}</div>`
+        + (open ? `<div class="ht-more">${histTopicStory(t)}</div>` : '')
+        + `</li>`;
 }
 
-function histTimeline(d) {
-    const all = [];
-    for (const t of d.tasks) for (const e of histEvents(t)) all.push({ ...e, tag: t.id });
-    for (const l of d.lines) all.push({ ts: l.ts, who: l.from, kind: 'line', text: `💬 ${l.to ? `→ ${label(l.to)}: ` : ''}${l.body}` });
-    if (!all.length) return '<div class="hx-empty">ไม่มีเหตุการณ์</div>';
-    all.sort((a, b) => a.ts - b.ts);
-    let day = '';
-    return all.map(e => {
-        const dd = histDay(e.ts);
-        const sep = dd !== day ? `<div class="day">${esc(dd)}</div>` : '';
-        day = dd;
-        return sep + evRow(e, e.tag);
+/** Re-draw ONE row (an expand, or its story arriving) without touching the rest. */
+function refreshTopicRow(id) {
+    const li = document.querySelector(`#hist-detail .ht[data-id="${CSS.escape(id)}"]`);
+    const t = histTopic(id);
+    if (li && t) li.outerHTML = histRow(t);
+}
+
+function histPager(page, pages) {
+    if (pages <= 1) return '';
+    const b = (p, txt, title) => `<button type="button" class="hbtn" data-page="${p}"${p < 1 || p > pages || p === page ? ' disabled' : ''} title="${title}">${txt}</button>`;
+    return `<span class="hx-pager">${b(1, '«', 'หน้าแรก')}${b(page - 1, '‹', 'ก่อนหน้า')}`
+        + `<span class="hx-pg">${page} / ${pages}</span>${b(page + 1, '›', 'ถัดไป')}${b(pages, '»', 'หน้าสุดท้าย')}</span>`;
+}
+
+function histTasks(d) {
+    const all = histTopicList(d);
+    if (!all.length) return '<div class="hx-empty">ไม่มีงานในโปรเจคนี้แล้ว</div>';
+    const f = HIST_FILTERS.find(x => x[0] === HIST.filter) || HIST_FILTERS[0];
+    const list = all.filter(f[2]).sort((a, b) => HIST.order === 'new' ? b.updated - a.updated : a.created - b.created);
+    const pages = Math.max(1, Math.ceil(list.length / HIST_PAGE));
+    HIST.page = Math.min(Math.max(1, HIST.page), pages);
+    const slice = list.slice((HIST.page - 1) * HIST_PAGE, HIST.page * HIST_PAGE);
+    const chips = HIST_FILTERS.map(([k, th, fn]) => {
+        const n = all.filter(fn).length;
+        return n || k === 'all' ? `<button type="button" class="hbtn${HIST.filter === k ? ' on' : ''}" data-filter="${k}">${th} ${n}</button>` : '';
     }).join('');
+    const bar = `<div class="hx-bar-top">${chips}`
+        + `<button type="button" class="hbtn" data-order="1" title="สลับลำดับ">${HIST.order === 'new' ? '⇣ ล่าสุดก่อน' : '⇡ เก่าสุดก่อน'}</button>`
+        + histPager(HIST.page, pages) + `</div>`;
+    const body = slice.length ? `<ol>${slice.map(histRow).join('')}</ol>` : '<div class="hx-empty">ไม่มีหัวข้อในตัวกรองนี้</div>';
+    const foot = pages > 1
+        ? `<div class="hx-bar-bot">แสดง ${(HIST.page - 1) * HIST_PAGE + 1}–${(HIST.page - 1) * HIST_PAGE + slice.length} จาก ${list.length}${histPager(HIST.page, pages)}</div>`
+        : '';
+    return bar + body + foot;
+}
+
+// ── the whole project as one line you scroll along ───────────────────
+//
+// Owner (2026-10-10): "ไทม์ไลน์ใช้แบบเป็นเส้นเดียวเลื่อนไปด้วยๆ เป็นกราฟฟิคได้ไหม".
+// One rail, every topic a stop on it in the order it started, its title on a
+// card that alternates above and below on three heights so neighbours never
+// collide. Work comes in bursts, so time is not linear: inside a burst a
+// minute is a few pixels (never closer than HIST_MIN_GAP between stops), and
+// an idle stretch longer than HIST_IDLE becomes a zig-zag break that says how
+// long the room was quiet. The rail draws itself in, the stops pop on one
+// after another, open work pulses; wheel, drag or the arrow buttons move
+// along it, and it opens at the latest. A stop opens its story below —
+// fetched then, and only that one.
+
+const HIST_STATUS_COLOR = { done: '#6fcf97', dropped: '#9a6a66', blocked: '#e0a86a', talk: '#7f9cc7', open: '#9f9c94', assigned: '#c8c4b8', doing: '#d8b978' };
+const HIST_IDLE = 90 * 60e3;
+const HIST_MIN_GAP = 30;        // px between two stops, however close in time
+const HIST_PX_PER_MIN = 2.2;    // inside a burst
+const HIST_BREAK_W = 64;        // an idle stretch, whatever its length
+const HIST_CARD_W = 168;
+const HIST_SLOTS = [-1, 1, -2, 2, -3, 3];   // above/below, three heights
+
+function histColor(t) {
+    if (t.kind === 'talk') return HIST_STATUS_COLOR.talk;
+    if (t.paused) return HIST_STATUS_COLOR.blocked;
+    return HIST_STATUS_COLOR[t.status] || HIST_STATUS_COLOR.open;
+}
+
+function histRailModel(d) {
+    if (d._rail) return d._rail;
+    const topics = [...histTopicList(d)].sort((a, b) => (a.created || a.updated) - (b.created || b.updated));
+    const stops = [];
+    const breaks = [];
+    const days = [];
+    let x = 70, prevTs = null, prevDay = '';
+    topics.forEach((t, i) => {
+        const ts = t.created || t.updated;
+        if (prevTs != null) {
+            const gap = ts - prevTs;
+            if (gap > HIST_IDLE) {
+                breaks.push({ x: x + HIST_MIN_GAP / 2 + HIST_BREAK_W / 2, idle: gap });
+                x += HIST_MIN_GAP + HIST_BREAK_W;
+            } else x += Math.max(HIST_MIN_GAP, (gap / 60e3) * HIST_PX_PER_MIN);
+        }
+        const day = new Date(ts).toDateString();
+        if (day !== prevDay) { days.push({ x, ts }); prevDay = day; }
+        stops.push({ t, x, ts, slot: HIST_SLOTS[i % HIST_SLOTS.length], i });
+        prevTs = ts;
+    });
+    return (d._rail = { stops, breaks, days, width: x + HIST_CARD_W / 2 + 60 });
+}
+
+function histChart(d) {
+    const topics = histTopicList(d);
+    if (!topics.length) return '<div class="hx-empty">ไม่มีหัวข้อในโปรเจคนี้</div>';
+    const m = histRailModel(d);
+    const H = 330, Y = H / 2, LEVEL = 44, CARD_H = 34;
+    const now = Date.now();
+    // Most of a project's titles open with the same tag ("กรุงศรี: …"); on a
+    // 168 px card that tag is all you would read, so it goes when it is common.
+    const tags = {};
+    for (const t of topics) { const mm = /^([^:：]{1,24})[:：]\s+/.exec(t.title); if (mm) tags[mm[1]] = (tags[mm[1]] || 0) + 1; }
+    const [tag, tagN] = Object.entries(tags).sort((a, b) => b[1] - a[1])[0] || ['', 0];
+    const short = s => tag && tagN >= topics.length * 0.3 && s.startsWith(tag) ? s.replace(/^[^:：]{1,24}[:：]\s+/, '') : s;
+
+    const dayMarks = m.days.map(dm => {
+        const txt = new Date(dm.ts).toLocaleDateString('th-TH', { weekday: 'short', day: 'numeric', month: 'short' });
+        return `<g class="hx-day" transform="translate(${dm.x},${Y})"><line y1="-${H / 2 - 14}" y2="${H / 2 - 14}"/>`
+            + `<rect x="-2" y="${-H / 2 + 2}" width="${txt.length * 6 + 12}" height="15" rx="7"/>`
+            + `<text x="4" y="${-H / 2 + 13}">${esc(txt)}</text></g>`;
+    }).join('');
+    const breakMarks = m.breaks.map(b =>
+        `<g class="hx-break" transform="translate(${b.x},${Y})">`
+        + `<rect x="${-HIST_BREAK_W / 2 + 6}" y="-9" width="${HIST_BREAK_W - 12}" height="18" rx="9"/>`
+        + `<path d="M-14,0 l5,-6 l6,12 l6,-12 l6,12 l5,-6"/>`
+        + `<text y="24">ว่าง ${esc(histSpan(b.idle))}</text></g>`).join('');
+
+    const stops = m.stops.map(s => {
+        const t = s.t;
+        const live = histLive(t);
+        const color = histColor(t);
+        const above = s.slot < 0;
+        const lv = Math.abs(s.slot);
+        const cy = above ? -(LEVEL * lv) - CARD_H / 2 + 6 : LEVEL * lv - CARD_H / 2 - 6;
+        const stem = above ? -(LEVEL * lv) + 6 : LEVEL * lv - 6;
+        const st = short(t.title);
+        const title = st.length > 26 ? st.slice(0, 25) + '…' : st;
+        const span = live ? 'ยังไม่จบ' : histSpan((t.updated || t.created) - t.created);
+        const sub = `${new Date(s.ts).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} · ${t.kind === 'talk' ? `${t.lines} ข้อความ` : span}`;
+        const who = t.assignee ? label(t.assignee) : (t.agents || []).map(a => label(a)).join(', ');
+        const tip = `${t.title}\n${t.kind === 'talk' ? 'คุยในห้อง' : taskState(t).th} · ${histWhen(t.created)} → ${live ? 'ยังไม่จบ' : histWhen(t.updated)}`
+            + `${who ? ` · ${who}` : ''}${t.steps ? ` · ${t.steps} ขั้น` : ''}${t.lines ? ` · ${t.lines} ข้อความ` : ''}`;
+        return `<g class="hx-stop${live ? ' live' : ''}${HIST.focus === t.id ? ' sel' : ''}" data-bar="${esc(t.id)}" tabindex="0"`
+            + ` transform="translate(${s.x},${Y})" style="--i:${Math.min(s.i, 90)};--c:${color}">`
+            + `<line class="hx-stem" y1="0" y2="${stem}"/>`
+            // Position on the OUTER group, animation on the inner one: a CSS
+            // transform animation replaces an SVG transform attribute, which
+            // put every card back on the rail.
+            + `<g transform="translate(${-HIST_CARD_W / 2},${cy})"><g class="hx-card">`
+            + `<rect width="${HIST_CARD_W}" height="${CARD_H}" rx="7"/><rect class="hx-card-edge" width="4" height="${CARD_H}" rx="2"/>`
+            + `<text class="hx-card-t" x="11" y="14">${esc(title)}</text>`
+            + `<text class="hx-card-s" x="11" y="27">${esc(sub)}${who ? ` · ` : ''}<tspan class="hx-card-who" style="fill:${t.assignee ? agentColor(t.assignee) : 'var(--ink-dim)'}">${esc(who)}</tspan></text></g></g>`
+            + (live ? '<circle class="hx-ring" r="7"/>' : '')
+            + `<circle class="hx-dot" r="${t.kind === 'talk' ? 4.5 : 6}"/><title>${esc(tip)}</title></g>`;
+    }).join('');
+
+    const last = m.stops[m.stops.length - 1];
+    const nowMark = now - last.ts < HIST_IDLE
+        ? `<g class="hx-nowmark" transform="translate(${m.width - 46},${Y})"><circle r="4"/><text y="-10">ตอนนี้</text></g>` : '';
+
+    return histOverview(d)
+        + `<div class="hx-railbar"><button type="button" class="hbtn" data-rail="start" title="ไปต้นเรื่อง">⏮ ต้นเรื่อง</button>`
+        + `<button type="button" class="hbtn" data-rail="back" title="ถอยหลัง">◀</button>`
+        + `<span class="hx-railhint">เลื่อนล้อเมาส์หรือลากเพื่อเดินตามเส้น · กดจุดเพื่อกางเรื่องนั้น</span>`
+        + `<button type="button" class="hbtn" data-rail="fwd" title="เดินหน้า">▶</button>`
+        + `<button type="button" class="hbtn" data-rail="end" title="ไปล่าสุด">ล่าสุด ⏭</button></div>`
+        + `<div class="hx-rail" tabindex="0"><svg width="${m.width}" height="${H}" role="img" aria-label="เส้นเวลาของโปรเจค">`
+        // userSpaceOnUse: a horizontal line has a zero-height bounding box, and
+        // an objectBoundingBox gradient on it is simply not painted.
+        + `<defs><linearGradient id="hx-railgrad" gradientUnits="userSpaceOnUse" x1="20" x2="${m.width - 20}" y1="0" y2="0"><stop offset="0" stop-color="#d8b978" stop-opacity=".15"/>`
+        + `<stop offset=".08" stop-color="#d8b978" stop-opacity=".85"/><stop offset="1" stop-color="#7fc8d8" stop-opacity=".85"/></linearGradient></defs>`
+        + dayMarks
+        + `<line class="hx-railline" x1="20" x2="${m.width - 20}" y1="${Y}" y2="${Y}" pathLength="1"/>`
+        + breakMarks + stops + nowMark + `</svg></div>`
+        + `<div id="hx-focus">${histFocusBox()}</div>`;
+}
+
+/** After a timeline render: wheel and drag move along the rail; open at the latest. */
+function wireRail() {
+    const rail = document.querySelector('#hist-detail .hx-rail');
+    if (!rail || rail.dataset.wired) return;
+    rail.dataset.wired = '1';
+    rail.scrollLeft = rail.scrollWidth;
+    rail.addEventListener('wheel', (e) => {
+        if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+        e.preventDefault();
+        rail.scrollLeft += e.deltaY;
+    }, { passive: false });
+    let drag = null;
+    rail.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0 || e.target.closest('[data-bar]')) return;
+        drag = { x: e.clientX, left: rail.scrollLeft };
+        rail.setPointerCapture(e.pointerId);
+        rail.classList.add('dragging');
+    });
+    rail.addEventListener('pointermove', (e) => { if (drag) rail.scrollLeft = drag.left - (e.clientX - drag.x); });
+    const stop = () => { drag = null; rail.classList.remove('dragging'); };
+    rail.addEventListener('pointerup', stop);
+    rail.addEventListener('pointercancel', stop);
+}
+
+function railJump(where) {
+    const rail = document.querySelector('#hist-detail .hx-rail');
+    if (!rail) return;
+    const step = rail.clientWidth * 0.8;
+    const to = where === 'start' ? 0 : where === 'end' ? rail.scrollWidth
+        : rail.scrollLeft + (where === 'back' ? -step : step);
+    rail.scrollTo({ left: to, behavior: 'smooth' });
+}
+
+/** Bring a stop into view on the rail (chips above, keyboard). */
+function railReveal(id) {
+    const rail = document.querySelector('#hist-detail .hx-rail');
+    const stop = HIST.detail?._rail?.stops.find(s => s.t.id === id);
+    if (rail && stop) rail.scrollTo({ left: Math.max(0, stop.x - rail.clientWidth / 2), behavior: 'smooth' });
+}
+
+/** The chart's summary: what the project is, in numbers, and where to look. */
+function histOverview(d) {
+    const all = histTopicList(d);
+    const firstTs = Math.min(...all.map(t => t.created || t.updated));
+    const lastTs = Math.max(...all.map(t => t.updated || t.created));
+    const tasks = all.filter(t => t.kind === 'task');
+    const n = s => tasks.filter(t => t.status === s).length;
+    const live = tasks.filter(histLive).length;
+    const talk = all.length - tasks.length;
+    const longest = [...tasks].sort((a, b) => (b.updated - b.created) - (a.updated - a.created)).slice(0, 3);
+    const latest = [...all].sort((a, b) => b.updated - a.updated).slice(0, 3);
+    const chip = t => `<button type="button" class="hx-chip" data-bar="${esc(t.id)}" title="${esc(t.title)}">${esc(t.title.length > 34 ? t.title.slice(0, 33) + '…' : t.title)}</button>`;
+    const agents = {};
+    for (const t of tasks) if (t.assignee) agents[t.assignee] = (agents[t.assignee] || 0) + 1;
+    const who = Object.entries(agents).sort((a, b) => b[1] - a[1])
+        .map(([a, c]) => `<span class="hx-agent" style="--pc:${agentColor(a)}">${esc(label(a))} ${c}</span>`).join('');
+    return `<div class="hx-over">`
+        + `<div class="hx-stats"><span class="hx-stat"><b>${all.length}</b> หัวข้อ</span>`
+        + `<span class="hx-stat ok"><b>${n('done')}</b> เสร็จ</span>`
+        + (live ? `<span class="hx-stat live"><b>${live}</b> ยังไม่จบ</span>` : '')
+        + (n('dropped') ? `<span class="hx-stat bad"><b>${n('dropped')}</b> ยกเลิก</span>` : '')
+        + (talk ? `<span class="hx-stat talk"><b>${talk}</b> วงคุย</span>` : '')
+        + `<span class="hx-stat"><b>${histSpan(lastTs - firstTs)}</b> ทั้งเรื่อง</span>${who ? `<span class="hx-who">${who}</span>` : ''}</div>`
+        + (longest.length ? `<div class="hx-hl"><span class="hx-hlh">⏳ ใช้เวลานานสุด</span>${longest.map(chip).join('')}</div>` : '')
+        + `<div class="hx-hl"><span class="hx-hlh">🕒 ล่าสุด</span>${latest.map(chip).join('')}</div>`
+        + `<div class="hx-legend"><i style="--c:${HIST_STATUS_COLOR.done}"></i>เสร็จ<i class="pulse" style="--c:var(--accent)"></i>กำลังทำ`
+        + `<i style="--c:${HIST_STATUS_COLOR.blocked}"></i>ติด<i style="--c:${HIST_STATUS_COLOR.dropped}"></i>ยกเลิก<i style="--c:${HIST_STATUS_COLOR.talk}"></i>คุยในห้อง`
+        + `<span class="hx-legend-tip">กดจุดบนเส้นเพื่อกางเรื่องนั้น</span></div></div>`;
+}
+
+/** The topic opened from the chart, under it. */
+function histFocusBox() {
+    const t = HIST.focus ? histTopic(HIST.focus) : null;
+    if (!t) return '<div class="hx-empty hx-hint">เลือกจุดบนเส้น หรือหัวข้อด้านบน — ระบบจะโหลดเฉพาะเรื่องนั้นมาให้</div>';
+    const talk = t.kind === 'talk';
+    const st = talk ? { ico: '💬', th: 'คุยในห้อง' } : taskState(t);
+    const live = histLive(t);
+    return `<div class="hx-focus-card st-${esc(t.status)}">`
+        + `<div class="hx-focus-head"><span class="ico">${st.ico}</span><span class="hx-focus-title">${esc(t.title)}</span>`
+        + `<button type="button" class="hbtn" data-unfocus="1" title="พับ">×</button></div>`
+        + `<div class="ht-sub">${talk ? '' : `${esc(t.id)} · `}${esc(st.th)} · ${esc(histWhen(t.created))} → ${live ? 'ยังไม่จบ' : esc(histWhen(t.updated))}`
+        + ` (${histSpan((live ? Date.now() : t.updated) - t.created)})${t.assignee ? ` · <span class="who" style="--pc:${agentColor(t.assignee)}">${esc(label(t.assignee))}</span>` : ''}</div>`
+        + `<div class="ht-more">${histTopicStory(t)}</div></div>`;
+}
+
+function refreshFocus() {
+    const f = document.getElementById('hx-focus');
+    if (f) f.innerHTML = histFocusBox();
+    document.querySelectorAll('#hist-detail .hx-stop').forEach(g => g.classList.toggle('sel', g.dataset.bar === HIST.focus));
+}
+
+function focusTopic(id) {
+    HIST.focus = HIST.focus === id ? null : id;
+    if (HIST.focus) { requestTopic(HIST.focus); railReveal(HIST.focus); }
+    refreshFocus();
+    if (HIST.focus) document.getElementById('hx-focus')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
 document.getElementById('room-history')?.addEventListener('click', () => {
@@ -4025,11 +4453,33 @@ document.getElementById('hist-detail')?.addEventListener('click', (e) => {
         post({ type: 'officeHistorySummary', project: HIST.sel });
         return;
     }
+    const pg = e.target.closest('button[data-page]');
+    if (pg && !pg.disabled) {
+        HIST.page = Number(pg.dataset.page) || 1;
+        renderHistory();
+        document.getElementById('hist-detail')?.scrollTo({ top: 0 });
+        return;
+    }
+    const fl = e.target.closest('button[data-filter]');
+    if (fl) { HIST.filter = fl.dataset.filter; HIST.page = 1; renderHistory(); return; }
+    if (e.target.closest('button[data-order]')) {
+        HIST.order = HIST.order === 'new' ? 'old' : 'new';
+        HIST.page = 1;
+        renderHistory();
+        return;
+    }
+    if (e.target.closest('button[data-unfocus]')) { focusTopic(HIST.focus); return; }
+    const rj = e.target.closest('button[data-rail]');
+    if (rj) { railJump(rj.dataset.rail); return; }
+    const bar = e.target.closest('[data-bar]');
+    if (bar) { focusTopic(bar.dataset.bar); return; }
     const tg = e.target.closest('[data-toggle]');
     if (tg) {
+        // Only this row changes, and only this topic is fetched.
         const id = tg.dataset.toggle;
-        if (HIST.open.has(id)) HIST.open.delete(id); else HIST.open.add(id);
-        renderHistory();
+        if (HIST.open.has(id)) HIST.open.delete(id);
+        else { HIST.open.add(id); requestTopic(id); }
+        refreshTopicRow(id);
         return;
     }
     const brain = '\n\nลบเฉพาะบันทึกของห้อง (งานและข้อความในห้องที่ผูกกับมัน) — เก็บในถังขยะของห้อง 30 วันแล้วลบถาวร\nโน้ตที่ agent เขียนไว้ในสมองไม่ถูกลบ';
@@ -4053,6 +4503,10 @@ document.getElementById('hist-detail')?.addEventListener('click', (e) => {
         renderHistory();
         post({ type: 'officeHistoryDelete', project: p.key, show: HIST.sel });
     }
+});
+document.getElementById('hist-detail')?.addEventListener('keydown', (e) => {
+    const bar = e.target.closest?.('g[data-bar]');
+    if (bar && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); focusTopic(bar.dataset.bar); }
 });
 document.addEventListener('click', (e) => {
     if (!clickedInside(e, '#history-panel, #room-history')) closeHistory();
@@ -4081,7 +4535,7 @@ const MIND_CAPS = [
     { id: 'answer', name: 'ตอบคำถามบอสในห้อง', note: 'พิมพ์ @มาย ตามด้วยคำถาม — ตอบจากบอร์ด ข้อความในห้อง และใครทำอะไรอยู่จริง' },
     { id: 'digest', name: 'สรุปห้องเป็นระยะ', note: 'ทุก ~30 นาทีเมื่อมีความเคลื่อนไหว: อะไรเสร็จ อะไรติด อะไรรอบอส' },
     { id: 'summarize', name: 'สรุปโปรเจค', note: 'ปุ่ม ✨ ให้มายสรุป ในหน้าประวัติ' },
-    { id: 'code', name: 'เขียนโค้ดเหมือน agent อีกตัว', note: 'บอสเรียกเธอเข้ามาทำงานได้เหมือน codex — รันผ่าน codex บนโมเดลในเครื่อง สิทธิ์เต็มแบบเดียวกับ codex' },
+    { id: 'code', name: 'เขียนโค้ดเหมือน agent อีกตัว', note: 'รับงานบนบอร์ดเข้ามาทำเองได้เหมือน codex — รันผ่าน codex บนโมเดลในเครื่อง สิทธิ์เต็มแบบเดียวกับ codex' },
 ];
 
 function renderMindPanel() {
@@ -4252,7 +4706,7 @@ function renderService(svc) {
     // from "installed ✓ running ✓".
     const warn = [];
     if (s.installed && s.privileged)
-        warn.push('เลิกใช้แล้ว — รันเป็น SYSTEM จึงเรียก codex / claude ที่ล็อกอินไว้ในบัญชีคุณไม่ได้ (เวอร์ชันนี้จะถอยให้บอสในแอปเอง แต่ควรถอนออก)');
+        warn.push('เลิกใช้แล้ว — รันเป็น SYSTEM จึงเรียก codex / claude ที่ล็อกอินไว้ในบัญชีคุณไม่ได้ (เวอร์ชันนี้จะถอยให้มายในแอปเอง แต่ควรถอนออก)');
     if (s.installed && s.privileged && s.userWritableBinary)
         warn.push('ไฟล์โปรแกรมของ service อยู่ในโฟลเดอร์ผู้ใช้ แต่รันด้วยสิทธิ์ SYSTEM — โปรแกรมใดก็ตามที่แก้ไฟล์นั้นได้ จะได้สิทธิ์ SYSTEM ตามไปด้วย');
     setHtml(document.getElementById('service-warn'), warn.map(w => `<li>⚠ ${w}</li>`).join(''));
@@ -4266,7 +4720,7 @@ function renderService(svc) {
         `<button type="button" data-svc="${a}"${c ? ` class="${c}"` : ''}${SVC_PENDING ? ' disabled' : ''}>${t}</button>`).join(''));
     document.getElementById('service-note').textContent = SVC_PENDING ? SVC_PENDING.note
         : SVC_RESULT ? SVC_RESULT
-        : !s.installed && svc ? 'บอสในแอปทำงานในนามบัญชีคุณอยู่แล้ว จึงเห็น codex / claude ที่ล็อกอินไว้ครบ'
+        : !s.installed && svc ? 'มายในแอปทำงานในนามบัญชีคุณอยู่แล้ว จึงเห็น codex / claude ที่ล็อกอินไว้ครบ'
         : acts.some(([, t]) => t.includes('🛡')) ? '🛡 = Windows จะถามยืนยันสิทธิ์แอดมิน' : '';
 }
 
@@ -4335,7 +4789,7 @@ function renderQuota() {
                 : `${id} HP: ไม่มีข้อมูลโควตารายสัปดาห์ในเครื่องนี้`)
                 + (sp != null ? `\n${id} SP: เหลือ ${sp}% ของรอบ ${q.sp.window || '5 ชม.'}${q.sp.resets ? ` · รีเซ็ต ${q.sp.resets}` : ''}` : '')
                 + `${q.source && q.source !== 'none' ? `\nจาก ${q.source}` : ''}${q.asOf ? ` · ข้อมูลเมื่อ ${q.asOf}` : ''}`
-                + (q.resting ? `\nพักอยู่ (บอสพักไว้เพราะติดลิมิต) — กลับมาทำงานได้ ${q.resting}` : '');
+                + (q.resting ? `\nพักอยู่ (มายพักไว้เพราะติดลิมิต) — กลับมาทำงานได้ ${q.resting}` : '');
             const bar = (tag, v, color, cls) =>
                 `<span class="ql${cls}"><b>${tag}</b><span class="qbar${v == null ? ' unknown' : ''}">`
                 + `<i style="width:${v ?? 0}%;background:${color}"></i></span>`
@@ -4387,7 +4841,7 @@ document.getElementById('service-actions')?.addEventListener('click', (e) => {
     const b = e.target.closest('button[data-svc]');
     if (!b || SVC_PENDING) return;
     const action = b.dataset.svc;
-    if (action === 'uninstall' && !confirm('ถอน Windows Service ของบอสออก?\n\nปิดแอปแล้วจะไม่มีใครเรียก agent เข้ามาทำงาน'))
+    if (action === 'uninstall' && !confirm('ถอน Windows Service ของมายออก?\n\nปิดแอปแล้วจะไม่มีใครเรียก agent เข้ามาทำงาน'))
         return;
     const svc = (BROKER && BROKER.service) || {};
     const uac = action === 'install' || action === 'uninstall' || !svc.canControl;
@@ -4458,7 +4912,7 @@ document.getElementById('room-broker')?.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     const svc = (BROKER && BROKER.service) || null;
     if (!svc || !svc.installed) return;
-    if (confirm('ถอน Windows Service ของบอส (แบบเก่า) ออก?\n\nบอสในแอปทำงานแทนอยู่แล้ว — ต้องยืนยันสิทธิ์ผู้ดูแล'))
+    if (confirm('ถอน Windows Service ของมาย (แบบเก่า) ออก?\n\nมายในแอปทำงานแทนอยู่แล้ว — ต้องยืนยันสิทธิ์ผู้ดูแล'))
         post({ type: 'officeBrokerService', action: 'uninstall' });
 });
 
@@ -4497,7 +4951,7 @@ function demo() {
         { id: 'codex', label: 'Codex', state: 'working', lastTool: 'agent_inbox', pending: 2, spawned: true,
           avatar: { gender: 'm', hair: 'short', hairColor: '#2b2430', skin: '#d9a06b', accessory: 'headphones' },
           emote: em('happy', 'thumbsup', 'none', 'ชุดภาพเสร็จแล้ว') },
-        { id: 'cluadex', label: 'CluadeX', state: 'idle', lastTool: '', pending: 0,
+        { id: 'cluadex', label: 'CluadeX', state: 'idle', lastTool: '', pending: 0, model: 'claude-sonnet-5-5',
           avatar: { gender: 'nb', hair: 'curly', hairColor: '#6b4fa8', skin: '#b97a4e', accessory: 'beanie' },
           emote: em('tired', 'none', 'none') },
         { id: 'gemini', label: 'Gemini', state: 'offline', lastTool: '', pending: 1,
@@ -4587,6 +5041,16 @@ function demo() {
               { id: 'xhigh', label: 'สูงมาก (xhigh)', note: 'คิดลึกมาก — งานยาก ใช้โควตาเร็วขึ้น' },
               { id: 'ultra', label: 'อัลตรา (ultra)', note: 'คิดเต็มที่และแตกงานให้ agent ย่อยเอง — แพงที่สุด' },
           ] },
+        // CluadeX, as CluadeXModels.Row builds it from its pipe report.
+        { agent: 'cluadex', app: 'CluadeX', canChoose: true, chosen: 'claude-sonnet-5-5', current: 'claude-sonnet-5-5',
+          currentProvider: 'Anthropic', configured: '', cliDefault: '', onCall: false, running: '', note: '',
+          options: [
+              { id: 'claude-opus-5-5', label: 'Anthropic Claude · claude-opus-5-5', note: 'ราคา $5 / $25 ต่อล้านโทเค็น (เข้า / ออก)' },
+              { id: 'claude-sonnet-5-5', label: 'Anthropic Claude · claude-sonnet-5-5', note: 'ราคา $2 / $10 ต่อล้านโทเค็น (เข้า / ออก)' },
+              { id: 'claude-haiku-5-5', label: 'Anthropic Claude · claude-haiku-5-5', note: 'ราคา $0.8 / $4 ต่อล้านโทเค็น (เข้า / ออก)' },
+          ],
+          effortCanChoose: true, effortChosen: 'medium', effortConfigured: '', effortCliDefault: '', effortRunning: '',
+          effortOptions: ['low', 'medium', 'high', 'xhigh', 'max'].map(id => ({ id, label: id, note: '' })) },
     ];
     const secretary = { enabled: true, model: '', codeModel: '', busy: '',
         can: { answer: true, digest: true, summarize: true, code: false },
@@ -4620,6 +5084,7 @@ function ensureMindFigure() {
         MIND_BUSY = busy;
         if (busy) try { MIND_FIG?.setState('thinking', 8000); } catch { /* loading */ }
     }
+    if (SHIP_MODE) return;      // มาย is aboard the ship; her VRM belongs to the painted room
     if (!want) {
         if (MIND_FIG) { try { MIND_FIG.dispose(); } catch { /* gone */ } MIND_FIG = null; }
         if (MIND_FIG_STATE === 'ready') MIND_FIG_STATE = '';
@@ -4759,6 +5224,7 @@ function drawMapDebug() {
 // pack should cost the boss his animation, not take the whole office down
 // with it — drawBoss() is still here for exactly that case.
 (async () => {
+    if (SHIP_MODE) return;      // the ship has its own boss
     try {
         const { BrainXAvatar } = await import('./avatar/brainx-avatar.js');
         BOSS_AV = await BrainXAvatar.load('./avatar/', { scale: 1 });
@@ -4803,6 +5269,34 @@ function drawMapDebug() {
 })();
 
 resize();
-requestAnimationFrame(frame);
+if (SHIP_MODE) {
+    // The pixel room is not drawn at all: the frame loop would paint a canvas
+    // nobody can see, every frame, for as long as the room is open.
+    document.body.classList.add('ship-mode');
+    SHIP_FRAME.hidden = false;
+    SHIP_FRAME.src = 'ship/scene/index.html?embed=1&v=' + encodeURIComponent(window.OFFICE_ASSET_V || '0');
+} else {
+    requestAnimationFrame(frame);
+}
 post({ type: 'officeReady' });
+// The host keeps the choice on disk too: on the ship the agents speak as the girls, and the
+// MCP server can only know which room the owner chose from there.
+post({ type: 'officeView', view: SHIP_MODE ? 'ship' : 'classic' });
+{
+    const vb = document.getElementById('room-view');
+    if (vb) {
+        vb.textContent = SHIP_MODE ? '🏢 ห้องเดิม' : '🚀 ยาน';
+        vb.title = SHIP_MODE
+            ? 'กลับไปห้องเดิม — ตัวละครพูดด้วยน้ำเสียงปกติของแต่ละ agent'
+            : 'ไปหน้ายาน — ทุกคนเป็นสาว ๆ บนยาน พูดแบบผู้หญิงตามบุคลิกของตัวเอง';
+        vb.addEventListener('click', () => {
+            const next = SHIP_MODE ? 'classic' : 'ship';
+            try { localStorage.setItem(SHIP_VIEW_KEY, next); } catch { /* the host still has it */ }
+            post({ type: 'officeView', view: next });
+            const u = new URL(location.href);
+            u.searchParams.delete('classic');
+            location.replace(u.toString());
+        });
+    }
+}
 if (new URLSearchParams(location.search).has('demo')) demo();

@@ -39,6 +39,7 @@ internal static partial class Program
         checks.Add(("owner gate + vault containment: /api/cloud is exempt, export paths cannot leave the vault", OwnerGateAndContainmentChecks));
         checks.Add(("audit log: concurrent records keep one unbroken HMAC chain", AuditChainChecks));
         checks.Add(("brain hub: only the target may answer a share request; FindExperts is bound to the caller", BrainHubAuthChecks));
+        checks.Add(("brain hub: peer acl — deny by default, whole-folder match, no leaked titles/snippets, revoke at once, content only on an accepted request", PeerAclChecks));
         checks.Add(("admin API: owner token AND a truly local request, every other request a plain 404", AdminGateChecks));
         checks.Add(("admin API: accounts — list, detail, quota, suspend (403 everywhere), reverify, revoke, delete with confirm", AdminAccountChecks));
         checks.Add(("node log + self-update: daily file, 14 kept, redacted; updater script uses /R:2 /W:2 and always restarts", NodeLogAndUpdaterChecks));
@@ -253,7 +254,9 @@ internal static partial class Program
             Cloud.Dispose();
             Log?.Dispose();
             SqliteConnection.ClearAllPools();   // let go of cloud.db so the temp root can be removed
-            try { Directory.Delete(Root, recursive: true); } catch { /* a child may still be exiting */ }
+            // Root is this node's own temp folder (brainx-cloud-<guid> under %TEMP%).
+            // A child may still be exiting, so a failure here is ignored.
+            try { Directory.Delete(Root, recursive: true); } catch { }
         }
     }
 

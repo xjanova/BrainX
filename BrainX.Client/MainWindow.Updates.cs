@@ -22,14 +22,25 @@ namespace BrainX.Client;
 // ─────────────────────────────────────────────────────────────────────────
 public partial class MainWindow
 {
+    /// <summary>
+    /// The one place an update manager is made: on xman studio's channel with a
+    /// signed feed (Services/SignedFeedSource). It used to read GitHub releases
+    /// directly in three places; a release still goes to GitHub, and installs
+    /// older than this one keep updating from there until they reach it.
+    /// </summary>
+    private static Velopack.UpdateManager NewUpdateManager() => new(new Services.SignedFeedSource());
+
+    /// <summary>Where a portable or dev build gets the installer: xman's own
+    /// download, which streams the latest BrainX-win-Setup.exe.</summary>
+    private const string InstallerDownloadUrl = "https://xman4289.com/brainx/download";
+
     /// <summary>True when this build was installed via Velopack's Setup.exe
     /// (i.e. can self-update). False for raw dev/zip/portable runs.</summary>
     private bool VelopackInstalled()
     {
         try
         {
-            return new Velopack.UpdateManager(
-                new Velopack.Sources.GithubSource($"https://github.com/{GitHubRepo}", null, false)).IsInstalled;
+            return NewUpdateManager().IsInstalled;
         }
         catch { return false; }
     }
@@ -78,6 +89,12 @@ public partial class MainWindow
             var history = UpdateLog.Describe();
             if (history != null)
                 UpdStatusText.Text = "⚠ " + history;
+            // A window running inside Claude's or Codex's package would install
+            // into that package's private store (2026-10-17). Say so, rather
+            // than reading as "up to date" while a release waits.
+            else if (InsidePackage is string package)
+                UpdStatusText.Text = $"⚠ Updates are paused in this window: it runs inside {PackageDisplayName(package)}'s sandbox. "
+                                   + "Close it and open BrainX from the Desktop or Start menu to update.";
             else if (_vpkPending != null)
                 UpdStatusText.Text = $"✅ Update v{_vpkPending.TargetFullRelease.Version} downloaded — click “Restart & apply”.";
             // Every earlier branch WROTE and none ever cleared, so a "Check
@@ -109,7 +126,7 @@ public partial class MainWindow
         if (_autoUpdateEnabled) _ = TryApplyStagedWhenIdleAsync();
     }
 
-    /// <summary>Manual "Check for updates": refresh the GitHub latest tag, and on
+    /// <summary>Manual "Check for updates": read the signed feed's latest version, and on
     /// an installed build also download+stage via Velopack. Then repaint + report.</summary>
     private async void UpdCheckNow_Click(object sender, RoutedEventArgs e)
     {
@@ -145,6 +162,15 @@ public partial class MainWindow
         }
     }
 
+    /// <summary>"Claude_2.42304.0.0_x64__pzs8sxrjxfjjc" → "Claude": the name
+    /// the owner knows the package by, for the update card.</summary>
+    private static string PackageDisplayName(string packageFullName)
+    {
+        var name = packageFullName.Split('_')[0];
+        var dot = name.LastIndexOf('.');
+        return dot >= 0 && dot < name.Length - 1 ? name[(dot + 1)..] : name;
+    }
+
     /// <summary>True while UpdCheckNow_Click is awaiting. RefreshUpdatePanel is
     /// re-entered during that await (via UpdateAboutCard) and must not blank the
     /// "Checking…" line the user is reading.</summary>
@@ -153,6 +179,12 @@ public partial class MainWindow
     /// <summary>Apply a staged Velopack update and relaunch.</summary>
     private void UpdApply_Click(object sender, RoutedEventArgs e)
     {
+        if (InsidePackage is string package)
+        {
+            UpdStatusText.Text = $"Can't apply from this window — it runs inside {PackageDisplayName(package)}'s sandbox and the update would "
+                               + "install into that sandbox, not into BrainX. Close it and open BrainX from the Desktop or Start menu.";
+            return;
+        }
         if (_vpkMgr == null || _vpkPending == null) { UpdStatusText.Text = "No staged update to apply yet — press “Check for updates” first."; return; }
         try
         {
@@ -165,18 +197,18 @@ public partial class MainWindow
         catch (Exception ex) { UpdStatusText.Text = $"Apply failed: {ex.Message}"; }
     }
 
-    /// <summary>Open the GitHub releases page so a portable/dev build can grab
-    /// the Setup.exe and switch onto the auto-update track.</summary>
+    /// <summary>Download the installer from xman so a portable/dev build can
+    /// switch onto the auto-update track.</summary>
     private void UpdDownloadInstaller_Click(object sender, RoutedEventArgs e)
     {
         try
         {
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
             {
-                FileName = $"https://github.com/{GitHubRepo}/releases/latest",
+                FileName = InstallerDownloadUrl,
                 UseShellExecute = true,
             });
-            UpdStatusText.Text = "Opened the GitHub releases page — download & run BrainX-win-Setup.exe.";
+            UpdStatusText.Text = "Downloading BrainX-win-Setup.exe from xman4289.com — run it once to turn on auto-update.";
         }
         catch (Exception ex) { UpdStatusText.Text = $"Couldn't open the browser: {ex.Message}"; }
     }

@@ -107,6 +107,15 @@ internal static partial class Program
                     "code review and a second opinion on design",
                 },
                 Array.Empty<string>()),
+
+            ["gemini"] = (
+                new[]
+                {
+                    "reading a whole repo or a very long document in one go (1M-token context)",
+                    "fresh facts from the web — Google Search grounding",
+                    "reading images, PDFs and screenshots",
+                },
+                new[] { "generate images, video or audio — hand that to codex" }),
         };
 
     /// <summary>What this agent can and cannot do, as the room should see it.
@@ -335,6 +344,8 @@ internal static partial class Program
         return new JObject
         {
             ["joined"] = me,
+            // her voice in the room (Program.Persona.cs); null for an agent without one
+            ["persona"] = CoworkPersonaInstruction(me) is { Length: > 0 } persona ? persona : null,
             ["room"] = CoworkMembersSnapshot(),
             ["resting"] = CoworkResting(),
             ["board"] = CoworkBoard(),
@@ -1897,7 +1908,7 @@ internal static partial class Program
             string action;
             if (ownerWantsMe)
                 action = "THE OWNER SPOKE IN THE COWORK ROOM. That is your user talking, and it outranks peer "
-                       + "chatter. Call cowork_read NOW. " + CoworkFloorRules;
+                       + "chatter. Call cowork_read NOW. " + CoworkFloorRules + CoworkPersonaReminder(me);
             else if (forMe > 0)
                 action = $"{string.Join(", ", speakers)} addressed {forMe} line(s) in the cowork room TO YOU BY NAME. "
                        + "Call cowork_read and ANSWER with cowork_say — not agent_send, the owner keeps the lanes "

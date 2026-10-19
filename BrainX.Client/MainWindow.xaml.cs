@@ -257,6 +257,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        ShowLoadingGirl();
         // The owner's seal key exists from the first launch of a client that
         // seals, so the MCP starts refusing unsealed "owner" lines right away
         // instead of after the owner's first message (see BusSeal).
@@ -301,7 +302,9 @@ public partial class MainWindow : Window
         // (see MainWindow.AutoOnboard.cs). Runs in the background so it never
         // blocks first paint. The user never has to open Settings and click
         // "Install" — it just works the moment the app opens.
-        _ = Task.Run(EnsureClaudeIntegrationAsync);
+        // After that first run, a light watcher re-runs it whenever an agent is
+        // installed or first opened while BrainX is already up.
+        _ = Task.Run(OnboardAndWatchAgentsAsync);
 
         // F11 toggles a true-fullscreen mode that *covers* the taskbar.
         // Standard WPF Maximize on a WindowStyle=None window only fills
@@ -2541,10 +2544,17 @@ public partial class MainWindow : Window
         // refreshes the bottom-bar label if a newer build is available.
         // Doesn't block startup — UX nicety only.
         _ = CheckLatestReleaseAsync();
+        // BrainX Pro. Its first, synchronous part publishes the saved answer
+        // to ProGate, so the broker below is gated by it straight away.
+        _ = InitLicenseAsync();
         // We are running, so whatever update was last attempted either landed
         // (this IS the target version — clear the history) or it did not (the
         // count stands). Must happen before the check below reads that count.
         try { UpdateLog.NoteRunningVersion(GetLocalVersion().compareKey); } catch { }
+        // Cleared only when the install is also whole now: a repair that landed
+        // the version but not a clean install must keep counting, or a damage
+        // the repair cannot fix would be "repaired" again on every launch.
+        try { if (Core.Services.InstallHealth.Scan(InstallRoot).Count == 0) RepairLedger.NoteRunningVersion(GetLocalVersion().compareKey); } catch { }
 
         Services.StartupProgress.Report("Initializing brain identity", 0.22, tag: "identity");
         InitializeIdentity();
@@ -5936,7 +5946,7 @@ public partial class MainWindow : Window
     // Local builds with no env vars get "2.0.0-dev+local" so dev work
     // doesn't accidentally claim it's a release.
     private const string GitHubRepo = "xjanova/BrainX";
-    private const string GitHubLatestUrl = "https://api.github.com/repos/" + GitHubRepo + "/releases/latest";
+
     private string? _latestRemoteVersion;          // e.g. "2.0.137" — null until first poll succeeds
 
     /// <summary>
@@ -6091,25 +6101,13 @@ public partial class MainWindow : Window
     {
         try
         {
-            using var http = new System.Net.Http.HttpClient
-            {
-                Timeout = TimeSpan.FromSeconds(6)
-            };
-            // GitHub requires a User-Agent on all API requests; without it
-            // they return 403. Use the product name + local version so
-            // their telemetry can spot real clients vs scrapers.
-            var (display, _) = GetLocalVersion();
-            http.DefaultRequestHeaders.UserAgent.ParseAdd($"BrainX/{display} (+https://github.com/{GitHubRepo})");
-            http.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+            // The same signed feed the updater installs from, so "latest" on
+            // the card is exactly what an update would bring — not a GitHub
+            // tag that xman's channel may not serve yet.
+            var latest = await Services.SignedFeedSource.LatestVersionAsync().ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(latest)) return;
 
-            var json = await http.GetStringAsync(GitHubLatestUrl).ConfigureAwait(false);
-            // Tiny ad-hoc parse — pulling tag_name and html_url. Avoids
-            // taking a dependency on Octokit just for two strings.
-            var obj = Newtonsoft.Json.Linq.JObject.Parse(json);
-            var tag = obj["tag_name"]?.ToString();      // e.g. "v2.0.137"
-            if (string.IsNullOrWhiteSpace(tag)) return;
-
-            var clean = tag.StartsWith("v", StringComparison.OrdinalIgnoreCase) ? tag[1..] : tag;
+            var clean = latest;
             await Dispatcher.InvokeAsync(() =>
             {
                 _latestRemoteVersion = clean;
@@ -6143,6 +6141,32 @@ public partial class MainWindow : Window
     /// <summary>The owner's switch, persisted. OFF means: still check, still
     /// tell them on the update card — never restart the app by itself.</summary>
     private bool _autoUpdateEnabled = true;
+
+    /// <summary>
+    /// The MSIX package whose private store this process's AppData writes land
+    /// in, or null when they reach the real file system.
+    ///
+    /// A window that Claude Desktop or Codex started (through brainx-mcp, or a
+    /// relaunch out of the package that found no shell to hand it to) runs in
+    /// that package's file-system virtualization. Velopack does not know: on
+    /// 2026-10-17 such a window applied 2.0.509 and the whole install —
+    /// current, Update.exe, packages — landed in
+    /// %LOCALAPPDATA%\Packages\Claude_…\LocalCache\Local\BrainX, while the
+    /// real %LOCALAPPDATA%\BrainX was left empty. The Desktop shortcut then
+    /// said "The specified path does not exist" on every click, and every
+    /// in-package relaunch popped the same dialog from the real shell.
+    ///
+    /// So no update is downloaded or applied from inside a package: the
+    /// release is still detected and the card says why it waits. Measured
+    /// once per process — the probe creates and removes a folder.
+    /// </summary>
+    private static readonly Lazy<string?> s_virtualizingPackage = new(() =>
+    {
+        try { return PackageBreakaway.VirtualizingPackage(); }
+        catch { return null; }
+    });
+
+    private static string? InsidePackage => s_virtualizingPackage.Value;
 
     /// <summary>How often a running app looks for a new release. Was four
     /// hours, which meant "we shipped a fix" and "your app has it" were half a
@@ -6224,9 +6248,21 @@ public partial class MainWindow : Window
 
         try
         {
-            var mgr = new Velopack.UpdateManager(
-                new Velopack.Sources.GithubSource($"https://github.com/{GitHubRepo}", null, false));
+            var mgr = NewUpdateManager();
             if (!mgr.IsInstalled) return false;              // dev / portable — nothing to apply
+            if (InsidePackage is string package)
+            {
+                // Applying here would install into the package's private
+                // store, not the real install (2026-10-17). Boot; the card
+                // explains, and a window opened from the Desktop updates.
+                Debug.WriteLine($"Pre-boot update skipped: running inside {package}");
+                return false;
+            }
+
+            // A damaged install, or an update that has failed to apply as many
+            // times as the updater allows, is repaired from a verified package
+            // before anything else — retrying the same apply cannot fix either.
+            if (await TryRepairInstallBeforeBootAsync(mgr)) return true;
 
             Services.StartupProgress.Report("Checking for updates", 0.12, tag: "update");
 
@@ -6314,6 +6350,7 @@ public partial class MainWindow : Window
     private async System.Threading.Tasks.Task TryApplyStagedWhenIdleAsync()
     {
         if (_vpkPending == null || _autoUpdateFiring || !_autoUpdateEnabled) return;
+        if (InsidePackage is not null) return;               // would install into the package's store
 
         var target = _vpkPending.TargetFullRelease.Version.ToString();
         if (UpdateLog.ShouldStopTrying(target)) return;      // this package is known bad
@@ -6379,9 +6416,12 @@ public partial class MainWindow : Window
     {
         try
         {
-            var mgr = new Velopack.UpdateManager(
-                new Velopack.Sources.GithubSource($"https://github.com/{GitHubRepo}", null, false));
+            var mgr = NewUpdateManager();
             if (!mgr.IsInstalled) return;                  // dev/unpacked — nothing to do
+            // The download would land in the package's private store, and
+            // nothing staged here may ever be applied. CheckLatestReleaseAsync
+            // still reads the feed, so the card knows a release exists.
+            if (InsidePackage is not null) return;
             var info = await mgr.CheckForUpdatesAsync().ConfigureAwait(false);
             if (info == null) return;                      // already on the latest release
             await mgr.DownloadUpdatesAsync(info).ConfigureAwait(false);
@@ -6446,6 +6486,16 @@ public partial class MainWindow : Window
         }
 
         // Updater is armed and waiting on us. Release what we hold, then go.
+        ReleaseInstallDirAndQuit();
+    }
+
+    /// <summary>
+    /// Let go of everything that holds a file under the install directory and
+    /// shut down through WPF — shared by the updater and the self-repair, both
+    /// of which rename <c>current</c> the moment this process is gone.
+    /// </summary>
+    private void ReleaseInstallDirAndQuit()
+    {
         // The WebView2 controls matter most: each owns msedgewebview2.exe child
         // processes with handles under the install directory, and those are
         // exactly what a rename of `current` trips over.
@@ -8398,6 +8448,7 @@ public partial class MainWindow : Window
     private void Nav_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button btn || btn.Tag is not string tag) return;
+        if (tag == "Mind" && !RequirePro(BrainX.Core.Services.License.ProFeature.Mind)) return;
         foreach (var vn in _viewMap.Values)
         {
             var view = (UIElement?)FindName(vn);
@@ -8834,7 +8885,7 @@ public partial class MainWindow : Window
             // ?hud=1 turns on the heads-up dashboard (see MainWindow.UniverseHud.cs).
             // ONLY this view passes it: the wallpaper and the dashboard's embedded
             // mini-galaxy load the same page and must stay bare.
-            UniverseWebView.Source = new Uri("https://universe.local/universe/index.html?hud=1");
+            UniverseWebView.Source = new Uri(UniverseHudUrl());   // ?hud=1, plus this launch's girl
             StartUniverseHud();
             _universeInitialized = true;
         }
@@ -10210,6 +10261,7 @@ public partial class MainWindow : Window
 
     private async Task RefreshAiKeyStatus()
     {
+        RefreshGeminiKeyStatus();   // local, no server round trip
         try
         {
             using var http = BuildLocalHttpClient(5);

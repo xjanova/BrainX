@@ -95,6 +95,16 @@ public sealed class CloudSyncEngine
             if (File.Exists(CloudSyncState.PathFor(root)))
                 state.AdoptSyncDataFrom(CloudSyncState.Load(root));
 
+            // A restore that has not finished: this root holds a part of the
+            // cloud at best, and mirroring it up would delete the rest. Pull
+            // again to complete the restore; pushes resume by themselves then.
+            if (state.Restoring)
+            {
+                result.ErrorCode = CloudSyncResult.Restoring;
+                result.ErrorMessage = "restore from the cloud not finished — pull first";
+                return result;
+            }
+
             progress?.Report(new CloudSyncProgress(CloudSyncPhase.Scan, 0, 0));
             var scan = await Task.Run(() => ScanLocal(root, folders, options.HonourIgnoreFile, options.FileLock, ct), ct)
                 .ConfigureAwait(false);
@@ -137,6 +147,24 @@ public sealed class CloudSyncEngine
             foreach (var p in plan.Forget) state.Uploaded.Remove(p);
             state.Save(root);
 
+            // Edited on both sides: keep both copies, then send what the cloud
+            // lacks. Done before the ordinary uploads so a conflict copy rides
+            // in the same batches.
+            var extraUploads = new List<UploadItem>();
+            if (plan.Conflicts.Count > 0)
+            {
+                var taken = new HashSet<string>(scan.Notes.Select(n => n.Path), StringComparer.OrdinalIgnoreCase);
+                foreach (var f in manifest.Files) if (!string.IsNullOrEmpty(f.Path)) taken.Add(f.Path);
+                var resolved = await ResolveConflictsAsync(root, plan.Conflicts, taken, state, options.DeviceName,
+                                                           options.FileLock, result.Skipped, ct).ConfigureAwait(false);
+                foreach (var r in resolved)
+                {
+                    result.Conflicts.Add(r.Conflict);
+                    extraUploads.AddRange(r.Uploads);
+                }
+                state.Save(root);
+            }
+
             // Deletions first: they free quota for the uploads that follow.
             var done = 0;
             foreach (var batch in plan.Deletes.Chunk(MaxBatchFiles))
@@ -153,17 +181,25 @@ public sealed class CloudSyncEngine
 
             var batches = Batch(plan.Uploads, n => n.WireBytes + Encoding.UTF8.GetByteCount(n.Path) + 160,
                                 MaxBatchFiles, MaxBatchBytes);
+            var total = plan.Uploads.Count + extraUploads.Count;
             done = 0;
             foreach (var batch in batches)
             {
                 ct.ThrowIfCancellationRequested();
-                progress?.Report(new CloudSyncProgress(CloudSyncPhase.Upload, done, plan.Uploads.Count));
+                progress?.Report(new CloudSyncProgress(CloudSyncPhase.Upload, done, total));
                 var items = ReadForUpload(batch, options.FileLock, result);
                 if (items.Count > 0)
                     await UploadWithSplitAsync(items, root, state, result, ct).ConfigureAwait(false);
                 done += batch.Count;
             }
-            progress?.Report(new CloudSyncProgress(CloudSyncPhase.Done, plan.Uploads.Count, plan.Uploads.Count));
+            foreach (var batch in Batch(extraUploads, i => Encoding.UTF8.GetByteCount(i.Content) * 2 + 400, MaxBatchFiles, MaxBatchBytes))
+            {
+                ct.ThrowIfCancellationRequested();
+                progress?.Report(new CloudSyncProgress(CloudSyncPhase.Upload, done, total));
+                await UploadWithSplitAsync(batch, root, state, result, ct).ConfigureAwait(false);
+                done += batch.Count;
+            }
+            progress?.Report(new CloudSyncProgress(CloudSyncPhase.Done, total, total));
         }
         catch (CloudApiException ex)
         {
@@ -193,6 +229,7 @@ public sealed class CloudSyncEngine
                         Uploaded = result.Uploaded,
                         Deleted = result.Deleted,
                         Skipped = result.Skipped.Count,
+                        Conflicts = result.Conflicts.Count,
                         ErrorCode = result.Cancelled ? "CANCELLED" : result.ErrorCode,
                     };
                     try { state.Save(root); } catch { /* the batches already saved what matters */ }
@@ -206,11 +243,14 @@ public sealed class CloudSyncEngine
     /// <summary>
     /// Decide what a push does. Pure: no disk, no network.
     ///
-    /// Upload when the cloud lacks the note, or has a different copy AND ours
-    /// changed since we last sent it. When ours is unchanged but the cloud's
-    /// differs, someone else edited it there (another machine, or Claude through
-    /// the cloud) — re-sending ours would silently undo that edit, and doing it
-    /// every sync would make two machines ping-pong forever.
+    /// Upload when the cloud lacks the note, or has a different copy while ours
+    /// changed and the cloud's did not since we last sent it. When ours is
+    /// unchanged but the cloud's differs, someone else edited it there (another
+    /// machine, or Claude through the cloud) — re-sending ours would silently
+    /// undo that edit, and doing it every sync would make two machines
+    /// ping-pong forever. When BOTH changed (or the two never agreed on a
+    /// version), neither copy may overwrite the other: it is a conflict, and
+    /// the engine keeps both.
     /// </summary>
     public static CloudPushPlan PlanPush(LocalScan scan, IReadOnlyCollection<string>? folders, CloudManifest manifest,
                                          CloudSyncState state, bool allowDeletes, bool allowMassDelete)
@@ -249,6 +289,20 @@ public sealed class CloudSyncEngine
                 plan.KeptCloudVersion++;
                 continue;
             }
+            if (server != null && !CloudSyncState.IsSha((server.Sha256 ?? "").ToLowerInvariant()))
+            {
+                // A cloud entry without a usable checksum cannot be compared;
+                // overwriting it blind is exactly what a conflict rule forbids.
+                plan.Conflicts.Add(new CloudConflictCandidate(n, server, HasAncestor: false));
+                continue;
+            }
+            if (server != null && (last == null || !string.Equals(server.Sha256, last, StringComparison.OrdinalIgnoreCase)))
+            {
+                // Ours changed (or was never sent) and the cloud's copy is not
+                // the one we last agreed on: both sides moved. Keep both.
+                plan.Conflicts.Add(new CloudConflictCandidate(n, server, HasAncestor: last != null));
+                continue;
+            }
             plan.Uploads.Add(n);
         }
 
@@ -277,15 +331,15 @@ public sealed class CloudSyncEngine
         }
 
         // The owner already answered for deselected folders (the UI asks at the
-        // moment of unticking). A folder emptying out on its own is different —
-        // a move, a botched sync tool, the wrong drive — so when a folder loses
-        // more than half of what it uploaded (and more than a handful), its
-        // deletions wait for a yes.
+        // moment of unticking). Notes vanishing from folders that are still
+        // ticked is different — a move, a botched sync tool, the wrong drive —
+        // so more than MassDeleteMin of them in one run wait for a yes.
         plan.Deletes.AddRange(deselected);
-        foreach (var (top, gone) in goneByFolder)
+        var goneTotal = goneByFolder.Values.Sum(g => g.Count);
+        var mass = goneTotal > MassDeleteMin && !allowMassDelete;
+        foreach (var (_, gone) in goneByFolder)
         {
-            var mass = gone.Count > MassDeleteMin && gone.Count * 2 > uploadedByFolder.GetValueOrDefault(top);
-            if (mass && !allowMassDelete) plan.HeldBack.AddRange(gone);
+            if (mass) plan.HeldBack.AddRange(gone);
             else plan.Deletes.AddRange(gone);
         }
         return plan;
@@ -375,38 +429,61 @@ public sealed class CloudSyncEngine
     // ═════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Mirror the account into <paramref name="cacheDir"/>: fetch what changed,
-    /// remove what the server no longer has — only inside the cache, never a
-    /// root dot-folder or system folder, and never a note with local changes
-    /// not yet pushed.
+    /// Mirror the account into <paramref name="cacheDir"/> (the brainx-mcp
+    /// cache: every folder, state read from the cache itself): fetch what
+    /// changed, remove what the server no longer has — only inside the cache,
+    /// never a root dot-folder or system folder, and never a note with local
+    /// changes not yet pushed.
     /// </summary>
-    public async Task<CloudPullResult> PullAsync(string cacheDir, CloudPullOptions? options = null,
-        IProgress<CloudSyncProgress>? progress = null, CancellationToken ct = default)
+    public Task<CloudPullResult> PullAsync(string cacheDir, CloudPullOptions? options = null,
+        IProgress<CloudSyncProgress>? progress = null, CancellationToken ct = default) =>
+        PullAsync(cacheDir, null, null, options, progress, ct);
+
+    /// <summary>
+    /// Bring <paramref name="root"/> up to date with the cloud: the notes of
+    /// <paramref name="folders"/> (null = every folder) that changed in the
+    /// cloud are fetched, notes the cloud no longer has are removed, and a note
+    /// edited on both sides is kept twice (<see cref="CloudConflict"/>). A note
+    /// written here and never pushed is never overwritten or deleted.
+    ///
+    /// A fresh install — no notes, no sync history, a cloud that has notes —
+    /// is a <b>restore</b>: every cloud folder is ticked, everything comes
+    /// down, and <see cref="CloudSyncState.Restoring"/> keeps every push from
+    /// this root refused until the download has completed. The sha of each
+    /// note written is recorded in <paramref name="state"/> as it lands, so the
+    /// push that follows sends nothing the cloud already has.
+    /// <paramref name="state"/> null = load it from the root (and keep it there).
+    /// </summary>
+    public async Task<CloudPullResult> PullAsync(string root, IReadOnlyCollection<string>? folders, CloudSyncState? state,
+        CloudPullOptions? options = null, IProgress<CloudSyncProgress>? progress = null, CancellationToken ct = default)
     {
         options ??= new CloudPullOptions();
         var result = new CloudPullResult();
         var sw = Stopwatch.StartNew();
         FileStream? held = null;
-        CloudSyncState? state = null;
+        var restoring = false;
         try
         {
-            Directory.CreateDirectory(cacheDir);
-            held = await AcquireLockAsync(cacheDir, options.LockTimeout, ct).ConfigureAwait(false);
+            Directory.CreateDirectory(root);
+            held = await AcquireLockAsync(root, options.LockTimeout, ct).ConfigureAwait(false);
             if (held == null)
             {
                 result.ErrorCode = CloudSyncResult.Busy;
-                result.ErrorMessage = "another sync of this cache is running";
+                result.ErrorMessage = "another sync of this folder is running";
                 return result;
             }
-            state = CloudSyncState.Load(cacheDir);
+            if (state == null) state = CloudSyncState.Load(root);
+            else if (File.Exists(CloudSyncState.PathFor(root))) state.AdoptSyncDataFrom(CloudSyncState.Load(root));
 
             var accountId = options.AccountId;
             if (string.IsNullOrEmpty(accountId))
                 accountId = (await _api.GetAccountAsync(ct).ConfigureAwait(false)).Id;
-            if (state.BindToAccount(accountId)) state.Save(cacheDir);
+            if (state.BindToAccount(accountId)) state.Save(root);
 
             progress?.Report(new CloudSyncProgress(CloudSyncPhase.Scan, 0, 0));
-            var scan = await Task.Run(() => ScanLocal(cacheDir, null, honourIgnoreFile: false, options.FileLock, ct), ct)
+            // The emptiness test looks at the whole root, not only the chosen
+            // folders: a vault with notes in an unticked folder is not "new".
+            var whole = await Task.Run(() => ScanLocal(root, null, honourIgnoreFile: false, options.FileLock, ct), ct)
                 .ConfigureAwait(false);
 
             progress?.Report(new CloudSyncProgress(CloudSyncPhase.Compare, 0, 0));
@@ -415,23 +492,60 @@ public sealed class CloudSyncEngine
             result.UsedBytes = manifest.UsedBytes;
             result.QuotaBytes = manifest.QuotaBytes;
 
-            var plan = PlanPull(scan, manifest, state, options.AllowMassDelete);
+            restoring = state.Restoring
+                        || (options.RestoreIfEmpty && whole.Notes.Count == 0 && state.Uploaded.Count == 0
+                            && manifest.Files.Any(f => CloudPathRules.IsValid(f.Path) && !CloudPathRules.IsMachineManaged(f.Path)));
+            if (restoring)
+            {
+                // Tick what the cloud has, and refuse pushes until it is all
+                // here — both written to disk BEFORE the first note lands, so
+                // an interrupted restore resumes in the same mode.
+                var cloudFolders = manifest.Files
+                    .Where(f => CloudPathRules.IsValid(f.Path) && !CloudPathRules.IsMachineManaged(f.Path))
+                    .Select(f => CloudPathRules.TopFolderOf(f.Path))
+                    .Where(t => t == CloudSyncState.RootToken || CloudPathRules.IsSelectableFolderName(t))
+                    .Distinct(CloudNameComparer.Instance).ToList();
+                foreach (var f in cloudFolders)
+                    if (!state.Folders.Contains(f, CloudNameComparer.Instance)) { state.Folders.Add(f); result.AdoptedFolders.Add(f); }
+                if (!state.Restoring) { state.Restoring = true; state.RestoreStartedUtc = DateTime.UtcNow; }
+                state.Save(root);
+                folders = null;                 // a restore brings everything down
+                result.Restored = true;
+            }
+
+            var scan = folders == null ? whole
+                     : await Task.Run(() => ScanLocal(root, folders, honourIgnoreFile: false, options.FileLock, ct), ct).ConfigureAwait(false);
+
+            var plan = PlanPull(scan, manifest, state, options.AllowMassDelete, folders);
             result.Skipped.AddRange(plan.Skipped);
             result.KeptLocal = plan.KeptLocal;
             result.HeldBackDeletes = plan.HeldBack.Count;
             result.Unchanged = plan.Unchanged;
             foreach (var (p, sha) in plan.InSync) state.Uploaded[p] = sha;
             foreach (var p in plan.Forget) state.Uploaded.Remove(p);
-            state.Save(cacheDir);
+            state.Save(root);
 
             var i = 0;
             foreach (var n in plan.DeleteLocal)
             {
                 ct.ThrowIfCancellationRequested();
                 if (i++ % 50 == 0) progress?.Report(new CloudSyncProgress(CloudSyncPhase.Delete, i, plan.DeleteLocal.Count));
-                if (DeleteLocalIfUnchanged(cacheDir, n, state, options.FileLock)) result.DeletedLocal++;
+                if (DeleteLocalIfUnchanged(root, n, state, options.FileLock)) result.DeletedLocal++;
             }
-            if (plan.DeleteLocal.Count > 0) state.Save(cacheDir);
+            if (plan.DeleteLocal.Count > 0) state.Save(root);
+
+            if (plan.Conflicts.Count > 0)
+            {
+                // Both copies are kept on disk; the conflict copy is not
+                // recorded as uploaded, so the next push sends it (and the
+                // cloud copy that lost its name is already there).
+                var taken = new HashSet<string>(scan.Notes.Select(n => n.Path), StringComparer.OrdinalIgnoreCase);
+                foreach (var f in manifest.Files) if (!string.IsNullOrEmpty(f.Path)) taken.Add(f.Path);
+                var resolved = await ResolveConflictsAsync(root, plan.Conflicts, taken, state, options.DeviceName,
+                                                           options.FileLock, result.Skipped, ct).ConfigureAwait(false);
+                foreach (var r in resolved) result.Conflicts.Add(r.Conflict);
+                state.Save(root);
+            }
 
             var before = new Dictionary<string, string?>(PathCase);
             foreach (var n in scan.Notes) before.TryAdd(n.Path, n.Sha256);
@@ -453,7 +567,7 @@ public sealed class CloudSyncEngine
                         continue;
                     }
                     before.TryGetValue(file.Path, out var expectedLocal);
-                    var why = WriteLocal(cacheDir, file.Path, file.Content ?? "", expectedLocal, options.FileLock);
+                    var why = WriteLocal(root, file.Path, file.Content ?? "", expectedLocal, options.FileLock);
                     if (why == null)
                     {
                         state.Uploaded[file.Path] = sha;
@@ -461,10 +575,18 @@ public sealed class CloudSyncEngine
                     }
                     else result.Skipped.Add(new CloudSkip(file.Path, why));
                 }
-                state.Save(cacheDir);
+                state.Save(root);
                 done += batch.Count;
             }
             progress?.Report(new CloudSyncProgress(CloudSyncPhase.Done, plan.Fetch.Count, plan.Fetch.Count));
+
+            if (restoring)
+            {
+                // Everything the cloud listed was asked for and nothing failed
+                // on the way: the vault is whole, pushes may resume.
+                state.Restoring = false;
+                state.Save(root);
+            }
         }
         catch (CloudApiException ex)
         {
@@ -494,9 +616,11 @@ public sealed class CloudSyncEngine
                         Uploaded = 0,
                         Deleted = result.DeletedLocal,
                         Skipped = result.Skipped.Count,
+                        Fetched = result.Fetched,
+                        Conflicts = result.Conflicts.Count,
                         ErrorCode = result.Cancelled ? "CANCELLED" : result.ErrorCode,
                     };
-                    try { state.Save(cacheDir); } catch { }
+                    try { state.Save(root); } catch { }
                 }
                 held.Dispose();
             }
@@ -508,14 +632,19 @@ public sealed class CloudSyncEngine
     /// Decide what a pull does. Pure. <see cref="CloudSyncState.Uploaded"/> is the
     /// last sha both sides agreed on, which is what separates "the server
     /// changed it" (local still equals it: take the server's) from "we changed
-    /// it" (keep ours; the next push sends it).
+    /// it" (keep ours; the next push sends it) from "both changed" (a conflict:
+    /// keep both). <paramref name="folders"/> limits the plan to those
+    /// top-level folders (null = all); entries of other folders are left alone.
     /// </summary>
-    public static CloudPullPlan PlanPull(LocalScan scan, CloudManifest manifest, CloudSyncState state, bool allowMassDelete = false)
+    public static CloudPullPlan PlanPull(LocalScan scan, CloudManifest manifest, CloudSyncState state, bool allowMassDelete = false,
+                                         IReadOnlyCollection<string>? folders = null)
     {
         var plan = new CloudPullPlan();
         var localExact = new Dictionary<string, LocalNote>(StringComparer.Ordinal);
         var localFold = new Dictionary<string, LocalNote>(StringComparer.OrdinalIgnoreCase);
         foreach (var n in scan.Notes) { localExact[n.Path] = n; localFold.TryAdd(n.Path, n); }
+
+        bool InScope(string path) => folders == null || folders.Contains(CloudPathRules.TopFolderOf(path), CloudNameComparer.Instance);
 
         var serverPaths = new HashSet<string>(StringComparer.Ordinal);
         var serverFold = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -529,6 +658,7 @@ public sealed class CloudSyncEngine
                 continue;
             }
             if (CloudPathRules.IsMachineManaged(path)) continue;
+            if (!InScope(path)) continue;
             if (!CloudSyncState.IsSha((s.Sha256 ?? "").ToLowerInvariant()))
             {
                 plan.Skipped.Add(new CloudSkip(path, "cloud listed no valid checksum"));
@@ -577,7 +707,14 @@ public sealed class CloudSyncEngine
                 plan.Fetch.Add(s);          // the server moved on; ours is untouched since
                 continue;
             }
-            plan.KeptLocal++;               // ours changed and is not pushed yet — never overwrite it
+            if (last != null && string.Equals(sha, last, StringComparison.Ordinal))
+            {
+                plan.KeptLocal++;           // only ours changed and it is not pushed yet — the push sends it
+                continue;
+            }
+            // Ours changed (or was never synced) AND the cloud's copy is not
+            // the one we last agreed on: both sides moved. Keep both.
+            plan.Conflicts.Add(new CloudConflictCandidate(local, s, HasAncestor: last != null));
         }
 
         var candidates = new List<LocalNote>();
@@ -593,17 +730,176 @@ public sealed class CloudSyncEngine
         }
 
         // An empty or truncated manifest (a server fault, a wiped disk) must not
-        // empty the cache — for a cloud that lost its notes, this may be the last copy.
-        var synced = state.Uploaded.Count;
-        if (!allowMassDelete && candidates.Count > MassDeleteMin && candidates.Count * 2 > synced)
+        // empty this root — for a cloud that lost its notes, this may be the
+        // last copy. More than MassDeleteMin removals in one run wait for a yes.
+        if (!allowMassDelete && candidates.Count > MassDeleteMin)
             plan.HeldBack.AddRange(candidates);
         else
             plan.DeleteLocal.AddRange(candidates);
 
         foreach (var p in state.Uploaded.Keys)
-            if (!serverPaths.Contains(p) && !localExact.ContainsKey(p))
+            if (InScope(p) && !serverPaths.Contains(p) && !localExact.ContainsKey(p))
                 plan.Forget.Add(p);
         return plan;
+    }
+
+    // ═════════════════════════════════════════════════════════════════
+    // CONFLICTS
+    // ═════════════════════════════════════════════════════════════════
+
+    /// <summary>Two clocks within this of each other are "the same time": the cloud wins a tie.</summary>
+    public static readonly TimeSpan ConflictClockTolerance = TimeSpan.FromSeconds(2);
+
+    private sealed record ResolvedConflict(CloudConflict Conflict, List<UploadItem> Uploads);
+
+    /// <summary>
+    /// Keep both copies of every conflict. The newer copy keeps the note's
+    /// name; the older one is written beside it as a conflict copy. Nothing
+    /// is deleted and nothing is overwritten without its content surviving
+    /// under the other name. Returns, per resolved conflict, what a push has
+    /// to send so the cloud ends up with both copies too.
+    ///
+    /// Who is newer: the local file's mtime against the cloud's modifiedUtc,
+    /// with <see cref="ConflictClockTolerance"/> — never a float, never a
+    /// string compare. No cloud time, or a tie: the cloud wins (the local copy
+    /// is the one that can be renamed safely). No common ancestor: the local
+    /// copy keeps its name regardless — it was never uploaded, so it is never
+    /// overwritten.
+    /// </summary>
+    private async Task<List<ResolvedConflict>> ResolveConflictsAsync(string root, List<CloudConflictCandidate> conflicts,
+        HashSet<string> takenPaths, CloudSyncState state, string? deviceName, object? fileLock, List<CloudSkip> skipped,
+        CancellationToken ct)
+    {
+        var resolved = new List<ResolvedConflict>();
+        var device = SafeDeviceName(deviceName);
+        var stamp = DateTime.Now;
+        foreach (var batch in Batch(conflicts, c => Math.Max(0, c.Server.Size) + 256, MaxBatchFiles, MaxBatchBytes))
+        {
+            ct.ThrowIfCancellationRequested();
+            var fetched = (await _api.FetchNotesAsync(batch.Select(c => c.Server.Path).ToList(), ct).ConfigureAwait(false))
+                .ToDictionary(f => f.Path, StringComparer.Ordinal);
+            foreach (var c in batch)
+            {
+                var path = c.Local.Path;
+                if (!fetched.TryGetValue(c.Server.Path, out var cloud))
+                {
+                    skipped.Add(new CloudSkip(path, "cloud copy vanished during sync — next sync handles it"));
+                    continue;
+                }
+                var cloudContent = cloud.Content ?? "";
+                var cloudSha = Sha256Hex(cloudContent);
+                if (!string.Equals(cloudSha, cloud.Sha256, StringComparison.OrdinalIgnoreCase))
+                {
+                    skipped.Add(new CloudSkip(path, "download did not match its checksum"));
+                    continue;
+                }
+
+                string localContent;
+                DateTime localMtime;
+                try
+                {
+                    lock (fileLock ?? new object())
+                    {
+                        localContent = ReadText(c.Local.FullPath);
+                        localMtime = File.GetLastWriteTimeUtc(c.Local.FullPath);
+                    }
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    skipped.Add(new CloudSkip(path, "could not be read (open in another program?)"));
+                    continue;
+                }
+                var localSha = Sha256Hex(localContent);
+                if (!string.Equals(localSha, c.Local.Sha256, StringComparison.Ordinal))
+                {
+                    skipped.Add(new CloudSkip(path, "changed locally during sync — next sync handles it"));
+                    continue;
+                }
+                if (string.Equals(localSha, cloudSha, StringComparison.Ordinal))
+                {
+                    state.Uploaded[path] = cloudSha;      // the manifest was stale; they agree after all
+                    continue;
+                }
+
+                var localWins = !c.HasAncestor
+                             || (c.Server.ModifiedUtc is { } cloudTime && localMtime > AsUtc(cloudTime) + ConflictClockTolerance);
+                var conflictPath = ConflictPathFor(path, localWins ? "cloud" : device, stamp, takenPaths);
+                if (conflictPath == null)
+                {
+                    skipped.Add(new CloudSkip(path, "no room for a conflict copy name"));
+                    continue;
+                }
+                takenPaths.Add(conflictPath);
+
+                var uploads = new List<UploadItem>();
+                string? why;
+                if (localWins)
+                {
+                    // Ours keeps the name; the cloud's copy lands beside it.
+                    why = WriteLocal(root, conflictPath, cloudContent, expectedLocalSha: null, fileLock);
+                    if (why != null) { skipped.Add(new CloudSkip(path, why)); continue; }
+                    uploads.Add(new UploadItem(path, localContent, localSha));
+                    uploads.Add(new UploadItem(conflictPath, cloudContent, cloudSha));
+                }
+                else
+                {
+                    // The cloud's copy keeps the name; ours is set aside first
+                    // (so a crash between the two writes loses nothing), then
+                    // the cloud's text takes the original path.
+                    why = WriteLocal(root, conflictPath, localContent, expectedLocalSha: null, fileLock);
+                    if (why != null) { skipped.Add(new CloudSkip(path, why)); continue; }
+                    why = WriteLocal(root, path, cloudContent, localSha, fileLock);
+                    if (why != null) { skipped.Add(new CloudSkip(path, why)); continue; }
+                    state.Uploaded[path] = cloudSha;
+                    uploads.Add(new UploadItem(conflictPath, localContent, localSha));
+                }
+                resolved.Add(new ResolvedConflict(new CloudConflict(path, conflictPath, localWins), uploads));
+            }
+        }
+        return resolved;
+    }
+
+    /// <summary>
+    /// "Folder/name (conflict &lt;device&gt; 2026-10-18 1432).md" — a legal cloud
+    /// path not in <paramref name="taken"/> (a counter is appended when it is).
+    /// Null only when even a shortened name cannot be made legal.
+    /// </summary>
+    public static string? ConflictPathFor(string cloudPath, string device, DateTime when, ISet<string> taken)
+    {
+        var slash = cloudPath.LastIndexOf('/');
+        var dir = slash < 0 ? "" : cloudPath[..(slash + 1)];
+        var name = slash < 0 ? cloudPath : cloudPath[(slash + 1)..];
+        var stem = name.EndsWith(".md", StringComparison.OrdinalIgnoreCase) ? name[..^3] : name;
+        // Invariant: on a Thai-locale PC the default calendar would stamp
+        // "2569", and the same conflict would carry two names on two machines.
+        var tag = $" (conflict {device} {when.ToString("yyyy-MM-dd HHmm", System.Globalization.CultureInfo.InvariantCulture)}";
+        for (var n = 0; n < 100; n++)
+        {
+            // A second conflict of the same note in the same minute counts
+            // inside the brackets: "… 1432 2).md", so the name still ends
+            // in the one "(conflict …)" tag the owner is told to look for.
+            var suffix = tag + (n == 0 ? "" : $" {n + 1}") + ").md";
+            var room = CloudPathRules.MaxSegmentLength - suffix.Length;
+            if (room < 1) return null;
+            var head = stem.Length > room ? stem[..room].TrimEnd() : stem;
+            var candidate = dir + head + suffix;
+            if (!CloudPathRules.IsValid(candidate)) return null;
+            if (!taken.Contains(candidate)) return candidate;
+        }
+        return null;
+    }
+
+    /// <summary>A wire timestamp as UTC: an unlabelled one is UTC by contract, a local one is converted.</summary>
+    private static DateTime AsUtc(DateTime t) =>
+        t.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(t, DateTimeKind.Utc) : t.ToUniversalTime();
+
+    /// <summary>A device name that is legal inside a file name on every platform: letters, digits, '-' and '_' only, at most 32.</summary>
+    public static string SafeDeviceName(string? name)
+    {
+        var raw = string.IsNullOrWhiteSpace(name) ? Environment.MachineName : name;
+        var clean = new string(raw.Where(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_').ToArray());
+        if (clean.Length > 32) clean = clean[..32];
+        return clean.Length == 0 ? "device" : clean;
     }
 
     /// <summary>Returns null on success, else the reason the note was not written.</summary>

@@ -214,6 +214,14 @@ public partial class MainWindow
             var age = (DateTime.UtcNow - seen.Value).TotalSeconds;
             var calls = o["calls"]?.ToObject<long?>() ?? 0;
             var online = age <= 90;
+            // A moon (Claude in local-agent mode) sits only while connected.
+            // Its host already has the empty chair, and one handshake with no
+            // tool call left it at a desk for a fortnight — read as a test stuck
+            // in the room (owner, 2026-10-12: "ตอนนี้ก็ค้างอีกแล้ว local -agent").
+            if (!online && BusMoonHosts.ContainsKey(id)) continue;
+            // An agent whose program BrainX cannot start (not installed, or Gemini without a key)
+            // gets no desk while it is offline — nobody could call it to one (AgentInstall).
+            if (!online && BusReach().TryGetValue(id, out var reach) && !reach.Ready) continue;
 
             // Per session when the sessions publish themselves: every window of
             // one agent overwrites this file with its own counter, so with two
@@ -245,6 +253,8 @@ public partial class MainWindow
                 // owner is watching for it.
                 ["avatar"] = CoworkAvatar(id),
                 ["emote"] = CoworkEmote(id),
+                // The model it answers with, when the room knows: CluadeX says so over its pipe (CoworkModels).
+                ["model"] = CoworkAgentModel(id),
             });
         }
 
@@ -544,7 +554,26 @@ public partial class MainWindow
         try
         {
             var m = JObject.Parse(e.WebMessageAsJson);
-            switch (m["type"]?.ToString())
+            var kind = m["type"]?.ToString();
+
+            // BrainX Pro: the room is free to watch; giving it orders, steering
+            // its agents and its secretary are Pro (ProGate). Stopping a run,
+            // leaving, opening a file and reading history stay free.
+            if (kind is "officeSay" or "officeCall" or "officeAnswer" or "officeBrokerService" or "officeModel"
+                    or "officeEffort" or "officeTask" or "officeHistorySummary" or "officeSecretary"
+                && !RequirePro(BrainX.Core.Services.License.ProFeature.Cowork))
+            {
+                if (kind == "officeSay")
+                    CoworkSurface?.PostWebMessageAsJson(new JObject
+                    {
+                        ["type"] = "officeSayFailed",
+                        ["text"] = m["text"]?.ToString() ?? "",
+                        ["reason"] = "สั่งงานในห้องเป็นฟีเจอร์ของ BrainX Pro",
+                    }.ToString());
+                return;
+            }
+
+            switch (kind)
             {
                 case "officeReady": PostCowork(); break;
                 case "officeSay":
@@ -583,6 +612,11 @@ public partial class MainWindow
                         CoworkWriteRoomLine("broker", "🔌 บอสปิดไฟปิดห้อง — ทุกคนออกจากห้องแล้ว", "room");
                     PostCowork();
                     break;
+                // Ship or classic room. On the ship every agent speaks as her girl
+                // (BrainX.Mcp Program.Persona.cs reads the same file).
+                case "officeView":
+                    CoworkSetView(m["view"]?.ToString() == "classic" ? "classic" : "ship");
+                    break;
                 // Installing or removing the Windows Service. Elevation is
                 // asked for by the client, never by the page.
                 case "officeBrokerService":
@@ -593,6 +627,12 @@ public partial class MainWindow
                     if (verb is "uninstall" or "stop") RunBrokerServiceVerb(verb);
                     break;
                 case "officeOpen": CoworkOpen(m["path"]?.ToString()); break;
+                // Where to get an agent that is not installed. Only the addresses BrainX itself put
+                // on the page (AgentInstall.KnownUrls) — a page must not open whatever it names.
+                case "officeOpenUrl":
+                    if (m["url"]?.ToString() is { } url && BrainX.Core.Services.AgentInstall.KnownUrls.Contains(url))
+                        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true }); } catch { }
+                    break;
                 case "officeModel": CoworkSetModel(m["agent"]?.ToString(), m["model"]?.ToString()); break;
                 case "officeEffort": CoworkSetEffort(m["agent"]?.ToString(), m["effort"]?.ToString()); break;
                 // The work window: pause / resume / drop / focus one piece of
@@ -602,6 +642,8 @@ public partial class MainWindow
                 // The room's history by project: read, and remove finished work
                 // from it (MainWindow.CoworkHistory) — never from the brain.
                 case "officeHistory": PostCoworkHistory(HistStr(m["project"])); break;
+                // One topic's story, fetched only when the owner opens it.
+                case "officeHistoryTopic": PostCoworkHistoryTopic(HistStr(m["project"]), HistStr(m["id"])); break;
                 case "officeHistorySummary": SecretarySummarize(HistStr(m["project"])); break;
                 case "officeSecretary": SecretaryChange(m); break;
                 case "officeHistoryDelete":
@@ -719,9 +761,17 @@ public partial class MainWindow
             var presence = Path.Combine(CoworkBusRoot, "presence");
             if (Directory.Exists(presence))
                 foreach (var f in Directory.GetFiles(presence, "*.json"))
-                    if ((DateTime.UtcNow - File.GetLastWriteTimeUtc(f)).TotalDays <= 14
-                        && BusWellKnownAgents.Contains(Path.GetFileNameWithoutExtension(f), StringComparer.OrdinalIgnoreCase))
-                        Add(Path.GetFileNameWithoutExtension(f));
+                {
+                    var id = Path.GetFileNameWithoutExtension(f);
+                    var age = DateTime.UtcNow - File.GetLastWriteTimeUtc(f);
+                    // A moon is mentionable only while it has a desk (CoworkAgents).
+                    if (age.TotalDays <= 14
+                        && BusWellKnownAgents.Contains(id, StringComparer.OrdinalIgnoreCase)
+                        && (age.TotalSeconds <= 90 || !BusMoonHosts.ContainsKey(id))
+                        // …and nobody is addressed who cannot be reached (same rule as the desks)
+                        && (age.TotalSeconds <= 90 || !BusReach().TryGetValue(id, out var reach) || reach.Ready))
+                        Add(id);
+                }
 
             var skills = Path.Combine(CoworkBusRoot, "cowork", "skills.json");
             if (File.Exists(skills))
@@ -866,6 +916,36 @@ public partial class MainWindow
             }
         }
         catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"CoworkSetRoomLight: {ex.Message}"); }
+    }
+
+    /// <summary>cowork/view.json: which room the owner looks at. "ship" = the girls'
+    /// starship, where the agents talk as the girls; "classic" = the painted room.</summary>
+    private void CoworkSetView(string view)
+    {
+        try
+        {
+            if (CoworkShipView() == (view == "ship") && File.Exists(Path.Combine(CoworkBusRoot, "cowork", "view.json"))) return;
+            var dir = Path.Combine(CoworkBusRoot, "cowork");
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, "view.json");
+            var tmp = path + ".tmp";
+            File.WriteAllText(tmp, new JObject { ["view"] = view, ["sinceUtc"] = DateTime.UtcNow.ToString("o") }.ToString(),
+                new System.Text.UTF8Encoding(false));
+            File.Move(tmp, path, overwrite: true);
+        }
+        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"CoworkSetView: {ex.Message}"); }
+    }
+
+    /// <summary>Is the room on the ship view? A missing file means yes: the ship is the default room.</summary>
+    private bool CoworkShipView()
+    {
+        try
+        {
+            var path = Path.Combine(CoworkBusRoot, "cowork", "view.json");
+            if (!File.Exists(path)) return true;
+            return JObject.Parse(File.ReadAllText(path))["view"]?.ToString() != "classic";
+        }
+        catch { return true; }
     }
 
     /// <summary>Is the room lit? A missing file means yes — a room that went
@@ -1114,11 +1194,10 @@ public partial class MainWindow
     {
         var arr = new JArray();
         var runners = CoworkRunners();
-        if (runners == null) return arr;
         var picks = BrainX.Core.Services.RunnerModels.ReadChoices(CoworkBusRoot);
         var effortPicks = BrainX.Core.Services.RunnerModels.ReadEffortChoices(CoworkBusRoot);
 
-        foreach (var (name, val) in runners)
+        foreach (var (name, val) in runners ?? new JObject())
         {
             if (val is not JObject r || name.StartsWith("//", StringComparison.Ordinal)) continue;
             try
@@ -1149,18 +1228,25 @@ public partial class MainWindow
                                        && BrainX.Core.Services.RunnerModels.IsValidEffort(r["effort"]!.ToString().Trim())
                     ? r["effort"]!.ToString().Trim() : "";
                 var (runModel, runEffort) = CoworkRunModel(agent);
+                // Owner (2026-10-17): an agent BrainX cannot reach offers no model to pick — it says
+                // what is missing and where to get it instead (BrainX.Core AgentInstall).
+                var reach = BrainX.Core.Services.AgentInstall.Probe(agent, r);
 
                 arr.Add(new JObject
                 {
                     ["agent"] = agent,
-                    ["canChoose"] = BrainX.Core.Services.RunnerModels.CanChoose(args, flag),
+                    ["installed"] = reach.Installed,
+                    ["ready"] = reach.Ready,
+                    ["fix"] = reach.Fix,
+                    ["fixUrl"] = reach.Url,
+                    ["canChoose"] = reach.Ready && BrainX.Core.Services.RunnerModels.CanChoose(args, flag),
                     ["chosen"] = chosen,
                     ["configured"] = configured,
                     ["cliDefault"] = cliDefault ?? "",
                     ["onCall"] = r["onCall"]?.Type == JTokenType.Boolean && r["onCall"]!.ToObject<bool>(),
                     ["running"] = runModel ?? "",
                     ["options"] = Options(options),
-                    ["effortCanChoose"] = BrainX.Core.Services.RunnerModels.CanChooseEffort(args, effortArgs),
+                    ["effortCanChoose"] = reach.Ready && BrainX.Core.Services.RunnerModels.CanChooseEffort(args, effortArgs),
                     ["effortChosen"] = effortPicks.TryGetValue(agent, out var effortPick) ? effortPick : "",
                     ["effortConfigured"] = effortConfigured,
                     ["effortCliDefault"] = effortDefault ?? "",
@@ -1170,10 +1256,108 @@ public partial class MainWindow
             }
             catch { /* one broken runner entry must not hide the others */ }
         }
+
+        // CluadeX while it is on: the app the owner runs, asked over its own pipe (BrainX.Core.Services.CluadeXModels).
+        if (!arr.OfType<JObject>().Any(m => string.Equals(m["agent"]?.ToString(), BrainX.Core.Services.CluadeXModels.Agent, StringComparison.OrdinalIgnoreCase)))
+        {
+            RefreshCoworkCluadeX();
+            if (_coworkCluadeXInfo is { } ci && DateTime.UtcNow - _coworkCluadeXAt < CoworkCluadeXFresh)
+                arr.Add(BrainX.Core.Services.CluadeXModels.Row(ci, _coworkCluadeXNote));
+        }
         return arr;
 
         static JArray Options(IEnumerable<BrainX.Core.Services.RunnerModels.Option> list) =>
             new(list.Select(o => new JObject { ["id"] = o.Id, ["label"] = o.Label, ["note"] = o.Note }));
+    }
+
+    // ─── CluadeX in the model panel (BrainX.Core.Services.CluadeXModels) ───
+
+    /// <summary>How long an answer from CluadeX stands for it; how often it is asked while the room is open.</summary>
+    private static readonly TimeSpan CoworkCluadeXFresh = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan CoworkCluadeXEvery = TimeSpan.FromSeconds(5);
+    /// <summary>The room's own connection: a Co-Pilot run holds the shared bridge for as long as it runs.</summary>
+    private BrainX.Core.Services.CluadeXClient? _coworkCluadeX;
+    private BrainX.Core.Services.CluadeXModelInfo? _coworkCluadeXInfo;
+    private DateTime _coworkCluadeXAt = DateTime.MinValue, _coworkCluadeXAsked = DateTime.MinValue;
+    /// <summary>Why CluadeX refused the last pick, shown under its row until a pick goes through.</summary>
+    private string? _coworkCluadeXNote;
+    private int _coworkCluadeXBusy;
+
+    /// <summary>CluadeX's presence on the bus is fresh — only then is its pipe asked, so a CluadeX that is not running
+    /// never costs a connect attempt every few seconds.</summary>
+    private bool CoworkCluadeXOnline()
+    {
+        try
+        {
+            var p = Path.Combine(CoworkBusRoot, "presence", BrainX.Core.Services.CluadeXModels.Agent + ".json");
+            if (!File.Exists(p)) return false;
+            var seen = JObject.Parse(File.ReadAllText(p))["lastSeenUtc"]?.ToObject<DateTime?>();
+            return seen is { } t && DateTime.UtcNow - t.ToUniversalTime() < TimeSpan.FromSeconds(120);
+        }
+        catch { return false; }
+    }
+
+    /// <summary>Ask CluadeX what it answers with — at most every few seconds, off the UI thread; the room repaints
+    /// when the answer changed.</summary>
+    private void RefreshCoworkCluadeX(bool now = false)
+    {
+        if (!now && DateTime.UtcNow - _coworkCluadeXAsked < CoworkCluadeXEvery) return;
+        if (Interlocked.Exchange(ref _coworkCluadeXBusy, 1) == 1) return;
+        _coworkCluadeXAsked = DateTime.UtcNow;
+        bool online = CoworkCluadeXOnline();
+        _ = Task.Run(async () =>
+        {
+            string before = CoworkCluadeXKey(_coworkCluadeXInfo);
+            try
+            {
+                if (!online) { _coworkCluadeXInfo = null; return; }
+                _coworkCluadeX ??= new BrainX.Core.Services.CluadeXClient();
+                _coworkCluadeXInfo = await _coworkCluadeX.GetActiveModelAsync(4000);
+                _coworkCluadeXAt = DateTime.UtcNow;
+            }
+            catch
+            {
+                _coworkCluadeXInfo = null;
+                try { if (_coworkCluadeX != null) await _coworkCluadeX.DisposeAsync(); } catch { }
+                _coworkCluadeX = null;
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _coworkCluadeXBusy, 0);
+                if (CoworkCluadeXKey(_coworkCluadeXInfo) != before)
+                    _ = Dispatcher.BeginInvoke(new Action(PostCowork));
+            }
+        });
+    }
+
+    /// <summary>The model an agent answers with, for its nameplate — known for CluadeX (it says so over its pipe).</summary>
+    private string CoworkAgentModel(string id) =>
+        string.Equals(id, BrainX.Core.Services.CluadeXModels.Agent, StringComparison.OrdinalIgnoreCase)
+        && _coworkCluadeXInfo is { } ci && DateTime.UtcNow - _coworkCluadeXAt < CoworkCluadeXFresh
+            ? ci.Model ?? "" : "";
+
+    private static string CoworkCluadeXKey(BrainX.Core.Services.CluadeXModelInfo? i) => i == null ? "" :
+        $"{i.Provider}|{i.Model}|{i.Effort}|{string.Join(",", (i.Options ?? new()).Select(o => o.Model))}";
+
+    /// <summary>The owner picked CluadeX's model or effort in the room: asked of CluadeX itself (choose_model, its own
+    /// model box and rules), and the room repaints from what CluadeX answers with afterwards — so "saved" means it
+    /// really switched. A refusal (a reply still running on another provider, no Pro, …) shows under the row.</summary>
+    private void CoworkChooseCluadeX(string? model, string? effort)
+    {
+        var info = _coworkCluadeXInfo;
+        if (info == null || !BrainX.Core.Services.CluadeXModels.IsOffered(info, model, effort)) return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                // A connection of its own: a pick must not queue behind the poll.
+                await using var client = new BrainX.Core.Services.CluadeXClient();
+                var r = await client.ChooseModelAsync(model, effort);
+                _coworkCluadeXNote = r.Ok ? "" : r.Reason;
+            }
+            catch (Exception ex) { _coworkCluadeXNote = "ติดต่อ CluadeX ไม่ได้ — " + ex.Message; }
+            _ = Dispatcher.BeginInvoke(new Action(() => { RefreshCoworkCluadeX(now: true); PostCowork(); }));
+        });
     }
 
     /// <summary>The model and effort a broker run still in flight was started on.</summary>
@@ -1206,6 +1390,8 @@ public partial class MainWindow
             var row = CoworkModels().OfType<JObject>().FirstOrDefault(m =>
                 string.Equals(m["agent"]?.ToString(), agent, StringComparison.OrdinalIgnoreCase));
             if (row == null || row["canChoose"]?.ToObject<bool>() != true) return;
+            // CluadeX is asked to switch — nothing goes into models.json; "" (no pick) means nothing for an app.
+            if (row["app"] != null) { if (model.Length > 0) CoworkChooseCluadeX(model, null); return; }
             var offered = (row["options"] as JArray ?? new JArray())
                 .Any(o => string.Equals(o["id"]?.ToString(), model, StringComparison.Ordinal));
             if (model.Length > 0 && !offered) return;
@@ -1228,6 +1414,8 @@ public partial class MainWindow
             var row = CoworkModels().OfType<JObject>().FirstOrDefault(m =>
                 string.Equals(m["agent"]?.ToString(), agent, StringComparison.OrdinalIgnoreCase));
             if (row == null || row["effortCanChoose"]?.ToObject<bool>() != true) return;
+            // CluadeX: "" (the default) is its auto level.
+            if (row["app"] != null) { CoworkChooseCluadeX(null, effort.Length > 0 ? effort : BrainX.Core.Services.CluadeXModels.AutoEffort); return; }
             var offered = (row["effortOptions"] as JArray ?? new JArray())
                 .Any(o => string.Equals(o["id"]?.ToString(), effort, StringComparison.Ordinal));
             if (effort.Length > 0 && !offered) return;

@@ -1,0 +1,51 @@
+{
+  "position": [
+    460,
+    461
+  ],
+  "scale": 0.35,
+  "approach": [
+    465,
+    574
+  ],
+  "floorY": 574,
+  "workLean": {
+    "offset": [
+      -105,
+      0
+    ],
+    "from": 380,
+    "to": 520
+  },
+  "typingHands": {
+    "regions": [
+      [
+        129.06,
+        311.4,
+        215.1,
+        95.15
+      ]
+    ],
+    "period": 0.68,
+    "amount": 2
+  },
+  "parts": [
+    {
+      "rect": [
+        0,
+        0,
+        717,
+        865
+      ],
+      "anchor": [
+        473.22,
+        527.65
+      ],
+      "at": [
+        0,
+        0
+      ],
+      "motion": "breath"
+    }
+  ]
+}
