@@ -56,8 +56,9 @@ internal static partial class Program
     /// and a directory with a year of chat in it makes every poll slower.</summary>
     private const int CoworkKeepMessages = 800;
 
-    /// <summary>Same ceiling as the mail long-poll, for the same reason: the
-    /// wait blocks the one stdio thread serving every tool on this brain.</summary>
+    /// <summary>Same ceiling as the mail long-poll. The wait no longer holds
+    /// the request loop (Program.LongPoll.cs serves it on its own); ten seconds
+    /// stays the gesture's length — callers poll again.</summary>
     private const int CoworkMaxWaitSeconds = 10;
 
     private static string CoworkRoot => Path.Combine(BusRoot, "cowork");
@@ -2314,6 +2315,11 @@ internal static partial class Program
                     default: // dropped
                         line = $"🗑 {me} ยกเลิก [{id}] {title}" + (note != null ? $" — {note}" : "");
                         if (creator != null && !Is(creator, me)) to = creator;
+                        // The one who raised it called it off while somebody holds
+                        // it (the owner pressed Stop in CluadeX): the holder is told
+                        // by name, so a run on it stops rather than finishing work
+                        // nobody is waiting for.
+                        else if (assignee != null && !Is(assignee, me)) to = assignee;
                         break;
                 }
             }

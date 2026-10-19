@@ -41,6 +41,10 @@ internal static partial class Program
         // what a brain below it offers. See Program.UnattendedRuns.
         if (Environment.GetEnvironmentVariable(RunnerProbeEnv) is { Length: > 0 } probeOut)
             return await RunnerProbeAsync(probeOut);
+        // A stand-in runner for the cowork relay checks: says where it was
+        // started and for whom, and exits. See Program.CoworkRelay.
+        if (Environment.GetEnvironmentVariable(RelayProbeEnv) is { Length: > 0 } relayProbe)
+            return RelayRunnerProbe(relayProbe);
         if (Environment.GetEnvironmentVariable(StubMcpServer.EnvFlag) == "1")
             return await StubMcpServer.RunAsync();
 
@@ -80,7 +84,9 @@ internal static partial class Program
         RegisterAssistantChecks(sshChecks);
         RegisterCoworkSnapshotChecks(sshChecks);
         RegisterCoworkTriageChecks(sshChecks);
+        RegisterCoworkRelayChecks(sshChecks);
         RegisterUpdateHolderChecks(sshChecks);
+        RegisterOverlayInstallChecks(sshChecks);
         RegisterLicenseChecks(sshChecks);
         RegisterHookHealthChecks(sshChecks);
         RegisterAgentOnboardingChecks(sshChecks);

@@ -289,6 +289,8 @@ internal static partial class Program
                 if (agent != null && IsReservedIdentity(agent)) continue;
                 var wait = CoworkTriage.Classify(t, byId, now);
                 var skill = t["skill"]?.ToString() is { Length: > 0 } sk ? sk : null;
+                // Raised by a relay seat: the owner is waiting on it live (Program.CoworkRelay.cs).
+                var relay = CoworkRelay.IsLiveRelayCard(t);
 
                 // Nobody's. Owner (2026-10-09): "ฉลาดเรื่องจัดสรรงานขึ้นอีก". An
                 // open card used to wait for whoever happened to be in the room;
@@ -300,20 +302,49 @@ internal static partial class Program
                 if (agent == null)
                 {
                     var since = CoworkUtc(t["updatedUtc"]) ?? DateTime.MinValue;
-                    if (status != "open" || now - since < OpenAllocateAfter) continue;
+                    // A relayed card (Program.CoworkRelay.cs) goes at once, or
+                    // after a short grace while somebody seated could claim it.
+                    if (status != "open" || now - since < CoworkAllocateAfter(t)) continue;
                     if (wait?.Kind == "owner")
                     {
                         if (!dryRun) CoworkBlockForOwner(id, wait.Needs, CoworkStill("open", null));
                         continue;
                     }
                     if (wait != null) continue;
-                    var pick = CoworkPickAgent(cfg, t, board, except: null, now);
-                    if (pick == null) continue;   // nobody fits: the owner is asked (CoworkBoardNoticesAsync)
-                    if ((dryRun || CoworkBrokerSetTask(id, "assigned",
-                            $"📌 ไม่มีใครรับมา {(int)Math.Min(9999, (now - since).TotalMinutes)} นาที — มายส่งให้ @{pick}"
-                            + (skill != null ? $" (งาน «{skill}»)" : ""), assignee: pick, onlyIf: CoworkStill("open", null)))
+                    // The owner is waiting on a relayed card in CluadeX: an on-call
+                    // runner that is free now first, and only one runners.json
+                    // lets work in the request's project folder.
+                    var folder = relay ? CoworkRelayFolders(t).FirstOrDefault() : null;
+                    Func<string, bool>? may = folder == null ? null : a => RunnerMayWorkIn(cfg, cfg.Runners[a], folder);
+                    Func<string, int>? rank = relay ? a => (cfg.Runners[a].OnCall ? 2 : 0) + (Callable(a) ? 1 : 0) : null;
+                    var pick = CoworkPickAgent(cfg, t, board, except: null, now, may, rank);
+                    if (pick == null)
+                    {
+                        // Somebody could take it — just not in that folder. Said now,
+                        // to the seat the owner is watching; nobody is started in
+                        // another folder instead. Nobody at all: the owner is asked
+                        // (CoworkBoardNoticesAsync).
+                        if (folder != null && !dryRun && CoworkPickAgent(cfg, t, board, except: null, now, rank: rank) != null)
+                            CoworkRefuseRelayFolder(cfg, t, folder, CoworkRelayTeam(cfg), CoworkStill("open", null));
+                        continue;
+                    }
+                    var handed = relay
+                        ? $"📌 งานจากแชท CluadeX — บอสรอคำตอบอยู่ มายส่งให้ @{pick}" + (folder != null ? $" (ทำใน {folder})" : "")
+                        : $"📌 ไม่มีใครรับมา {(int)Math.Min(9999, (now - since).TotalMinutes)} นาที — มายส่งให้ @{pick}"
+                          + (skill != null ? $" (งาน «{skill}»)" : "");
+                    if ((dryRun || CoworkBrokerSetTask(id, "assigned", handed, assignee: pick, onlyIf: CoworkStill("open", null)))
                         && Callable(pick))
+                    {
                         Add(calls, pick, id);
+                        // Called now: its first chase is FollowUpIdle from here,
+                        // not the next tick (a relayed card skips the quiet wait
+                        // until it has been called once — below).
+                        if (relay && !dryRun)
+                        {
+                            ledger[id] = new JObject { ["lastUtc"] = now.ToString("o"), ["count"] = 0 };
+                            changed = true;
+                        }
+                    }
                     continue;
                 }
 
@@ -389,7 +420,12 @@ internal static partial class Program
                 // left five minutes to "go quiet" or ten since the last chase.
                 var cutOff = CoworkInterruptedRuns.Contains(agent);
                 var updated = CoworkUtc(t["updatedUtc"]) ?? DateTime.MinValue;
-                if (!cutOff && (now - updated < FollowUpIdle || CoworkSpokeSince(agent, now - FollowUpIdle))) continue;
+                // A relayed card the seat named this agent on, not called yet:
+                // the owner is waiting on it in CluadeX, so it is not left five
+                // minutes to "go quiet" first (Program.CoworkRelay.cs).
+                var rec = ledger[id] as JObject;
+                var fresh = relay && status == "assigned" && rec == null;
+                if (!cutOff && !fresh && (now - updated < FollowUpIdle || CoworkSpokeSince(agent, now - FollowUpIdle))) continue;
 
                 // Before anybody is started for it: can a headless run do this
                 // at all? Owner (2026-10-09), on a board that only grew: three
@@ -409,9 +445,12 @@ internal static partial class Program
                 // a run spent saying "not mine". It goes to whoever fits; with
                 // nobody, the owner is asked. Not a card already being done —
                 // its holder chose to take it.
+                var relayDir = relay ? CoworkRelayFolders(t).FirstOrDefault() : null;
                 if (status == "assigned" && CoworkCannotDo(agent, t) is { } cannotLine)
                 {
-                    var pick = CoworkPickAgent(cfg, t, board, except: agent, now);
+                    var pick = CoworkPickAgent(cfg, t, board, except: agent, now,
+                        may: relayDir == null ? null : a => RunnerMayWorkIn(cfg, cfg.Runners[a], relayDir),
+                        rank: relay ? a => (cfg.Runners[a].OnCall ? 2 : 0) + (Callable(a) ? 1 : 0) : null);
                     if (pick == null) continue;   // the owner is asked (CoworkBoardNoticesAsync)
                     if ((dryRun || CoworkBrokerSetTask(id, "assigned",
                             $"🔁 «{skill}» ไม่ใช่งานของ {agent} («{cannotLine}») — มายส่งต่อให้ @{pick}",
@@ -421,7 +460,14 @@ internal static partial class Program
                     continue;
                 }
 
-                var rec = ledger[id] as JObject;
+                // Its holder may not work in the relayed request's folder: not
+                // started somewhere else instead — the seat is told why.
+                if (relayDir != null && !RunnerMayWorkIn(cfg, cfg.Runners[agent], relayDir))
+                {
+                    if (!dryRun) CoworkRefuseRelayFolder(cfg, t, relayDir, new[] { agent }, CoworkStill(status, agent));
+                    continue;
+                }
+
                 var last = CoworkUtc(rec?["lastUtc"]);
                 if (!cutOff && last is DateTime l && now - l < FollowUpEvery) continue;
                 // The task moved since the last chase (a checkpoint, a note, a
@@ -438,8 +484,13 @@ internal static partial class Program
                 }
 
                 Add(calls, agent, id);
-                if (!quiet.TryGetValue(agent, out var ql)) quiet[agent] = ql = new();
-                ql.Add((id, t["title"]?.ToString() ?? id, (int)Math.Min(9999, (now - updated).TotalMinutes)));
+                // A fresh relayed card is not "quiet for 0 minutes": the seat's
+                // own line already named the agent, and the call says the rest.
+                if (!fresh)
+                {
+                    if (!quiet.TryGetValue(agent, out var ql)) quiet[agent] = ql = new();
+                    ql.Add((id, t["title"]?.ToString() ?? id, (int)Math.Min(9999, (now - updated).TotalMinutes)));
+                }
                 if (!dryRun)
                 {
                     ledger[id] = new JObject { ["lastUtc"] = now.ToString("o"), ["count"] = count + 1 };
@@ -676,7 +727,8 @@ internal static partial class Program
     /// `broker`, a `paused` record set or cleared, a new holder when the work
     /// is handed on (<paramref name="assignee"/>), who called it off when it is
     /// dropped (<paramref name="droppedBy"/>), and the line on the wall — to
-    /// the holder, new or old.
+    /// the holder, new or old, or to <paramref name="to"/> when the one who
+    /// must hear it is somebody else (the relay seat a refusal is for).
     ///
     /// <paramref name="onlyIf"/> is checked UNDER the lock against the card as
     /// it is now: the broker decides from a snapshot, and an agent claiming the
@@ -684,7 +736,8 @@ internal static partial class Program
     /// False = nothing was written.
     /// </summary>
     internal static bool CoworkBrokerSetTask(string id, string status, string note, JObject? paused = null, bool clearPaused = false,
-                                             string? assignee = null, string? droppedBy = null, Func<JObject, bool>? onlyIf = null)
+                                             string? assignee = null, string? droppedBy = null, Func<JObject, bool>? onlyIf = null,
+                                             string? to = null)
     {
         try
         {
@@ -713,7 +766,7 @@ internal static partial class Program
             AtomicWriteJson(path, task);
             var who = task["assignee"]?.Type == JTokenType.String ? task["assignee"]!.ToString() : null;
             var icon = status switch { "blocked" => "⛔", "dropped" => "🗑", _ => "📌" };
-            CoworkSystemLine($"{icon} [{id}] {task["title"]}: {note}", to: who, topic: "task", task: id);
+            CoworkSystemLine($"{icon} [{id}] {task["title"]}: {note}", to: to ?? who, topic: "task", task: id);
             return true;
         }
         catch (Exception ex) { BrokerLog($"cowork: could not update [{id}] — {Redact(ex.Message)}"); return false; }

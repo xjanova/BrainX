@@ -461,6 +461,9 @@ internal static partial class Program
         while ((line = await reader.ReadLineAsync()) != null)
         {
             if (string.IsNullOrWhiteSpace(line)) continue;
+            // A wait for the room or the inbox waits off this loop, so the
+            // client's next call is not queued behind it (Program.LongPoll.cs).
+            if (LongPollOf(line) is { } poll && TryServeLongPoll(poll, writer)) continue;
             string response;
             try
             {
@@ -472,11 +475,7 @@ internal static partial class Program
                 response = BuildError(null, -32603, $"internal error: {ex.Message}");
             }
 
-            if (!string.IsNullOrEmpty(response))
-            {
-                await writer.WriteLineAsync(response);
-                await writer.FlushAsync();
-            }
+            await WriteResponseAsync(writer, response);
         }
 
         // stdin closed — the client is gone. Take the bridged servers with us:
@@ -9355,6 +9354,16 @@ internal static partial class Program
         {
             var package = PackageBreakaway.VirtualizingPackage();
             if (package is null) return false;
+
+            // Neither route can start a file that exists only in the store:
+            // the shell says "The specified path does not exist" (2026-10-19,
+            // once per Claude session) and cmd outside says it cannot find it.
+            // Opened inside instead, the window moves the install out itself.
+            if (PackageBreakaway.PackageStoreHolding(exe) is string store)
+            {
+                Log($"client launch: {exe} exists only in {store}'s private store — opening it inside, where it moves itself to the real folder");
+                return false;
+            }
 
             if (PackageBreakaway.CurrentPackage() is not null)
             {

@@ -47,7 +47,9 @@ internal static partial class Program
     /// useful while bounding the blast radius; callers poll again, which the
     /// tool's own hint already tells them is cheap.
     ///
-    /// Raising this needs the dispatcher to serve requests concurrently first.
+    /// Since 2026-10-19 the request loop hands a waiting call to its own task
+    /// (Program.LongPoll.cs), so the wait no longer freezes the other tools;
+    /// the ceiling stays, because callers already poll again.
     /// </summary>
     private const int MaxWaitSeconds = 10;
 
@@ -509,7 +511,7 @@ internal static partial class Program
             ["from"] = me,
             ["delivered"] = delivered,
             ["hint"] = anyOnline
-                ? "Recipient is ONLINE. Call agent_inbox {wait_seconds:10} now to wait for the reply — they see your message piggybacked on their next tool call. Repeat the call to keep waiting; each wait blocks this brain's pipe, so short polls beat one long one."
+                ? "Recipient is ONLINE. Call agent_inbox {wait_seconds:10} now to wait for the reply — they see your message piggybacked on their next tool call. Repeat the call to keep waiting (each wait is at most 10 seconds; your other brain calls are served meanwhile)."
                 : "Recipient is OFFLINE — the message is parked in their inbox and delivered when they next connect to this brain. Don't block waiting; tell the user."
         };
     }
