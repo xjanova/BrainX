@@ -133,7 +133,7 @@ internal static partial class Program
                 BrokerLog("service: took over the vault");
                 try
                 {
-                    await BrokerRunLoop(once: false, dryRun: false, ct: stoppingToken).ConfigureAwait(false);
+                    await BrokerRunLoop(once: false, dryRun: false, ct: stoppingToken, exitWhenUpdated: false).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {

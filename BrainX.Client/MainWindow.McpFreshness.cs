@@ -559,10 +559,18 @@ public partial class MainWindow
             p.Dispose();
         }
 
+        // The cowork broker is a brainx-mcp too, but no MCP client's: no
+        // restart of Claude refreshes it, so naming it here sends the owner to
+        // restart the wrong program (2026-10-19 — a broker left over from the
+        // morning made the bar say "Claude runs an old MCP" all afternoon). It
+        // hands itself over to the new build after an update instead.
+        var brokerPid = ReadBrokerPid();
+
         foreach (var p in Process.GetProcessesByName("brainx-mcp"))
         {
             try
             {
+                if (p.Id == brokerPid) continue;
                 // Worker: its parent is another brainx-mcp — self-heals.
                 if (parents.TryGetValue(p.Id, out var pp) && mcpPids.Contains(pp)) continue;
                 // Launcher: some brainx-mcp names it as parent.
@@ -595,6 +603,32 @@ public partial class MainWindow
         }
 
         return found.OrderByDescending(f => f.Started).ToList();
+    }
+
+    /// <summary>The cowork broker's pid: the one this app hosts, else the one
+    /// agent-bus/broker/broker.pid.json names (an orphan from an earlier run,
+    /// or the CLI). 0 when there is none.</summary>
+    private int ReadBrokerPid()
+    {
+        try
+        {
+            if (_brokerProc is { } own && !own.HasExited) return own.Id;
+        }
+        catch { /* exited between the checks */ }
+        try
+        {
+            var f = Path.Combine(BusRootDir, "broker", "broker.pid.json");
+            if (!File.Exists(f)) return 0;
+            var o = JObject.Parse(File.ReadAllText(f));
+            var pid = o["pid"]?.ToObject<int>() ?? 0;
+            if (pid <= 0 || !DateTime.TryParse(o["startedUtc"]?.ToString(), null,
+                    System.Globalization.DateTimeStyles.RoundtripKind, out var started)) return 0;
+            // A left-over file whose pid Windows has since given to a Claude
+            // session must not hide that session: same pid AND same start.
+            using var p = Process.GetProcessById(pid);
+            return Math.Abs((p.StartTime.ToUniversalTime() - started.ToUniversalTime()).TotalSeconds) < 2 ? pid : 0;
+        }
+        catch { return 0; }
     }
 
     private static string ProcessNameOrEmpty(int pid)
