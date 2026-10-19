@@ -216,6 +216,11 @@ internal static partial class Program
     /// </summary>
     private static string? FindMcpExe()
     {
+        // A build that went somewhere other than BrainX.Mcp\bin (a shared build
+        // folder, a CI artifact directory) names its exe explicitly.
+        var pinned = Environment.GetEnvironmentVariable("BRAINX_TEST_MCP_EXE");
+        if (!string.IsNullOrWhiteSpace(pinned) && File.Exists(pinned)) return pinned;
+
         var sep = Path.DirectorySeparatorChar;
         var own = AppContext.BaseDirectory.Contains($"{sep}Release{sep}", StringComparison.OrdinalIgnoreCase) ? "Release" : "Debug";
         foreach (var config in new[] { own, own == "Release" ? "Debug" : "Release" })

@@ -176,6 +176,8 @@ internal static partial class Program
             ("PGPASSWORD=pgsecret123 psql -h db -U app -c 'select 1'", "pgsecret123"),
             ("curl 'https://api.example.com/x?token=tok_1234567890abcdef&q=1'", "tok_1234567890abcdef"),
             ("mysql --password 'longpassword1' -e 'show tables'", "longpassword1"),
+            // An opaque OAuth token in a callback URL's fragment (review rev2/rev3).
+            ("curl -s 'https://app.example/cb#access_token=ya29.A0ARrdaMopaque123&token_type=Bearer'", "ya29.A0ARrdaMopaque123"),
         };
         foreach (var (command, secret) in secrets)
         {
@@ -186,7 +188,11 @@ internal static partial class Program
 
         foreach (var benign in new[] { "tail -n 200 /var/log/nginx/error.log", "git reset --hard 5bb439c",
                                         "mkdir -p /tmp/x", "ssh -p 2222 example.com uptime",
-                                        "grep -r 'password=' /etc/app.conf", "php artisan migrate --force" })
+                                        "grep -r 'password=' /etc/app.conf", "php artisan migrate --force",
+                                        // The approval prompt must show where a force push goes and what
+                                        // a mount maps (review rev3: '/' as a secret delimiter hid both).
+                                        "git push --force origin feature/auth:main", "docker run -v /srv/secrets:/run/secrets app",
+                                        "vim /src/auth.ts:12" })
             Check($"unchanged: {benign}", SecretRedactor.Redact(benign) == benign, SecretRedactor.Redact(benign));
 
         Check("the classifier's excerpt is redacted too",

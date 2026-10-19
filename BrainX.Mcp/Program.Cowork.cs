@@ -1199,9 +1199,12 @@ internal static partial class Program
         return false;
     }
 
-    /// <summary>A run the broker started (it sets this on the child). Its leave
-    /// never closes the seat for the agent's other sessions.</summary>
-    private static bool IsBrokerRun => Environment.GetEnvironmentVariable("BRAINX_BROKER_RUN") == "1";
+    /// <summary>A run the broker started: BRAINX_BROKER_RUN on the child, or —
+    /// for a CLI that does not pass its environment on to its MCP servers,
+    /// codex — a recorded runner among this brain's ancestors
+    /// (UnattendedRuns). Its leave never closes the seat for the agent's other
+    /// sessions.</summary>
+    private static bool IsBrokerRun => BrainX.Core.Services.UnattendedRuns.IsBrokerRun();
 
     private static JObject? CoworkMySession(JObject? member) =>
         (member?["sessions"] as JObject)?[CoworkSessionKey] as JObject;

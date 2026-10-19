@@ -82,6 +82,15 @@ $handoff = $false
 $scratch = 0
 $firstTs = $null; $lastTs = $null
 
+# PRIVATE BROWSING (owner's rule, 2026-10-10): what Claude in Chrome showed an
+# agent never enters the vault. A session that used it - BrainX's bridge
+# (mcp__brainx-brain__chrome__* or the flat chrome_*), private_browse_search,
+# or Claude Code's own claude-in-chrome server - routinely restates page text,
+# balances and URLs in its closing replies. Such a digest keeps the owner's
+# prompts with URLs removed and leaves the replies out.
+$rxPrivate = [regex]'"name":"[^"]*(?:__chrome__|__chrome_[A-Za-z]|private_browse_search|claude-in-chrome__)'
+$privateBrowsing = $false
+
 $rxEdit = [regex]'"name":"(?:Edit|Write|MultiEdit|NotebookEdit)"'
 $rxPath = [regex]'"(?:file_path|notebook_path)":"((?:[^"\\]|\\.)*)"'
 $rxBrainWrite = [regex]'"name":"mcp__[^"]*__(brain_create_note|brain_append_note|brain_remember)"'
@@ -90,6 +99,11 @@ $rxTs = [regex]'"timestamp":"([^"]+)"'
 
 try {
     foreach ($line in [System.IO.File]::ReadLines($transcript)) {
+        # Before every skip below: a huge line, a subagent's (sidechain) call
+        # and a tool_use all count - any one of them saw the owner's browsing.
+        if (-not $privateBrowsing -and $line.Contains('"tool_use"') -and ($line.Contains('chrome') -or $line.Contains('private_browse_search'))) {
+            if ($rxPrivate.IsMatch($line)) { $privateBrowsing = $true }
+        }
         if ($line.Length -gt 400000) { continue }   # pasted images / huge tool output
         $m = $rxTs.Match($line)
         if ($m.Success) { if (-not $firstTs) { $firstTs = $m.Groups[1].Value }; $lastTs = $m.Groups[1].Value }
@@ -138,7 +152,16 @@ try {
 if ($handoff) { Write-Decision 'handoff-written' @{ event = $hookEvent; sid = $sid }; exit 0 }
 if ($prompts.Count -lt 2 -and $files.Count -eq 0) { Write-Decision 'trivial' @{ event = $hookEvent; sid = $sid; prompts = $prompts.Count }; exit 0 }
 
+function StripUrls([string]$s) {
+    if (-not $s) { return $s }
+    $s = $s -replace '(?i)\b(?:https?|ftp|file|chrome|edge|about|data|javascript):\S+', '[url removed]'
+    $s = $s -replace '(?i)\bwww\.\S+', '[url removed]'
+    return $s
+}
+
 $replies = @()
+# Private browsing: the replies are where page content is restated - none of it.
+if ($privateBrowsing) { $lastTexts.Clear() }
 foreach ($l in $lastTexts) {
     try {
         $o = $l | ConvertFrom-Json
@@ -173,11 +196,18 @@ if ($tagProject) { [void]$sb.Append("  - $tagProject$nl") }
 [void]$sb.Append("---$nl$nl")
 [void]$sb.Append("# Auto digest - $project - $day ($sid8)$nl$nl")
 [void]$sb.Append("> Written by the $hookEvent hook because this session ended without a #session-handoff note. Raw material: verify before relying on it. Secrets are redacted.$nl$nl")
+if ($privateBrowsing) {
+    [void]$sb.Append("> Private browsing (Claude in Chrome) was used in this session: the last replies are left out and URLs are removed from the prompts.$nl$nl")
+}
 [void]$sb.Append("- cwd: ``$cwd```n- span: $firstTs .. $lastTs`n- owner prompts: $($prompts.Count) - files changed: $($files.Count) (+$scratch scratchpad writes) - brain writes: $($brainNotes.Count)$nl$nl")
 
 [void]$sb.Append("## Owner prompts (last 12)$nl")
 $start = [Math]::Max(0, $prompts.Count - 12)
-for ($i = $start; $i -lt $prompts.Count; $i++) { [void]$sb.Append("$($i + 1). $(Redact (Clip $prompts[$i] 300))$nl") }
+for ($i = $start; $i -lt $prompts.Count; $i++) {
+    $p = $prompts[$i]
+    if ($privateBrowsing) { $p = StripUrls $p }
+    [void]$sb.Append("$($i + 1). $(Redact (Clip $p 300))$nl")
+}
 
 if ($files.Count -gt 0) {
     [void]$sb.Append("$nl## Files changed$nl")
@@ -207,5 +237,5 @@ if ($env:BRAINX_SANDBOX -ne '1') {
     } catch { }
 }
 
-Write-Decision 'written' @{ event = $hookEvent; sid = $sid; prompts = $prompts.Count; files = $files.Count; path = $path }
+Write-Decision 'written' @{ event = $hookEvent; sid = $sid; prompts = $prompts.Count; files = $files.Count; path = $path; private_browsing = $privateBrowsing }
 exit 0

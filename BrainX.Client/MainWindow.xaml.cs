@@ -264,8 +264,11 @@ public partial class MainWindow : Window
         try { BrainX.Core.Services.BusSeal.EnsureKey(); }
         catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"BusSeal key: {ex.Message}"); }
         _vaultPath = @"G:\Obsidian";
-        if (Environment.GetCommandLineArgs().Length > 1)
-            _vaultPath = Environment.GetCommandLineArgs()[1];
+        // A switch is never the vault: `--settings claude-in-chrome` used to
+        // open (and remember) a vault named "--settings".
+        _launchArgs = BrainX.Core.Services.ClientLaunchArgs.Parse(Environment.GetCommandLineArgs().Skip(1));
+        if (_launchArgs.VaultPath != null)
+            _vaultPath = _launchArgs.VaultPath;
         // A vault moved via Settings ▸ Move vault is remembered in a pointer
         // file OUTSIDE the vault — a pointer stored inside the thing it points
         // at would have moved along with it. CLI argument still wins above.
@@ -307,7 +310,17 @@ public partial class MainWindow : Window
         // Standard WPF Maximize on a WindowStyle=None window only fills
         // the work area; this mode manually overrides bounds + Topmost.
         PreviewKeyDown += OnGlobalPreviewKeyDown;
+
+        // Started with `--settings <section>`: open there once the window is up.
+        if (_launchArgs.OpenSettings)
+        {
+            EventHandler? once = null;
+            once = (_, _) => { ContentRendered -= once; OpenSettingsSection(_launchArgs.SettingsSection); };
+            ContentRendered += once;
+        }
     }
+
+    private readonly BrainX.Core.Services.ClientLaunchArgs _launchArgs;
 
     // ── Maximize honours the taskbar (WM_GETMINMAXINFO) ──────────────
     // With WindowStyle=None + AllowsTransparency=True, the default WPF
@@ -347,12 +360,50 @@ public partial class MainWindow : Window
     private IntPtr WindowProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
         const int WM_GETMINMAXINFO = 0x0024;
+        const int WM_COPYDATA = 0x004A;
         if (msg == WM_GETMINMAXINFO)
         {
             WmGetMinMaxInfo(hwnd, lParam);
             handled = true;
         }
+        else if (msg == WM_COPYDATA && TryReadSettingsRequest(lParam, out var section))
+        {
+            // A second `BrainX.Client.exe --settings <section>` (App.OnStartup).
+            // Posted, not run here: the sender is waiting on this message.
+            Dispatcher.BeginInvoke(new Action(() => OpenSettingsSection(section)));
+            handled = true;
+            return (IntPtr)1;
+        }
         return IntPtr.Zero;
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct COPYDATASTRUCT
+    {
+        public IntPtr dwData;
+        public int cbData;
+        public IntPtr lpData;
+    }
+
+    /// <summary>
+    /// Any process on the desktop can send WM_COPYDATA. Only our tag, a sane
+    /// size and a well-formed settings request are accepted — and all it can
+    /// ever do is open one of the known Settings cards.
+    /// </summary>
+    private static bool TryReadSettingsRequest(IntPtr lParam, out string? section)
+    {
+        section = null;
+        try
+        {
+            var cds = System.Runtime.InteropServices.Marshal.PtrToStructure<COPYDATASTRUCT>(lParam);
+            if (cds.dwData != (IntPtr)BrainX.Core.Services.ClientLaunchArgs.CopyDataTag) return false;
+            if (cds.cbData <= 0 || cds.cbData > 512 || cds.lpData == IntPtr.Zero) return false;
+            var text = System.Runtime.InteropServices.Marshal.PtrToStringUni(cds.lpData, cds.cbData / 2).TrimEnd('\0');
+            var (ok, s) = BrainX.Core.Services.ClientLaunchArgs.FromMessage(text);
+            section = s;
+            return ok;
+        }
+        catch { return false; }
     }
 
     private void WmGetMinMaxInfo(IntPtr hwnd, IntPtr lParam)
@@ -8452,6 +8503,7 @@ public partial class MainWindow : Window
             RefreshMcpCardForBuildKind();
             RefreshGardenerCard();
             RefreshMcpReaperCard();
+            RefreshChromeBridgeCard();
         }
     }
 

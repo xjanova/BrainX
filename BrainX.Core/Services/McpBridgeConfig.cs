@@ -101,6 +101,42 @@ public sealed class McpBridgeDef
     public string? Setup { get; set; }
 
     /// <summary>
+    /// A bridge built into BrainX rather than read from mcp-bridges.json — today
+    /// only the Claude in Chrome bridge. Never settable from the config file
+    /// ([JsonIgnore]): a hand-written entry must not be able to claim the
+    /// privacy handling below, nor shed it.
+    /// </summary>
+    [JsonIgnore] public bool BuiltIn { get; set; }
+
+    /// <summary>
+    /// The bridge's arguments and results are the owner's PRIVATE data (page
+    /// text, screenshots, URLs, typed values of logged-in sites). Such a call
+    /// writes nothing into the vault — no journal line, no activity, no agent
+    /// bus, no status file, no schema cache — and is kept only in the private
+    /// store outside the vault. Built-in bridges only.
+    /// </summary>
+    [JsonIgnore] public bool Private { get; set; }
+
+    /// <summary>Strip CLAUDECODE / CLAUDE_CODE_* / ANTHROPIC_* from the child's
+    /// environment (see ClaudeChildEnv). Built-in bridges only.</summary>
+    [JsonIgnore] public bool StripClaudeEnv { get; set; }
+
+    /// <summary>Do not echo the child's stderr into brainx-mcp's own log (which
+    /// the host app may persist); keep only its first line, in memory, for the
+    /// status message. Built-in bridges only.</summary>
+    [JsonIgnore] public bool QuietStderr { get; set; }
+
+    /// <summary>A copy that can be given a freshly resolved command without
+    /// touching the shared definition.</summary>
+    public McpBridgeDef CloneForSpawn() => new()
+    {
+        Id = Id, Enabled = Enabled, Command = Command, Args = new List<string>(Args),
+        Env = new Dictionary<string, string>(Env), Cwd = Cwd, Url = Url, TimeoutSeconds = TimeoutSeconds,
+        ToolAllowlist = new List<string>(ToolAllowlist), Probe = Probe, Docs = Docs, Setup = Setup,
+        BuiltIn = BuiltIn, Private = Private, StripClaudeEnv = StripClaudeEnv, QuietStderr = QuietStderr,
+    };
+
+    /// <summary>
     /// Identity of the *process* this def would spawn. Changing the command,
     /// args, cwd or allowlist invalidates the cached tool schemas — pointing
     /// `unity` at a different checkout must not serve the old server's tools.
@@ -211,6 +247,10 @@ public sealed class McpBridgeProbe
 /// </summary>
 public static class McpBridgeConfig
 {
+    /// <summary>Ids of bridges BrainX builds in itself; refused from the file.</summary>
+    public static readonly IReadOnlySet<string> ReservedIds =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Chrome.ChromeBridgeIds.BridgeId };
+
     public static string PathFor(string vaultPath) =>
         Path.Combine(vaultPath, ".obsidianx", "mcp-bridges.json");
 
@@ -251,6 +291,11 @@ public static class McpBridgeConfig
 
                 var bad = def.Validate();
                 if (bad != null) { log($"bridge '{def.Id}' skipped: {bad}"); continue; }
+                // Built-in ids are not available to the config file: an entry
+                // named "chrome" would otherwise take over the chrome__ names
+                // with none of the built-in bridge's privacy handling.
+                if (ReservedIds.Contains(def.Id))
+                { log($"bridge '{def.Id}' skipped: that id is reserved for BrainX's built-in bridge"); continue; }
                 if (list.Any(d => string.Equals(d.Id, def.Id, StringComparison.OrdinalIgnoreCase)))
                 { log($"bridge '{def.Id}' skipped: duplicate id"); continue; }
 

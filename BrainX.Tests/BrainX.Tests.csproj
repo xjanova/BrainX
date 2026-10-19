@@ -30,4 +30,11 @@
     <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="10.0.5" />
   </ItemGroup>
 
+  <!-- The real tools/list of the Claude in Chrome MCP server (claude.exe 2.1.293),
+       replayed by the chrome stub (ChromeStubServer) so the bridge is tested
+       against the schemas a live server actually advertises. -->
+  <ItemGroup>
+    <None Include="fixtures\**\*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

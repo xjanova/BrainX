@@ -67,7 +67,21 @@ public static class McpRemotePolicy
         // Start a local Grok process on the owner's subscription.
         "media_generate",
         "media_status",
+        // The owner's PRIVATE browsing log (what Claude in Chrome saw). The
+        // owner's rule: searchable by the owner, locally, and nothing else.
+        // The MCP also refuses it on its headless child and never lists it
+        // there; this is the third lock.
+        BrainX.Core.Services.Chrome.ChromeBridgeIds.PrivateSearchTool,
     };
+
+    /// <summary>
+    /// Whole namespaces that never cross the network. chrome__* (and Grok's
+    /// chrome_* spelling) drive the owner's logged-in browser and return its
+    /// pages; the hub is already off in the headless child, so these can only
+    /// arrive here by mistake — refuse them by NAME as well.
+    /// </summary>
+    private static bool IsHardBlockedName(string tool) =>
+        HardBlocked.Contains(tool) || BrainX.Core.Services.Chrome.ChromeBridgeIds.IsPrivateToolName(tool);
 
     /// <summary>Read-only tools — available to any valid token.</summary>
     private static readonly HashSet<string> ReadTools = new(StringComparer.OrdinalIgnoreCase)
@@ -149,7 +163,7 @@ public static class McpRemotePolicy
         "brain_cloud_sync",
     };
 
-    public static bool IsHardBlocked(string tool) => HardBlocked.Contains(tool);
+    public static bool IsHardBlocked(string tool) => IsHardBlockedName(tool);
 
     /// <summary>A tool that mutates the vault — for a cloud session this is what
     /// the quota guard and the re-index hook key on.</summary>
@@ -181,7 +195,7 @@ public static class McpRemotePolicy
     public static bool IsAllowed(string tool, McpScope scope)
     {
         if (scope == McpScope.None) return false;
-        if (HardBlocked.Contains(tool)) return false;          // belt
+        if (IsHardBlockedName(tool)) return false;             // belt
         if (ReadTools.Contains(tool)) return true;
         if (WriteTools.Contains(tool)) return scope == McpScope.ReadWrite;
         return false;                                          // default deny
@@ -194,7 +208,7 @@ public static class McpRemotePolicy
     /// </summary>
     public static string DenyReason(string tool, McpScope scope)
     {
-        if (HardBlocked.Contains(tool))
+        if (IsHardBlockedName(tool))
             return $"tool '{tool}' is permanently disabled over the remote endpoint (local stdio only)";
         if (WriteTools.Contains(tool) && scope != McpScope.ReadWrite)
             return $"tool '{tool}' requires a read-write token; this token is read-only";
@@ -239,7 +253,7 @@ public static class McpRemotePolicy
         {
             var name = t?["name"]?.ToString();
             if (string.IsNullOrEmpty(name)) continue;
-            if (!ReadTools.Contains(name!) && !WriteTools.Contains(name!) && !HardBlocked.Contains(name!))
+            if (!ReadTools.Contains(name!) && !WriteTools.Contains(name!) && !IsHardBlockedName(name!))
                 unknown.Add(name!);
         }
         return unknown;

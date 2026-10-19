@@ -19,6 +19,92 @@ internal static partial class Program
         checks.Add(("hook health: the 2026-09-25 signature, a missing script and a stale log are each named", HookHealthNamesEachFailure));
         checks.Add(("hook health: a healthy, an absent and a foreign-only config report nothing", HookHealthQuietWhenFine));
         checks.Add(("session-end hook: a digest is written once per session, redacted, and skipped after a handoff", SessionEndDigest));
+        checks.Add(("session-end hook: a session that used Claude in Chrome leaves no reply and no URL in the vault", SessionEndPrivateBrowsing));
+    }
+
+    /// <summary>
+    /// The owner's rule: what Claude in Chrome showed never enters the vault.
+    /// A closing reply restates the page ("your balance is …") and a prompt
+    /// names the URL, so a digest of such a session drops the replies and the
+    /// URLs. Negative control: the SAME transcript without the chrome call
+    /// keeps both — the stripping is caused by the detection, nothing else.
+    /// </summary>
+    private static async Task SessionEndPrivateBrowsing()
+    {
+        var script = FindHookScript("session-end.ps1");
+        if (script == null) { Check("hooks/session-end.ps1 found", false); return; }
+        var root = TempDir("brainx-sessionend-private-");
+        try
+        {
+            var home = Path.Combine(root, "home");
+            var vault = Path.Combine(root, "vault");
+            Directory.CreateDirectory(Path.Combine(home, ".claude"));
+            Directory.CreateDirectory(Path.Combine(vault, ".obsidianx"));
+            var autoDir = Path.Combine(vault, "Notes", "Claude-Sessions", "auto");
+
+            const string url = "https://bank.example/account?acct=998877";
+            const string pageFact = "ยอดเงินคงเหลือ 54,321 บาท";
+            string User(string text) => Line(new JObject { ["type"] = "user", ["timestamp"] = "2026-10-10T02:00:00Z",
+                ["message"] = new JObject { ["role"] = "user", ["content"] = text } });
+            string Assistant(JArray content, bool sidechain = false)
+            {
+                var o = new JObject { ["type"] = "assistant", ["timestamp"] = "2026-10-10T02:05:00Z",
+                    ["message"] = new JObject { ["role"] = "assistant", ["content"] = content } };
+                if (sidechain) o["isSidechain"] = true;
+                return Line(o);
+            }
+            string[] Transcript(string? chromeTool, bool sidechain = false)
+            {
+                var lines = new List<string>
+                {
+                    User("open " + url + " and tell me the balance"),
+                    User("ขอบคุณ แล้วสรุปให้หน่อย"),
+                };
+                if (chromeTool != null)
+                    lines.Add(Assistant(new JArray(new JObject { ["type"] = "tool_use", ["id"] = "c1", ["name"] = chromeTool,
+                        ["input"] = new JObject { ["url"] = url } }), sidechain));
+                lines.Add(Assistant(new JArray(new JObject { ["type"] = "text", ["text"] = "The page says " + pageFact + "." })));
+                return lines.ToArray();
+            }
+
+            async Task<string?> Digest(string sid, string[] lines)
+            {
+                var t = Path.Combine(root, sid + ".jsonl");
+                File.WriteAllLines(t, lines, new UTF8Encoding(false));
+                var rc = await RunSessionEnd(script, home, vault, t, sid + "-0000", "SessionEnd");
+                if (rc != 0) return null;
+                var f = Directory.Exists(autoDir) ? Directory.GetFiles(autoDir, $"* {sid}.md").FirstOrDefault() : null;
+                return f == null ? null : File.ReadAllText(f, Encoding.UTF8);
+            }
+
+            // Control first: no chrome call — the reply and the URL ARE kept.
+            var plain = await Digest("aaaa0001", Transcript(null));
+            Check("(control) without a chrome call the digest keeps the reply and the URL",
+                  plain != null && plain.Contains(pageFact) && plain.Contains(url), plain?[..Math.Min(400, plain.Length)]);
+
+            foreach (var (sid, tool, side) in new[]
+                     {
+                         ("bbbb0002", "mcp__brainx-brain__chrome__get_page_text", false),
+                         ("cccc0003", "mcp__brainx-brain__chrome_navigate", false),          // the flat spelling
+                         ("dddd0004", "mcp__brainx-brain__private_browse_search", false),
+                         ("eeee0005", "mcp__brainx-brain__chrome__navigate", true),          // a subagent did it
+                         ("ffff0006", "mcp__claude-in-chrome__navigate", false),            // Claude Code's own server
+                     })
+            {
+                var body = await Digest(sid, Transcript(tool, side));
+                Check($"{tool}{(side ? " (sidechain)" : "")}: a digest is still written, saying why it is reduced",
+                      body != null && body.Contains("Private browsing (Claude in Chrome) was used"), body?[..Math.Min(300, body?.Length ?? 0)]);
+                Check($"…without the reply that restated the page", body != null && !body.Contains(pageFact) && !body.Contains("## Last replies"));
+                Check($"…and without the URL, the owner's words kept", body != null && !body.Contains("bank.example") && body.Contains("[url removed]")
+                      && body.Contains("ขอบคุณ แล้วสรุปให้หน่อย"));
+            }
+
+            var decisions = File.ReadAllLines(Path.Combine(home, ".claude", "brain-session-end.ndjson"));
+            Check("the decision log marks the private sessions (and only them)",
+                  decisions.Count(d => d.Contains("\"private_browsing\":true")) == 5
+                  && decisions.Count(d => d.Contains("\"private_browsing\":false")) == 1, string.Join(" | ", decisions));
+        }
+        finally { try { Directory.Delete(root, true); } catch { } }
     }
 
     private static string TempDir(string prefix)
@@ -105,12 +191,22 @@ internal static partial class Program
         return Task.CompletedTask;
     }
 
-    private static string? FindHookScript(string name)
+    private static string? FindHookScript(string name) => FindRepoFile("hooks", name);
+
+    /// <summary>
+    /// A file of the checkout: walked up from the harness binary (an in-tree
+    /// build) and from the working folder (a build sent to a shared output
+    /// folder, run from the checkout — how locked.ps1 runs it).
+    /// </summary>
+    private static string? FindRepoFile(params string[] parts)
     {
-        for (var d = new DirectoryInfo(AppContext.BaseDirectory); d != null; d = d.Parent)
+        foreach (var start in new[] { AppContext.BaseDirectory, Environment.CurrentDirectory })
         {
-            var p = Path.Combine(d.FullName, "hooks", name);
-            if (File.Exists(p)) return p;
+            for (var d = new DirectoryInfo(start); d != null; d = d.Parent)
+            {
+                var p = Path.Combine(new[] { d.FullName }.Concat(parts).ToArray());
+                if (File.Exists(p)) return p;
+            }
         }
         return null;
     }

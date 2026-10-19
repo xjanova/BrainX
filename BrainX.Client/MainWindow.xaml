@@ -5788,6 +5788,13 @@
                                                 Click="SettingsJump_Click" Tag="Gardener"
                                                 HorizontalContentAlignment="Left" Padding="14,8"
                                                 Margin="0,0,0,2"/>
+                                        <!-- Also where the client's "settings claude-in-chrome" switch
+                                             lands (bridge_status's "Turn on in BrainX" action). -->
+                                        <Button x:Name="SettingsNavChrome" Content="Claude in Chrome"
+                                                Style="{StaticResource NavButton}"
+                                                Click="SettingsJump_Click" Tag="Chrome"
+                                                HorizontalContentAlignment="Left" Padding="14,8"
+                                                Margin="0,0,0,2"/>
                                         <Button x:Name="SettingsNavAbout" Content="About"
                                                 Style="{StaticResource NavButton}"
                                                 Click="SettingsJump_Click" Tag="About"
@@ -6901,6 +6908,70 @@
                                                                 HorizontalAlignment="Left"/>
                                                     </StackPanel>
                                                 </Expander>
+                                            </StackPanel>
+                                        </Border>
+
+                                        <!-- CLAUDE IN CHROME — the built-in browser bridge (opt-in) and its
+                                             private log. Its own card, not a line in the MCP "Advanced"
+                                             expander: it is a decision the owner makes (it hands agents
+                                             their logged-in browser), so it has to be in plain sight.
+                                             Logic: MainWindow.ChromeBridge.cs. -->
+                                        <Border x:Name="SettingsAnchorChrome"
+                                                Style="{StaticResource NeuralCard}"
+                                                Padding="22" Margin="0,0,0,14">
+                                            <StackPanel>
+                                                <StackPanel Margin="0,0,0,12">
+                                                    <TextBlock Text="Claude in Chrome · เบราว์เซอร์ผ่าน BrainX" FontSize="16" FontWeight="Bold"
+                                                               Foreground="{StaticResource NeuralText}"/>
+                                                    <TextBlock FontSize="12.5" FontWeight="Medium" TextWrapping="Wrap"
+                                                               Foreground="{StaticResource NeuralText2}" Margin="0,3,0,0"
+                                                               Text="Gives every agent on this brain (Claude, Codex, CluadeX) chrome__* tools that drive YOUR Chrome or Edge through Claude's extension. Needs Claude Code signed in with a claude.ai Pro/Max/Team/Enterprise account — an API key or API credit cannot drive Chrome."/>
+                                                    <TextBlock FontSize="12" TextWrapping="Wrap"
+                                                               Foreground="{StaticResource NeuralText3}" Margin="0,3,0,0"
+                                                               Text="ให้ทุกเอเจนต์ที่ต่อกับสมองนี้ (Claude, Codex, CluadeX) ใช้เครื่องมือ chrome__* คุม Chrome หรือ Edge ของคุณผ่านส่วนขยาย Claude — ต้องล็อกอิน Claude Code ด้วยบัญชี claude.ai แบบ Pro/Max/Team/Enterprise (API key หรือเครดิต API ใช้คุม Chrome ไม่ได้)"/>
+                                                </StackPanel>
+                                                <CheckBox x:Name="ChromeBridgeToggle" IsChecked="False"
+                                                          Click="ChromeBridgeToggle_Click" FontSize="12" Margin="0,0,0,10"
+                                                          Foreground="{StaticResource NeuralText}"
+                                                          Content="Turn on the Claude in Chrome bridge · เปิดการเชื่อม Claude in Chrome"/>
+                                                <Border Background="{StaticResource NeuralBgInset}" CornerRadius="8" Padding="12,10" Margin="0,0,0,10">
+                                                    <StackPanel>
+                                                        <TextBlock Text="PRIVATE BROWSING LOG · บันทึกการท่องเว็บส่วนตัว" FontSize="11" FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource NeonGreenBrush}" Margin="0,0,0,4"/>
+                                                        <TextBlock FontSize="11" TextWrapping="Wrap" Foreground="{StaticResource TextSecondaryBrush}"
+                                                                   Text="What chrome__ tools see (URLs, page text, typed values, screenshots) never enters the brain, the journal, the agent bus or any sync. It is kept only on this PC, readable by your Windows account alone — search it here, or ask an agent to use private_browse_search."/>
+                                                        <TextBlock FontSize="11" TextWrapping="Wrap" Foreground="{StaticResource TextMutedBrush}" Margin="0,2,0,4"
+                                                                   Text="สิ่งที่เครื่องมือ chrome__ เห็น (URL, ข้อความในหน้า, ค่าที่พิมพ์, ภาพหน้าจอ) จะไม่เข้าสมอง ไม่ลงบันทึกประจำวัน ไม่ผ่าน agent bus และไม่ซิงก์ไปไหน เก็บไว้ในเครื่องนี้เท่านั้น อ่านได้เฉพาะบัญชี Windows ของคุณ — ค้นได้ที่นี่ หรือให้เอเจนต์ใช้ private_browse_search"/>
+                                                        <!-- The log and the switch live in %LOCALAPPDATA%\BrainX\private,
+                                                             inside the installer's app root: say so, plainly. -->
+                                                        <TextBlock FontSize="11" TextWrapping="Wrap" Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,8"
+                                                                   Text="Uninstalling BrainX erases this log and turns the bridge off. · การถอนการติดตั้ง BrainX จะลบบันทึกนี้และปิดการเชื่อมด้วย"/>
+                                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                                            <TextBlock Text="Keep for · เก็บไว้" FontSize="11" VerticalAlignment="Center"
+                                                                       Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,8,0"/>
+                                                            <ComboBox x:Name="ChromeRetentionCombo" Width="180" FontSize="11"
+                                                                      Background="{StaticResource NeuralBgInset}"
+                                                                      Foreground="{StaticResource NeuralText1}"
+                                                                      SelectionChanged="ChromeRetention_Changed"/>
+                                                        </StackPanel>
+                                                        <StackPanel Orientation="Horizontal">
+                                                            <Button Content="Open private log · เปิดบันทึก" Style="{StaticResource NeuralBtnPrimary}"
+                                                                    Click="OpenPrivateBrowseLog_Click" Padding="12,5" FontSize="10" Margin="0,0,6,0"/>
+                                                            <Button x:Name="ClearPrivateBrowseLogBtn" Content="Clear log · ล้างบันทึก" Style="{StaticResource NeuralBtnGhost}"
+                                                                    Click="ClearPrivateBrowseLog_Click" Padding="12,5" FontSize="10" Margin="0,0,6,0"/>
+                                                            <Button x:Name="CheckChromeBridgeBtn" Content="Check status · ตรวจสถานะ" Style="{StaticResource NeuralBtnGhost}"
+                                                                    Click="CheckChromeBridge_Click" Padding="12,5" FontSize="10"/>
+                                                        </StackPanel>
+                                                    </StackPanel>
+                                                </Border>
+                                                <TextBlock x:Name="ChromeBridgeStatusText" FontSize="11" TextWrapping="Wrap"
+                                                           FontFamily="{StaticResource MonoFont}"
+                                                           Foreground="{StaticResource TextMutedBrush}"/>
+                                                <!-- The one action that fixes what "Check status" found. Hidden
+                                                     until a check names something this app can actually do. -->
+                                                <Button x:Name="ChromeActionBtn" Visibility="Collapsed" HorizontalAlignment="Left"
+                                                        Style="{StaticResource NeuralBtnPrimary}" Click="ChromeAction_Click"
+                                                        Padding="12,5" FontSize="10" Margin="0,8,0,0"/>
                                             </StackPanel>
                                         </Border>
 

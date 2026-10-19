@@ -32,6 +32,15 @@ internal static partial class Program
     {
         // Spawned as a fake MCP child by one of the checks below. Must be the
         // first thing decided — a stub owns stdio and prints nothing else.
+        // The chrome stub first: it is started by brainx-mcp's chrome bridge,
+        // which is itself started by the harness.
+        if (ChromeStubServer.IsRequested(args))
+            return await ChromeStubServer.RunAsync();
+        // A stand-in for a broker runner (a copy of this exe named codex.exe),
+        // started by a sandboxed broker: records what it was started with and
+        // what a brain below it offers. See Program.UnattendedRuns.
+        if (Environment.GetEnvironmentVariable(RunnerProbeEnv) is { Length: > 0 } probeOut)
+            return await RunnerProbeAsync(probeOut);
         if (Environment.GetEnvironmentVariable(StubMcpServer.EnvFlag) == "1")
             return await StubMcpServer.RunAsync();
 
@@ -83,6 +92,7 @@ internal static partial class Program
         RegisterMindBridgeChecks(sshChecks);
         RegisterHardeningChecks(sshChecks);
         RegisterMySqlChecks(sshChecks);
+        RegisterChromeBridgeChecks(sshChecks);
         RegisterOAuthChecks(sshChecks);
         foreach (var (name, check) in sshChecks) await Run(name, check);
 
