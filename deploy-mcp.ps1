@@ -22,8 +22,10 @@
 # MCP binary ResolveBestMcpExe() picks -- the INSTALLED one for a shipped
 # client, the dev Release one for a checkout:
 #   1. dev  -> BrainX.Mcp\bin\Release\net9.0      (framework-dependent build)
-#   2. app  -> %LOCALAPPDATA%\BrainX\current\mcp  (self-contained install)
-# Both end up at the same version (2.9.<git-count>) so every surface agrees.
+#   2. app  -> %LOCALAPPDATA%\BrainX\current\mcp  (self-contained install,
+#              only when it exists)
+# plus the agent runtime mirror %USERPROFILE%\.brainx\mcp (always; see 5a).
+# All end up at the same version (2.9.<git-count>) so every surface agrees.
 #
 # IMPORTANT: this file MUST be saved as UTF-8 WITHOUT BOM and ASCII-only,
 # because Windows PowerShell 5.1 silently mis-decodes UTF-8 multibyte
@@ -36,6 +38,10 @@ $fwBuild     = "$mcpProj\bin\TestBuild"        # framework-dependent -> dev Rele
 $scBuild     = "$mcpProj\bin\SelfContained"    # self-contained     -> installed app
 $devRelease  = "$mcpProj\bin\Release\net9.0"
 $installedMcp = Join-Path $env:LOCALAPPDATA "BrainX\current\mcp"
+# The agent runtime every agent is registered at, plus the retired mirrors
+# that older machines may still carry (see 5a).
+$agentMcp    = Join-Path $env:USERPROFILE ".brainx\mcp"
+$retiredMirrors = @((Join-Path $env:LOCALAPPDATA "xjanova\brainx-mcp"), (Join-Path $env:LOCALAPPDATA "BrainX\mcp"))
 
 # 1. Live processes are fine now -- just report them so the operator knows
 #    which sessions will keep the OLD version until they exit.
@@ -49,7 +55,7 @@ if ($running) {
 
 # 2. Sweep leftovers from previous hot-swaps. Files still mapped by a living
 #    process refuse deletion -- skip them silently, next run retries.
-foreach ($dir in @($devRelease, $installedMcp)) {
+foreach ($dir in @(@($devRelease, $installedMcp, $agentMcp) + $retiredMirrors)) {
     if (Test-Path $dir) {
         Get-ChildItem $dir -Filter "*.stale.*" -ErrorAction SilentlyContinue | ForEach-Object {
             try { Remove-Item $_.FullName -Force -ErrorAction Stop; Write-Output "[sweep] removed $($_.Name)" } catch {}
@@ -194,48 +200,62 @@ $devFailed = Deploy-Set $fwBuild $devRelease $devAssets $ts "dev Release"
 #    reads). It is a self-contained folder, so we only swap the managed code +
 #    its deps/runtimeconfig -- never the bundled runtime DLLs (coreclr etc.),
 #    which are unchanged and identical across builds.
+# A self-contained publish flattens runtimes\ into the output root, so the
+# native names have no subdirectory here. Same files, different layout --
+# which is exactly why the two lists are separate. Used by the installed app
+# AND by the agent runtime mirrors below.
+$appAssets = @(
+    "brainx-mcp.dll", "brainx-mcp.exe",
+    "brainx-mcp.deps.json", "brainx-mcp.runtimeconfig.json",
+    "BrainX.Core.dll",
+    "Microsoft.ML.OnnxRuntime.dll", "System.Numerics.Tensors.dll",
+    "onnxruntime.dll", "onnxruntime_providers_shared.dll",
+    "Renci.SshNet.dll"
+) + $hostingAssets
+
 $appFailed = @()
 if (Test-Path $installedMcp) {
-    # A self-contained publish flattens runtimes\ into the output root, so the
-    # native names have no subdirectory here. Same files, different layout --
-    # which is exactly why the two lists are separate.
-    $appAssets = @(
-        "brainx-mcp.dll", "brainx-mcp.exe",
-        "brainx-mcp.deps.json", "brainx-mcp.runtimeconfig.json",
-        "BrainX.Core.dll",
-        "Microsoft.ML.OnnxRuntime.dll", "System.Numerics.Tensors.dll",
-        "onnxruntime.dll", "onnxruntime_providers_shared.dll",
-        "Renci.SshNet.dll"
-    ) + $hostingAssets
     $appFailed = Deploy-Set $scBuild $installedMcp $appAssets $ts "installed app"
-
-    # 5a. The THIRD target, and the one that actually serves the running app.
-    #
-    # ResolveBestMcpExe() in the client prefers %LOCALAPPDATA%\BrainX\mcp over
-    # the Velopack current\mcp folder, so that is the binary the client spawns
-    # for the broker and for every agent session it starts. This script only
-    # ever wrote the other two, and the version stamp made the miss invisible:
-    # both copies report 2.9.<git commit count>, which does not move between
-    # two builds of the same commit. A fix deployed twice, a broker still
-    # running the code from before it, and nothing anywhere saying so -- the
-    # same blindness recorded in "Stale-MCP detection was blind to the case it
-    # existed for - version drift, not file timestamps".
-    #
-    # Since 2026-10-10 the mirror lives OUTSIDE the app root, because Velopack
-    # kills every process under %LOCALAPPDATA%\BrainX on each apply - first at
-    # xjanova\brainx-mcp, then at %USERPROFILE%\.brainx\mcp, because a new
-    # top-level %LOCALAPPDATA% folder made from inside an MSIX package (Claude,
-    # Codex) exists only in that package. Every copy that exists is written
-    # while machines still carry the old ones.
-    foreach ($side in @((Join-Path $env:USERPROFILE ".brainx\mcp"), (Join-Path $env:LOCALAPPDATA "xjanova\brainx-mcp"), (Join-Path $env:LOCALAPPDATA "BrainX\mcp"))) {
-        if (Test-Path $side) {
-            $sideFailed = Deploy-Set $scBuild $side $appAssets $ts "client-side mcp ($side)"
-            $appFailed = @($appFailed) + @($sideFailed)
-        }
-    }
 } else {
     Write-Output ""
-    Write-Output "[skip] no installed app at $installedMcp (dev-only machine)"
+    Write-Output "[skip] no installed app at $installedMcp (the agent runtime below is still deployed)"
+}
+
+# 5a. The agent runtime, and the one that actually serves every agent.
+#
+# Claude Code, Codex and CluadeX are all registered at
+# %USERPROFILE%\.brainx\mcp\brainx-mcp.exe, and ResolveBestMcpExe() in the
+# client prefers this mirror over the Velopack current\mcp folder for the
+# broker and every agent session it starts. This step used to sit inside the
+# installed-app check above, so a machine whose current\mcp was missing
+# (e.g. after the 2026-10-17 damaged-install repair) printed "[skip]" and
+# every agent kept running the old MCP. The version stamp made the miss
+# invisible: both copies report 2.9.<git commit count>, which does not move
+# between two builds of the same commit -- the same blindness recorded in
+# "Stale-MCP detection was blind to the case it existed for - version drift,
+# not file timestamps".
+#
+# Since 2026-10-10 the mirror lives OUTSIDE the app root, because Velopack
+# kills every process under %LOCALAPPDATA%\BrainX on each apply - first at
+# xjanova\brainx-mcp, then at %USERPROFILE%\.brainx\mcp, because a new
+# top-level %LOCALAPPDATA% folder made from inside an MSIX package (Claude,
+# Codex) exists only in that package. The current mirror is always written
+# (and created if absent); the retired ones only while a machine still has
+# them.
+#
+# Deploy-File swaps only the listed files, so a fresh mirror needs the
+# bundled runtime too: if brainx-mcp.exe is not there yet, seed the whole
+# self-contained build first.
+if (-not (Test-Path (Join-Path $agentMcp "brainx-mcp.exe"))) {
+    Write-Output ""
+    Write-Output "[seed] no agent runtime at $agentMcp -- copying the full self-contained build"
+    New-Item -ItemType Directory -Force $agentMcp | Out-Null
+    Copy-Item (Join-Path $scBuild "*") $agentMcp -Recurse -Force
+}
+$sideTargets = @($agentMcp) + @($retiredMirrors | Where-Object { Test-Path $_ })
+foreach ($side in $sideTargets) {
+    $sideFailed = Deploy-Set $scBuild $side $appAssets $ts "agent runtime ($side)"
+    $appFailed = @($appFailed) + @($sideFailed)
 }
 
 # 5b. The guard this script was missing.
@@ -273,11 +293,13 @@ function Check-Coverage($srcDir, $dstDir, $label) {
 }
 Check-Coverage $fwBuild $devRelease "dev Release"
 if (Test-Path $installedMcp) { Check-Coverage $scBuild $installedMcp "installed app" }
+foreach ($side in $sideTargets) { Check-Coverage $scBuild $side "agent runtime ($side)" }
 
 # 6. Report resulting versions so the operator can confirm the swap.
 Write-Output ""
 Write-Output "[result] dev Release   -> $(Get-McpVersion $devRelease)"
 Write-Output "[result] installed app -> $(Get-McpVersion $installedMcp)"
+Write-Output "[result] agent runtime -> $(Get-McpVersion $agentMcp)"
 Write-Output ""
 if (($devFailed.Count + $appFailed.Count) -gt 0) {
     Write-Error "Deploy INCOMPLETE -- locked file(s): $((@($devFailed) + @($appFailed)) -join ', '). Close the owning session and re-run."
