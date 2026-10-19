@@ -262,6 +262,12 @@ public partial class MainWindow
             installed,
             Path.Combine(root, "BrainX.Mcp", "bin", "Release", "net9.0", "brainx-mcp.exe"),
             Path.Combine(root, "BrainX.Mcp", "bin", "Debug",   "net9.0", "brainx-mcp.exe"),
+            // Last: the agent runtime mirror itself. An install whose current
+            // has no mcp\ (2026-10-17: a damaged install repaired by copying a
+            // client-only publish into current) otherwise resolved to null —
+            // no broker, no status chip — while every agent ran fine from this
+            // very folder. Listed last so an equal-version dev build still wins.
+            BrainX.Core.Services.McpRuntimePaths.StableExe,
         };
         var best = candidates
             .Where(File.Exists)
