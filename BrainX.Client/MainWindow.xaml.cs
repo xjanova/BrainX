@@ -2498,6 +2498,10 @@ public partial class MainWindow : Window
         // (this IS the target version — clear the history) or it did not (the
         // count stands). Must happen before the check below reads that count.
         try { UpdateLog.NoteRunningVersion(GetLocalVersion().compareKey); } catch { }
+        // Cleared only when the install is also whole now: a repair that landed
+        // the version but not a clean install must keep counting, or a damage
+        // the repair cannot fix would be "repaired" again on every launch.
+        try { if (Core.Services.InstallHealth.Scan(InstallRoot).Count == 0) RepairLedger.NoteRunningVersion(GetLocalVersion().compareKey); } catch { }
 
         Services.StartupProgress.Report("Initializing brain identity", 0.22, tag: "identity");
         InitializeIdentity();
@@ -6202,6 +6206,11 @@ public partial class MainWindow : Window
                 return false;
             }
 
+            // A damaged install, or an update that has failed to apply as many
+            // times as the updater allows, is repaired from a verified package
+            // before anything else — retrying the same apply cannot fix either.
+            if (await TryRepairInstallBeforeBootAsync(mgr)) return true;
+
             Services.StartupProgress.Report("Checking for updates", 0.12, tag: "update");
 
             var check = mgr.CheckForUpdatesAsync();
@@ -6424,6 +6433,16 @@ public partial class MainWindow : Window
         }
 
         // Updater is armed and waiting on us. Release what we hold, then go.
+        ReleaseInstallDirAndQuit();
+    }
+
+    /// <summary>
+    /// Let go of everything that holds a file under the install directory and
+    /// shut down through WPF — shared by the updater and the self-repair, both
+    /// of which rename <c>current</c> the moment this process is gone.
+    /// </summary>
+    private void ReleaseInstallDirAndQuit()
+    {
         // The WebView2 controls matter most: each owns msedgewebview2.exe child
         // processes with handles under the install directory, and those are
         // exactly what a rename of `current` trips over.

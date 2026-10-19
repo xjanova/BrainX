@@ -106,7 +106,7 @@ public sealed class UpdateAttemptLog
 
     // Velopack reports "2.0.204" while the assembly carries
     // "2.0.204+abbfc64..."; compare on the numeric triple only.
-    private static bool VersionsMatch(string a, string b) =>
+    internal static bool VersionsMatch(string a, string b) =>
         Trim(a).Equals(Trim(b), StringComparison.OrdinalIgnoreCase);
 
     private static string Trim(string v)
