@@ -28,7 +28,7 @@ public static class EnvDocument
         new("BrainX__McpEnabled", EnvFieldKind.Bool, "McpEnabled", "เปิด /mcp ให้ token เจ้าของ", "false"),
         new("BrainX__CloudEnabled", EnvFieldKind.Bool, "CloudEnabled", "เปิดบริการ BrainX Cloud ให้ลูกค้า", "true"),
         new("BrainX__CloudRoot", EnvFieldKind.Path, "CloudRoot", @"ที่เก็บข้อมูลลูกค้า · ว่าง = C:\brainx\cloud", null),
-        new("BrainX__CloudQuotaMb", EnvFieldKind.Int, "CloudQuotaMb", "โควตาเริ่มต้นต่อบัญชี (MB)", "1024", 1, 1_048_576),
+        new("BrainX__CloudQuotaMb", EnvFieldKind.Int, "CloudQuotaMb", "โควตาเริ่มต้นต่อบัญชี (MB) เมื่อคีย์ไม่ได้กำหนดพื้นที่มาจาก xman", "4096", 1, 1_048_576),
         new("BrainX__McpMaxSessions", EnvFieldKind.Int, "McpMaxSessions", "session /mcp พร้อมกันสูงสุด (แต่ละอันคือโปรเซสจริง)", "8", 1, 256),
         new("BrainX__McpIdleMinutes", EnvFieldKind.Int, "McpIdleMinutes", "ปิด session ที่ว่างเกินกี่นาที", "30", 1, 1440),
         new("BrainX__LogDir", EnvFieldKind.Path, "LogDir", @"โฟลเดอร์ log ของ node · ว่าง = C:\brainx\logs", null),

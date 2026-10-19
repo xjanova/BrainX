@@ -28,7 +28,8 @@ public sealed record LicenseCheck(
     string? Status = null,
     DateTimeOffset? ExpiresUtc = null,
     int? DaysRemaining = null,
-    string? Detail = null)
+    string? Detail = null,
+    long? StorageBytes = null)
 {
     public bool IsDefinitive => Verdict != LicenseVerdict.Unavailable;
     public static LicenseCheck Down(string detail) => new(LicenseVerdict.Unavailable, Detail: detail);
@@ -204,6 +205,7 @@ public sealed class XmanLicenseVerifier : ILicenseVerifier, IDisposable
         var type = Str(d, "license_type") ?? Str(d, "type");
         var expires = Date(d, "expires_at");
         var days = Int(d, "days_remaining");
+        var storage = StorageOf(d);
 
         LicenseVerdict verdict;
         if (isExpired == true) verdict = LicenseVerdict.Expired;
@@ -224,7 +226,33 @@ public sealed class XmanLicenseVerifier : ILicenseVerifier, IDisposable
             if (verdict == LicenseVerdict.Unavailable)
                 return LicenseCheck.Down("xman answered success without is_valid or status");
         }
-        return new LicenseCheck(verdict, type, status, expires, days);
+        return new LicenseCheck(verdict, type, status, expires, days, StorageBytes: storage);
+    }
+
+    /// <summary>Largest cloud space xman may grant one key (16 TB). Anything
+    /// above is a typo or a broken answer, not a plan — ignored, so the node
+    /// default applies instead of a near-infinite quota.</summary>
+    public const long MaxStorageBytes = 16L * 1024 * 1024 * 1024 * 1024;
+
+    /// <summary>
+    /// The key's cloud space: <c>cloud_storage_bytes</c> (an integer, or a
+    /// digit-only string — never a float, a byte count must not round). Null
+    /// when xman did not say (an older xman, a product without cloud space) or
+    /// said something out of range; the node default then applies.
+    /// </summary>
+    internal static long? StorageOf(JsonElement d)
+    {
+        if (!d.TryGetProperty("cloud_storage_bytes", out var v)) return null;
+        long n;
+        if (v.ValueKind == JsonValueKind.Number) { if (!v.TryGetInt64(out n)) return null; }
+        else if (v.ValueKind == JsonValueKind.String)
+        {
+            var s = v.GetString();
+            if (string.IsNullOrEmpty(s) || !s.All(char.IsAsciiDigit)
+                || !long.TryParse(s, NumberStyles.None, CultureInfo.InvariantCulture, out n)) return null;
+        }
+        else return null;
+        return n is > 0 and <= MaxStorageBytes ? n : null;
     }
 
     private static bool? Bool(JsonElement d, string name)

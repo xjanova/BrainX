@@ -12,8 +12,11 @@ public sealed class CloudOptions
 {
     /// <summary>BrainX:CloudRoot — cloud.db, cloud.key and one folder per account.</summary>
     public required string Root { get; init; }
-    /// <summary>BrainX:CloudQuotaMb — default per-account quota.</summary>
-    public long QuotaBytes { get; init; } = 1024L * 1024 * 1024;
+    /// <summary>BrainX:CloudQuotaMb — the quota of an account whose key carries
+    /// no cloud space from xman and has no owner override (4 GB, the starter plan).</summary>
+    public long QuotaBytes { get; init; } = DefaultQuotaBytes;
+
+    public const long DefaultQuotaBytes = 4L * 1024 * 1024 * 1024;
     /// <summary>brainx-mcp, for the re-index. Null = re-index unavailable.</summary>
     public string? McpExePath { get; init; }
     public TimeSpan ReindexDebounce { get; init; } = TimeSpan.FromSeconds(10);
@@ -157,7 +160,12 @@ public sealed class CloudService : IMcpTenantHooks, IDisposable
     public CloudReindexer Reindexer { get; }
     public CloudRateLimiter Limiter { get; }
 
-    public long QuotaFor(AccountRecord a) => a.QuotaBytes is > 0 ? a.QuotaBytes.Value : Options.QuotaBytes;
+    /// <summary>The account's space: the owner's override on this node first,
+    /// then what xman sold with the key (plan + add-ons), then the node default.</summary>
+    public long QuotaFor(AccountRecord a)
+        => a.QuotaBytes is > 0 ? a.QuotaBytes.Value
+         : a.LicenseQuotaBytes is > 0 ? a.LicenseQuotaBytes.Value
+         : Options.QuotaBytes;
 
     // ───────────────────────── tokens ─────────────────────────
 
@@ -305,7 +313,7 @@ public sealed class CloudService : IMcpTenantHooks, IDisposable
         if (Accounts.Get(accountId) is null) return null;
         var q = quotaBytes is > 0 ? quotaBytes : null;
         var a = Accounts.Update(accountId, cur => cur with { QuotaBytes = q });
-        Console.WriteLine($"[cloud] account {CloudIds.ShortId(accountId)} quota → {(q is { } b ? $"{b / (1024 * 1024)} MB" : "node default")}");
+        Console.WriteLine($"[cloud] account {CloudIds.ShortId(accountId)} quota → {(q is { } b ? $"{b / (1024 * 1024)} MB" : "no override (the plan sold on xman, else the node default)")}");
         return a;
     }
 

@@ -460,7 +460,13 @@ internal sealed class AccountsPage : UserControl, IManagerPage
         _dVerified.Text = Fmt.Ago(a.LastVerifiedUtc);
         _dCreated.Text = Fmt.DateTimeLocal(a.CreatedUtc);
         _dUsage.Text = $"{Fmt.Bytes(a.UsedBytes)} / {Fmt.Bytes(a.QuotaBytes)} ({a.UsedRatio * 100:0.#}%)"
-                       + a.QuotaOverride switch { true => " · โควตากำหนดเอง", false => " · โควตาค่าเริ่มต้น", null => "" };
+                       + (a.QuotaSource, a.QuotaOverride) switch
+                       {
+                           ("license", _) => " · โควตาตามแพ็กเกจที่ซื้อ (xman)",
+                           (_, true) => " · โควตากำหนดเอง",
+                           (_, false) => " · โควตาค่าเริ่มต้น",
+                           _ => "",
+                       };
         _dNotes.Text = Fmt.Num(a.NoteCount);
         _dSessions.Text = a.ActiveSessions.ToString(System.Globalization.CultureInfo.InvariantCulture);
         _dSeen.Text = Fmt.Ago(a.LastSeenUtc);

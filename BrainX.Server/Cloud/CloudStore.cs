@@ -22,8 +22,13 @@ public sealed record AccountRecord
     /// <summary>When xman last gave a definitive answer. Null = never verified.</summary>
     public DateTimeOffset? CheckedUtc { get; init; }
 
-    /// <summary>Per-account override of the default quota; null = the node default.</summary>
+    /// <summary>Per-account override set by the node owner; null = no override.
+    /// Wins over <see cref="LicenseQuotaBytes"/> and the node default.</summary>
     public long? QuotaBytes { get; init; }
+
+    /// <summary>The cloud space xman sold with the key (plan + add-ons), from
+    /// the last VALID answer; null = xman did not say, the node default applies.</summary>
+    public long? LicenseQuotaBytes { get; init; }
 
     /// <summary>Last 4 characters of the key — enough for the owner to tell
     /// customers apart in the Server Manager, useless to anyone else.</summary>
@@ -139,7 +144,8 @@ public sealed class CloudStore
                 lic_checked_ms   INTEGER NULL,
                 quota_bytes      INTEGER NULL,
                 key_hint         TEXT NULL,
-                suspended        INTEGER NOT NULL DEFAULT 0
+                suspended        INTEGER NOT NULL DEFAULT 0,
+                lic_quota_bytes  INTEGER NULL
             );
             CREATE TABLE IF NOT EXISTS tokens (
                 id            TEXT PRIMARY KEY,
@@ -159,6 +165,7 @@ public sealed class CloudStore
         // earlier build gains them in place, nothing is rebuilt.
         EnsureSqliteColumn(c, "accounts", "key_hint", "key_hint TEXT NULL");
         EnsureSqliteColumn(c, "accounts", "suspended", "suspended INTEGER NOT NULL DEFAULT 0");
+        EnsureSqliteColumn(c, "accounts", "lic_quota_bytes", "lic_quota_bytes INTEGER NULL");
     }
 
     private static void CreateMySqlSchema(DbConnection c)
@@ -177,9 +184,12 @@ public sealed class CloudStore
                 lic_checked_ms   BIGINT NULL,
                 quota_bytes      BIGINT NULL,
                 key_hint         VARCHAR(64) NULL,
-                suspended        TINYINT NOT NULL DEFAULT 0
+                suspended        TINYINT NOT NULL DEFAULT 0,
+                lic_quota_bytes  BIGINT NULL
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
             """);
+        // Same rule as SQLite: a table made by an earlier build gains new columns in place.
+        EnsureMySqlColumn(c, "accounts", "lic_quota_bytes", "lic_quota_bytes BIGINT NULL");
         Exec(c, """
             CREATE TABLE IF NOT EXISTS tokens (
                 id            VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL PRIMARY KEY,
@@ -206,6 +216,21 @@ public sealed class CloudStore
             using var r = cmd.ExecuteReader();
             while (r.Read())
                 if (string.Equals(r.GetString(1), column, StringComparison.OrdinalIgnoreCase)) return;
+        }
+        Exec(c, $"ALTER TABLE {table} ADD COLUMN {ddl}");
+    }
+
+    private static void EnsureMySqlColumn(DbConnection c, string table, string column, string ddl)
+    {
+        using (var cmd = c.CreateCommand())
+        {
+            cmd.CommandText = """
+                SELECT COUNT(*) FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @t AND COLUMN_NAME = @c
+                """;
+            P(cmd, "@t", table);
+            P(cmd, "@c", column);
+            if (Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) > 0) return;
         }
         Exec(c, $"ALTER TABLE {table} ADD COLUMN {ddl}");
     }
@@ -252,7 +277,7 @@ public sealed class CloudStore
 
     private const string AccountColumns = """
         id, key_protected, created_ms, lic_type, lic_status, lic_valid, lic_expired,
-        lic_expires_ms, lic_days, lic_checked_ms, quota_bytes, key_hint, suspended
+        lic_expires_ms, lic_days, lic_checked_ms, quota_bytes, key_hint, suspended, lic_quota_bytes
         """;
 
     private static AccountRecord ReadAccount(DbDataReader r) => new()
@@ -270,6 +295,7 @@ public sealed class CloudStore
         QuotaBytes = r.IsDBNull(10) ? null : Int(r, 10),
         KeyHint = r.IsDBNull(11) ? null : r.GetString(11),
         Suspended = Int(r, 12) != 0,
+        LicenseQuotaBytes = r.IsDBNull(13) ? null : Int(r, 13),
     };
 
     public AccountRecord? GetAccount(string id)
@@ -298,12 +324,12 @@ public sealed class CloudStore
     {
         const string insert = """
             INSERT INTO accounts (id, key_protected, created_ms, lic_type, lic_status, lic_valid, lic_expired,
-                                  lic_expires_ms, lic_days, lic_checked_ms, quota_bytes, key_hint, suspended)
-            VALUES (@id, @key, @created, @type, @status, @valid, @expired, @expires, @days, @checked, @quota, @hint, @suspended)
+                                  lic_expires_ms, lic_days, lic_checked_ms, quota_bytes, key_hint, suspended, lic_quota_bytes)
+            VALUES (@id, @key, @created, @type, @status, @valid, @expired, @expires, @days, @checked, @quota, @hint, @suspended, @licquota)
             """;
         const string updated = """
             key_protected, lic_type, lic_status, lic_valid, lic_expired, lic_expires_ms,
-            lic_days, lic_checked_ms, quota_bytes, key_hint, suspended
+            lic_days, lic_checked_ms, quota_bytes, key_hint, suspended, lic_quota_bytes
             """;
         var columns = updated.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
         using var c = Open();
@@ -324,6 +350,7 @@ public sealed class CloudStore
         P(cmd, "@quota", a.QuotaBytes);
         P(cmd, "@hint", Fit(a.KeyHint, 64));
         P(cmd, "@suspended", a.Suspended ? 1 : 0);
+        P(cmd, "@licquota", a.LicenseQuotaBytes);
         cmd.ExecuteNonQuery();
     }
 

@@ -214,11 +214,11 @@ internal sealed class DemoServerBackend : IServerBackend
         return ApiResult<CloudAccount>.Success(a);
     }
 
-    /// <summary>0 = back to the node default (1024 MB here), like the real endpoint.</summary>
+    /// <summary>0 = back to the node default (4096 MB here), like the real endpoint.</summary>
     public Task<ApiResult<CloudAccount>> SetQuotaAsync(string id, long quotaMb, CancellationToken ct)
         => Mutate(id, a =>
         {
-            a.QuotaBytes = (quotaMb > 0 ? quotaMb : 1024) * 1024 * 1024;
+            a.QuotaBytes = (quotaMb > 0 ? quotaMb : 4096) * 1024 * 1024;
             a.QuotaOverride = quotaMb > 0;
         }, ct);
 
@@ -429,7 +429,7 @@ internal sealed class DemoServerBackend : IServerBackend
             "BrainX__UpdateServiceName=BrainXNode",
             "BrainX__AllowedOrigins=https://serverbrain.xman4289.com",
             "BrainX__McpEnabled=true",
-            "BrainX__CloudQuotaMb=1024",
+            "BrainX__CloudQuotaMb=4096",
             "BrainX__McpReadToken=r3ad0nlyd3m0t0k3n",
             "BrainX__StorageProvider=sqlite",
         ]);

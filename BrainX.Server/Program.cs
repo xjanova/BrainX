@@ -1396,8 +1396,8 @@ public static class NodeConfig
     /// <summary>cloud.db, cloud.key and one folder per account.
     /// Default C:\brainx\cloud on Windows, &lt;ContentRoot&gt;/cloud elsewhere.</summary>
     public static string CloudRoot { get; private set; } = "";
-    /// <summary>Default per-account quota (BrainX:CloudQuotaMb, default 1024).</summary>
-    public static long CloudQuotaBytes { get; private set; } = 1024L * 1024 * 1024;
+    /// <summary>Default per-account quota when xman sends no cloud space for the key (BrainX:CloudQuotaMb, default 4096).</summary>
+    public static long CloudQuotaBytes { get; private set; } = CloudOptions.DefaultQuotaBytes;
     /// <summary>xman studio base URL for license checks (tests point it at a fake).</summary>
     public static string LicenseApiBase { get; private set; } = XmanLicenseVerifier.DefaultApiBase;
     /// <summary>Live /mcp sessions per cloud account.</summary>
@@ -1476,7 +1476,7 @@ public static class NodeConfig
         CloudEnabled = ParseBool(b["CloudEnabled"], defaultValue: !EmbeddedMode);
         CloudRoot = FirstNonEmpty(b["CloudRoot"])
                     ?? (OperatingSystem.IsWindows() ? @"C:\brainx\cloud" : Path.Combine(AppContext.BaseDirectory, "cloud"));
-        CloudQuotaBytes = ParseInt(b["CloudQuotaMb"], 1024) * 1024L * 1024;
+        CloudQuotaBytes = ParseInt(b["CloudQuotaMb"], (int)(CloudOptions.DefaultQuotaBytes / (1024 * 1024))) * 1024L * 1024;
         LicenseApiBase = FirstNonEmpty(b["LicenseApiBase"]) ?? XmanLicenseVerifier.DefaultApiBase;
         CloudMcpSessionsPerAccount = ParseInt(b["CloudMcpSessionsPerAccount"], 3);
         CloudMcpMaxSessions = ParseInt(b["CloudMcpMaxSessions"], 16);

@@ -168,6 +168,10 @@ public static class AdminRoutes
             usedBytes = used,
             quotaBytes = cloud.QuotaFor(a),
             quotaOverride = a.QuotaBytes is > 0,
+            // Where quotaBytes came from: "override" (set here), "license"
+            // (the space xman sold with the key), "default" (CloudQuotaMb).
+            quotaSource = a.QuotaBytes is > 0 ? "override" : a.LicenseQuotaBytes is > 0 ? "license" : "default",
+            licenseQuotaBytes = a.LicenseQuotaBytes,
             noteCount = count,
             tokenCount = s?.Live ?? 0,
             activeSessions = sessions.TryGetValue(a.Id, out var n) ? n : 0,

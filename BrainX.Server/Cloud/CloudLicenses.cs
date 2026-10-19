@@ -353,6 +353,10 @@ public sealed class CloudLicenses
         // error-code answer carries none, so keep the last known one for display.
         ExpiresUtc = c.Verdict == LicenseVerdict.Valid ? c.ExpiresUtc : c.ExpiresUtc ?? a.ExpiresUtc,
         DaysRemaining = c.DaysRemaining,
+        // The space xman sold with the key. Only a VALID answer carries the
+        // plan's data; an expired/invalid one keeps the last known figure so
+        // a renewal does not flash the account down to the node default.
+        LicenseQuotaBytes = c.Verdict == LicenseVerdict.Valid ? c.StorageBytes : a.LicenseQuotaBytes,
         CheckedUtc = now,
     };
 

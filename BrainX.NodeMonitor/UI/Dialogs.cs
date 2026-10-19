@@ -193,7 +193,8 @@ internal sealed class QuotaDialog : DialogBase
         AddText($"บัญชี {a.ShortId}", Theme.H2, Theme.Accent);
         AddText($"ใช้อยู่ {Fmt.Bytes(a.UsedBytes)} จากโควตาเดิม {Fmt.Bytes(a.QuotaBytes)}", color: Theme.Muted);
 
-        // 0 = back to the node default (BrainX__CloudQuotaMb) — the endpoint's own rule.
+        // 0 = no override: back to the space sold with the key on xman, else the
+        // node default (BrainX__CloudQuotaMb) — the endpoint's own rule.
         _mb = new NumericUpDown
         {
             Minimum = 0,
@@ -208,14 +209,14 @@ internal sealed class QuotaDialog : DialogBase
         var unit = Theme.Text("MB", Theme.Body, Theme.Muted);
         unit.Margin = new Padding(0, 8, 16, 0);
         var row = Theme.Row(_mb, unit);
-        foreach (var (label, mb) in new (string, long)[] { ("ค่าเริ่มต้น", 0), ("500 MB", 500), ("1 GB", 1024), ("5 GB", 5120), ("10 GB", 10240) })
+        foreach (var (label, mb) in new (string, long)[] { ("ค่าเริ่มต้น", 0), ("4 GB", 4096), ("8 GB", 8192), ("16 GB", 16384), ("32 GB", 32768) })
         {
             var b = Theme.Button(label, Theme.BtnGray, (_, _) => _mb.Value = mb);
             b.Font = Theme.Small;
             row.Controls.Add(b);
         }
         AddRow(row);
-        AddText("0 = ใช้โควตาค่าเริ่มต้นของ node (CloudQuotaMb ในแท็บ ตั้งค่า)", Theme.Small, Theme.Muted);
+        AddText("0 = ไม่กำหนดเอง: ใช้พื้นที่ตามแพ็กเกจที่ซื้อบน xman (ขยายได้ที่หลังบ้าน xman ▸ License) ถ้าไม่มีจึงใช้ CloudQuotaMb ในแท็บ ตั้งค่า", Theme.Small, Theme.Muted);
 
         _warn = AddText("", Theme.Bold, Theme.Warn);
         _mb.ValueChanged += (_, _) => UpdateWarning();
