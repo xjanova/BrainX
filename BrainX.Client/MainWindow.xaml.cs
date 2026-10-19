@@ -11195,6 +11195,22 @@ public partial class MainWindow : Window
                     Margin = new Thickness(0, 4, 0, 0),
                 });
             }
+            if (isOnline && _network.IsConnected)
+            {
+                var browse = new Button
+                {
+                    Content = "Browse · เปิดดู",
+                    FontSize = 11,
+                    Padding = new Thickness(10, 3, 10, 3),
+                    Margin = new Thickness(0, 8, 0, 0),
+                    HorizontalAlignment = HorizontalAlignment.Right,
+                    Cursor = Cursors.Hand,
+                    ToolTip = "Search and read the notes this brain shared with you · ค้นและอ่านโน้ตที่สมองนี้แชร์ให้คุณ",
+                };
+                var target = peer;
+                browse.Click += (_, _) => OpenPeerBrowser(target);
+                stat.Children.Add(browse);
+            }
             grid.Children.Add(stat);
 
             card.Child = grid;

@@ -34,6 +34,7 @@ internal static partial class Program
         checks.Add(("cloud: token scopes and kinds, revoke, logout, the 20-token cap", CloudTokenChecks));
         checks.Add(("cloud: accounts cannot see, fetch or delete each other's notes", CloudIsolationChecks));
         checks.Add(("cloud: an expired license blocks writes (402) but never the way back to your data", CloudExpiredLicenseChecks));
+        checks.Add(("cloud: quota = owner override, else the space xman sold with the key, else the node default (4 GB)", CloudStorageQuotaChecks));
         checks.Add(("cloud: re-index is debounced, never overlaps per account, and the real export leaves no CLAUDE.md", CloudReindexChecks));
         checks.Add(("cloud /mcp: sessions bound to their account, account vault + sandbox, caps, quota, 402, DELETE auth", CloudMcpChecks));
         checks.Add(("owner gate + vault containment: /api/cloud is exempt, export paths cannot leave the vault", OwnerGateAndContainmentChecks));
@@ -905,6 +906,100 @@ internal static partial class Program
         node.Clock.Advance(TimeSpan.FromMinutes(2));
         var renewed = await node.Post("/api/cloud/notes", Files(("g2.md", "x")), g);
         Check("renewed on xman → writable again within minutes, same token", renewed.Status == HttpStatusCode.OK, renewed.ToString());
+    }
+
+    // ───────────────────────── storage quota ─────────────────────────
+
+    private static async Task CloudStorageQuotaChecks()
+    {
+        var now = DateTimeOffset.UtcNow;
+        long? S(string storageJson) => XmanLicenseVerifier.Classify(200,
+            "{\"success\":true,\"data\":{\"is_valid\":true,\"license_type\":\"monthly\"" + storageJson + "}}", now).StorageBytes;
+        Check("xman's cloud_storage_bytes as an integer is read exactly", S(",\"cloud_storage_bytes\":4294967296") == 4294967296L);
+        Check("…and as a digit-only string", S(",\"cloud_storage_bytes\":\"8589934592\"") == 8589934592L);
+        Check("absent → null (an older xman: the node default applies)", S("") == null);
+        Check("a float, a negative, zero, an exponent string, junk → null, never a guessed size",
+              S(",\"cloud_storage_bytes\":1.5") == null && S(",\"cloud_storage_bytes\":-1") == null
+              && S(",\"cloud_storage_bytes\":0") == null && S(",\"cloud_storage_bytes\":\"4e9\"") == null
+              && S(",\"cloud_storage_bytes\":\" 1\"") == null && S(",\"cloud_storage_bytes\":true") == null);
+        Check("more than 16 TB → null (a typo is not a plan)",
+              S(",\"cloud_storage_bytes\":" + (XmanLicenseVerifier.MaxStorageBytes + 1)) == null
+              && S(",\"cloud_storage_bytes\":" + XmanLicenseVerifier.MaxStorageBytes) == XmanLicenseVerifier.MaxStorageBytes);
+        Check("the node default with no CloudQuotaMb is 4 GB",
+              new CloudOptions { Root = "x" }.QuotaBytes == 4L * 1024 * 1024 * 1024 && CloudOptions.DefaultQuotaBytes == 4L * 1024 * 1024 * 1024);
+
+        await using var node = await CloudNode.StartAsync(quotaBytes: 100);
+        const string key = "SPACE-0000-0001";
+        node.Xman.Set(key, ValidFor(node.Clock.Now) with { StorageBytes = 300 });
+        var token = await node.LoginAsync(key);
+        var id = CloudIds.AccountIdFor(key);
+        var acct = await node.Get("/api/cloud/account", token);
+        Check("a key sold with 300 bytes gets 300, not the node's 100",
+              acct.Body["quotaBytes"]?.ToObject<long>() == 300, acct.ToString());
+        var up = await node.Post("/api/cloud/notes", Files(("a.md", new string('a', 200))), token);
+        Check("…so 200 bytes fit (over the node default, under the plan)", up.Status == HttpStatusCode.OK, up.ToString());
+        var over = await node.Post("/api/cloud/notes", Files(("b.md", new string('b', 200))), token);
+        Check("…and 200 more do not → 413 QUOTA_EXCEEDED", over.Status == HttpStatusCode.RequestEntityTooLarge && over.Code == "QUOTA_EXCEEDED", over.ToString());
+
+        // The owner adds space on xman: the next definitive answer carries it.
+        node.Xman.Set(key, ValidFor(node.Clock.Now) with { StorageBytes = 1000 });
+        var (_, check) = await node.Cloud.Licenses.ForceReverifyAsync(id, CancellationToken.None);
+        var grown = await node.Post("/api/cloud/notes", Files(("b.md", new string('b', 200))), token);
+        Check("space added on xman → picked up at the next check, the same upload now fits",
+              check?.StorageBytes == 1000 && grown.Status == HttpStatusCode.OK, grown.ToString());
+
+        // An expired answer carries no plan data: the last known space stands (no flash down to 100 mid-renewal).
+        node.Xman.Set(key, ExpiredAnswer());
+        await node.Cloud.Licenses.ForceReverifyAsync(id, CancellationToken.None);
+        var lapsed = node.Cloud.Accounts.Get(id)!;
+        Check("an expired answer keeps the last known space", node.Cloud.QuotaFor(lapsed) == 1000 && lapsed.LicenseQuotaBytes == 1000,
+              $"{lapsed.LicenseQuotaBytes}");
+
+        // The node owner's override wins over the plan, and clearing it goes back to the plan.
+        node.Cloud.SetQuota(id, 50);
+        var overridden = node.Cloud.QuotaFor(node.Cloud.Accounts.Get(id)!);
+        node.Cloud.SetQuota(id, null);
+        var back = node.Cloud.QuotaFor(node.Cloud.Accounts.Get(id)!);
+        Check("owner override wins (50); clearing it returns to the plan (1000), not the node default",
+              overridden == 50 && back == 1000, $"{overridden} / {back}");
+
+        // A valid answer from an xman that says nothing about space → node default.
+        node.Xman.Set(key, ValidFor(node.Clock.Now));
+        await node.Cloud.Licenses.ForceReverifyAsync(id, CancellationToken.None);
+        Check("a valid answer without cloud_storage_bytes → the node default",
+              node.Cloud.QuotaFor(node.Cloud.Accounts.Get(id)!) == 100);
+
+        // The column survives a restart and is added in place to an older cloud.db.
+        var dbDir = Path.Combine(Path.GetTempPath(), "brainx-quota-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dbDir);
+        var dbPath = Path.Combine(dbDir, "cloud.db");
+        try
+        {
+            using (var c = new SqliteConnection($"Data Source={dbPath}"))
+            {
+                c.Open();
+                using var cmd = c.CreateCommand();
+                cmd.CommandText = """
+                    CREATE TABLE accounts (id TEXT PRIMARY KEY, key_protected TEXT NULL, created_ms INTEGER NOT NULL,
+                        lic_type TEXT NULL, lic_status TEXT NULL, lic_valid INTEGER NOT NULL DEFAULT 0, lic_expired INTEGER NOT NULL DEFAULT 0,
+                        lic_expires_ms INTEGER NULL, lic_days INTEGER NULL, lic_checked_ms INTEGER NULL, quota_bytes INTEGER NULL);
+                    INSERT INTO accounts (id, created_ms, lic_valid) VALUES ('old', 1, 1);
+                    """;
+                cmd.ExecuteNonQuery();
+            }
+            SqliteConnection.ClearAllPools();
+            var store = new CloudStore(dbPath);
+            var old = store.GetAccount("old");
+            store.SaveAccount(old! with { LicenseQuotaBytes = 4L * 1024 * 1024 * 1024 });
+            var reopened = new CloudStore(dbPath).GetAccount("old");
+            Check("an older cloud.db gains lic_quota_bytes in place; the old row reads null, then round-trips 4 GB",
+                  old.LicenseQuotaBytes == null && reopened?.LicenseQuotaBytes == 4L * 1024 * 1024 * 1024, $"{reopened?.LicenseQuotaBytes}");
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            try { Directory.Delete(dbDir, recursive: true); } catch { }
+        }
     }
 
     // ───────────────────────── re-index ─────────────────────────

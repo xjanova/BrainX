@@ -2,6 +2,7 @@ using System.Net.Http;
 using System.Net.Security;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.SignalR.Client;
 using BrainX.Core.Models;
 using BrainX.Core.Services;
@@ -30,6 +31,27 @@ public sealed class NetworkClientOptions
     /// blocking every connection.</summary>
     public IReadOnlyCollection<string> PinnedServerSpkiSha256 { get; set; } = [];
 }
+
+/// <summary>A note as BrainHub's peer methods shape it. Preview is empty below
+/// ShareLevel.Preview; Content is set only by PeerGetNote at Full or above.
+/// Everything here came from another brain — show it as text, never run it.</summary>
+public sealed class PeerNote
+{
+    public string Id { get; set; } = "";
+    public string Title { get; set; } = "";
+    public string RelativePath { get; set; } = "";
+    public KnowledgeCategory PrimaryCategory { get; set; }
+    public List<string> Tags { get; set; } = [];
+    public string Preview { get; set; } = "";
+    public string? Content { get; set; }
+}
+
+/// <summary>The hub said "not shared": no scope, revoked, a private note, or an
+/// unknown id — deliberately indistinguishable.</summary>
+public sealed class PeerNotSharedException() : Exception("not shared");
+
+/// <summary>The hub's per-method budget (60 a minute) ran out.</summary>
+public sealed class PeerRateLimitedException() : Exception("rate limited");
 
 public class NetworkClient : IAsyncDisposable
 {
@@ -418,6 +440,45 @@ public class NetworkClient : IAsyncDisposable
         if (_hub == null || !IsConnected) return [];
         return await _hub.InvokeAsync<List<ShareScope>>("GetMyScopes");
     }
+
+    // ── Peer reads — the hub answers only what the owner's scope opens ──────
+
+    /// <summary>One of <paramref name="ownerAddress"/>'s notes, shaped by the
+    /// level the owner granted us. Throws <see cref="PeerNotSharedException"/>
+    /// when the hub says "not shared" (no scope, revoked, private, unknown id —
+    /// the hub answers all of them the same on purpose).</summary>
+    public Task<PeerNote> PeerGetNoteAsync(string ownerAddress, string nodeId, CancellationToken ct = default)
+        => PeerInvokeAsync(h => h.InvokeAsync<PeerNote>("PeerGetNote", ownerAddress, nodeId, ct));
+
+    /// <summary>Search the notes <paramref name="ownerAddress"/> shared with us.
+    /// Empty for no scope, no match, or an owner this hub does not host.</summary>
+    public Task<List<PeerNote>> PeerSearchAsync(string ownerAddress, string query, int limit = 50, CancellationToken ct = default)
+        => PeerInvokeAsync(h => h.InvokeAsync<List<PeerNote>>("PeerSearch", ownerAddress, query, limit, ct));
+
+    /// <summary>Shared notes that link into <paramref name="nodeId"/>.</summary>
+    public Task<List<PeerNote>> PeerBacklinksAsync(string ownerAddress, string nodeId, CancellationToken ct = default)
+        => PeerInvokeAsync(h => h.InvokeAsync<List<PeerNote>>("PeerBacklinks", ownerAddress, nodeId, ct));
+
+    private async Task<T> PeerInvokeAsync<T>(Func<HubConnection, Task<T>> call)
+    {
+        var hub = _hub;
+        if (hub == null || !IsConnected) throw new InvalidOperationException("not connected");
+        try
+        {
+            return await call(hub);
+        }
+        catch (HubException ex) when (ex.Message.Contains(NotSharedMarker, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new PeerNotSharedException();
+        }
+        catch (HubException ex) when (ex.Message.Contains("rate limited", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new PeerRateLimitedException();
+        }
+    }
+
+    /// <summary>What BrainHub's NotShared message says; the hub wraps it in its own text.</summary>
+    private const string NotSharedMarker = "not shared";
 
     public async ValueTask DisposeAsync()
     {

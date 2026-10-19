@@ -140,6 +140,8 @@ public class CloudAccount
     public DateTime? CreatedUtc { get; set; }
     /// <summary>True = a quota set for this account; false = the node default (CloudQuotaMb).</summary>
     public bool? QuotaOverride { get; set; }
+    /// <summary>"override" | "license" (sold with the key on xman) | "default"; null = an older node.</summary>
+    public string? QuotaSource { get; set; }
 
     public string ShortId => Id.Length > 8 ? Id[..8] : Id;
     public double UsedRatio => QuotaBytes > 0 ? Math.Clamp((double)UsedBytes / QuotaBytes, 0, 10) : 0;
@@ -186,6 +188,7 @@ public class CloudAccount
         Suspended = a.Bool("suspended") ?? false;
         CreatedUtc = a.Date("createdUtc");
         QuotaOverride = a.Bool("quotaOverride");
+        QuotaSource = a.Str("quotaSource");
     }
 
     public static IReadOnlyList<CloudAccount> ParseList(JsonElement r)
