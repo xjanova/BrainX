@@ -461,6 +461,9 @@ internal static partial class Program
         while ((line = await reader.ReadLineAsync()) != null)
         {
             if (string.IsNullOrWhiteSpace(line)) continue;
+            // A wait for the room or the inbox waits off this loop, so the
+            // client's next call is not queued behind it (Program.LongPoll.cs).
+            if (LongPollOf(line) is { } poll && TryServeLongPoll(poll, writer)) continue;
             string response;
             try
             {
@@ -472,11 +475,7 @@ internal static partial class Program
                 response = BuildError(null, -32603, $"internal error: {ex.Message}");
             }
 
-            if (!string.IsNullOrEmpty(response))
-            {
-                await writer.WriteLineAsync(response);
-                await writer.FlushAsync();
-            }
+            await WriteResponseAsync(writer, response);
         }
 
         // stdin closed — the client is gone. Take the bridged servers with us:

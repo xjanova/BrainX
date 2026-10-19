@@ -622,7 +622,7 @@ internal static partial class Program
             if (coworkCalls.TryGetValue(agent, out var called) && called > work.Room)
                 work = work with { Room = called };
             if (followUps.TryGetValue(agent, out var chased))
-                work = work with { Room = work.Room + chased.Count, FollowUps = chased.Count };
+                work = work with { Room = work.Room + chased.Count, FollowUps = chased.Count, CardIds = chased };
             // Fresh call vs. standing backlog. work.Room counts what this
             // agent has not read, which for a parked session is every room
             // line ever written and never goes down; the ledger counts what
@@ -1476,12 +1476,15 @@ internal static partial class Program
     }
 
     /// <summary>
-    /// The folder a run happens in: the one mapped to this work label, else
-    /// the runner's default, else the vault. Labelled work whose folder is
-    /// unknown never reaches here — BrokerTick asks the owner instead.
+    /// The folder a run happens in: the project a relayed board card names
+    /// (the owner is waiting on it in CluadeX, and runners.json lets this
+    /// runner work there — CoworkCardDirFor), else the one mapped to this work
+    /// label, else the runner's default, else the vault. Labelled work whose
+    /// folder is unknown never reaches here — BrokerTick asks the owner instead.
     /// </summary>
     private static string WorkDirFor(BrokerConfig cfg, RunnerSpec runner, WaitingWork work)
     {
+        if (CoworkCardDirFor(cfg, runner, work.CardIds) is { } card) return card;
         foreach (var w in work.Works)
             if (ResolveWorkDir(cfg, w) is { } dir) return dir;
         return Directory.Exists(runner.Cwd) ? runner.Cwd : _vaultPath;
@@ -2230,6 +2233,10 @@ internal static partial class Program
         /// <summary>How much of <see cref="Room"/> is the broker following up
         /// unfinished board work rather than the owner speaking.</summary>
         public int FollowUps { get; init; }
+
+        /// <summary>The board cards this run is called for (CoworkFollowUps).
+        /// A relayed one names the folder the run starts in (WorkDirFor).</summary>
+        public IReadOnlyList<string> CardIds { get; init; } = Array.Empty<string>();
     }
 
     /// <summary>The same thing as <see cref="Describe"/>, for the owner.

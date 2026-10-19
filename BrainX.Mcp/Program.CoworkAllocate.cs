@@ -35,7 +35,8 @@ internal static partial class Program
 {
     /// <summary>How long an open card may sit unclaimed before the broker
     /// hands it to whoever fits. Long enough for somebody in the room to take
-    /// it themselves — the floor rule still comes first.</summary>
+    /// it themselves — the floor rule still comes first. A card the owner is
+    /// waiting on in CluadeX goes much sooner (CoworkAllocateAfter).</summary>
     private static readonly TimeSpan OpenAllocateAfter = TimeSpan.FromMinutes(15);
 
     /// <summary>The broker's own notices about board cards: answered on the
@@ -72,8 +73,13 @@ internal static partial class Program
     /// not resting on quota, then who holds the fewest moving cards. Resting
     /// is a preference, not a bar: the agent that fits is back in hours, and
     /// one that does not fit never is.
+    /// <paramref name="may"/> narrows who is eligible at all (a relayed card:
+    /// runners.json lets them work in its folder); <paramref name="rank"/>
+    /// orders the fitting ones before the rest (higher first — a relayed card:
+    /// on call and free now).
     /// </summary>
-    private static string? CoworkPickAgent(BrokerConfig cfg, JObject task, IEnumerable<JObject> board, string? except, DateTime now)
+    private static string? CoworkPickAgent(BrokerConfig cfg, JObject task, IEnumerable<JObject> board, string? except, DateTime now,
+                                           Func<string, bool>? may = null, Func<string, int>? rank = null)
     {
         var skill = task["skill"]?.ToString();
         var load = board
@@ -83,8 +89,9 @@ internal static partial class Program
         return cfg.Runners.Keys
             .Where(a => !IsReservedIdentity(a) && !a.Equals(except, StringComparison.OrdinalIgnoreCase))
             .Select(a => (Agent: a, Skills: CoworkAgentSkills(a)))
-            .Where(x => x.Skills.Known && CoworkTriage.SkillConflict(skill, x.Skills.Cannot) == null)
+            .Where(x => x.Skills.Known && CoworkTriage.SkillConflict(skill, x.Skills.Cannot) == null && (may == null || may(x.Agent)))
             .OrderByDescending(x => CoworkTriage.SkillFits(skill, x.Skills.Can))
+            .ThenByDescending(x => rank?.Invoke(x.Agent) ?? 0)
             .ThenBy(x => ReadRunnerState(x.Agent).QuotaResumeUtc is DateTime q && q > now)
             .ThenBy(x => load.TryGetValue(x.Agent, out var n) ? n : 0)
             .ThenBy(x => x.Agent, StringComparer.OrdinalIgnoreCase)
