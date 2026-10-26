@@ -121,6 +121,17 @@ public sealed class McpBridgeDef
     /// environment (see ClaudeChildEnv). Built-in bridges only.</summary>
     [JsonIgnore] public bool StripClaudeEnv { get; set; }
 
+    /// <summary>
+    /// May point off this PC (https only). Built-in bridges only — today XDREAMER (<see cref="XDreamerKey"/>), a
+    /// service the owner pays for and chose to connect. [JsonIgnore]: a hand-written entry stays loopback-only, so a
+    /// synced or tampered mcp-bridges.json can never send the owner's tool calls to someone else's server.
+    /// </summary>
+    [JsonIgnore] public bool AllowRemote { get; set; }
+
+    /// <summary>Headers sent with every request of an HTTP bridge (the built-in XDREAMER bridge's Bearer key).
+    /// [JsonIgnore]: a credential never lives in mcp-bridges.json, which is in the vault, which syncs.</summary>
+    [JsonIgnore] public Dictionary<string, string> Headers { get; set; } = new();
+
     /// <summary>Do not echo the child's stderr into brainx-mcp's own log (which
     /// the host app may persist); keep only its first line, in memory, for the
     /// status message. Built-in bridges only.</summary>
@@ -134,6 +145,7 @@ public sealed class McpBridgeDef
         Env = new Dictionary<string, string>(Env), Cwd = Cwd, Url = Url, TimeoutSeconds = TimeoutSeconds,
         ToolAllowlist = new List<string>(ToolAllowlist), Probe = Probe, Docs = Docs, Setup = Setup,
         BuiltIn = BuiltIn, Private = Private, StripClaudeEnv = StripClaudeEnv, QuietStderr = QuietStderr,
+        AllowRemote = AllowRemote, Headers = new Dictionary<string, string>(Headers),
     };
 
     /// <summary>
@@ -179,8 +191,12 @@ public sealed class McpBridgeDef
             // See the Url remarks: a bridge forwards the owner's tool calls, so
             // the far end has to be their own machine. IsLoopback covers
             // 127.0.0.0/8, ::1 and the literal "localhost".
-            if (!uri.IsLoopback)
-                return $"url must be loopback (127.0.0.1 / localhost) — refusing to bridge to '{uri.Host}'";
+            // The one exception is a built-in bridge to a service the owner signed up for (AllowRemote, never
+            // settable from the file), and then only over https — its key travels in a header.
+            if (!uri.IsLoopback && !(AllowRemote && uri.Scheme == Uri.UriSchemeHttps))
+                return AllowRemote
+                    ? $"a remote bridge must use https — refusing '{uri.Scheme}://{uri.Host}'"
+                    : $"url must be loopback (127.0.0.1 / localhost) — refusing to bridge to '{uri.Host}'";
         }
         else if (string.IsNullOrWhiteSpace(Command))
         {

@@ -175,6 +175,13 @@ public static class McpBridgeHub
         // it is ENABLED is the owner's live switch, read on every use.
         ChromeBridge.Initialize(vaultPath, log, identity);
         _defs.Add(ChromeBridge.Def);
+        // XDREAMER (ai.xman4289.com): built in and on while the owner's key is
+        // saved in Settings (DPAPI, never the vault). A bridge the file already
+        // calls "xdreamer" — CluadeX writes one when it holds the key — wins:
+        // one connection per account, never two.
+        if (!_defs.Any(d => string.Equals(d.Id, XDreamerKey.BridgeId, StringComparison.OrdinalIgnoreCase))
+            && XDreamerKey.BridgeDef(XDreamerKey.Read()) is { } xdreamer)
+            _defs.Add(xdreamer);
         LoadCache();
 
         // The heartbeat also closes an idle chrome server and one the owner

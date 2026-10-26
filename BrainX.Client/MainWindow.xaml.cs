@@ -10262,6 +10262,7 @@ public partial class MainWindow : Window
     private async Task RefreshAiKeyStatus()
     {
         RefreshGeminiKeyStatus();   // local, no server round trip
+        RefreshXDreamerKeyStatus(); // local too
         try
         {
             using var http = BuildLocalHttpClient(5);

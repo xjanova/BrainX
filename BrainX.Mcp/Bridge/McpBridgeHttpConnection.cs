@@ -92,13 +92,14 @@ public sealed class McpBridgeHttpConnection : IMcpBridgeConnection
             throw new InvalidOperationException($"bridge '{def.Id}' has an unusable url: {def.Url}");
 
         // Per-connection handler so a dropped bridge takes its sockets with it.
-        // No proxy: the endpoint is loopback (enforced in Validate), and an
-        // inherited system proxy would otherwise try to route it off-box.
+        // No proxy for loopback (an inherited system proxy would try to route
+        // it off-box); a built-in remote bridge (XDREAMER) goes the way the
+        // owner's other internet traffic goes, system proxy included.
         var handler = new SocketsHttpHandler
         {
-            UseProxy = false,
+            UseProxy = !endpoint.IsLoopback,
             AllowAutoRedirect = false,
-            ConnectTimeout = TimeSpan.FromSeconds(5),
+            ConnectTimeout = TimeSpan.FromSeconds(endpoint.IsLoopback ? 5 : 15),
         };
 
         // No HttpClient.Timeout: it is global and would cut the SSE stream of a
@@ -212,6 +213,11 @@ public sealed class McpBridgeHttpConnection : IMcpBridgeConnection
                 }
 
                 var body = SafeReadBody(response, cts.Token);
+                if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden && _def.Headers.Count > 0)
+                    throw new InvalidOperationException(
+                        $"bridge '{_def.Id}' {method}: the key was refused (HTTP {(int)response.StatusCode}) — " +
+                        "check it in BrainX ▸ Settings and save it again" +
+                        (string.IsNullOrWhiteSpace(body) ? "" : $" — {Trim(body)}"));
                 throw new InvalidOperationException(
                     $"bridge '{_def.Id}' {method}: HTTP {(int)response.StatusCode} {response.ReasonPhrase}" +
                     (string.IsNullOrWhiteSpace(body) ? "" : $" — {Trim(body)}"));
@@ -278,7 +284,11 @@ public sealed class McpBridgeHttpConnection : IMcpBridgeConnection
         // Unreal's server rejects non-loopback Origins as its DNS-rebinding
         // defence. We ARE loopback (Validate enforces it), so say so explicitly
         // rather than relying on a missing Origin being treated as same-origin.
-        req.Headers.TryAddWithoutValidation("Origin", $"{_endpoint.Scheme}://{_endpoint.Authority}");
+        // A remote service gets no Origin: we are not a browser page.
+        if (_endpoint.IsLoopback)
+            req.Headers.TryAddWithoutValidation("Origin", $"{_endpoint.Scheme}://{_endpoint.Authority}");
+        // The built-in bridge's credential (never from the config file — see McpBridgeDef.Headers).
+        foreach (var (name, value) in _def.Headers) req.Headers.TryAddWithoutValidation(name, value);
 
         if (_sessionId != null) req.Headers.TryAddWithoutValidation("Mcp-Session-Id", _sessionId);
         // Required on every request after initialize.
@@ -422,6 +432,9 @@ public sealed class McpBridgeHttpConnection : IMcpBridgeConnection
     {
         var root = ex;
         while (root.InnerException != null) root = root.InnerException;
+
+        if (!_endpoint.IsLoopback)
+            return $"{_endpoint.Host} could not be reached ({root.Message}) — check the internet connection";
 
         if (root is System.Net.Sockets.SocketException se &&
             (se.SocketErrorCode == System.Net.Sockets.SocketError.ConnectionRefused ||
