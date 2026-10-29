@@ -104,6 +104,7 @@ public partial class MainWindow
             _coworkTimer.Tick += (_, _) => PostCowork();
             _coworkTimer.Tag = true;
         }
+        EnsureAttentionWatch();
         _coworkTimer.Start();
     }
 
@@ -175,6 +176,7 @@ public partial class MainWindow
                 new JObject { ["type"] = "officeState", ["payload"] = payload }.ToString());
         }
         catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"PostCowork: {ex.Message}"); }
+        PostCoworkAttention();
     }
 
     /// <summary>
