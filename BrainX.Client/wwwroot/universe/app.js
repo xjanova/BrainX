@@ -1165,14 +1165,16 @@ function onHostMessage(evt) {
             }
             break;
         case 'pauseRender':
-            // C# detected our wallpaper is fully covered (fullscreen game,
-            // browser maximized over us, RDP, etc.) → stop the rAF loop to
+            // C# detected nobody can see us: a wallpaper fully covered
+            // (fullscreen game, RDP, etc.), or the app's own window minimised
+            // or buried under a maximised browser (MainWindow.Attention)
+            // → stop the rAF loop to
             // give the foreground app the GPU. scene.pauseAnimation cancels
             // the in-flight rAF + sets a flag so tick() stops re-scheduling.
             if (scene) scene.pauseAnimation?.();
             break;
         case 'resumeRender':
-            // C# detected the wallpaper is visible again → restart rAF.
+            // C# detected we are visible again → restart rAF.
             // scene.resumeAnimation resets THREE.Clock so the first frame
             // doesn't attribute the full pause duration as elapsed dt
             // (which would jump-rotate the universe by hours of motion).

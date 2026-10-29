@@ -230,8 +230,9 @@ let lastAgents = null;
 /** Whether the card is on screen; a freshly swapped picture must honour it,
  *  because its IntersectionObserver will not fire again for the same canvas. */
 let busVisible = true;
-/** Wallpaper only: the host paused this surface (a fullscreen window covers
- *  it). Nothing may restart the bus until it says resume. */
+/** The host paused this surface: a fullscreen window covers the wallpaper,
+ *  or the app's own window is minimised or buried (MainWindow.Attention).
+ *  Nothing may restart the bus until it says resume. */
 let wallpaperPaused = false;
 
 const $ = (id) => document.getElementById(id);
@@ -1328,10 +1329,10 @@ function onHudMessage(evt) {
         // hold this curtain up forever over a row that will never tick.
         case 'hudBootGiveUp': settleStragglers(); break;
         case 'hudNotice':    renderNotice(m.payload); break;
-        // A wallpaper covered by a fullscreen window stops its galaxy (app.js
-        // handles the scene); the agent bus is its own render loop and has to
-        // stop with it, or a card nobody can see keeps a GPU context busy
-        // under a game.
+        // A hidden surface stops its galaxy (app.js handles the scene): a
+        // wallpaper under a fullscreen window, or the app's window minimised or
+        // buried. The agent bus is its own render loop and has to stop with
+        // it, or a card nobody can see keeps a GPU context busy.
         case 'pauseRender':  wallpaperPaused = true;  bus?.stop(); break;
         case 'resumeRender':
             wallpaperPaused = false;

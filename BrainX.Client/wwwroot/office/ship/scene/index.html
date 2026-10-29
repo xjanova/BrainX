@@ -76,7 +76,13 @@ let LOW_POWER = (() => {
   if (Q.has('hq')) return false;
   try { return localStorage.getItem(QUALITY_KEY) !== 'high'; } catch { return true; }
 })();
-const FRAME_MS = () => (LOW_POWER ? 1000 / 30 : 0);
+// How much of the deck anybody can see, from the cowork room's host (owner, 2026-10-28: "หน้า
+// coworkroom ยังกินการ์ดจอ มาก"). WebView2 keeps painting a window that is minimised or buried
+// under a maximised browser, so the host says: 'active' (its window is in front), 'background' (on
+// screen behind another window: 15 fps, in either quality) or 'hidden' (minimised or covered: no
+// frames at all until it is seen again). The studio has no host and stays 'active'.
+let ATTENTION = 'active', PAUSED = false;
+const FRAME_MS = () => (ATTENTION === 'background' ? 1000 / 15 : LOW_POWER ? 1000 / 30 : 0);
 let SKY_DIRTY = true;   // set by resize(), which runs before the sky cache below exists
 const EMBED = Q.has('embed');
 const ASSET_V = Q.get('v') || String(Date.now());
@@ -413,7 +419,11 @@ function onRoomMessage(e) {
   } else if (m.type === 'shipSay' && m.who && m.text) {
     SAYS.push({ who: String(m.who), text: String(m.text).slice(0, 240), color: String(m.color || ''), until: performance.now() + (+m.ms || 4000) });
     while (SAYS.length > 12) SAYS.shift();
-  }
+  } else if (m.type === 'shipAttention') setAttention(m.state);
+}
+function setAttention(state) {
+  ATTENTION = state === 'hidden' || state === 'background' ? state : 'active';
+  if (ATTENTION !== 'hidden' && PAUSED) { PAUSED = false; last = performance.now(); requestAnimationFrame(frame); }
 }
 if (EMBED) addEventListener('message', onRoomMessage);
 const tagLayer = document.getElementById('tags');
@@ -618,6 +628,8 @@ function think(c, dt) {
 let last = performance.now(), frames = 0, fpsT = 0, lastDrawn = 0;
 window.__frames = (n = 1, step = 1 / 60) => { for (let i = 0; i < n; i++) frame(last + step * 1000, true); };
 function frame(now, manual) {
+  // Nobody can see it: stop asking for frames; setAttention() starts them again.
+  if (!manual && ATTENTION === 'hidden') { PAUSED = true; return; }
   // A frame that has not been laid out yet (a hidden iframe) has no size: zooming to fit it gives
   // zero and every camera position after that NaN, for good.
   if (!W || !H) resize();

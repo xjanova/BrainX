@@ -42,6 +42,7 @@ public partial class MainWindow
             var w = new CoworkWindow { Owner = null };
             _coworkWindow = w;
             w.Closed += (_, _) => OnCoworkWindowClosed(w);
+            WireAttention(w);
             w.Show();
             w.MarkOpen();
             ShowCoworkPoppedOut(true);

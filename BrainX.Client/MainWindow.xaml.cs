@@ -8888,6 +8888,7 @@ public partial class MainWindow : Window
             UniverseWebView.Source = new Uri(UniverseHudUrl());   // ?hud=1, plus this launch's girl
             StartUniverseHud();
             _universeInitialized = true;
+            EnsureAttentionWatch();
         }
         catch (Exception ex)
         {

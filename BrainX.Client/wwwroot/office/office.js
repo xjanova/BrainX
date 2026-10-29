@@ -75,6 +75,12 @@ const SHIP_MODE = (() => {
 })();
 const SHIP_FRAME = document.getElementById('ship');
 let SHIP_READY = false;
+/** How much of the room anybody can see, from the host: 'active' (its window
+ *  is in front), 'background' (on screen behind another window) or 'hidden'
+ *  (minimised, or covered by the window in front). WebView2 keeps painting a
+ *  page nobody can see, so the ship slows down or stops on this, and the
+ *  painted room draws nothing while it is hidden. */
+let ATTENTION = 'active';
 /** Agent id -> the girl who plays it. claude-code and claude-chat are both
  *  Claude; the broker IS มาย (Mai). Gemini's girl boards once she has drawn
  *  herself (output/boss-rig/tools/intake_gemini.py). Anyone else has none. */
@@ -3351,6 +3357,11 @@ function onMessage(evt) {
     if (m.type === 'shipReady' && SHIP_MODE && evt.source === SHIP_FRAME?.contentWindow) {
         SHIP_READY = true;
         shipSync();
+        shipPost({ type: 'shipAttention', state: ATTENTION });
+        return;
+    }
+    if (m.type === 'officeAttention' && typeof m.state === 'string') {
+        if (m.state !== ATTENTION) { ATTENTION = m.state; shipPost({ type: 'shipAttention', state: ATTENTION }); }
         return;
     }
     if (m.type !== 'officeState') return;
@@ -5153,6 +5164,7 @@ function frame() {
     // Scheduled first: one frame that throws used to end the loop for good,
     // and the room froze until somebody reloaded it.
     requestAnimationFrame(frame);
+    if (ATTENTION === 'hidden') return;     // nobody can see the room
     T++;
     try {
         drawRoom();     // sprites, onto the logical canvas

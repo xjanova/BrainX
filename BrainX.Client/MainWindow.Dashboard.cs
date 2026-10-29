@@ -509,6 +509,7 @@ public partial class MainWindow
             DashUniverseWebView.Source = new System.Uri(
                 "https://universe.local/universe/index.html?cameraMode=follow&mode=wallpaper-active");
             _dashUniverseInitialized = true;
+            EnsureAttentionWatch();
 
             // Chips moved from Popup → Border (sibling of WebView2 in the
             // universe Grid) to fix the "ทับ chrome" bleed-through. No
