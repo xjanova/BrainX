@@ -1341,7 +1341,19 @@ public partial class MainWindow
         try
         {
             var path = ClaudeSettingsPath();
-            if (File.Exists(path) && File.ReadAllText(path).Contains(BrainAutoIngestHookVersionTag))
+            var mcpExe = ResolveBestMcpExe();
+            var text = File.Exists(path) ? File.ReadAllText(path) : "";
+
+            // Native and pointing at this binary: done. The path is compared the
+            // way settings.json holds it, as in EnsureTaskWakeHooksInstalled.
+            if (mcpExe != null && text.Contains(BrainX.Core.Services.HookHealth.AutoIngestNativeTag)
+                && text.Contains(Newtonsoft.Json.JsonConvert.ToString(mcpExe).Trim('"'), StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            // A script entry stays only where the binary cannot replace it. This
+            // starts processes, so it comes after the check above that needs none.
+            var nativeExe = NativeHookExe(mcpExe);
+            if (text.Contains(BrainAutoIngestHookVersionTag) && nativeExe == null)
             {
                 // The entry is current, but the script it calls lives in its own
                 // file now (v5). Re-assert it so a deleted or stale script cannot
@@ -1367,23 +1379,14 @@ public partial class MainWindow
             // upgrade replaces rather than stacks duplicates.
             for (int i = postToolUse.Count - 1; i >= 0; i--)
             {
-                var cmd = postToolUse[i]["hooks"]?[0]?["command"]?.ToString() ?? "";
-                if (cmd.Contains(BrainAutoIngestHookMarker)) postToolUse.RemoveAt(i);
+                if (BrainX.Core.Services.HookHealth.IsAutoIngestHook(
+                        BrainX.Core.Services.HookHealth.CommandText(postToolUse[i]["hooks"]?[0]))) postToolUse.RemoveAt(i);
             }
 
             postToolUse.Add(new Newtonsoft.Json.Linq.JObject
             {
                 ["matcher"] = "Read|Edit|MultiEdit|Write",
-                ["hooks"] = new Newtonsoft.Json.Linq.JArray
-                {
-                    new Newtonsoft.Json.Linq.JObject
-                    {
-                        ["type"] = "command",
-                        ["command"] = BuildAutoIngestHookCommand(),
-                        ["shell"] = "powershell",
-                        ["timeout"] = 10,
-                    },
-                },
+                ["hooks"] = new Newtonsoft.Json.Linq.JArray { BuildAutoIngestHandler(nativeExe) },
             });
 
             hooks["PostToolUse"] = postToolUse;

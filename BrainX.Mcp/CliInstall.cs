@@ -70,6 +70,8 @@ internal static class CliInstall
         Console.WriteLine("                                          Installed automatically by the Client; run it by hand to debug");
         Console.WriteLine("                                          (echo {} | brainx-mcp hook-stop --vault G:\\Obsidian).");
         Console.WriteLine("  brainx-mcp hook-session-start        Claude Code SessionStart hook: print queued tasks as context.");
+        Console.WriteLine("  brainx-mcp hook-tool-log | hook-prompt-gate | hook-brain-end | hook-pretool-warn |");
+        Console.WriteLine("    hook-error-recall | hook-auto-ingest   The hooks `install-hooks` registers. Read a hook payload on stdin.");
         Console.WriteLine("             --vault PATH                 Always exits 0 — it informs a session, it never blocks one.");
         Console.WriteLine("  brainx-mcp ssh-approve <confirm_id>  Review and approve (or deny) a gated ssh_run command — needs a");
         Console.WriteLine("                                       real terminal; --list shows what is waiting, --deny refuses");

@@ -28,6 +28,97 @@ public static class HookHealth
 
     private static readonly Regex FileArg = new("-File\\s+\"([^\"]+)\"", RegexOptions.Compiled);
 
+    /// <summary>The binary at the head of a shell-form native hook.</summary>
+    private static readonly Regex QuotedExe = new("^\"([^\"]+)\"\\s+hook-", RegexOptions.Compiled);
+
+    /// <summary>The auto-ingest entry once it runs in the binary. It keeps the " v5"
+    /// that a BrainX.Client older than this looks for, or that client would add
+    /// the PowerShell entry back on its next start.</summary>
+    public const string AutoIngestNativeTag = "obsidianx-auto-ingest v5+native";
+
+    /// <summary>What a binary with the native hooks prints for `hook-probe`.</summary>
+    public const string NativeProbeAnswer = "brainx-native-hooks";
+
+    /// <summary>The first Claude Code with exec form (`args` on a command hook).</summary>
+    private static readonly Version ExecFormSince = new(2, 1, 139);
+
+    /// <summary>
+    /// All of what a hook handler runs: its command plus, in exec form, its
+    /// args. A marker or a subcommand can sit in either, so every reader of
+    /// settings.json looks at this and not at "command" alone.
+    /// </summary>
+    public static string CommandText(JToken? handler)
+    {
+        var cmd = handler?["command"]?.ToString() ?? "";
+        return handler?["args"] is JArray a ? cmd + " " + string.Join(" ", a.Select(x => x.ToString())) : cmd;
+    }
+
+    /// <summary>True for an entry of `brainx-mcp install-hooks`, script or native.</summary>
+    public static bool IsInstallerHook(string commandText) =>
+        commandText.Contains("# brainx-hooks", StringComparison.Ordinal)
+        || commandText.Contains("--tag brainx-hooks-", StringComparison.Ordinal);
+
+    /// <summary>True for the PostToolUse auto-ingest entry, which BrainX.Client owns.</summary>
+    public static bool IsAutoIngestHook(string commandText) =>
+        commandText.Contains("obsidianx-auto-ingest", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Whether this machine's Claude Code runs a hook's `args` with no shell.
+    ///
+    /// Exec form is what takes Git Bash out of every hook (300-400 ms each,
+    /// measured 2026-10-30), but a Claude Code older than 2.1.139 would ignore
+    /// `args` and start the bare command, which for brainx-mcp is an MCP server,
+    /// once per tool call. So false only when an older version is positively
+    /// seen. Not finding `claude` says nothing: the Desktop app carries its own.
+    /// </summary>
+    public static bool ExecFormSupported()
+    {
+        var text = Environment.GetEnvironmentVariable("BRAINX_CLAUDE_VERSION") ?? ProbeClaudeVersion();
+        var m = Regex.Match(text ?? "", @"(\d+)\.(\d+)\.(\d+)");
+        return !m.Success || !Version.TryParse(m.Value, out var v) || v >= ExecFormSince;
+    }
+
+    /// <summary>
+    /// Whether this binary can run the native hooks. The binary is asked, because
+    /// its version cannot say: that is 2.x.[commit count], which does not move
+    /// between two builds of one commit, and a build without the hooks does not
+    /// refuse one. It takes the subcommand for nothing and starts an MCP server,
+    /// once per tool call. Starts a process, so never for a hot path.
+    /// </summary>
+    public static bool RunsNativeHooks(string? exe) =>
+        !string.IsNullOrEmpty(exe) && File.Exists(exe)
+        && Capture(exe, "hook-probe")?.Trim() == NativeProbeAnswer;
+
+    // cmd: on Windows `claude` is an npm .cmd shim, which only a shell can start.
+    private static string? ProbeClaudeVersion() =>
+        OperatingSystem.IsWindows() ? Capture("cmd.exe", "/c claude --version") : Capture("claude", "--version");
+
+    /// <summary>A command's stdout, or null when it fails or outlasts 8 s. Its stdin
+    /// is closed, which is what makes a server taking the place of a hook exit.</summary>
+    private static string? Capture(string file, string arguments)
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo(file, arguments)
+            {
+                UseShellExecute = false,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+            using var p = System.Diagnostics.Process.Start(psi);
+            if (p == null) return null;
+            p.StandardInput.Close();
+            var read = p.StandardOutput.ReadToEndAsync();
+            _ = p.StandardError.ReadToEndAsync();
+            if (p.WaitForExit(8000) && p.ExitCode == 0) return read.GetAwaiter().GetResult();
+            try { p.Kill(true); } catch { }
+            return null;
+        }
+        catch { return null; }
+    }
+
     /// <summary>
     /// Problems with OUR hooks (the "# brainx-hooks" and "obsidianx-auto-ingest"
     /// entries) in <paramref name="claudeDir"/>/settings.json, as short phrases.
@@ -52,7 +143,7 @@ public static class HookHealth
         }
         if (root["hooks"] is not JObject hooks) return problems;
 
-        int ours = 0, envWithoutShell = 0;
+        int ours = 0, envWithoutShell = 0, inRetired = 0;
         bool loggerRegistered = false;
         var missing = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -64,11 +155,11 @@ public static class HookHealth
                 if (g["hooks"] is not JArray hs) continue;
                 foreach (var h in hs)
                 {
-                    var cmd = h["command"]?.ToString() ?? "";
-                    if (!cmd.Contains("# brainx-hooks", StringComparison.Ordinal)
-                        && !cmd.Contains("obsidianx-auto-ingest", StringComparison.Ordinal)) continue;
+                    var cmd = CommandText(h);
+                    if (!IsInstallerHook(cmd) && !IsAutoIngestHook(cmd)) continue;
                     ours++;
-                    if (cmd.Contains("brain-tool-logger.ps1", StringComparison.OrdinalIgnoreCase)) loggerRegistered = true;
+                    if (cmd.Contains("brain-tool-logger.ps1", StringComparison.OrdinalIgnoreCase)
+                        || cmd.Contains("hook-tool-log", StringComparison.OrdinalIgnoreCase)) loggerRegistered = true;
 
                     // The exact 2026-09-25 signature: PowerShell syntax in a command
                     // that will not be run by PowerShell.
@@ -77,11 +168,18 @@ public static class HookHealth
                         && !string.Equals(shell, "powershell", StringComparison.OrdinalIgnoreCase))
                         envWithoutShell++;
 
-                    var m = FileArg.Match(cmd);
-                    if (m.Success && !m.Groups[1].Value.Contains('$'))
+                    // What the hook needs on disk: a script, or the binary itself.
+                    // A native hook whose exe is gone is as dead as a missing script.
+                    var script = ScriptPath(h);
+                    var native = h["args"] is JArray ? h["command"]?.ToString() : QuotedExe.Match(cmd).Groups[1].Value;
+                    var target = script ?? native;
+                    if (!string.IsNullOrEmpty(target) && !target.Contains('$'))
                     {
-                        var script = m.Groups[1].Value.Replace('/', Path.DirectorySeparatorChar);
-                        if (!File.Exists(script)) missing.Add(Path.GetFileName(script));
+                        var path = target.Replace('/', Path.DirectorySeparatorChar);
+                        if (!File.Exists(path)) missing.Add(Path.GetFileName(path));
+                        // A hook is an agent-launched process too: place matters, not
+                        // only existence (see McpRuntimePaths).
+                        if (target == native && McpRuntimePaths.IsRetiredLocation(path)) inRetired++;
                     }
                 }
             }
@@ -92,6 +190,8 @@ public static class HookHealth
             problems.Add($"{envWithoutShell} hook(s) use $env: paths without \"shell\": \"powershell\", so Git Bash breaks them");
         if (missing.Count > 0)
             problems.Add($"script(s) missing: {string.Join(", ", missing)}");
+        if (inRetired > 0)
+            problems.Add($"{inRetired} hook(s) run a brainx-mcp inside the folder the updater replaces");
 
         // Freshness: the PostToolUse logger appends on every tool call of every
         // session. Old means nothing has fired, whatever the config says.
@@ -104,6 +204,19 @@ public static class HookHealth
                     "tool-log.ndjson last written {0:0}h ago, so the PostToolUse hooks may not be firing", age.TotalHours));
         }
         return problems;
+    }
+
+    /// <summary>The script a handler runs, in exec form or shell form. Null for a binary.</summary>
+    private static string? ScriptPath(JToken handler)
+    {
+        if (handler["args"] is JArray args)
+        {
+            var list = args.Select(x => x.ToString()).ToList();
+            var at = list.FindIndex(a => a.Equals("-File", StringComparison.OrdinalIgnoreCase));
+            return at >= 0 && at + 1 < list.Count ? list[at + 1] : null;
+        }
+        var m = FileArg.Match(handler["command"]?.ToString() ?? "");
+        return m.Success ? m.Groups[1].Value : null;
     }
 
     /// <summary>One line for the server instructions, or "" when healthy.</summary>

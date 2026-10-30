@@ -7,6 +7,8 @@
     <Nullable>enable</Nullable>
     <AssemblyName>brainx-mcp</AssemblyName>
     <RootNamespace>BrainX.Mcp</RootNamespace>
+    <!-- Not Program: hooks are dispatched before that type loads. See HookEntry.cs. -->
+    <StartupObject>BrainX.Mcp.HookEntry</StartupObject>
     <Version>2.10.0</Version>
     <AssemblyVersion>2.10.0.0</AssemblyVersion>
     <FileVersion>2.10.0.0</FileVersion>
@@ -45,9 +47,12 @@
        folder, so anything not embedded is not there on a user's machine.
        Embedding also means `brainx-mcp install-hooks` works from a single
        downloaded exe with no repo checkout. Link path keeps the resource
-       name short and stable: BrainX.Mcp.hooks.<file>. -->
+       name short and stable: BrainX.Mcp.hooks.<file>.
+       The excluded five run in the binary now (NativeHooks.cs); their scripts
+       stay in hooks/ as what BrainX.Tests holds the port against. -->
   <ItemGroup>
-    <EmbeddedResource Include="..\hooks\*.ps1;..\hooks\*.json">
+    <EmbeddedResource Include="..\hooks\*.ps1;..\hooks\*.json"
+                      Exclude="..\hooks\brain-tool-logger.ps1;..\hooks\brain-prompt-gate.ps1;..\hooks\stop-hook.ps1;..\hooks\brain-pretool-warn.ps1;..\hooks\brain-error-recall.ps1">
       <Link>hooks\%(Filename)%(Extension)</Link>
     </EmbeddedResource>
   </ItemGroup>
