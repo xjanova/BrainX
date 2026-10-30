@@ -777,7 +777,11 @@ public static class McpBridgeHub
         // Announced too: a discovery slower than AppendTools' wait lands after
         // the client's first tools/list, and without the notice its tools would
         // wait for the next session. Discover only speaks when the list changed.
-        lock (Gate) state.InFlight = Task.Run(() => Discover(def, fp, announce: true));
+        lock (Gate)
+        {
+            if (def.Private) ChromeBridge.DiscoveryQueued();
+            state.InFlight = Task.Run(() => Discover(def, fp, announce: true));
+        }
     }
 
     /// <summary>
@@ -803,8 +807,17 @@ public static class McpBridgeHub
                 // discovery's own failure was cached for every new
                 // session. A call now starts its own server; this one is
                 // closed as soon as the list is in (~150 MB each).
-                using var own = ChromeBridge.StartConnection(_log);
-                tools = own.ListTools();
+                //
+                // Only BeginDiscover brings chrome here, and it counted this
+                // discovery. Released before state.Tools is set below: a
+                // client that sees the tools must not hear Connecting next.
+                try
+                {
+                    ChromeBridge.SandboxDiscoveryDelay();
+                    using var own = ChromeBridge.StartConnection(_log);
+                    tools = own.ListTools();
+                }
+                finally { ChromeBridge.DiscoveryDone(); }
             }
             else
             {
@@ -1023,7 +1036,8 @@ public static class McpBridgeHub
         try
         {
             // From the one snapshot above. While a chrome spawn holds the
-            // gate the entry says Connecting (ChromeBridge counts its spawns).
+            // gate the entry says Connecting (ChromeBridge counts its spawns
+            // and its discoveries).
             var chromeLive = LiveNow(ChromeBridge.Def.Id);
             var chromeTools = _enabled && !ChromeBridge.IsUnattendedRun ? (StateFor(ChromeBridge.Def.Id).Tools?.OfType<JObject>()
                 .Count(t => !ChromeBridge.IsHidden(t["name"]?.ToString() ?? "")) ?? 0) : 0;
