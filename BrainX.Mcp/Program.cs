@@ -1324,6 +1324,23 @@ internal static partial class Program
                         ["limit"] = new JObject { ["type"] = "integer", ["default"] = 50 }
                     }
                 }),
+            Tool("brain_lookup",
+                "Resolve an EXACT note id, vault-relative path, title or code symbol without embeddings. " +
+                "Use for a known name; use brain_search/brain_semantic_search for questions. " +
+                "Reports ambiguity instead of guessing. Scope is strict, never broadened. " +
+                "Retired notes stay flagged: resolving identity does not verify claims. " +
+                "Symbol lookup needs indexed code; old exports have only 40 symbol tags until re-indexed.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["reference"] = new JObject { ["type"] = "string" },
+                        ["kind"] = new JObject { ["type"] = "string", ["enum"] = new JArray("auto", "id", "path", "title", "symbol"), ["default"] = "auto" },
+                        ["scope"] = new JObject { ["type"] = "string", ["description"] = "Project, kind or folder scope. Never broadened automatically." }
+                    },
+                    ["required"] = new JArray("reference")
+                }),
             Tool("brain_scope_list",
                 "List the brain's scope namespaces (top-level folders + their direct children) with note counts. Use BEFORE passing a scope arg to brain_search/brain_list/brain_walk so you know what scopes exist. Helps the user see how their brain is organised.",
                 new JObject
@@ -2009,6 +2026,7 @@ internal static partial class Program
             {
                 "brain_recall"              => BrainRecall(args),
                 "brain_search"              => BrainSearch(args),
+                "brain_lookup"              => BrainLookup(args),
                 "brain_get_note"            => BrainGetNote(args),
                 "brain_expertise"           => BrainExpertise(),
                 "brain_list"                => BrainList(args),
@@ -2432,8 +2450,8 @@ internal static partial class Program
 
         var ql = query.ToLowerInvariant();
         List<T> Rank<T>(Func<NodeSummary, bool> pred, Func<NodeSummary, double, T> make) =>
-            export.Nodes.Where(pred)
-                .Select(n => (n, s: ScoreNode(n, ql, GetContentLower(export, n))))
+            KeywordScores(export, export.Nodes.Where(pred), ql)
+                .Select(x => (n: x.Node, s: x.Score))
                 .Where(x => x.s > 0)
                 .OrderByDescending(x => x.s)
                 .Take(limit)

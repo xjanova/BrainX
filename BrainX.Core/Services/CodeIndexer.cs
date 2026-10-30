@@ -82,7 +82,8 @@ public static partial class CodeIndexer
             {
                 ["isCode"] = true,
                 ["language"] = langTag,
-                ["symbolCount"] = symbols.Count
+                ["symbolCount"] = symbols.Count,
+                ["symbols"] = symbols
             }
         };
     }
@@ -110,6 +111,7 @@ public static partial class CodeIndexer
         foreach (Match m in pattern.Matches(content))
         {
             var name = m.Groups["name"].Value;
+            if (string.IsNullOrEmpty(name)) name = m.Groups["name2"].Value;
             if (string.IsNullOrEmpty(name) || name.Length < 2) continue;
             if (seen.Add(name)) list.Add(name);
         }

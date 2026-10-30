@@ -87,6 +87,7 @@ public static class McpRemotePolicy
     private static readonly HashSet<string> ReadTools = new(StringComparer.OrdinalIgnoreCase)
     {
         "brain_search",
+        "brain_lookup",
         "brain_semantic_search",
         "brain_walk",
         "brain_get_note",
