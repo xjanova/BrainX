@@ -70,7 +70,7 @@ internal static partial class Program
     /// the temp vaults was unlabelled, so this path was not once exercised.
     /// The oldest stuck message was three days old.
     /// </summary>
-    private static string BuildSpawnPrompt(WaitingWork work, int maxRunSeconds = 0, string? agent = null)
+    private static string BuildSpawnPrompt(WaitingWork work, int maxRunSeconds = 0, string? agent = null, bool staysOpen = false)
     {
         var sb = new StringBuilder(
             "BrainX broker: work is queued for you on this brain and nobody is driving this session. ");
@@ -116,6 +116,10 @@ internal static partial class Program
               .Append("Do not call cowork_leave when you finish — just stop. ");
         }
 
+        // Told, or it sits in a watch loop to stay useful — the one thing that
+        // keeps the owner's next line from reaching it (Program.BrokerOpenRun.cs).
+        if (staysOpen) sb.Append(OpenRunNote);
+
         // The owner's answer to a question this agent asked — named even when
         // its label is parked and stripped from everything below. On
         // 2026-10-04 the owner answered codex's "15 destination images first,
@@ -123,10 +127,7 @@ internal static partial class Program
         // under a parked label, every run the owner then called was told
         // "there is no mail", and each one asked the same question again.
         var answers = work.Answers ?? Array.Empty<string>();
-        if (answers.Count > 0)
-            sb.Append("THE OWNER HAS ANSWERED A QUESTION YOU ASKED, and you have not read it. Before you decide anything, read it: ")
-              .Append(string.Join(", ", answers.Select(a => a.Length == 0 ? "agent_inbox {}" : InboxCallFor(a))))
-              .Append(" (topic 'owner-decision'). Carry on with that decision; do not ask it again. ");
+        if (answers.Count > 0) sb.Append(OwnerAnsweredNote(answers)).Append(' ');
 
         if (work.Mail == 0 && work.Tasks == 0 && work.Room > 0)
         {
@@ -179,6 +180,11 @@ internal static partial class Program
           .Append(HeadlessNote());
         return sb.ToString();
     }
+
+    private static string OwnerAnsweredNote(IReadOnlyCollection<string> answers) =>
+        "THE OWNER HAS ANSWERED A QUESTION YOU ASKED, and you have not read it. Before you decide anything, read it: "
+      + string.Join(", ", answers.Select(a => a.Length == 0 ? "agent_inbox {}" : InboxCallFor(a)))
+      + " (topic 'owner-decision'). Carry on with that decision; do not ask it again.";
 
     /// <summary>
     /// What every spawned run needs to know about itself, mail or not.
@@ -335,6 +341,7 @@ internal static partial class Program
         // work is picked up on the first tick, without waiting for it to look
         // quiet. Read now, before anything clears those records.
         CoworkInterruptedRuns = FindInterruptedRuns(cfg);
+        _brokerStaysUp = !once && !dryRun;
         foreach (var a in CoworkInterruptedRuns)
             BrokerLog($"{a}: its run was cut off when the broker last stopped — its unfinished work is picked up now");
         // A room the BROKER darkened is not the owner's "stop". A finished idle
@@ -393,6 +400,9 @@ internal static partial class Program
                         BrokerLog($"brainx-mcp was updated on disk ({rebuilt:u}) — handing over to the new build"
                                   + (live.Count > 0 ? $" once {live.Count} run(s) finish" : ""));
                     }
+                    // One waiting for a line is not a run to wait for.
+                    foreach (var (agent, run) in live)
+                        if (run.Open is { Busy: false }) CloseOpenRun(agent, run, "the broker is handing over to a new build");
                     if (live.Count == 0 || DateTime.UtcNow - updateSeenUtc > BrokerUpdateGrace)
                     {
                         exitCode = BrokerExitUpdated;
@@ -404,7 +414,7 @@ internal static partial class Program
                 catch (Exception ex) { BrokerLog("tick failed: " + Redact(ex.Message)); }
 
                 if (once) { await SuperviseToCompletion(cfg, live).ConfigureAwait(false); break; }
-                try { await Task.Delay(TimeSpan.FromSeconds(cfg.PollSeconds), ct).ConfigureAwait(false); }
+                try { await BrokerNap(cfg, live, ct).ConfigureAwait(false); }
                 catch (OperationCanceledException) { break; }
             } while (!ct.IsCancellationRequested);
         }
@@ -655,6 +665,7 @@ internal static partial class Program
         var coworkCalls = CoworkCallsWaiting(
             cfg.Runners.Where(r => r.Value.OnCall).Select(r => r.Key), out var coworkScanned, out var coworkUnheard);
         var coworkHandled = false;
+        var keepCalls = false;
 
         // Before anything else: is a circle still running that should not be?
         // Checked every tick rather than only when idle — a study still
@@ -689,7 +700,11 @@ internal static partial class Program
             // inbox, which is the exact race the bus was built to avoid — and
             // the reason this check is by agent, not by task. Disk as well as
             // memory, so it holds across `--once` ticks and restarts.
-            if (live.ContainsKey(agent)) continue;
+            if (live.TryGetValue(agent, out var going))
+            {
+                keepCalls |= !CoworkReachLiveRun(cfg, agent, going, coworkCalls.ContainsKey(agent), followUps.GetValueOrDefault(agent));
+                continue;
+            }
             if (AdoptOrClearOrphanRun(cfg, agent)) continue;
 
             var work = WaitingWorkFor(agent);
@@ -1044,13 +1059,16 @@ internal static partial class Program
                     CoworkSystemLine("ยังเรียกเข้าห้องไม่ได้ — "
                         + string.Join(" · ", missing.Select(a => $"{a}: {CoworkWhyNotCalledTh(cfg, a)}")));
                 else if (seated.Count == 0)
-                    CoworkSystemLine("ไม่มีใครอยู่ในห้อง และไม่มี runner ที่ตั้ง onCall ไว้ใน runners.json — คำสั่งนี้ยังไม่มีใครรับ");
+                    CoworkSystemLine(CoworkResting().Count > 0
+                        ? "ตอนนี้ยังไม่มีใครรับได้ — คนที่เรียกได้หมดโควต้าอยู่ พอโควต้ากลับมา broker จะตามงานให้เอง"
+                        : "ไม่มีใครอยู่ในห้อง และไม่มี runner ที่ตั้ง onCall ไว้ใน runners.json — คำสั่งนี้ยังไม่มีใครรับ");
                 // else: everyone called is already seated. Silence is correct.
             }
         }
         // Up to what was scanned and no further — including lines with nothing
         // to dispatch, so a forged line is logged once, not every tick.
-        if (!dryRun) CoworkMarkCalled(coworkScanned);
+        if (!dryRun && !keepCalls) CoworkMarkCalled(coworkScanned);
+        if (!dryRun) CoworkTellWhyNoAnswerYet(cfg, live);
 
         await PumpDecisionsAsync(cfg).ConfigureAwait(false);
 
@@ -1262,6 +1280,12 @@ internal static partial class Program
         /// <summary>Started because somebody was called into the cowork room —
         /// so how it ends is owed to the room, where the owner is watching.</summary>
         public bool ForRoom { get; init; }
+        /// <summary>Set on a room run kept open for the next line
+        /// (Program.BrokerOpenRun.cs).</summary>
+        public OpenRun? Open { get; init; }
+        /// <summary>The owner said something while this run was going, and it
+        /// has not spoken since. Broker thread only.</summary>
+        public DateTime? OwnerWaitingSinceUtc { get; set; }
     }
 
     /// <summary>
@@ -1302,8 +1326,19 @@ internal static partial class Program
     /// run that took 46s to give up (2026-10-04).</summary>
     private static readonly string[] VersionSigns = { "version_too_old", "or newer is required", "does not support this model" };
 
+    /// <summary>
+    /// The model's safeguards refused the session. Not a door that is shut:
+    /// the next run on other words goes through, and on 2026-10-30 one did. So
+    /// it is never a failure streak, and never a reason to stop an owner's line
+    /// being tried. It is a run that ended for a reason the owner has to hear:
+    /// five runs in a row went out like this that morning, with a broker that
+    /// read each as a success because it took longer than a minute to fail.
+    /// The room got "รับทราบค่ะบอส" and then nothing.
+    /// </summary>
+    private static readonly string[] RefusalSigns = { "safeguards flagged" };
+
     /// <summary>Doors that are shut at any point in a run, not only at startup.</summary>
-    private static readonly string[] AnyTimeSigns = QuotaSigns.Concat(VersionSigns).ToArray();
+    private static readonly string[] AnyTimeSigns = QuotaSigns.Concat(VersionSigns).Concat(RefusalSigns).ToArray();
 
     /// <summary>Things only a runner that never got going says. In the tail of
     /// a run that worked for minutes they are as likely to be the work.</summary>
@@ -1390,10 +1425,20 @@ internal static partial class Program
             UnattendedRuns.IsCodex(exe) ? UnattendedRuns.ReadCodexConfig() : null);
         if (UnattendedRuns.IsCodex(exe) && launch.CodexServers.Count == 0)
             BrokerSay(agent + ":codex-brain", $"{agent}: no BrainX server with a command in codex's config.toml — its runs are recognised by the run registry alone");
-        foreach (var a in launch.Args)
-            psi.ArgumentList.Add(a.Replace("{prompt}", BuildSpawnPrompt(work, cfg.MaxRunSeconds, agent))
+        // A room run is left open for the next line (Program.BrokerOpenRun.cs).
+        var forRoom = reportToRoom && (work.Room > 0 || work.Works.Any(CoworkIsRoomWork));
+        var openArgs = forRoom ? OpenRunArgs(cfg, exe, runner, launch.Args) : null;
+        var prompt = BuildSpawnPrompt(work, cfg.MaxRunSeconds, agent, staysOpen: openArgs != null);
+        foreach (var a in openArgs ?? launch.Args)
+            psi.ArgumentList.Add(a.Replace("{prompt}", prompt)
                                   .Replace("{cwd}", psi.WorkingDirectory)
                                   .Replace("{agent}", agent));
+        if (openArgs != null)
+        {
+            psi.RedirectStandardInput = true;
+            psi.StandardInputEncoding = new UTF8Encoding(false);
+            psi.StandardOutputEncoding = new UTF8Encoding(false);
+        }
 
         // The child must not inherit this broker's vault override by accident
         // on one path and not another — set it explicitly so a spawned agent
@@ -1474,7 +1519,12 @@ internal static partial class Program
             // the mildest version of that bug; the same format elsewhere would
             // put 2569 into data other tools parse.
             var log = Path.Combine(BrokerDir, $"{agent}-{DateTime.UtcNow.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture)}.log");
-            p.OutputDataReceived += (_, e) => AppendRunLog(log, e.Data);
+            var open = openArgs != null ? new OpenRun { Model = model, Effort = effort } : null;
+            p.OutputDataReceived += (_, e) =>
+            {
+                if (open != null) OpenRunOutput(open, log, e.Data);
+                else AppendRunLog(log, e.Data);
+            };
             p.ErrorDataReceived += (_, e) => AppendRunLog(log, e.Data);
             p.BeginOutputReadLine();
             p.BeginErrorReadLine();
@@ -1487,8 +1537,14 @@ internal static partial class Program
             live[agent] = new BrokerRun
             {
                 Process = p, Agent = agent, StartedUtc = startedUtc, LogPath = log,
-                ForRoom = reportToRoom && (work.Room > 0 || work.Works.Any(CoworkIsRoomWork)),
+                ForRoom = forRoom,
+                Open = open,
             };
+            if (open != null)
+            {
+                open.PumpInto(p.StandardInput);
+                FeedOpenRun(live[agent], prompt);
+            }
             state.Spawns.Add(startedUtc);
             // A study is not a hop on anybody's work. Counting it froze an agent
             // after three days of idle studies with nothing ever queued.
@@ -1502,6 +1558,7 @@ internal static partial class Program
             BrokerLog($"{agent}: spawned {Path.GetFileName(exe)} pid {p.Id}"
                       + (model != null ? $" on {model}" : "")
                       + (effort != null ? $" at effort {effort}" : "")
+                      + (open != null ? ", staying open" : "")
                       + $" for {Describe(work)} · log {Path.GetFileName(log)}");
             return true;
         }
@@ -1877,7 +1934,10 @@ internal static partial class Program
             var killed = false;
             if (!run.Process.HasExited)
             {
-                if ((DateTime.UtcNow - run.StartedUtc).TotalSeconds < cfg.MaxRunSeconds) continue;
+                SettleOpenRun(cfg, agent, run);
+                // An open run is on the clock from the last thing it was given:
+                // an afternoon of short answers is not one run outstaying its budget.
+                if ((DateTime.UtcNow - (run.Open?.LastFedUtc ?? run.StartedUtc)).TotalSeconds < cfg.MaxRunSeconds) continue;
                 BrokerLog($"{agent}: run exceeded {cfg.MaxRunSeconds}s — killing pid {run.Process.Id}");
                 TryKill(run.Process);
                 killed = true;
@@ -1894,6 +1954,11 @@ internal static partial class Program
             if (!killed)
                 try { Task.Run(() => run.Process.WaitForExit()).Wait(TimeSpan.FromSeconds(3)); } catch { }
             BrokerLog($"{agent}: run finished, exit {code}, {elapsed.TotalSeconds:F0}s" + (ownerStopped ? " — stopped by the owner" : ""));
+            // An open run the broker sent home was not a failure, whatever exit
+            // code EOF left it with. One whose turn failed was, whatever it left.
+            var turnError = run.Open?.Error;
+            var badEnd = turnError != null || (code != 0 && run.Open?.ClosedUtc == null);
+            run.Open?.EndInput();
             UnattendedRuns.Unregister(run.Process.Id);
             run.Process.Dispose();
             live.Remove(agent);
@@ -1907,14 +1972,24 @@ internal static partial class Program
             // printed "No such file" or "authentication" while working on auth
             // code did not fail to start — only a quota message means a shut
             // door at any point in a run.
-            var fatal = code != 0 && !killed && !ownerStopped
+            var fatal = badEnd && !killed && !ownerStopped
                 ? FatalComplaint(run.LogPath, startup: elapsed < RunTooFastToBeReal)
                 : null;
-            var failed = !ownerStopped && (fatal != null || (code != 0 && elapsed < RunTooFastToBeReal));
+            var refused = fatal != null && FailureClass(fatal) == "refused";
+            var failed = !ownerStopped && !refused && (fatal != null || (badEnd && elapsed < RunTooFastToBeReal));
+            // Went down part-way with nothing we know the name of. Counted as a
+            // run that worked, and it may have: it is not a door that is shut.
+            // But the room hears it. A non-zero exit after a minute used to end
+            // with no word to anybody.
+            var diedOnTheWay = !ownerStopped && !killed && !failed && !refused && badEnd;
             if (ownerStopped)
             {
                 // Nothing to learn about the runner from a run cut short on
                 // purpose: its failure streak and its quota record stand.
+            }
+            else if (refused)
+            {
+                st.RefusedUtc = DateTime.UtcNow;
             }
             else if (failed)
             {
@@ -1931,6 +2006,7 @@ internal static partial class Program
                 st.ConsecutiveFailures = 0;
                 st.LastFailure = null;
                 st.FailedUtc = null;
+                st.RefusedUtc = null;
                 // The work closed: the run finished and left nothing waiting.
                 // Hops count passes over ONE piece of work, and only the owner
                 // answering a question used to reset them — so twelve good runs
@@ -1947,6 +2023,7 @@ internal static partial class Program
             st.RunStartedUtc = null;
             st.RunModel = null;
             st.RunEffort = null;
+            st.RunQuiet = false;
             SaveRunnerState(agent, st);
 
             // Out of quota: pause its board work, save where it got to in the
@@ -1957,7 +2034,9 @@ internal static partial class Program
                          && CoworkPauseForQuota(cfg, agent, fatal, run.LogPath);
 
             // The owner's window already said it stopped the run.
-            if (run.ForRoom && !paused && !ownerStopped) CoworkReportRun(cfg, agent, run, failed, killed, st.LastFailure);
+            if (run.ForRoom && !paused && !ownerStopped)
+                CoworkReportRun(cfg, agent, run, failed, killed, st.LastFailure,
+                                refused ? fatal : diedOnTheWay ? turnError ?? LastLineOf(run.LogPath) ?? $"exit {code}" : null);
         }
     }
 
@@ -1987,10 +2066,17 @@ internal static partial class Program
     /// four runs died on a login error eleven seconds after starting, and only
     /// the broker log knew. The owner reads the room, not the log.
     /// </summary>
-    private static void CoworkReportRun(BrokerConfig cfg, string agent, BrokerRun run, bool failed, bool killed, string? failure)
+    /// <param name="wentDown">What a run that got going said as it went down:
+    /// refused, or dead part-way. It may have spoken already, and that is the
+    /// case that needs saying — "รับทราบค่ะบอส" with nothing after it.</param>
+    private static void CoworkReportRun(BrokerConfig cfg, string agent, BrokerRun run, bool failed, bool killed, string? failure, string? wentDown)
     {
         if (failed)
             CoworkSystemLine($"เรียก {agent} เข้าห้องไม่สำเร็จ — {RunnerTroubleTh(agent, failure ?? "exit")}");
+        else if (Redact(wentDown) is { } went && went.Length > 0)
+            CoworkSystemLine(FailureClass(went) == "other"
+                ? $"{agent} หลุดกลางทาง: {(went.Length > 160 ? went[..160] + "…" : went)} — งานบนบอร์ดที่ยังไม่เสร็จ broker จะตามให้ทำต่อเอง"
+                : $"{agent} หลุดกลางทาง — {RunnerTroubleTh(agent, went)}");
         else if (killed)
             CoworkSystemLine($"{agent} ทำงานเกิน {cfg.MaxRunSeconds / 60} นาทีที่ตั้งไว้ จึงถูกหยุด — งานบนบอร์ดที่ยังไม่เสร็จ "
                            + $"broker จะตามให้ทำต่อเองเมื่อเงียบเกิน {FollowUpIdle.TotalMinutes:F0} นาที");
@@ -2024,6 +2110,9 @@ internal static partial class Program
     {
         var low = failure.ToLowerInvariant();
         var clip = failure.Length > 160 ? failure[..160] + "…" : failure;
+        if (RefusalSigns.Any(low.Contains))
+            return $"ตัวกรองความปลอดภัยของโมเดลปฏิเสธรอบนี้ ไม่ใช่เครื่องหรือห้องเสีย งานที่ค้างจะไม่ถูกเรียกซ้ำเอง "
+                 + $"{FollowUpAfterRefusal.TotalMinutes:F0} นาที ถ้าจะทำต่อ ให้สั่งใหม่ด้วยคำอื่น หรือเปลี่ยนโมเดลของ {agent} ในห้อง";
         if (CreditSigns.Any(low.Contains))
             return agent.Equals("claude", StringComparison.OrdinalIgnoreCase)
                 ? "Claude CLI บนเครื่องนี้คิดเงินกับ API key ของ Console ที่เครดิตหมด ไม่ได้ใช้ subscription — "
@@ -2113,6 +2202,7 @@ internal static partial class Program
         st.RunStartedUtc = null;
         st.RunModel = null;
         st.RunEffort = null;
+        st.RunQuiet = false;
         SaveRunnerState(agent, st);
         try { File.Delete(OwnerStopPath(agent)); } catch { }
     }
@@ -2219,6 +2309,7 @@ internal static partial class Program
     private static string FailureClass(string? failure)
     {
         var low = (failure ?? "").ToLowerInvariant();
+        if (RefusalSigns.Any(low.Contains)) return "refused";
         if (CreditSigns.Any(low.Contains)) return "credit";
         if (VersionSigns.Any(low.Contains)) return "version";
         if (QuotaSigns.Any(low.Contains)) return "quota";
@@ -2607,6 +2698,14 @@ internal static partial class Program
         /// </summary>
         public DateTime? FailedUtc { get; set; }
 
+        /// <summary>When the model's safeguards last refused a run of this agent
+        /// (RefusalSigns); cleared by a run that gets through.</summary>
+        public DateTime? RefusedUtc { get; set; }
+
+        /// <summary>The run going now is open and between turns: waiting for a
+        /// line, not working (Program.BrokerOpenRun.cs).</summary>
+        public bool RunQuiet { get; set; }
+
         /// <summary>Out of quota: when the broker calls this agent back to its
         /// paused board work (see CoworkPauseForQuota). Null when not resting.</summary>
         public DateTime? QuotaResumeUtc { get; set; }
@@ -2698,6 +2797,8 @@ internal static partial class Program
                 ConsecutiveFailures = o["consecutiveFailures"]?.ToObject<int?>() ?? 0,
                 LastFailure = o["lastFailure"]?.ToString(),
                 FailedUtc = Utc(o["failedUtc"]),
+                RefusedUtc = Utc(o["refusedUtc"]),
+                RunQuiet = o["runQuiet"]?.ToObject<bool?>() ?? false,
                 LastBudgetLog = o["lastBudgetLog"]?.ToString(),
                 LastBudgetLogUtc = Utc(o["lastBudgetLogUtc"]),
             };
@@ -2729,6 +2830,8 @@ internal static partial class Program
                 ["consecutiveFailures"] = s.ConsecutiveFailures,
                 ["lastFailure"] = s.LastFailure,
                 ["failedUtc"] = s.FailedUtc,
+                ["refusedUtc"] = s.RefusedUtc,
+                ["runQuiet"] = s.RunQuiet,
                 ["lastBudgetLog"] = s.LastBudgetLog,
                 ["lastBudgetLogUtc"] = s.LastBudgetLogUtc,
             });
@@ -2772,12 +2875,27 @@ internal static partial class Program
         /// the boss says anything" is how one sentence becomes five sessions.
         /// </summary>
         public bool OnCall { get; init; }
+
+        /// <summary>Keep a room run open for the next line. Unset = claude only
+        /// (Program.BrokerOpenRun.cs).</summary>
+        public bool? HoldOpen { get; init; }
     }
 
     private sealed class BrokerConfig
     {
         public int PollSeconds { get; init; } = 15;
         public int IdleGraceSeconds { get; init; } = 45;
+
+        /// <summary>How long a room run waits for the owner's next line after
+        /// it goes quiet. 0 = every line gets a new process, as it used to.</summary>
+        public double HoldOpenMinutes { get; init; } = 30;
+
+        /// <summary>How long the owner waits on a busy run before the room says why.</summary>
+        public int OwnerWaitSeconds { get; init; } = 60;
+
+        /// <summary>False: a room run starts without the hooks in the owner's
+        /// settings.json, for the speed (Program.BrokerOpenRun.cs says how much).</summary>
+        public bool RoomHooks { get; init; } = true;
         public int MaxRunSeconds { get; init; } = 900;
         public int MaxHopsPerWork { get; init; } = 12;
         public int MaxSpawnsPerHour { get; init; } = 20;
@@ -2952,6 +3070,7 @@ internal static partial class Program
                     Args = Strings(r["args"]).Select(Environment.ExpandEnvironmentVariables).ToList(),
                     Cwd = Environment.ExpandEnvironmentVariables(r["cwd"]?.ToString() ?? ""),
                     OnCall = Bool(r["onCall"], false),
+                    HoldOpen = r["holdOpen"]?.Type == JTokenType.Boolean ? r["holdOpen"]!.ToObject<bool>() : null,
                     Model = r["model"]?.Type == JTokenType.String ? r["model"]!.ToString().Trim() : "",
                     ModelFlag = r["modelFlag"]?.Type == JTokenType.String ? r["modelFlag"]!.ToString().Trim() : RunnerModels.DefaultFlag,
                     Effort = r["effort"]?.Type == JTokenType.String ? r["effort"]!.ToString().Trim() : "",
@@ -2978,6 +3097,9 @@ internal static partial class Program
         {
             PollSeconds = Math.Max(5, Int(o["pollSeconds"], 15)),
             IdleGraceSeconds = Math.Max(10, Int(o["idleGraceSeconds"], 45)),
+            HoldOpenMinutes = Math.Max(0, o["holdOpenMinutes"]?.ToObject<double?>() ?? 30),
+            OwnerWaitSeconds = Math.Max(1, Int(o["ownerWaitSeconds"], 60)),
+            RoomHooks = o["roomHooks"]?.Type != JTokenType.Boolean || o["roomHooks"]!.ToObject<bool>(),
             MaxRunSeconds = Math.Max(60, Int(b["maxRunSeconds"], 900)),
             MaxHopsPerWork = Math.Max(1, Int(b["maxHopsPerWork"], 12)),
             MaxSpawnsPerHour = Math.Max(1, Int(b["maxSpawnsPerHour"], 20)),
@@ -3009,6 +3131,8 @@ internal static partial class Program
   "//": "BrainX broker. One entry per agent that can be STARTED headless.",
   "//pollSeconds": "How often the queue is checked.",
   "//idleGraceSeconds": "A live session whose tool-call counter has not moved for this long is parked, not working.",
+  "//holdOpenMinutes": "How long a room run on claude stays open for the owner's next line after it goes quiet. It costs no tokens while it waits. 0 = a new process for every line.",
+  "//roomHooks": "false = a room run on claude starts without the hooks in settings.json. About eight times faster to answer, and it no longer gets the repo's traps or a file's past lessons pushed to it.",
   "//budget": "Ceilings, because an autonomous loop with no ceiling is a bill.",
   "//staleMailMinutes": "Work older than this is put in front of a BUSY agent too. Busy never meant busy with THIS.",
   "//idleStudy": "When nothing is waiting, open a measured retrieval gap in the cowork room so the agents fill it. false turns it off entirely.",
