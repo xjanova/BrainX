@@ -33,7 +33,7 @@ namespace BrainX.Mcp;
 // the PowerShell versions ran under SilentlyContinue + catch {} for that reason.
 // ─────────────────────────────────────────────────────────────────────────
 
-internal static class NativeHooks
+internal static partial class NativeHooks
 {
     /// <summary>Runs the hook named by args[0]. Null when it is not one of these,
     /// which sends the caller on to the ordinary subcommands.</summary>
@@ -47,6 +47,8 @@ internal static class NativeHooks
             "hook-pretool-warn" => PreToolWarn,
             "hook-error-recall" => ErrorRecall,
             "hook-auto-ingest" => AutoIngest,
+            "hook-brain-start" => BrainStart,
+            "hook-session-end" => SessionEnd,
             "hook-probe" => Probe,
             _ => null,
         };
@@ -568,13 +570,7 @@ internal static class NativeHooks
         if (entries.Count == 0) return 0;
 
         // Scoring mirrors calibrate.py exactly (180 real sessions, 2026-08-28).
-        var cwdLeaf = "";
-        if (Str(payload, "cwd") is { Length: > 0 } cwd)
-        {
-            cwdLeaf = Path.GetFileName(cwd.TrimEnd('\\', '/')).ToLowerInvariant();
-            cwdLeaf = Regex.Replace(cwdLeaf, "^(code|d|e)[-]+", "");
-            cwdLeaf = Regex.Replace(cwdLeaf, "[^a-z0-9]", "");
-        }
+        var cwdLeaf = Str(payload, "cwd") is { Length: > 0 } cwd ? RepoLeaf(cwd) : "";
         var today = DateTime.Now.Date;
         var apSegs = fpn.Trim('\\').Split('\\');
         Lesson? best = null;
@@ -609,6 +605,14 @@ internal static class NativeHooks
                 + "). Call brain_get_note " + best.Id + " BEFORE editing if you have not read it this session" + also + "."));
         }
         return 0;
+    }
+
+    /// <summary>A working folder's name as the vault's project keys spell it.</summary>
+    private static string RepoLeaf(string cwd)
+    {
+        var leaf = Path.GetFileName(cwd.TrimEnd('\\', '/')).ToLowerInvariant();
+        leaf = Regex.Replace(leaf, "^(code|d|e)[-]+", "");
+        return Regex.Replace(leaf, "[^a-z0-9]", "");
     }
 
     private static int Score(Lesson e, string fpn, string[] apSegs, string cwdLeaf, DateTime today)
@@ -786,7 +790,7 @@ internal static class NativeHooks
 
         var tool = Str(payload, "tool_name");
         if (p.EndsWith(".md", StringComparison.OrdinalIgnoreCase))
-            try { PostIngest(Arg(args, "--ingest-url") ?? "http://localhost:5142/api/brain/auto-ingest", p); } catch { }
+            try { PostIngest(Arg(args, "--ingest-url") ?? IngestUrl, p); } catch { }
 
         if (!string.Equals(tool, "Read", StringComparison.OrdinalIgnoreCase))
             try
@@ -805,6 +809,8 @@ internal static class NativeHooks
             catch { }
         return 0;
     }
+
+    private const string IngestUrl = "http://localhost:5142/api/brain/auto-ingest";
 
     // In its own method so a Read of a .cs file never loads System.Net.Http.
     private static void PostIngest(string url, string path)

@@ -8,8 +8,8 @@ using Newtonsoft.Json.Linq;
 namespace BrainX.Mcp;
 
 /// <summary>
-/// `brainx-mcp install-hooks` — write the Claude Code hook scripts and
-/// register them, and the native hooks, in ~/.claude/settings.json.
+/// `brainx-mcp install-hooks` — register the native Claude Code hooks in
+/// ~/.claude/settings.json and write the two files that go with them.
 ///
 /// WHY THIS EXISTS. Until 2026-08-28 these scripts lived only in one
 /// developer's ~/.claude/scripts and in no repository at all. Three
@@ -27,15 +27,14 @@ namespace BrainX.Mcp;
 /// DESIGN RULES, each paid for by a past incident:
 ///  - settings.json is MERGED, never rewritten. The user owns that file and it
 ///    holds unrelated hooks, plugins and preferences.
-///  - Every entry this writes carries a marker (<see cref="Marker"/> on a script,
-///    <see cref="NativeTag"/> on a native hook), so a re-run REPLACES its own
-///    entries and touches nothing else. Idempotent.
+///  - Every entry this writes carries <see cref="NativeTag"/>, so a re-run
+///    REPLACES its own entries and touches nothing else. Idempotent.
 ///  - The file is written WITHOUT a BOM. Claude Code parses it with a JSON
 ///    parser that rejects one, and a BOM here has bricked a config before.
 ///  - A timestamped backup is written first, and the merged document must
 ///    re-parse before it replaces the original.
-///  - The hooks that fire on every tool call and every prompt run in the binary
-///    (NativeHooks.cs), in exec form: `command` is the exe, `args` its arguments,
+///  - Every hook runs in the binary (NativeHooks.cs), in exec form: `command` is
+///    the exe, `args` its arguments,
 ///    no `shell`. Exec form is not a style choice. Powershell.exe alone took 3 to
 ///    5.5 s here and Git Bash 0.3 to 0.4 s, per hook, per tool call; with `args`
 ///    Claude Code starts the exe directly. It also cannot repeat 2026-09-25: there
@@ -46,21 +45,17 @@ internal static partial class Program
     /// <summary>The resolved vault, for callers outside this partial (CliInstall).</summary>
     internal static string VaultPath => _vaultPath;
 
-    /// <summary>Stamped into every command line this installer writes. It is
-    /// how a re-run finds its own entries among the user's.</summary>
-    private const string Marker = "# brainx-hooks";
+    /// <summary>Bumped when the SET of hooks changes.
+    /// v3: five of them moved from PowerShell into the binary.
+    /// v4: the last two did, so no hook starts PowerShell.</summary>
+    private const string HooksVersion = "v4";
 
-    /// <summary>Bumped when the SET of hooks changes (not when a script's body
-    /// changes — that is handled by overwriting the script file).
-    /// v3: five of them moved from PowerShell into the binary.</summary>
-    private const string HooksVersion = "v3";
-
-    /// <summary>The marker on a native hook. A real argument, which the binary
-    /// ignores, because exec form has no shell to make a trailing `#` a comment.</summary>
+    /// <summary>Stamped on every entry this installer writes: how a re-run finds its
+    /// own among the user's. A real argument, which the binary ignores, because
+    /// exec form has no shell to make a trailing `#` a comment.</summary>
     private const string NativeTag = "brainx-hooks-" + HooksVersion;
 
-    /// <summary>Exactly one of Script and Native is set.</summary>
-    private sealed record HookSpec(string Event, string? Matcher, string? Script, string? Native, int TimeoutSec);
+    private sealed record HookSpec(string Event, string? Matcher, string Native, int TimeoutSec);
 
     /// <summary>
     /// The wiring, in one place. Matchers are deliberately narrow: PreToolUse
@@ -70,20 +65,20 @@ internal static partial class Program
     /// </summary>
     private static readonly HookSpec[] Hooks =
     {
-        new("SessionStart",     null,                    "session-start.ps1", null,                15),
-        new("UserPromptSubmit", null,                    null,                "hook-prompt-gate",  15),
-        new("PreToolUse",       "Edit|Write|MultiEdit",  null,                "hook-pretool-warn", 10),
-        new("PostToolUse",      ".*",                    null,                "hook-tool-log",     10),
-        new("PostToolUse",      "Bash|PowerShell",       null,                "hook-error-recall", 10),
-        new("Stop",             null,                    null,                "hook-brain-end",    15),
+        new("SessionStart",     null,                    "hook-brain-start",  15),
+        new("UserPromptSubmit", null,                    "hook-prompt-gate",  15),
+        new("PreToolUse",       "Edit|Write|MultiEdit",  "hook-pretool-warn", 10),
+        new("PostToolUse",      ".*",                    "hook-tool-log",     10),
+        new("PostToolUse",      "Bash|PowerShell",       "hook-error-recall", 10),
+        new("Stop",             null,                    "hook-brain-end",    15),
         // v2: a session that closes, or loses its context to compaction, without
         // a #session-handoff note leaves an auto digest instead of nothing.
-        new("SessionEnd",       null,                    "session-end.ps1",   null,                30),
-        new("PreCompact",       null,                    "session-end.ps1",   null,                30),
+        new("SessionEnd",       null,                    "hook-session-end",  30),
+        new("PreCompact",       null,                    "hook-session-end",  30),
     };
 
     /// <summary>
-    /// Scripts the table above no longer names. Needed by the filename arm of
+    /// The scripts the table above replaced. Needed by the filename arm of
     /// <see cref="IsOurs"/>: an entry wired by hand before this installer existed
     /// carries no marker, and if it survived the upgrade every native hook would
     /// run beside the PowerShell it replaced. The files stay on disk, unused.
@@ -91,11 +86,11 @@ internal static partial class Program
     private static readonly string[] RetiredScripts =
     {
         "brain-prompt-gate.ps1", "brain-pretool-warn.ps1", "brain-tool-logger.ps1",
-        "brain-error-recall.ps1", "stop-hook.ps1",
+        "brain-error-recall.ps1", "stop-hook.ps1", "session-start.ps1", "session-end.ps1",
     };
 
-    /// <summary>Shipped alongside the hooks but not registered: called BY
-    /// session-start.ps1, and a diagnostic the install summary points at.</summary>
+    /// <summary>Shipped alongside the hooks but not registered: the diagnostic the
+    /// install summary points at, and the aliases hook-prompt-gate reads.</summary>
     private static readonly string[] SupportFiles = { "brain-stats.ps1", "brain-aliases.json" };
 
     internal static int InstallHooksCli(string[] args)
@@ -111,10 +106,9 @@ internal static partial class Program
             {
                 Console.WriteLine("Usage: brainx-mcp install-hooks [--vault PATH] [--dry-run] [--quiet]");
                 Console.WriteLine();
-                Console.WriteLine("Writes the brain-first hook scripts to ~/.claude/scripts and registers them,");
-                Console.WriteLine("with the native `brainx-mcp hook-*` hooks, in ~/.claude/settings.json (merged,");
-                Console.WriteLine("never overwritten). Re-running updates the scripts and replaces only this");
-                Console.WriteLine("installer's own entries.");
+                Console.WriteLine("Registers the native `brainx-mcp hook-*` hooks in ~/.claude/settings.json (merged,");
+                Console.WriteLine("never overwritten) and writes brain-stats.ps1 and brain-aliases.json to");
+                Console.WriteLine("~/.claude/scripts. Re-running replaces only this installer's own entries.");
                 Console.WriteLine();
                 Console.WriteLine("  --dry-run   show what would change; write nothing");
                 return 0;
@@ -154,14 +148,13 @@ internal static partial class Program
         var scriptsDir = Path.Combine(claudeDir, "scripts");
         Say($"  target: {scriptsDir}");
 
-        // ── 1. scripts ────────────────────────────────────────────────────
+        // ── 1. support files ──────────────────────────────────────────────
         var asm = Assembly.GetExecutingAssembly();
-        var wanted = Hooks.Where(h => h.Script != null).Select(h => h.Script!).Concat(SupportFiles).Distinct().ToList();
         var noBom = new UTF8Encoding(false);
         int written = 0, unchanged = 0;
 
         if (!dryRun) Directory.CreateDirectory(scriptsDir);
-        foreach (var file in wanted)
+        foreach (var file in SupportFiles)
         {
             var resName = asm.GetManifestResourceNames()
                 .FirstOrDefault(n => n.EndsWith("." + file, StringComparison.OrdinalIgnoreCase));
@@ -173,11 +166,6 @@ internal static partial class Program
             using var stream = asm.GetManifestResourceStream(resName)!;
             using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
             var body = reader.ReadToEnd();
-
-            // The scripts prefer $env:BRAINX_VAULT and fall back to this token.
-            // Substituting at install time means a machine with no env var set
-            // still resolves the right vault.
-            body = body.Replace("__BRAINX_VAULT__", vaultPath.TrimEnd('\\', '/'));
 
             var dest = Path.Combine(scriptsDir, file);
             // A .ps1 carrying non-ASCII MUST keep a BOM: Windows PowerShell 5.1
@@ -218,17 +206,6 @@ internal static partial class Program
         var hooksNode = root["hooks"] as JObject;
         if (hooksNode == null) { hooksNode = new JObject(); root["hooks"] = hooksNode; }
 
-        // The script path is written ABSOLUTE, with forward slashes, never as
-        // "$env:USERPROFILE\.claude\scripts\x.ps1". The $env form only resolves
-        // when Claude Code honours "shell": "powershell"; anything that rewrites
-        // settings.json and drops that field hands the command to Git Bash, which
-        // expands $env:USERPROFILE to ":USERPROFILE". PowerShell then rejects
-        // the path and every hook fails silently. That happened on 2026-09-25
-        // 22:15 and nothing fired for two weeks (892 sessions). A forward-slash
-        // absolute path means the same thing to bash, cmd and PowerShell. It is
-        // also right when the Claude config dir is not ~/.claude.
-        var scriptsDirForCmd = scriptsDir.Replace('\\', '/').TrimEnd('/');
-
         // The binary a native hook names. Only a real brainx-mcp will do: under
         // `dotnet brainx-mcp.dll` ProcessPath is dotnet.exe, and every hook would
         // then run the bare .NET host.
@@ -261,9 +238,7 @@ internal static partial class Program
             {
                 var entry = new JObject();
                 if (h.Matcher != null) entry["matcher"] = h.Matcher;
-                entry["hooks"] = new JArray(h.Native != null
-                    ? NativeHandler(hookExe, h.Native, vaultArg, NativeTag, null, h.TimeoutSec, execForm)
-                    : ScriptHandler($"{scriptsDirForCmd}/{h.Script}", h.TimeoutSec, execForm));
+                entry["hooks"] = new JArray(NativeHandler(hookExe, h.Native, vaultArg, NativeTag, null, h.TimeoutSec, execForm));
                 arr.Add(entry);
                 added++;
             }
@@ -315,31 +290,6 @@ internal static partial class Program
     }
 
     /// <summary>
-    /// A hook handler that runs one of the scripts that stay. In exec form
-    /// PowerShell starts once. With "shell": "powershell" Claude Code starts one
-    /// to run this line and the line starts another, and two boots of 4 to 5 s
-    /// are most of SessionStart's 15 s. It timed out 144 of 183 times in the two
-    /// days counted on 2026-10-30, and a hook that times out delivers nothing,
-    /// repo pack included.
-    /// </summary>
-    private static JObject ScriptHandler(string script, int timeoutSec, bool execForm) => execForm
-        ? new JObject
-        {
-            ["type"] = "command",
-            ["command"] = "powershell.exe",
-            // The scripts declare no parameters, so the tag only lands in $args.
-            ["args"] = new JArray("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "--tag", NativeTag),
-            ["timeout"] = timeoutSec,
-        }
-        : new JObject
-        {
-            ["type"] = "command",
-            ["command"] = $"powershell -NoProfile -ExecutionPolicy Bypass -File \"{script}\" {Marker} {HooksVersion}",
-            ["shell"] = "powershell",
-            ["timeout"] = timeoutSec,
-        };
-
-    /// <summary>
     /// A hook handler that runs this binary. Exec form unless Claude Code is too
     /// old for it; shell form then carries no "shell" field, because a quoted
     /// path at the start of a PowerShell line is a string, not a command.
@@ -359,8 +309,9 @@ internal static partial class Program
         }
         else
         {
-            // Forward slashes for the reason given at scriptsDirForCmd, and a
-            // backslash before a closing quote would escape it in bash.
+            // Forward slashes: they mean the same to bash, cmd and PowerShell, and a
+            // backslash before a closing quote would escape it in bash. Git Bash
+            // mangling a path took every hook out for two weeks from 2026-09-25.
             var quoted = args.Select(a => a.Contains(' ') || a.Contains('\\') || a.Contains(':') ? $"\"{a.Replace('\\', '/')}\"" : a);
             handler["command"] = $"\"{exe.Replace('\\', '/')}\" {string.Join(" ", quoted)}";
         }
@@ -383,7 +334,7 @@ internal static partial class Program
 
     /// <summary>
     /// True when this array element is one of ours — by a marker, or by naming
-    /// one of our scripts.
+    /// one of the scripts the hooks used to be.
     ///
     /// The filename arm is the MIGRATION path and it is not optional: every
     /// machine that wired these hooks by hand before this installer existed
@@ -400,8 +351,7 @@ internal static partial class Program
             var cmd = HookHealth.CommandText(h);
             if (cmd.Length == 0) return false;
             if (HookHealth.IsInstallerHook(cmd)) return true;
-            return Hooks.Where(spec => spec.Script != null).Select(spec => spec.Script!).Concat(RetiredScripts)
-                        .Any(script => cmd.Contains(script, StringComparison.OrdinalIgnoreCase));
+            return RetiredScripts.Any(script => cmd.Contains(script, StringComparison.OrdinalIgnoreCase));
         });
     }
 }
