@@ -36,6 +36,16 @@ public static class HookHealth
     /// the PowerShell entry back on its next start.</summary>
     public const string AutoIngestNativeTag = "obsidianx-auto-ingest v5+native";
 
+    /// <summary>The hook set `install-hooks` writes, and the mark on each of its
+    /// entries. BrainX.Client compares this with settings.json to decide whether
+    /// to run the installer after an update, so bump it when the set changes AND
+    /// when a script's body does: an unbumped change reaches no other machine.
+    /// v3: five of them moved from PowerShell into the binary.
+    /// v4: the last two did, so no hook starts PowerShell.</summary>
+    public const string InstallerVersion = "v4";
+    public const string InstallerTag = "brainx-hooks-" + InstallerVersion;
+    public const string InstallerScriptMark = "# brainx-hooks " + InstallerVersion;
+
     /// <summary>What a binary with the native hooks prints for `hook-probe`.</summary>
     public const string NativeProbeAnswer = "brainx-native-hooks";
 
@@ -89,13 +99,67 @@ public static class HookHealth
         !string.IsNullOrEmpty(exe) && File.Exists(exe)
         && Capture(exe, "hook-probe")?.Trim() == NativeProbeAnswer;
 
+    /// <summary>
+    /// Whether `install-hooks` has work to do on this machine: it has entries of
+    /// the installer and one of them is from an older set, needs a file that is
+    /// gone, runs a binary from where the updater replaces it, or is in shell form
+    /// on a Claude Code that has moved past it.
+    ///
+    /// False with no such entries, because no hooks is a choice (see
+    /// <see cref="Problems"/>), and false for a settings.json that will not parse,
+    /// which the installer refuses to touch. Reads one file; it starts a process
+    /// only for a shell-form entry, so a current machine pays nothing at startup.
+    /// </summary>
+    public static bool InstallerHooksOutdated(string claudeDir)
+    {
+        JObject root;
+        try { root = JObject.Parse(File.ReadAllText(Path.Combine(claudeDir, "settings.json"))); }
+        catch { return false; }
+        if (root["hooks"] is not JObject hooks) return false;
+
+        var shellForm = false;
+        foreach (var h in hooks.Properties().Select(p => p.Value).OfType<JArray>()
+                     .SelectMany(groups => groups).SelectMany(g => g["hooks"] as JArray ?? new JArray()))
+        {
+            var cmd = CommandText(h);
+            if (!IsInstallerHook(cmd)) continue;
+            if (!cmd.Contains("--tag " + InstallerTag, StringComparison.Ordinal)
+                && !cmd.Contains(InstallerScriptMark, StringComparison.Ordinal)) return true;
+
+            var (target, isBinary) = Needs(h, cmd);
+            if (!string.IsNullOrEmpty(target) && !target.Contains('$'))
+            {
+                var path = target.Replace('/', Path.DirectorySeparatorChar);
+                if (!File.Exists(path) || (isBinary && McpRuntimePaths.IsRetiredLocation(path))) return true;
+            }
+            shellForm |= h["args"] is not JArray;
+        }
+        return shellForm && ExecFormSupported();
+    }
+
+    /// <summary>
+    /// Run `install-hooks --upgrade` when <see cref="InstallerHooksOutdated"/> says
+    /// so. The installer is the one place that knows the wiring, and an update
+    /// reaches no settings.json by itself: a machine stayed on PowerShell until
+    /// someone ran this by hand. True when it ran and succeeded.
+    ///
+    /// The binary is asked first. One without the native hooks would write the
+    /// scripts back, and a half-failed mirror still has an exe; the next app start
+    /// tries again. Takes seconds at worst, so never for the UI thread.
+    /// </summary>
+    public static bool UpgradeInstallerHooks(string claudeDir, string? exe, string vault)
+    {
+        if (!InstallerHooksOutdated(claudeDir) || !RunsNativeHooks(exe)) return false;
+        return Capture(exe!, $"install-hooks --upgrade --quiet --vault \"{vault.TrimEnd('\\', '/')}\"", 60_000, claudeDir) != null;
+    }
+
     // cmd: on Windows `claude` is an npm .cmd shim, which only a shell can start.
     private static string? ProbeClaudeVersion() =>
         OperatingSystem.IsWindows() ? Capture("cmd.exe", "/c claude --version") : Capture("claude", "--version");
 
-    /// <summary>A command's stdout, or null when it fails or outlasts 8 s. Its stdin
-    /// is closed, which is what makes a server taking the place of a hook exit.</summary>
-    private static string? Capture(string file, string arguments)
+    /// <summary>A command's stdout, or null when it fails or outlasts its time. Its
+    /// stdin is closed, which is what makes a server taking the place of a hook exit.</summary>
+    private static string? Capture(string file, string arguments, int timeoutMs = 8000, string? claudeDir = null)
     {
         try
         {
@@ -107,12 +171,14 @@ public static class HookHealth
                 RedirectStandardError = true,
                 CreateNoWindow = true,
             };
+            // So the installer writes to the config that was read, whatever it inherits.
+            if (claudeDir != null) psi.Environment["CLAUDE_CONFIG_DIR"] = claudeDir;
             using var p = System.Diagnostics.Process.Start(psi);
             if (p == null) return null;
             p.StandardInput.Close();
             var read = p.StandardOutput.ReadToEndAsync();
             _ = p.StandardError.ReadToEndAsync();
-            if (p.WaitForExit(8000) && p.ExitCode == 0) return read.GetAwaiter().GetResult();
+            if (p.WaitForExit(timeoutMs) && p.ExitCode == 0) return read.GetAwaiter().GetResult();
             try { p.Kill(true); } catch { }
             return null;
         }
@@ -168,18 +234,15 @@ public static class HookHealth
                         && !string.Equals(shell, "powershell", StringComparison.OrdinalIgnoreCase))
                         envWithoutShell++;
 
-                    // What the hook needs on disk: a script, or the binary itself.
                     // A native hook whose exe is gone is as dead as a missing script.
-                    var script = ScriptPath(h);
-                    var native = h["args"] is JArray ? h["command"]?.ToString() : QuotedExe.Match(cmd).Groups[1].Value;
-                    var target = script ?? native;
+                    var (target, isBinary) = Needs(h, cmd);
                     if (!string.IsNullOrEmpty(target) && !target.Contains('$'))
                     {
                         var path = target.Replace('/', Path.DirectorySeparatorChar);
                         if (!File.Exists(path)) missing.Add(Path.GetFileName(path));
                         // A hook is an agent-launched process too: place matters, not
                         // only existence (see McpRuntimePaths).
-                        if (target == native && McpRuntimePaths.IsRetiredLocation(path)) inRetired++;
+                        if (isBinary && McpRuntimePaths.IsRetiredLocation(path)) inRetired++;
                     }
                 }
             }
@@ -204,6 +267,14 @@ public static class HookHealth
                     "tool-log.ndjson last written {0:0}h ago, so the PostToolUse hooks may not be firing", age.TotalHours));
         }
         return problems;
+    }
+
+    /// <summary>What a handler needs on disk: its script, or the binary itself.</summary>
+    private static (string? Target, bool IsBinary) Needs(JToken handler, string commandText)
+    {
+        var script = ScriptPath(handler);
+        if (script != null) return (script, false);
+        return (handler["args"] is JArray ? handler["command"]?.ToString() : QuotedExe.Match(commandText).Groups[1].Value, true);
     }
 
     /// <summary>The script a handler runs, in exec form or shell form. Null for a binary.</summary>

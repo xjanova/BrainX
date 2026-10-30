@@ -76,8 +76,11 @@ internal static partial class Program
         Directory.CreateDirectory(Path.Combine(claude, "scripts"));
         Directory.CreateDirectory(Path.Combine(vault, ".obsidianx", "push-pack"));
         Directory.CreateDirectory(repo);
-        var aliases = FindHookScript("brain-aliases.json");
-        if (aliases != null) File.Copy(aliases, Path.Combine(claude, "scripts", "brain-aliases.json"), true);
+        // With no AppData\Local under USERPROFILE, a PowerShell that lives long enough
+        // writes Microsoft\Windows\PowerShell\ModuleAnalysisCache into its cwd.
+        Directory.CreateDirectory(Path.Combine(home, "AppData", "Local"));
+        foreach (var support in new[] { "brain-aliases.json", "brain-stats.ps1" })
+            if (FindHookScript(support) is { } file) File.Copy(file, Path.Combine(claude, "scripts", support), true);
 
         string Lesson(string p, string n, string id, string? s, bool w, string? t, string m) =>
             new JObject { ["p"] = p, ["n"] = n, ["id"] = id, ["s"] = s, ["w"] = w, ["t"] = t, ["m"] = m }.ToString(Formatting.None);
@@ -127,7 +130,7 @@ internal static partial class Program
     {
         var sb = new StringBuilder();
         sb.Append("exit-independent stdout: ").AppendLine(Mask(stdout, w));
-        foreach (var f in new[] { "tool-log.ndjson", "brain-search-log.ndjson", "brain-decisions.ndjson", "brain-stop-log.ndjson" })
+        foreach (var f in new[] { "tool-log.ndjson", "brain-search-log.ndjson", "brain-decisions.ndjson", "brain-stop-log.ndjson", "brain-session-end.ndjson" })
         {
             var p = Path.Combine(w.Claude, f);
             if (!File.Exists(p)) continue;
@@ -141,6 +144,14 @@ internal static partial class Program
                 sb.Append(Path.GetFileName(f)).Append(": ").AppendLine(File.ReadAllText(f).Replace("\r\n", "⏎"));
         var activity = Path.Combine(w.Vault, ".obsidianx", "agent-bus", "activity", "claude-code.ndjson");
         if (File.Exists(activity)) sb.Append("activity: ").AppendLine(Mask(File.ReadAllText(activity).Replace("\r\n", "⏎"), w));
+        var digests = Path.Combine(w.Vault, "Notes", "Claude-Sessions", "auto");
+        if (Directory.Exists(digests))
+            foreach (var f in Directory.GetFiles(digests).OrderBy(x => x, StringComparer.Ordinal))
+            {
+                var bytes = File.ReadAllBytes(f);
+                sb.Append(Path.GetFileName(f)).Append(" bom=").Append(bytes.Length >= 3 && bytes[0] == 0xEF).Append(": ");
+                sb.AppendLine(Mask(new UTF8Encoding(false).GetString(bytes), w));
+            }
         foreach (var f in extraFiles)
             sb.Append(Path.GetFileName(f)).Append(": ").AppendLine(File.Exists(f) ? Mask(File.ReadAllText(f), w) : "(none)");
         return sb.ToString();
@@ -155,7 +166,8 @@ internal static partial class Program
     }
 
     private sealed record HookCase(string Name, string Script, string Hook, Func<HookWorld, string> Stdin,
-                                   Action<HookWorld>? Setup = null, string[]? Files = null, bool InRepo = false, string[]? Extra = null);
+                                   Action<HookWorld>? Setup = null, string[]? Files = null, bool InRepo = false, string[]? Extra = null,
+                                   Func<HookWorld, string>? WorkDir = null, Func<HookWorld, string>? EnvVault = null);
 
     private static List<HookCase> HookCases()
     {
@@ -325,6 +337,7 @@ internal static partial class Program
             new("recall: another tool is ignored", "brain-error-recall.ps1", "hook-error-recall",
                 _ => Payload(Tool("Read", new JObject { ["stdout"] = "fatal: ENOENT" }))),
         };
+        cases.AddRange(SessionHookCases());
         return cases;
     }
 
@@ -356,9 +369,9 @@ internal static partial class Program
                     // As the installer stamps it, BOM included: 5.1 reads these as ANSI otherwise.
                     File.WriteAllText(patched, File.ReadAllText(script).Replace("__BRAINX_VAULT__", a.Vault), new UTF8Encoding(true));
 
-                    var ps = await RunScript(patched, c.Stdin(a), a.Home, a.Vault, c.InRepo ? a.Repo : null);
+                    var ps = await RunScript(patched, c.Stdin(a), a.Home, c.EnvVault?.Invoke(a) ?? a.Vault, c.WorkDir?.Invoke(a) ?? (c.InRepo ? a.Repo : null));
                     var extra = (c.Extra ?? Array.Empty<string>()).Concat(new[] { "--vault", b.Vault }).ToArray();
-                    var native = await RunNative(exe, c.Hook, c.Stdin(b), b.Home, b.Vault, c.InRepo ? b.Repo : null, extra);
+                    var native = await RunNative(exe, c.Hook, c.Stdin(b), b.Home, c.EnvVault?.Invoke(b) ?? b.Vault, c.WorkDir?.Invoke(b) ?? (c.InRepo ? b.Repo : null), extra);
                     return (c.Name, Ps: (ps.Exit, Evidence(a, ps.Stdout)), Native: (native.Exit, Evidence(b, native.Stdout)));
                 }
                 finally { gate.Release(); }
@@ -387,7 +400,7 @@ internal static partial class Program
                          ("warn: the middle tier goes to the agent", "additionalContext"),
                          ("recall: a masked build failure", "cs1061: seen before"),
                          ("recall: several tokens cite distinct notes", "e00000000003"),
-                     })
+                     }.Concat(SessionHookSayings))
             {
                 var r = results.Single(x => x.Name == name);
                 Check($"not vacuous: {name}", r.Ps.Item2.Contains(says, StringComparison.Ordinal), r.Ps.Item2);
@@ -404,13 +417,14 @@ internal static partial class Program
         try
         {
             var w = MakeWorld(root, "w");
-            foreach (var hook in new[] { "hook-tool-log", "hook-pretool-warn", "hook-error-recall", "hook-brain-end", "hook-auto-ingest", "hook-prompt-gate" })
+            foreach (var hook in new[] { "hook-tool-log", "hook-pretool-warn", "hook-error-recall", "hook-brain-end", "hook-auto-ingest", "hook-prompt-gate", "hook-session-end", "hook-brain-start" })
                 foreach (var (label, input) in new[] { ("nothing", ""), ("garbage", "{ not json"), ("a bare array", "[1,2]"), ("a tool_input of the wrong type", "{\"tool_name\":\"Edit\",\"tool_input\":3}") })
                 {
                     var r = await RunNative(exe, hook, input, w.Home, w.Vault, null, "--vault", w.Vault);
                     // A Stop with no payload is a turn with no transcript, not a
                     // failure: it reads the tool log, which these runs have written to.
-                    var mayNudge = hook == "hook-brain-end";
+                    // SessionStart reads no payload at all and always has the stats line.
+                    var mayNudge = hook is "hook-brain-end" or "hook-brain-start";
                     Check($"{hook} on {label}: exit 0, and nothing on stdout or stderr",
                           r.Exit == 0 && (mayNudge || r.Stdout.Length == 0) && r.Stderr.Length == 0, $"exit {r.Exit} [{r.Stdout}] [{r.Stderr}]");
                 }
@@ -486,7 +500,7 @@ internal static partial class Program
         // BrainX.Client deletes any brainx-mcp command containing " hook-stop" or
         // " hook-session-start" as its own wake hook (UpsertWakeHook). A Stop
         // hook named after those would vanish on the app's next start.
-        var names = new[] { "hook-tool-log", "hook-prompt-gate", "hook-brain-end", "hook-pretool-warn", "hook-error-recall", "hook-auto-ingest" };
+        var names = new[] { "hook-tool-log", "hook-prompt-gate", "hook-brain-end", "hook-pretool-warn", "hook-error-recall", "hook-auto-ingest", "hook-brain-start", "hook-session-end" };
         Check("no native hook name starts with what the client takes for a wake hook",
               names.All(n => !n.StartsWith("hook-stop", StringComparison.Ordinal) && !n.StartsWith("hook-session-start", StringComparison.Ordinal)));
         // The installed client looks for this substring, or it adds the script back.
@@ -567,35 +581,34 @@ internal static partial class Program
             Check("settings.json has no BOM", bytes[0] == (byte)'{');
             Check("a backup of the old file is kept", Directory.GetFiles(claude, "settings.json.bak-*").Length == 1);
 
-            var all = new[] { "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop" }.SelectMany(ev => Handlers(s, ev)).ToList();
+            var events = new[] { "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SessionEnd", "PreCompact" };
+            var all = events.SelectMany(ev => Handlers(s, ev)).ToList();
             var native = all.Where(h => h["args"] is JArray).ToList();
-            Check("exec form: five hooks and the auto-ingest name the binary directly, with no shell",
-                  native.Count == 6 && native.All(h => h["shell"] == null && File.Exists((string?)h["command"])
+            Check("exec form: every hook and the auto-ingest name the binary directly, with no shell",
+                  native.Count == 9 && native.All(h => h["shell"] == null && File.Exists((string?)h["command"])
                       && Path.GetFileNameWithoutExtension((string?)h["command"]) == "brainx-mcp"),
                   string.Join(" | ", native.Select(h => h.ToString(Formatting.None))));
             foreach (var (ev, matcher, sub, timeout) in new[]
                      {
                          ("UserPromptSubmit", (string?)null, "hook-prompt-gate", 15), ("PreToolUse", "Edit|Write|MultiEdit", "hook-pretool-warn", 10),
                          ("PostToolUse", ".*", "hook-tool-log", 10), ("PostToolUse", "Bash|PowerShell", "hook-error-recall", 10), ("Stop", null, "hook-brain-end", 15),
+                         ("SessionStart", null, "hook-brain-start", 15), ("SessionEnd", null, "hook-session-end", 30), ("PreCompact", null, "hook-session-end", 30),
                      })
             {
                 var group = (s["hooks"]![ev] as JArray)!.FirstOrDefault(g => (g["hooks"]![0]!["args"] as JArray)?[0]?.ToString() == sub);
                 Check($"{sub} sits on {ev} with its matcher, timeout, vault and tag",
                       group != null && (string?)group["matcher"] == matcher && (int?)group["hooks"]![0]!["timeout"] == timeout
-                      && group["hooks"]![0]!["args"]!.Select(x => x.ToString()).SequenceEqual(new[] { sub, "--vault", vault, "--tag", "brainx-hooks-v3" }),
+                      && group["hooks"]![0]!["args"]!.Select(x => x.ToString()).SequenceEqual(new[] { sub, "--vault", vault, "--tag", "brainx-hooks-v4" }),
                       group?.ToString(Formatting.None));
             }
 
             var text = File.ReadAllText(settings);
             Check("no ported script is left registered, marked or not",
-                  new[] { "brain-tool-logger.ps1", "brain-prompt-gate.ps1", "brain-pretool-warn.ps1", "brain-error-recall.ps1", "stop-hook.ps1", "brain-auto-ingest.ps1" }
+                  new[] { "brain-tool-logger.ps1", "brain-prompt-gate.ps1", "brain-pretool-warn.ps1", "brain-error-recall.ps1", "stop-hook.ps1", "brain-auto-ingest.ps1", "session-start.ps1", "session-end.ps1" }
                       .All(x => !text.Contains(x, StringComparison.Ordinal)), text);
-            Check("session-start and session-end stay scripts, in exec form: PowerShell boots once, not twice",
-                  new[] { ("SessionStart", "session-start.ps1"), ("SessionEnd", "session-end.ps1"), ("PreCompact", "session-end.ps1") }.All(e =>
-                      Handlers(s, e.Item1).Any(h => (string?)h["command"] == "powershell.exe" && h["shell"] == null
-                          && (h["args"] as JArray)!.Select(x => x.ToString()).SequenceEqual(new[]
-                             { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $"{scripts}/{e.Item2}", "--tag", "brainx-hooks-v3" }))),
-                  string.Join(" | ", Handlers(s, "SessionStart").Select(h => h.ToString(Formatting.None))));
+            // What a handler runs, not the file: hook-error-recall's matcher names the PowerShell tool.
+            Check("no hook starts PowerShell any more",
+                  !all.Any(h => (HookHealth.CommandText(h) + " " + h["shell"]).Contains("powershell", StringComparison.OrdinalIgnoreCase)), text);
             Check("the wake hooks are the client's and were not touched",
                   Handlers(s, "Stop").Any(h => (string?)h["command"] == wakeStop) && Handlers(s, "SessionStart").Any(h => (string?)h["command"] == wakeStart));
             Check("a hook of the user's and an unrelated setting survive",
@@ -606,9 +619,11 @@ internal static partial class Program
                   (string?)ingest["matcher"] == "Read|Edit|MultiEdit|Write" && text.Contains("http://localhost:6000/api/brain/auto-ingest")
                   && text.Contains("obsidianx-auto-ingest v5"), ingest.ToString(Formatting.None));
 
-            Check("the ported scripts are not written again, what still runs on them is",
+            Check("the ported scripts are not written again, the diagnostic and the aliases are",
                   !File.Exists(Path.Combine(claude, "scripts", "brain-tool-logger.ps1"))
-                  && File.Exists(Path.Combine(claude, "scripts", "session-start.ps1"))
+                  && !File.Exists(Path.Combine(claude, "scripts", "session-start.ps1"))
+                  && !File.Exists(Path.Combine(claude, "scripts", "session-end.ps1"))
+                  && File.Exists(Path.Combine(claude, "scripts", "brain-stats.ps1"))
                   && File.Exists(Path.Combine(claude, "scripts", "brain-aliases.json")));
             Check("hook health is quiet on the result", HookHealth.Problems(claude, TimeSpan.FromHours(48)).Count == 0,
                   string.Join(" | ", HookHealth.Problems(claude, TimeSpan.FromHours(48))));
@@ -629,13 +644,10 @@ internal static partial class Program
             // bare MCP server once per tool call.
             var oldClaude = await RunInstallHooks(exe, claude, vault, "2.1.100 (Claude Code)");
             var shellForm = JObject.Parse(File.ReadAllText(settings));
-            var hooks = new[] { "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop" }.SelectMany(ev => Handlers(shellForm, ev))
+            var hooks = events.SelectMany(ev => Handlers(shellForm, ev))
                 .Where(h => HookHealth.IsInstallerHook(HookHealth.CommandText(h))).ToList();
-            Check("(shell form) the scripts stay with their PowerShell shell and old marker",
-                  Handlers(shellForm, "SessionStart").Any(h => (string?)h["shell"] == "powershell"
-                      && ((string?)h["command"])!.EndsWith("session-start.ps1\" # brainx-hooks v3", StringComparison.Ordinal)));
             Check("an older Claude Code gets shell form: a quoted forward-slash path, no args, no shell field",
-                  oldClaude.Exit == 0 && hooks.Count == 5 && hooks.All(h => h["args"] == null && h["shell"] == null
+                  oldClaude.Exit == 0 && hooks.Count == 8 && hooks.All(h => h["args"] == null && h["shell"] == null
                       && ((string?)h["command"])!.StartsWith("\"", StringComparison.Ordinal) && !((string?)h["command"])!.Contains('\\')),
                   string.Join(" | ", hooks.Select(h => (string?)h["command"])));
             Check("(shell form) hook health recognises it and finds the binary", HookHealth.Problems(claude, TimeSpan.FromHours(48)).Count == 0,
