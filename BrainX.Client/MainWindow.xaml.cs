@@ -14217,6 +14217,37 @@ public partial class MainWindow : Window
     private const string BrainAutoIngestHookVersionTag = BrainAutoIngestHookMarker + " v5";
 
     /// <summary>
+    /// The hook handler for ~/.claude/settings.json. The binary, in exec form,
+    /// when <paramref name="nativeExe"/> names one; the v5 script otherwise.
+    ///
+    /// Not a tidy-up: Claude Code runs matching hooks in parallel and waits for
+    /// the slowest, and powershell.exe alone takes seconds to start, so a script
+    /// here keeps every Read and Edit that slow however fast the other hooks are.
+    /// </summary>
+    private Newtonsoft.Json.Linq.JObject BuildAutoIngestHandler(string? nativeExe)
+    {
+        if (nativeExe != null)
+            return new Newtonsoft.Json.Linq.JObject
+            {
+                ["type"] = "command",
+                ["command"] = nativeExe,
+                ["args"] = new Newtonsoft.Json.Linq.JArray(
+                    "hook-auto-ingest", "--vault", _vaultPath.TrimEnd('\\', '/'),
+                    "--ingest-url", $"{AiServerBase}/api/brain/auto-ingest",
+                    "--tag", HookHealth.AutoIngestNativeTag),
+                ["timeout"] = 10,
+            };
+
+        return new Newtonsoft.Json.Linq.JObject
+        {
+            ["type"] = "command",
+            ["command"] = BuildAutoIngestHookCommand(),
+            ["shell"] = "powershell",
+            ["timeout"] = 10,
+        };
+    }
+
+    /// <summary>
     /// The PostToolUse hook command. Claude Code hands hooks their payload as
     /// JSON on stdin ({ tool_name, tool_input: { file_path } … }); there is no
     /// CLAUDE_TOOL_INPUT environment variable. The trailing comment doubles as
@@ -14307,10 +14338,16 @@ public partial class MainWindow : Window
         return path;
     }
 
-    private void InstallClaudeHook_Click(object s, RoutedEventArgs e)
+    /// <summary><paramref name="mcpExe"/> if a hook can name it on this machine,
+    /// null for the script. Starts processes: off the UI thread.</summary>
+    private static string? NativeHookExe(string? mcpExe) =>
+        HookHealth.RunsNativeHooks(mcpExe) && HookHealth.ExecFormSupported() ? mcpExe : null;
+
+    private async void InstallClaudeHook_Click(object s, RoutedEventArgs e)
     {
         try
         {
+            var nativeExe = await Task.Run(() => NativeHookExe(ResolveBestMcpExe()));
             var path = ClaudeSettingsPath();
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 
@@ -14334,28 +14371,15 @@ public partial class MainWindow : Window
             // Remove any previous BrainX entries so re-install is idempotent
             for (int i = postToolUse.Count - 1; i >= 0; i--)
             {
-                var item = postToolUse[i];
-                var cmd = item["hooks"]?[0]?["command"]?.ToString() ?? "";
-                if (cmd.Contains(BrainAutoIngestHookMarker)) postToolUse.RemoveAt(i);
+                if (HookHealth.IsAutoIngestHook(HookHealth.CommandText(postToolUse[i]["hooks"]?[0]))) postToolUse.RemoveAt(i);
             }
 
             // New hook entry — fires after Read/Edit/Write/MultiEdit and
             // posts the file path back to our server.
-            var command = BuildAutoIngestHookCommand();
-
             postToolUse.Add(new Newtonsoft.Json.Linq.JObject
             {
                 ["matcher"] = "Read|Edit|MultiEdit|Write",
-                ["hooks"] = new Newtonsoft.Json.Linq.JArray
-                {
-                    new Newtonsoft.Json.Linq.JObject
-                    {
-                        ["type"] = "command",
-                        ["command"] = command,
-                        ["shell"] = "powershell",
-                        ["timeout"] = 10,
-                    }
-                }
+                ["hooks"] = new Newtonsoft.Json.Linq.JArray { BuildAutoIngestHandler(nativeExe) },
             });
 
             hooks["PostToolUse"] = postToolUse;
@@ -14420,8 +14444,7 @@ public partial class MainWindow : Window
             int removed = 0;
             for (int i = postToolUse.Count - 1; i >= 0; i--)
             {
-                var cmd = postToolUse[i]["hooks"]?[0]?["command"]?.ToString() ?? "";
-                if (cmd.Contains(BrainAutoIngestHookMarker)) { postToolUse.RemoveAt(i); removed++; }
+                if (HookHealth.IsAutoIngestHook(HookHealth.CommandText(postToolUse[i]["hooks"]?[0]))) { postToolUse.RemoveAt(i); removed++; }
             }
 
             if (removed > 0)

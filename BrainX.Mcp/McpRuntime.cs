@@ -165,6 +165,28 @@ internal static class McpRuntime
         }
     }
 
+    /// <summary>
+    /// The exe a hook entry should name: the mirror when it holds this build,
+    /// else whatever <see cref="EnsureStable"/> settles on.
+    ///
+    /// Each answer is put to the binary itself, and that is not caution. A hook
+    /// runs it with a subcommand, and a build without that subcommand falls
+    /// through to the MCP server, once per tool call. The marker cannot rule that
+    /// out: it does not move between two builds of one commit, and a mirror that
+    /// failed halfway still has an exe. So a dev build newer than the mirror, or a
+    /// package whose mirror is stuck, stays pinned to itself until a run after the
+    /// next deploy; hook health names the second case.
+    /// A dry run reports the answer without mirroring anything.
+    /// </summary>
+    public static string HookExe(string runningExe, bool dryRun, Action<string>? log = null)
+    {
+        var stable = BrainX.Core.Services.McpRuntimePaths.StableExe;
+        if (!NeedsSync(StableDir) && BrainX.Core.Services.HookHealth.RunsNativeHooks(stable)) return stable;
+        if (dryRun) return runningExe;
+        var resolved = EnsureStable(runningExe, log);
+        return BrainX.Core.Services.HookHealth.RunsNativeHooks(resolved) ? resolved : runningExe;
+    }
+
     private static bool NeedsSync(string target)
     {
         try
