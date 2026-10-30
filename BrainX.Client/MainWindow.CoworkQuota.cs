@@ -91,7 +91,11 @@ public partial class MainWindow
     private JObject? ClaudeQuota()
     {
         var u = _hudUsage;
-        if (u == null || !u.Authenticated) return null;
+        if (u == null) return null;
+        // claude.ai signed BrainX's probe out (2026-10-28: the page sat on
+        // login?from=logout&reauth=1 for days and the room showed a bare "?").
+        // Say so, so the room can offer the sign-in instead of a mystery.
+        if (!u.Authenticated) return new JObject { ["left"] = null, ["source"] = "claude.ai", ["signin"] = true };
         var row = new JObject { ["left"] = null, ["source"] = "claude.ai" };
         if (u.WeeklyAll is { Percent: >= 0 } week)
         {

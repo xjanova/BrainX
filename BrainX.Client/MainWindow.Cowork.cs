@@ -635,6 +635,9 @@ public partial class MainWindow
                     if (m["url"]?.ToString() is { } url && BrainX.Core.Services.AgentInstall.KnownUrls.Contains(url))
                         try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true }); } catch { }
                     break;
+                // Claude's HP frame says claude.ai signed BrainX out: the same
+                // sign-in window as the dashboard card (MainWindow.CoworkQuota).
+                case "officeClaudeSignIn": OpenClaudeSignIn(); break;
                 case "officeModel": CoworkSetModel(m["agent"]?.ToString(), m["model"]?.ToString()); break;
                 case "officeEffort": CoworkSetEffort(m["agent"]?.ToString(), m["effort"]?.ToString()); break;
                 // The work window: pause / resume / drop / focus one piece of

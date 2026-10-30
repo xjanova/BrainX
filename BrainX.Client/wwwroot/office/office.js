@@ -4795,6 +4795,8 @@ function renderQuota() {
             const name = id === 'mind' ? 'มาย' : label(id);
             const tip = (q.unlimited
                 ? `${name}: AI local บนเครื่องนี้ — ไม่มีโควตา ใช้ได้ไม่จำกัด`
+                : q.signin
+                ? `${id} HP: claude.ai ล็อกเอาต์ BrainX ออก เลยอ่านโควตาไม่ได้ — คลิกเพื่อล็อกอินใหม่`
                 : known
                 ? `${id} HP: เหลือ ${hp}% ของโควตารายสัปดาห์${q.resets ? ` · รีเซ็ต ${q.resets}` : ''}`
                 : `${id} HP: ไม่มีข้อมูลโควตารายสัปดาห์ในเครื่องนี้`)
@@ -4804,8 +4806,8 @@ function renderQuota() {
             const bar = (tag, v, color, cls) =>
                 `<span class="ql${cls}"><b>${tag}</b><span class="qbar${v == null ? ' unknown' : ''}">`
                 + `<i style="width:${v ?? 0}%;background:${color}"></i></span>`
-                + `<span class="qv" style="color:${color}">${v == null ? '?' : q.unlimited ? '∞' : v}</span></span>`;
-            return `<div class="qcard${known && hp <= 15 ? ' crit' : ''}" title="${esc(tip)}">`
+                + `<span class="qv" style="color:${color}">${v == null ? (q.signin ? '🔑' : '?') : q.unlimited ? '∞' : v}</span></span>`;
+            return `<div class="qcard${known && hp <= 15 ? ' crit' : ''}${q.signin ? ' signin' : ''}" title="${esc(tip)}">`
                 + `<span class="qn" style="--pc:${agentColor(id)}">${esc(name)}${q.resting ? ' <i class="qz">💤</i>' : ''}</span>`
                 + bar('HP', hp, hpColor(hp), '')
                 + (sp != null ? bar('SP', sp, spColor(sp), ' sp') : '')
@@ -4813,6 +4815,9 @@ function renderQuota() {
         }).join('');
 }
 document.getElementById('quota-hud')?.addEventListener('click', (e) => {
+    // A frame the host could not read because claude.ai signed BrainX out:
+    // the host opens its sign-in window (MainWindow.CoworkQuota).
+    if (e.target.closest('.qcard.signin')) { post({ type: 'officeClaudeSignIn' }); return; }
     if (!e.target.closest('.qh')) return;
     QUOTA_FOLDED = !QUOTA_FOLDED;
     try { localStorage.setItem('brainx.office.quotaFolded', QUOTA_FOLDED ? '1' : '0'); } catch { /* private window */ }
