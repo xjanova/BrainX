@@ -742,7 +742,10 @@ body.ship-mode #floor, body.ship-mode #overlay { display: none; }
     max-width: 190px;
     padding: 5px 8px;
     border-radius: 9px;
-    background: linear-gradient(180deg, rgba(34,39,50,0.96), rgba(18,22,30,0.96));
+    /* Owner (2026-10-30): "กล่องแจ้งเตือน ให้เปลี่ยนสีตามคนที่แจ้งด้วย". */
+    background: linear-gradient(180deg,
+        color-mix(in srgb, var(--bc, #222732) 30%, rgba(34,39,50,0.96)),
+        color-mix(in srgb, var(--bc, #12161e) 20%, rgba(18,22,30,0.96)));
     border: 1px solid var(--bc, var(--stroke));
     color: var(--ink);
     font-size: 10.5px;
@@ -770,6 +773,7 @@ body.ship-mode #floor, body.ship-mode #overlay { display: none; }
 /* ── side panel ───────────────────────────────────────────────────── */
 
 #side {
+    position: relative;
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -793,6 +797,85 @@ body.ship-mode #floor, body.ship-mode #overlay { display: none; }
 #side-head strong { color: var(--ink); }
 #side-count { margin-left: auto; color: var(--ink-faint); }
 
+#side-wide {
+    font: inherit;
+    font-size: 11px;
+    letter-spacing: 0;
+    padding: 1px 9px;
+    border-radius: 999px;
+    cursor: pointer;
+    color: var(--ink);
+    background: rgba(34,39,50,0.95);
+    border: 1px solid rgba(216,185,120,0.45);
+}
+#side-wide:hover { border-color: rgba(216,185,120,0.85); }
+
+/* The edge you take hold of: in the gap between the room and the panel. */
+#side-grip {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -9px;
+    width: 9px;
+    cursor: ew-resize;
+    touch-action: none;
+}
+#side-grip::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 3px;
+    width: 3px;
+    height: 46px;
+    margin-top: -23px;
+    border-radius: 2px;
+    background: rgba(242, 239, 230, 0.22);
+}
+#side-grip:hover::after { background: var(--accent); }
+
+#side-alpha-wrap {
+    display: none;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    letter-spacing: 0;
+    color: var(--ink-dim);
+}
+#side-alpha { width: 104px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+
+/* Owner (2026-10-30): "อยากให้ช่องแชท กดยืดมาทับ พวกกราฟฟิคได้ด้วย เพื่อเพิ่มพื้นที่แชท
+   และตรวจสอบ แต่เป็นโปร่งใส ปรับความใสได้ และ auto กลับที่เดิมเมื่อเลิกใช้".
+   Fixed, so it lifts out of the grid and the room keeps its size: nothing is
+   redrawn at a new resolution. Under the work and history panels, which open
+   from this column. Plain alpha and no backdrop blur: blurring a room that is
+   drawing is the GPU bill the room has just been cured of. */
+body.side-wide #side {
+    position: fixed;
+    top: 10px;
+    right: 10px;
+    bottom: 10px;
+    z-index: 25;
+    width: var(--side-w, 60vw);
+    max-width: calc(100vw - 20px);
+    --card-a: calc(var(--side-alpha, 0.72) * 0.75);
+    background: rgba(14, 17, 24, var(--side-alpha, 0.72));
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85);
+}
+body.side-wide #side button { text-shadow: none; }
+body.side-wide #side-alpha-wrap { display: inline-flex; }
+body.side-wide #log > li { background: rgba(10, 12, 26, var(--card-a)); }
+body.side-wide #log > li.boss { background: rgba(40, 28, 8, var(--card-a)); }
+body.side-wide #board-list .task { background: rgba(10, 12, 26, var(--card-a)); }
+body.side-wide #decisions > li { background: color-mix(in srgb, var(--lc, var(--warn)) 13%, rgba(16, 19, 26, var(--card-a))); }
+/* Stretched to check something: nothing folded. */
+body.side-wide #log .lb { display: block; }
+body.side-wide .atts img { max-width: 260px; max-height: 195px; }
+
+@media (max-width: 900px) {
+    #side-grip { display: none; }
+    body.side-wide #side { left: 10px; width: auto; }
+}
+
 /* Decisions. `flex: none` with a cap rather than a share of the column: when
    three questions are open they must not push the transcript out of the panel
    entirely, and when none are open this takes no room at all. */
@@ -809,36 +892,38 @@ body.ship-mode #floor, body.ship-mode #overlay { display: none; }
 }
 #decisions:empty { display: none; }
 
+/* Owner (2026-10-30): "กล่องแจ้งเตือน ให้เปลี่ยนสีตามคนที่แจ้งด้วย". Every card
+   was the same orange, so who was waiting had to be read off a 9px line. */
 #decisions > li {
-    border: 1px solid rgba(255, 184, 108, 0.4);
-    border-left-width: 3px;
+    border: 1px solid color-mix(in srgb, var(--lc, var(--warn)) 45%, transparent);
+    border-left: 3px solid var(--lc, var(--warn));
     border-radius: 6px;
-    background: rgba(50, 36, 14, 0.5);
-    padding: 7px 8px;
+    background: color-mix(in srgb, var(--lc, var(--warn)) 13%, rgba(16, 19, 26, 0.72));
+    padding: 7px 9px 8px;
 }
-#decisions .dq { font-size: 11px; color: var(--ink); white-space: pre-wrap; }
+#decisions .dq { font-size: 13px; line-height: 1.5; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
 #decisions .dmeta {
-    font-size: 9px;
-    letter-spacing: 0.5px;
-    color: var(--warn);
-    margin-bottom: 3px;
+    font-size: 11.5px;
+    color: var(--ink-dim);
+    margin-bottom: 4px;
 }
-#decisions .opts { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+#decisions .dmeta .from { font-size: 13.5px; font-weight: 700; color: var(--lc, var(--warn)); }
+#decisions .opts { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
 #decisions button {
     font: inherit;
-    font-size: 10.5px;
-    padding: 3px 9px;
+    font-size: 12px;
+    padding: 3px 11px;
     border-radius: 999px;
     cursor: pointer;
-    color: #1a1204;
-    background: var(--warn);
+    color: #14110a;
+    background: var(--lc, var(--warn));
     border: none;
 }
 #decisions button:hover { filter: brightness(1.12); }
 #decisions button.other {
     background: transparent;
-    color: var(--warn);
-    border: 1px solid rgba(255, 184, 108, 0.5);
+    color: var(--lc, var(--warn));
+    border: 1px solid color-mix(in srgb, var(--lc, var(--warn)) 55%, transparent);
 }
 
 /* The board. Capped like the decisions above it, so a long list of work never
@@ -947,35 +1032,61 @@ body.ship-mode #floor, body.ship-mode #overlay { display: none; }
     overflow-anchor: none;
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 7px;
 }
 
+/* Owner (2026-10-30): "ช่องแชทตัวหนังสือเล็ก ดูยากว่าใครตอบ". The name was 9.5px
+   in the same row as the time and the topic, so who answered was the hardest
+   thing on the line to read. It is the first thing the eye lands on now. */
 #log > li {
-    padding: 4px 7px;
-    border-radius: 5px;
-    border-left: 2px solid var(--lc, rgba(255, 255, 255, 0.25));
+    padding: 7px 10px 8px;
+    border-radius: 6px;
+    border-left: 3px solid var(--lc, rgba(255, 255, 255, 0.25));
     background: rgba(10, 12, 26, 0.55);
 }
 #log .lh {
     display: flex;
-    align-items: baseline;
-    gap: 5px;
-    font-size: 9.5px;
-    letter-spacing: 0.3px;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 3px 7px;
+    margin-bottom: 4px;
+    font-size: 11.5px;
     color: var(--ink-faint);
 }
-#log .lh .from { font-weight: 600; color: var(--lc, var(--ink)); }
+#log .lh .from {
+    padding: 1px 9px;
+    border-radius: 999px;
+    font-size: 13.5px;
+    font-weight: 700;
+    color: var(--lc, var(--ink));
+    background: color-mix(in srgb, var(--lc, #fff) 16%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--lc, #fff) 34%, transparent);
+}
 #log .lh .t { margin-left: auto; flex: none; }
 #log .lb {
-    font-size: 11px;
+    font-size: 14px;
+    line-height: 1.55;
     color: var(--ink);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     display: -webkit-box;
-    -webkit-line-clamp: 4;
+    -webkit-line-clamp: 6;
     -webkit-box-orient: vertical;
     overflow: hidden;
 }
+/* The broker's own notices step back, so an agent's answer stands out from
+   "กำลังเรียก…" around it. Still readable: a run dying is said on one of these.
+   --nc is who the notice is about (renderLog): "claude หลุดกลางทาง" is in
+   claude's colour, and the name on it stays the one who said it. */
+#log > li.sys,
+body.side-wide #log > li.sys {
+    padding: 4px 10px 5px;
+    border-left-color: var(--nc, var(--lc));
+    background: color-mix(in srgb, var(--nc, var(--lc)) 9%, transparent);
+}
+#log > li.sys .lh { margin-bottom: 1px; }
+#log > li.sys .lh .from { padding: 0; font-size: 11.5px; font-weight: 600; background: none; box-shadow: none; }
+#log > li.sys .lb { font-size: 12.5px; color: var(--ink-dim); }
 #log > li.open .lb { display: block; }
 #log > li { cursor: pointer; }
 /* Sent, nobody has opened it yet — "they talked" and "one of them has not
@@ -1018,8 +1129,8 @@ body.ship-mode #floor, body.ship-mode #overlay { display: none; }
 #say-to:empty { display: none; }
 #say-to button {
     font: inherit;
-    font-size: 10px;
-    padding: 2px 8px;
+    font-size: 12px;
+    padding: 2px 9px;
     border-radius: 999px;
     cursor: pointer;
     color: var(--pc, var(--ink-dim));
@@ -1036,8 +1147,8 @@ body.ship-mode #floor, body.ship-mode #overlay { display: none; }
     flex: 1 1 auto;
     min-width: 0;
     font: inherit;
-    font-size: 11.5px;
-    padding: 7px 9px;
+    font-size: 14px;
+    padding: 8px 10px;
     border-radius: 7px;
     color: var(--ink);
     background: rgba(6, 8, 18, 0.8);
@@ -1049,8 +1160,8 @@ body.ship-mode #floor, body.ship-mode #overlay { display: none; }
 #room-broker:disabled { opacity: 0.6; cursor: progress; }
 #say-send {
     font: inherit;
-    font-size: 11.5px;
-    padding: 7px 14px;
+    font-size: 14px;
+    padding: 8px 15px;
     border-radius: 7px;
     cursor: pointer;
     color: #04121a;

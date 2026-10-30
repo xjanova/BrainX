@@ -45,6 +45,9 @@ internal static partial class Program
         // started and for whom, and exits. See Program.CoworkRelay.
         if (Environment.GetEnvironmentVariable(RelayProbeEnv) is { Length: > 0 } relayProbe)
             return RelayRunnerProbe(relayProbe);
+        // Stands in for `claude -p` under a sandboxed broker. See Program.BrokerOpenRun.
+        if (Environment.GetEnvironmentVariable(OpenRunnerEnv) is { Length: > 0 } openRunner)
+            return OpenRunnerStandIn(openRunner);
         if (Environment.GetEnvironmentVariable(StubMcpServer.EnvFlag) == "1")
             return await StubMcpServer.RunAsync();
 

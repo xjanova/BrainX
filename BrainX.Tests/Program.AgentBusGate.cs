@@ -23,6 +23,14 @@ internal static partial class Program
         checks.Add(("cowork room: the owner's @names become who the order is for", CoworkAddressingChecks));
         checks.Add(("cowork room: the light re-seats, @names route, the board holds who is doing what", CoworkRoomEndToEnd));
         checks.Add(("cowork broker: a call that dies is reported in the room, with the reason", CoworkBrokerReportsFailedCall));
+        checks.Add(("cowork broker: a room run stays open and takes the owner's next line on stdin", CoworkBrokerKeepsRunOpen));
+        checks.Add(("cowork broker: an open run quiet past its hold leaves, and that is no failure", CoworkBrokerClosesIdleOpenRun));
+        checks.Add(("cowork broker: a run still booting holds nobody else up", CoworkBrokerNotHeldByBootingRun));
+        checks.Add(("cowork broker: the room hears what a run is stuck on when the owner is waiting", CoworkBrokerSaysWhyNoAnswer));
+        checks.Add(("cowork broker: a run the model's safeguards refused is told to the room", CoworkBrokerReportsRefusedRun));
+        checks.Add(("cowork broker: a run that dies part-way is told to the room", CoworkBrokerReportsRunThatDied));
+        checks.Add(("cowork broker: an agent out of quota is not called by a line to nobody", CoworkBrokerLeavesRestingAgentAlone));
+        checks.Add(("cowork broker: the real claude CLI stays open (BRAINX_TEST_REAL_CLAUDE=1)", CoworkBrokerRealClaudeStaysOpen));
         checks.Add(("cowork broker: reopened, it picks unfinished work up at once — and a study's end never darkens the room", CoworkBrokerResumesOnStart));
         checks.Add(("cowork follow-up: only a line that asks something calls its addressee in", CoworkLineAsksChecks));
         checks.Add(("broker decisions: a folder question answered once stays answered", BrokerKeepsFolderAnswers));

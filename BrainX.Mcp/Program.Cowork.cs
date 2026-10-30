@@ -1456,7 +1456,15 @@ internal static partial class Program
       // Owner (2026-10-06): "ถ้าใช้ได้ก็ใส่ ทูลไว้ด้วย จะได้ไม่ต้องไปเปิดผ่าน chome".
       + "(14) IMAGES AND VIDEO ARE A TOOL CALL: media_generate makes an image (or a short video from one) with "
       + "Grok Imagine on the owner's login — no browser, any of us can call it. Poll media_status, then attach "
-      + "the file with cowork_say.";
+      + "the file with cowork_say. "
+      // Owner (2026-10-30): "ไม่ค่อยจะตอบ อยากให้ตอบทันที ที่บอสพิพม์". That afternoon a
+      // run read "เปิดหน้ารหัสแล้วไงต่อ" and started another four-minute watch without
+      // a word. Two more lines went unanswered until the owner cancelled the card.
+      + "(15) THE OWNER'S LINE COMES FIRST, AND IT ONLY REACHES YOU BETWEEN TOOL CALLS. When you read a line from "
+      + "the owner, cowork_say your answer BEFORE your next tool call for anything else; one line on where you "
+      + "are will do if the work is not finished. Never hold one tool call for more than 30 seconds while you are "
+      + "in the room: a build, a test run, a log watch or a poll goes in the background (run_in_background, or in "
+      + "short slices if your tools have no background), and you look at it with quick calls.";
 
     // ───────────── what the broker sees ─────────────
 
@@ -1563,6 +1571,10 @@ internal static partial class Program
                     ? addressed.Select(CollapseToReadableBox).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
                     : members.Concat(onCall ?? Enumerable.Empty<string>())
                              .Distinct(StringComparer.OrdinalIgnoreCase)
+                             // Out of quota and said so: a line to nobody in particular
+                             // is no reason to go and hear it again. Named, it is the
+                             // owner's call, and a try costs fifteen seconds.
+                             .Where(t => !(ReadRunnerState(t).QuotaResumeUtc is DateTime back && back > DateTime.UtcNow))
                              .ToList();
 
                 var called = 0;

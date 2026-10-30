@@ -3003,6 +3003,22 @@ function playSound(name) {
 
 let LOG_KEY = '';
 
+/** A name on the wall. */
+function logName(name) {
+    return name === 'owner' ? 'บอส' : label(name);
+}
+
+/** Who a broker's notice is about: the agent it names first. */
+function noticeAbout(m) {
+    const body = m.body || '';
+    let first = null, at = Infinity;
+    for (const a of AGENTS) {
+        const i = body.indexOf(a.id);
+        if (i >= 0 && i < at) { first = a.id; at = i; }
+    }
+    return first;
+}
+
 function renderLog() {
     const el = document.getElementById('log');
     // Rebuilt only when the lines change. Every two seconds wiped a selection
@@ -3024,10 +3040,15 @@ function renderLog() {
         if (m.pending) li.classList.add('pending');
         if (m.from === 'owner') li.classList.add('boss');
         li.style.setProperty('--lc', agentColor(m.from));
+        if (m.from === 'broker') {
+            li.classList.add('sys');
+            const about = noticeAbout(m);
+            if (about) li.style.setProperty('--nc', agentColor(about));
+        }
         // "claude,codex" when the boss named two: each name, not one long one.
-        const to = (m.to || '').split(',').filter(Boolean).map(label).join(', ') || 'ทุกคน';
+        const to = (m.to || '').split(',').filter(Boolean).map(logName).join(', ') || 'ทุกคน';
         li.innerHTML =
-            `<div class="lh"><span class="from">${esc(label(m.from))}</span>` +
+            `<div class="lh"><span class="from">${esc(logName(m.from))}</span>` +
             `<span>→ ${esc(to)}</span>` +
             (m.topic ? `<span>· ${esc(m.topic)}</span>` : '') +
             `<span class="t">${esc(m.ts || '')}</span></div>` +
@@ -3069,7 +3090,8 @@ function renderDecisions() {
     const html = DECISIONS.filter(d => d.status === 'open').map(d => {
         const opts = (d.options || []).map(o =>
             `<button data-id="${esc(d.id)}" data-answer="${esc(o)}">${esc(o)}</button>`).join('');
-        return `<li><div class="dmeta">${esc(d.agent || '?')} รออยู่${d.work ? ' · ' + esc(d.work) : ''}</div>` +
+        return `<li style="--lc:${agentColor(d.agent)}"><div class="dmeta"><span class="from">${esc(logName(d.agent || '?'))}</span>`
+            + ` รออยู่${d.work ? ' · ' + esc(d.work) : ''}</div>` +
             `<div class="dq">${esc(d.question || '')}</div>` +
             `<div class="opts">${opts}<button class="other" data-id="${esc(d.id)}" data-answer="">อื่น ๆ…</button></div></li>`;
     }).join('');
@@ -3782,6 +3804,7 @@ const isPaused = t => t.paused === 'owner';
 function runWhat(r) {
     const row = MODELS.find(m => m.agent === r.agent);
     const parts = [];
+    if (r.quiet) parts.push('รอคำสั่งอยู่ ตอบได้ทันที');
     parts.push(r.model ? (row ? modelLabel(row, r.model) : r.model) : 'โมเดลค่าเริ่มต้น');
     if (r.effort) parts.push(`effort ${row ? effortLabel(row, r.effort) : r.effort}`);
     parts.push(`รันมา ${ago(r.since)}`);
@@ -3807,9 +3830,10 @@ function renderWork() {
     const chip = document.getElementById('room-work');
     if (chip) {
         chip.textContent = active.length ? `📋 งาน ${active.length}` : '📋 งาน';
-        chip.classList.toggle('busy', RUNS.length > 0 || active.some(t => t.status === 'doing'));
+        const working = RUNS.filter(r => !r.quiet);
+        chip.classList.toggle('busy', working.length > 0 || active.some(t => t.status === 'doing'));
         chip.title = 'สถานะงาน — ' + (workSummary(active) || 'ไม่มีงานค้าง')
-            + (RUNS.length ? `\nกำลังรัน: ${RUNS.map(r => r.agent).join(', ')}` : '');
+            + (working.length ? `\nกำลังรัน: ${working.map(r => r.agent).join(', ')}` : '');
     }
     const note = document.getElementById('work-note');
     if (note) note.textContent = WORK_NOTE;
@@ -4949,6 +4973,118 @@ document.getElementById('log').addEventListener('keydown', (e) => {
     const t = e.target.closest('[data-open]');
     if (t && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); post({ type: 'officeOpen', path: t.dataset.open }); }
 });
+
+// ── the chat, stretched over the room ───────────────────────────────
+
+/* Owner (2026-10-30): "อยากให้ช่องแชท กดยืดมาทับ พวกกราฟฟิคได้ด้วย เพื่อเพิ่มพื้นที่แชท
+ * และตรวจสอบ แต่เป็นโปร่งใส ปรับความใสได้ และ auto กลับที่เดิมเมื่อเลิกใช้".
+ * "เลิกใช้" is a judgement, so it has two clocks. The pointer leaving the panel
+ * is a clear sign and gets a few seconds. A pointer resting on it, a caret in
+ * the box or text selected to copy may be somebody reading: only a long silence
+ * ends those, and a line being typed is never lost, the box does not change. */
+const SIDE_WIDTH_KEY = 'brainx.office.sideWidth';
+const SIDE_ALPHA_KEY = 'brainx.office.sideAlpha';
+const SIDE_MIN_W = 420;          // below this, a drag means "put it back"
+const SIDE_CLICK_PX = 4;         // moved less than this: the grip was clicked
+const SIDE_LEFT_MS = 6000;
+const SIDE_QUIET_MS = 90000;
+
+const SIDE = document.getElementById('side');
+const SIDE_LOG = document.getElementById('log');
+const SIDE_GRIP = document.getElementById('side-grip');
+const SIDE_BTN = document.getElementById('side-wide');
+const SIDE_ALPHA = document.getElementById('side-alpha');
+
+let SIDE_USED = 0;       // when the pointer or a key last did something on it
+let SIDE_HOVER = false;
+let SIDE_DRAG = null;    // {x, moved, was}
+let SIDE_CLOCK = 0;
+
+const sideIsWide = () => document.body.classList.contains('side-wide');
+
+function setSideWide(on) {
+    if (on === sideIsWide()) return;
+    // The text rewraps at the new width: someone at the newest line stays there.
+    const stick = SIDE_LOG.scrollHeight - SIDE_LOG.scrollTop - SIDE_LOG.clientHeight < 24;
+    document.body.classList.toggle('side-wide', on);
+    SIDE_BTN.textContent = on ? '⤡ กลับที่เดิม' : '⤢ ยืด';
+    SIDE_BTN.setAttribute('aria-pressed', on ? 'true' : 'false');
+    clearInterval(SIDE_CLOCK);
+    SIDE_CLOCK = 0;
+    if (on) {
+        SIDE_USED = Date.now();
+        SIDE_CLOCK = setInterval(() => { if (!sideInUse()) setSideWide(false); }, 1000);
+    }
+    if (stick) SIDE_LOG.scrollTop = SIDE_LOG.scrollHeight;
+}
+
+function sideInUse() {
+    if (SIDE_DRAG) return true;
+    const quiet = Date.now() - SIDE_USED;
+    if (quiet < SIDE_LEFT_MS) return true;
+    const sel = getSelection();
+    const held = SIDE_HOVER
+        || document.activeElement === document.getElementById('say-text')
+        || (sel && !sel.isCollapsed && SIDE.contains(sel.anchorNode));
+    return held && quiet < SIDE_QUIET_MS;
+}
+
+function setSideAlpha(pct) {
+    document.documentElement.style.setProperty('--side-alpha', (pct / 100).toFixed(2));
+}
+
+{
+    const stored = (key) => { try { return Number(localStorage.getItem(key)) || 0; } catch { return 0; } };
+    const width = stored(SIDE_WIDTH_KEY);
+    if (width >= SIDE_MIN_W) document.documentElement.style.setProperty('--side-w', `${width}px`);
+    const alpha = stored(SIDE_ALPHA_KEY);
+    SIDE_ALPHA.value = alpha >= 15 && alpha <= 100 ? alpha : 70;
+    setSideAlpha(Number(SIDE_ALPHA.value));
+}
+
+const sideTouched = () => { SIDE_USED = Date.now(); };
+for (const ev of ['pointermove', 'pointerdown', 'keydown', 'input']) SIDE.addEventListener(ev, sideTouched);
+SIDE.addEventListener('wheel', sideTouched, { passive: true });
+SIDE.addEventListener('pointerenter', () => { SIDE_HOVER = true; sideTouched(); });
+SIDE.addEventListener('pointerleave', () => { SIDE_HOVER = false; sideTouched(); });
+
+SIDE_BTN.addEventListener('click', () => setSideWide(!sideIsWide()));
+SIDE_ALPHA.addEventListener('input', () => setSideAlpha(Number(SIDE_ALPHA.value)));
+SIDE_ALPHA.addEventListener('change', () => {
+    try { localStorage.setItem(SIDE_ALPHA_KEY, SIDE_ALPHA.value); } catch { /* private window */ }
+});
+
+// Going back to the room is the plainest "finished with the chat" there is.
+document.getElementById('room').addEventListener('pointerdown', () => setSideWide(false));
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setSideWide(false); });
+
+SIDE_GRIP.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    // Held through the drag, or the pointer is lost the moment it crosses the
+    // ship's iframe, which swallows every event over it.
+    SIDE_GRIP.setPointerCapture(e.pointerId);
+    SIDE_DRAG = { x: e.clientX, moved: false, was: sideIsWide() };
+});
+SIDE_GRIP.addEventListener('pointermove', (e) => {
+    if (!SIDE_DRAG) return;
+    if (!SIDE_DRAG.moved && Math.abs(e.clientX - SIDE_DRAG.x) < SIDE_CLICK_PX) return;
+    SIDE_DRAG.moved = true;
+    const width = Math.min(innerWidth - 10 - e.clientX, innerWidth - 20);
+    if (width < SIDE_MIN_W) { setSideWide(false); return; }
+    document.documentElement.style.setProperty('--side-w', `${width}px`);
+    setSideWide(true);
+});
+SIDE_GRIP.addEventListener('pointerup', () => {
+    const drag = SIDE_DRAG;
+    SIDE_DRAG = null;
+    if (!drag) return;
+    if (!drag.moved) { setSideWide(!drag.was); return; }
+    if (!sideIsWide()) return;
+    const width = parseInt(document.documentElement.style.getPropertyValue('--side-w'), 10);
+    try { localStorage.setItem(SIDE_WIDTH_KEY, String(width)); } catch { /* private window */ }
+});
+SIDE_GRIP.addEventListener('pointercancel', () => { SIDE_DRAG = null; });
 
 // ── demo mode ───────────────────────────────────────────────────────
 

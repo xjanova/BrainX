@@ -270,15 +270,21 @@ internal static partial class Program
             // started them, their pids stayed in the state file, and the work
             // was never chased again.
             var running = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
-            bool Busy(string a) => live.ContainsKey(a)
-                || (running.TryGetValue(a, out var r) ? r : running[a] = AdoptOrClearOrphanRun(cfg, a));
+            // A run sitting open between turns is not busy: chasing it is one line
+            // down its stdin, not a run started on top of it.
+            bool Busy(string a) => live.TryGetValue(a, out var going)
+                ? going.Open is not { Busy: false, ClosedUtc: null }
+                : CoworkRefusedLately(a) || (running.TryGetValue(a, out var r) ? r : running[a] = AdoptOrClearOrphanRun(cfg, a));
+            // Seated hears a line on its next tool reply. An open run between
+            // turns has no next reply: it only hears what goes down its stdin.
+            bool Told(string a) => CoworkHasLiveSession(a) && !(live.TryGetValue(a, out var going) && going.Open != null);
 
             var board = CoworkTasks();
             var byId = CoworkTriage.ById(board);
             // Somebody the broker may start for a card right now. Seated in the
             // room means told already (the line is addressed to them); busy or
             // resting means the ordinary chase picks it up later.
-            bool Callable(string a) => cfg.Runners.ContainsKey(a) && !Busy(a) && !CoworkHasLiveSession(a)
+            bool Callable(string a) => cfg.Runners.ContainsKey(a) && !Busy(a) && !Told(a)
                                        && !(ReadRunnerState(a).QuotaResumeUtc is DateTime rq0 && rq0 > now);
             foreach (var t in board)
             {
@@ -402,7 +408,7 @@ internal static partial class Program
                     // interactive Chrome session)" is t-e45c4c's need, not this one's.
                     var spec = (JObject)t.DeepClone();
                     spec.Remove("note");
-                    if (hasRunner && !busy && !CoworkHasLiveSession(agent)
+                    if (hasRunner && !busy && !Told(agent)
                         && CoworkTriage.DesktopNeeds(spec).Count == 0 && CoworkCannotDo(agent, t) == null)
                         Add(calls, agent, id);
                     continue;
@@ -410,7 +416,7 @@ internal static partial class Program
 
                 if (status is not ("doing" or "assigned")) continue;
                 if (!hasRunner) continue;
-                if (busy || CoworkHasLiveSession(agent)) continue;
+                if (busy || Told(agent)) continue;
                 // Out of quota: its work waits for the reset, it is not chased.
                 if (st.QuotaResumeUtc is DateTime qr && qr > now) continue;
 

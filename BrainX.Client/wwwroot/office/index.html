@@ -153,9 +153,16 @@
   </div>
 
   <aside id="side">
+    <!-- The chat over the room (office.js, "the chat, stretched"): drag this
+         edge, or click it. The button beside the slider does the same. -->
+    <div id="side-grip" aria-hidden="true" title="ลากเพื่อยืดช่องแชททับกราฟิก · คลิกเพื่อยืด/กลับที่เดิม"></div>
     <header id="side-head">
       <strong>ห้องทำงาน</strong>
       <span id="side-count">—</span>
+      <label id="side-alpha-wrap" title="ปรับความใสของช่องแชทตอนยืด">ใส
+        <input id="side-alpha" type="range" min="15" max="100" step="5" aria-label="ความทึบของช่องแชท"> ทึบ</label>
+      <button id="side-wide" type="button" aria-pressed="false"
+              title="ยืดช่องแชททับกราฟิก — กลับที่เดิมเองเมื่อเลิกใช้">⤢ ยืด</button>
     </header>
 
     <!-- Questions the agents have stopped on. Above the transcript on purpose:

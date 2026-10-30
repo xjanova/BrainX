@@ -315,7 +315,7 @@ public partial class MainWindow
     /// <summary>The run the broker started for this agent, if its process is
     /// still THAT run: pid plus start time, as the broker itself checks it
     /// (pids are reused on Windows).</summary>
-    private (int Pid, DateTime StartedUtc, string? Model, string? Effort)? CoworkLiveRun(string agent)
+    private (int Pid, DateTime StartedUtc, string? Model, string? Effort, bool Quiet)? CoworkLiveRun(string agent)
     {
         try
         {
@@ -327,7 +327,8 @@ public partial class MainWindow
             if (proc.HasExited || Math.Abs((proc.StartTime.ToUniversalTime() - started).TotalSeconds) >= 2) return null;
             return (pid, started,
                     o["runModel"]?.Type == JTokenType.String ? o["runModel"]!.ToString() : null,
-                    o["runEffort"]?.Type == JTokenType.String ? o["runEffort"]!.ToString() : null);
+                    o["runEffort"]?.Type == JTokenType.String ? o["runEffort"]!.ToString() : null,
+                    o["runQuiet"]?.ToObject<bool?>() ?? false);
         }
         catch { return null; }
     }
@@ -347,6 +348,7 @@ public partial class MainWindow
             {
                 ["agent"] = agent,
                 ["since"] = new DateTimeOffset(run.StartedUtc).ToUnixTimeMilliseconds(),
+                ["quiet"] = run.Quiet,
                 ["model"] = run.Model ?? "",
                 ["effort"] = run.Effort ?? "",
             });
