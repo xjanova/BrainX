@@ -45,15 +45,10 @@ internal static partial class Program
     /// <summary>The resolved vault, for callers outside this partial (CliInstall).</summary>
     internal static string VaultPath => _vaultPath;
 
-    /// <summary>Bumped when the SET of hooks changes.
-    /// v3: five of them moved from PowerShell into the binary.
-    /// v4: the last two did, so no hook starts PowerShell.</summary>
-    private const string HooksVersion = "v4";
-
     /// <summary>Stamped on every entry this installer writes: how a re-run finds its
     /// own among the user's. A real argument, which the binary ignores, because
     /// exec form has no shell to make a trailing `#` a comment.</summary>
-    private const string NativeTag = "brainx-hooks-" + HooksVersion;
+    private const string NativeTag = HookHealth.InstallerTag;
 
     private sealed record HookSpec(string Event, string? Matcher, string Native, int TimeoutSec);
 
@@ -78,15 +73,21 @@ internal static partial class Program
     };
 
     /// <summary>
-    /// The scripts the table above replaced. Needed by the filename arm of
-    /// <see cref="IsOurs"/>: an entry wired by hand before this installer existed
-    /// carries no marker, and if it survived the upgrade every native hook would
-    /// run beside the PowerShell it replaced. The files stay on disk, unused.
+    /// Each native hook and the script it replaced, which the table above no longer
+    /// names. Needed by the filename arm of <see cref="IsOurs"/>: an entry wired by
+    /// hand before this installer existed carries no marker, and if it survived the
+    /// upgrade every native hook would run beside the PowerShell it replaced. The
+    /// files stay on disk, unused.
     /// </summary>
-    private static readonly string[] RetiredScripts =
+    private static readonly Dictionary<string, string> RetiredScripts = new()
     {
-        "brain-prompt-gate.ps1", "brain-pretool-warn.ps1", "brain-tool-logger.ps1",
-        "brain-error-recall.ps1", "stop-hook.ps1", "session-start.ps1", "session-end.ps1",
+        ["hook-prompt-gate"] = "brain-prompt-gate.ps1",
+        ["hook-pretool-warn"] = "brain-pretool-warn.ps1",
+        ["hook-tool-log"] = "brain-tool-logger.ps1",
+        ["hook-error-recall"] = "brain-error-recall.ps1",
+        ["hook-brain-end"] = "stop-hook.ps1",
+        ["hook-brain-start"] = "session-start.ps1",
+        ["hook-session-end"] = "session-end.ps1",
     };
 
     /// <summary>Shipped alongside the hooks but not registered: the diagnostic the
@@ -96,21 +97,23 @@ internal static partial class Program
     internal static int InstallHooksCli(string[] args)
     {
         string? vaultArg = null;
-        bool dryRun = false, quiet = false;
+        bool dryRun = false, quiet = false, upgrade = false;
         for (int i = 0; i < args.Length; i++)
         {
             if (args[i] == "--vault" && i + 1 < args.Length) vaultArg = args[++i];
             else if (args[i] == "--dry-run") dryRun = true;
             else if (args[i] == "--quiet") quiet = true;
+            else if (args[i] == "--upgrade") upgrade = true;
             else if (args[i] is "-h" or "--help" or "help")
             {
-                Console.WriteLine("Usage: brainx-mcp install-hooks [--vault PATH] [--dry-run] [--quiet]");
+                Console.WriteLine("Usage: brainx-mcp install-hooks [--vault PATH] [--dry-run] [--upgrade] [--quiet]");
                 Console.WriteLine();
                 Console.WriteLine("Registers the native `brainx-mcp hook-*` hooks in ~/.claude/settings.json (merged,");
                 Console.WriteLine("never overwritten) and writes brain-stats.ps1 and brain-aliases.json to");
                 Console.WriteLine("~/.claude/scripts. Re-running replaces only this installer's own entries.");
                 Console.WriteLine();
                 Console.WriteLine("  --dry-run   show what would change; write nothing");
+                Console.WriteLine("  --upgrade   replace the hooks already registered, add none (what BrainX runs)");
                 return 0;
             }
         }
@@ -123,7 +126,7 @@ internal static partial class Program
 
         try
         {
-            return InstallHooks(_vaultPath, dryRun, Say);
+            return InstallHooks(_vaultPath, dryRun, Say, upgrade);
         }
         catch (Exception ex)
         {
@@ -132,7 +135,10 @@ internal static partial class Program
         }
     }
 
-    internal static int InstallHooks(string vaultPath, bool dryRun, Action<string>? say = null)
+    /// <param name="upgrade">Replace what is registered and add nothing. This is
+    /// what runs unattended, and an unattended run must not undo a choice: taking
+    /// one hook out of settings.json is how an owner turns it off.</param>
+    internal static int InstallHooks(string vaultPath, bool dryRun, Action<string>? say = null, bool upgrade = false)
     {
         void Say(string s) => say?.Invoke(s);
 
@@ -190,10 +196,11 @@ internal static partial class Program
         // ── 2. settings.json ──────────────────────────────────────────────
         var settingsPath = Path.Combine(claudeDir, "settings.json");
         JObject root;
+        JObject? before = null;
         if (File.Exists(settingsPath))
         {
             var text = File.ReadAllText(settingsPath);            // strips a BOM if present
-            try { root = JObject.Parse(text); }
+            try { root = JObject.Parse(text); before = (JObject)root.DeepClone(); }
             catch (JsonException ex)
             {
                 Console.Error.WriteLine($"  ✗ {settingsPath} is not valid JSON ({ex.Message}).");
@@ -226,16 +233,29 @@ internal static partial class Program
         foreach (var group in Hooks.GroupBy(h => h.Event))
         {
             var arr = hooksNode[group.Key] as JArray;
-            if (arr == null) { arr = new JArray(); hooksNode[group.Key] = arr; }
+            if (arr == null)
+            {
+                if (upgrade) continue;
+                arr = new JArray(); hooksNode[group.Key] = arr;
+            }
 
-            // Drop only OUR entries; everything else in this event's array is
-            // the user's and survives untouched.
-            var mine = arr.Where(IsOurs).ToList();
-            foreach (var m in mine) { m.Remove(); replaced++; }
+            // Drop only OUR handlers; everything else in this event's array is
+            // the user's and survives untouched, a handler of theirs that shares
+            // a group with one of ours included.
+            var present = new List<string>();
+            foreach (var g in arr.OfType<JObject>().ToList())
+            {
+                if (g["hooks"] is not JArray hs) continue;
+                var mine = hs.Where(IsOurs).ToList();
+                if (mine.Count == 0) continue;
+                foreach (var m in mine) { present.Add(HookHealth.CommandText(m)); m.Remove(); replaced++; }
+                if (hs.Count == 0) g.Remove();
+            }
             kept += arr.Count;
 
             foreach (var h in group)
             {
+                if (upgrade && !present.Any(cmd => IsFor(h, cmd))) continue;
                 var entry = new JObject();
                 if (h.Matcher != null) entry["matcher"] = h.Matcher;
                 entry["hooks"] = new JArray(NativeHandler(hookExe, h.Native, vaultArg, NativeTag, null, h.TimeoutSec, execForm));
@@ -253,7 +273,9 @@ internal static partial class Program
                      .SelectMany(g => g["hooks"] as JArray ?? new JArray()).OfType<JObject>().ToList())
         {
             if (!HookHealth.IsAutoIngestHook(HookHealth.CommandText(handler))) continue;
-            handler.Replace(NativeHandler(hookExe, "hook-auto-ingest", vaultArg, HookHealth.AutoIngestNativeTag, ingestUrl,
+            // A native entry already says where to post, and that is the client's word.
+            var url = (handler["args"] as JArray)?.Select(a => a.ToString()).SkipWhile(a => a != "--ingest-url").Skip(1).FirstOrDefault();
+            handler.Replace(NativeHandler(hookExe, "hook-auto-ingest", vaultArg, HookHealth.AutoIngestNativeTag, url ?? ingestUrl,
                                           handler["timeout"]?.ToObject<int?>() ?? 10, execForm));
             Say("  auto-ingest: upgraded to native");
         }
@@ -263,6 +285,10 @@ internal static partial class Program
           + $", {kept} unrelated entr(ies) untouched");
 
         if (dryRun) { Say("  [dry run] settings.json not written"); return 0; }
+
+        // Nothing to say, so no backup: BrainX runs this unattended, and a config
+        // that stays one step behind must not leave a new file on every start.
+        if (before != null && JToken.DeepEquals(before, root)) { Say("  settings: already current"); return 0; }
 
         // Backup, then verify the merged document re-parses before it lands.
         if (File.Exists(settingsPath))
@@ -279,8 +305,11 @@ internal static partial class Program
             return 2;
         }
         // No BOM: Claude Code's JSON parser rejects one, and writing config
-        // with `Set-Content -Encoding utf8` has bricked this file before.
-        File.WriteAllText(settingsPath, merged, noBom);
+        // with `Set-Content -Encoding utf8` has bricked this file before. Through a
+        // temp file, so a run killed halfway cannot leave half a config.
+        var tmp = $"{settingsPath}.{Environment.ProcessId}.tmp";
+        File.WriteAllText(tmp, merged, noBom);
+        File.Move(tmp, settingsPath, overwrite: true);
         Say($"  wrote    {settingsPath}");
 
         Say("");
@@ -332,9 +361,17 @@ internal static partial class Program
         return "http://localhost:5142/api/brain/auto-ingest";
     }
 
+    /// <summary>True when a handler that was registered is this hook, under its
+    /// name now or the script it used to be.</summary>
+    private static bool IsFor(HookSpec spec, string commandText)
+    {
+        return commandText.Contains(spec.Native, StringComparison.OrdinalIgnoreCase)
+            || (RetiredScripts.TryGetValue(spec.Native, out var was) && commandText.Contains(was, StringComparison.OrdinalIgnoreCase));
+    }
+
     /// <summary>
-    /// True when this array element is one of ours — by a marker, or by naming
-    /// one of the scripts the hooks used to be.
+    /// True when this handler is one of ours — by a marker, or by naming one of
+    /// the scripts the hooks used to be.
     ///
     /// The filename arm is the MIGRATION path and it is not optional: every
     /// machine that wired these hooks by hand before this installer existed
@@ -343,15 +380,11 @@ internal static partial class Program
     /// fires, and the duplicate SessionStart injection looks like a brain bug
     /// rather than an install bug.
     /// </summary>
-    private static bool IsOurs(JToken entry)
+    private static bool IsOurs(JToken handler)
     {
-        if (entry is not JObject o || o["hooks"] is not JArray hs) return false;
-        return hs.Any(h =>
-        {
-            var cmd = HookHealth.CommandText(h);
-            if (cmd.Length == 0) return false;
-            if (HookHealth.IsInstallerHook(cmd)) return true;
-            return RetiredScripts.Any(script => cmd.Contains(script, StringComparison.OrdinalIgnoreCase));
-        });
+        var cmd = HookHealth.CommandText(handler);
+        if (cmd.Length == 0) return false;
+        if (HookHealth.IsInstallerHook(cmd)) return true;
+        return RetiredScripts.Values.Any(script => cmd.Contains(script, StringComparison.OrdinalIgnoreCase));
     }
 }

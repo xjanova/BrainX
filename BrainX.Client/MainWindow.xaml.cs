@@ -14190,9 +14190,7 @@ public partial class MainWindow : Window
     // file — policy-gated, so only stable content lands in the brain.
     // ═══════════════════════════════════════
 
-    private string ClaudeSettingsPath() =>
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".claude", "settings.json");
+    private string ClaudeSettingsPath() => Path.Combine(HookHealth.DefaultClaudeDir(), "settings.json");
 
     private const string BrainAutoIngestHookMarker = "obsidianx-auto-ingest";
 
