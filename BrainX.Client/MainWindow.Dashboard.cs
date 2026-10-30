@@ -1707,13 +1707,24 @@ public partial class MainWindow
     // WebView2 UserDataFolder as the hidden probe — so any cookies
     // the user receives in the modal flow straight through to the
     // background scraper on its next tick.
-    private void DashClaudeDot_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    private void DashClaudeDot_Click(object sender, System.Windows.Input.MouseButtonEventArgs e) => OpenClaudeSignIn();
+
+    // Also reached from the cowork room's Claude HP frame when the probe
+    // has been signed out ("officeClaudeSignIn").
+    private BrainX.Client.Services.ClaudeUsageLoginWindow? _claudeSignIn;
+
+    private void OpenClaudeSignIn()
     {
         try
         {
+            // One window: a second click (room frame + dashboard dot) brings
+            // the open one forward instead of a second WebView on the same profile.
+            if (_claudeSignIn != null) { _claudeSignIn.Activate(); return; }
             var win = new BrainX.Client.Services.ClaudeUsageLoginWindow { Owner = this };
+            _claudeSignIn = win;
             win.Closed += async (_, _) =>
             {
+                _claudeSignIn = null;
                 // Immediately re-inject any newly-stored cookies (no-op if
                 // the user closed without logging in) and trigger a
                 // fresh tick so the dashboard updates right away instead

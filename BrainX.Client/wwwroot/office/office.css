@@ -512,6 +512,7 @@ body.ship-mode #floor, body.ship-mode #overlay { display: none; }
 #quota-hud .qh b.sp { color: #f0c45a; }
 #quota-hud .qh .qf { float: right; }
 #quota-hud .qcard { display: grid; gap: 1px; min-width: 0; }
+#quota-hud .qcard.signin { cursor: pointer; }
 #quota-hud .qn { color: var(--pc, var(--ink)); font-weight: 600; font-size: 9.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #quota-hud .qn .qz { font-style: normal; font-size: 8px; }
 #quota-hud .ql { display: grid; grid-template-columns: 13px minmax(0, 1fr) 18px; align-items: center; gap: 3px; }
