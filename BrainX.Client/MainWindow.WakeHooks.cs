@@ -26,28 +26,22 @@
 // bugs already — v1 read an env var Claude Code never sets, v3 wrote a BOM
 // that ate the first line of every feed.
 //
-// This file only writes settings.json. All the logic is in Program.Wake.cs.
+// This file only writes settings.json. All the logic is in Program.Wake.cs, and
+// what an entry looks like is in BrainX.Core's ClaudeWakeHooks.
+//
+// It also keeps the hooks of `brainx-mcp install-hooks` current. They live in
+// the same file and nothing else would: an update reaches no settings.json, and a
+// machine stayed on PowerShell until someone ran the installer by hand.
 
 using System;
 using System.IO;
+using BrainX.Core.Services;
 using Newtonsoft.Json.Linq;
 
 namespace BrainX.Client;
 
 public partial class MainWindow
 {
-    /// <summary>Marker identifying our entries in the user's settings.json, so
-    /// an upgrade replaces its own hooks and never touches anyone else's.</summary>
-    private const string BrainWakeHookMarker = "obsidianx-task-wake";
-
-    /// <summary>Bump when either command below changes shape. The tag is part
-    /// of the command string, so "is the installed hook current" is a substring
-    /// test on the file — the same scheme the auto-ingest hook uses.
-    /// v2: carries --agent claude-code, matching the hand-installed 2026-08-14
-    /// entries; without it the binary still defaults to claude-code, but the
-    /// audience should be stated, not defaulted, now that Codex shares it.</summary>
-    private const string BrainWakeHookVersionTag = BrainWakeHookMarker + "-v2";
-
     /// <summary>
     /// Install (or upgrade) the Stop + SessionStart hooks. Idempotent: returns
     /// false and touches nothing when the current version is already present.
@@ -66,15 +60,18 @@ public partial class MainWindow
             if (mcpExe is null || !File.Exists(mcpExe)) return false;
 
             var path = ClaudeSettingsPath();
+            var text = File.Exists(path) ? File.ReadAllText(path) : "";
+
             // Current = this version's tag AND this exe. The exe half is new
             // (2026-10-10): the MCP moved out of %LOCALAPPDATA%\BrainX\mcp, where
             // every update kills it, and a tag-only test would have kept these
-            // hooks pointing at the old copy forever. The path is compared in
-            // its JSON-escaped form because that is how settings.json holds it.
-            var exeInJson = Newtonsoft.Json.JsonConvert.ToString(mcpExe).Trim('"');
-            if (File.Exists(path) && File.ReadAllText(path) is var text
-                && text.Contains(BrainWakeHookVersionTag) && text.Contains(exeInJson, StringComparison.OrdinalIgnoreCase))
-                return false;
+            // hooks pointing at the old copy forever.
+            if (ClaudeWakeHooks.IsCurrent(text, mcpExe, ClaudeWakeHooks.ExecTag)) return false;
+
+            // Shell form stays only where exec form cannot run. This starts
+            // processes, so it comes after the check above that needs none.
+            var nativeExe = NativeHookExe(mcpExe);
+            if (nativeExe == null && ClaudeWakeHooks.IsCurrent(text, mcpExe, ClaudeWakeHooks.ShellTag)) return false;
 
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 
@@ -88,12 +85,12 @@ public partial class MainWindow
 
             var hooks = root["hooks"] as JObject ?? new JObject();
 
-            hooks["Stop"] = UpsertWakeHook(
+            hooks["Stop"] = ClaudeWakeHooks.Upsert(
                 hooks["Stop"] as JArray,
-                BuildWakeHookCommand(mcpExe, "hook-stop"));
-            hooks["SessionStart"] = UpsertWakeHook(
+                ClaudeWakeHooks.Handler(mcpExe, "hook-stop", _vaultPath, nativeExe != null));
+            hooks["SessionStart"] = ClaudeWakeHooks.Upsert(
                 hooks["SessionStart"] as JArray,
-                BuildWakeHookCommand(mcpExe, "hook-session-start"));
+                ClaudeWakeHooks.Handler(mcpExe, "hook-session-start", _vaultPath, nativeExe != null));
 
             root["hooks"] = hooks;
 
@@ -111,60 +108,15 @@ public partial class MainWindow
     }
 
     /// <summary>
-    /// Replace our entry in one hook array, preserving every entry that is not
-    /// ours. Matching on the marker rather than the whole command is what makes
-    /// an upgrade replace instead of stack: the exe path changes between builds
-    /// and the version tag changes between releases, but the marker does not.
-    /// A brainx-mcp wake command WITHOUT the marker is also ours — that is what
-    /// a hand-installed entry looks like (2026-08-14 left two per event), and
-    /// leaving it in place is how an upgrade stacks a duplicate.
+    /// Bring the hooks of `install-hooks` up to this build. Only on a machine that
+    /// already has them: no hooks is a choice, and so is the auto-register switch,
+    /// which means "do not touch my agent configs". Silent and best-effort for the
+    /// same reason as above. Starts processes: off the UI thread.
     /// </summary>
-    private static JArray UpsertWakeHook(JArray? existing, string command)
+    private bool EnsureInstallerHooksCurrent()
     {
-        var arr = existing ?? new JArray();
-        for (var i = arr.Count - 1; i >= 0; i--)
-        {
-            var cmd = arr[i]["hooks"]?[0]?["command"]?.ToString() ?? "";
-            var ours = cmd.Contains(BrainWakeHookMarker, StringComparison.Ordinal)
-                || (cmd.Contains("brainx-mcp", StringComparison.OrdinalIgnoreCase)
-                    && (cmd.Contains(" hook-stop", StringComparison.Ordinal)
-                        || cmd.Contains(" hook-session-start", StringComparison.Ordinal)));
-            if (ours) arr.RemoveAt(i);
-        }
-
-        // No `matcher`: Stop and SessionStart are not tool events, and a
-        // matcher on them is either ignored or (depending on the build) reads
-        // as "match nothing".
-        arr.Add(new JObject
-        {
-            ["hooks"] = new JArray
-            {
-                new JObject
-                {
-                    ["type"] = "command",
-                    ["command"] = command,
-                    // Generous, because the alternative is worse: a hook killed
-                    // mid-run reports as failed, and a failed Stop hook is a
-                    // scary red message about the brain on a turn that was
-                    // otherwise fine. The work itself is one directory listing.
-                    ["timeout"] = 10,
-                },
-            },
-        });
-        return arr;
+        if (!_mcpAutoRegisterEnabled) return false;
+        try { return HookHealth.UpgradeInstallerHooks(HookHealth.DefaultClaudeDir(), ResolveBestMcpExe(), _vaultPath); }
+        catch { return false; }
     }
-
-    /// <summary>
-    /// The command line. Both paths are quoted — Program Files and a vault on
-    /// a Desktop both contain spaces.
-    ///
-    /// The version marker rides as a REAL ARGUMENT, not a trailing comment.
-    /// Claude Code hands this string to the shell, and `#` (sh) or `::` (cmd)
-    /// only comment at the start of a line — mid-command they are arguments,
-    /// and which of the two would even apply depends on the platform. A flag
-    /// the binary ignores is a comment that works in every shell, and it still
-    /// leaves the version greppable in settings.json.
-    /// </summary>
-    private string BuildWakeHookCommand(string mcpExe, string subcommand) =>
-        $"\"{mcpExe}\" {subcommand} --vault \"{_vaultPath}\" --agent claude-code --tag {BrainWakeHookVersionTag}";
 }

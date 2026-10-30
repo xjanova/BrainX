@@ -138,6 +138,7 @@ public partial class MainWindow
             // It is still under the auto-register opt-out checked above, which
             // is the switch that means "do not touch my agent configs".
             hookChanged |= EnsureTaskWakeHooksInstalled();
+            hookChanged |= EnsureInstallerHooksCurrent();
 
             // Friendly, non-technical confirmation. The status-bar chips
             // (RefreshMcpStatusBar, polled every 3s) flip to green on their own —
