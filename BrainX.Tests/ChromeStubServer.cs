@@ -30,6 +30,12 @@ internal static class ChromeStubServer
     /// <summary>Cold start: sleep this long before reading stdin (Defender
     /// scanning a 250 MB exe, a slow disk) — the discovery race needs it.</summary>
     public const string StartDelayEnv = "BRAINX_CHROME_STUB_START_MS";
+    /// <summary>Sit on tools/list this long: the handshake is over, so the spawn
+    /// is too, and discovery still is not.</summary>
+    public const string ListDelayEnv = "BRAINX_CHROME_STUB_LIST_MS";
+    /// <summary>Create this file on starting to sit on tools/list: something a
+    /// check can poll, where the request log is being written to.</summary>
+    public const string ListHeldEnv = "BRAINX_CHROME_STUB_LIST_HELD";
     /// <summary>Append "&lt;utc ticks&gt; &lt;pid&gt; &lt;method&gt; &lt;tool&gt;" for every request received.</summary>
     public const string LogEnv = "BRAINX_CHROME_STUB_LOG";
     /// <summary>Exit WITHOUT answering when this tool is called (a crash mid-call).</summary>
@@ -64,8 +70,7 @@ internal static class ChromeStubServer
     {
         try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
         var started = Environment.GetEnvironmentVariable(StartedEnv);
-        if (!string.IsNullOrWhiteSpace(started))
-            try { File.AppendAllText(started, DateTime.UtcNow.ToString("o") + "\n"); } catch { }
+        if (!string.IsNullOrWhiteSpace(started)) AppendLine(started, DateTime.UtcNow.ToString("o") + "\n");
 
         var tools = LoadFixtureTools();
         if (int.TryParse(Environment.GetEnvironmentVariable(StartDelayEnv), out var startMs) && startMs > 0)
@@ -84,10 +89,15 @@ internal static class ChromeStubServer
 
             var method = req["method"]?.ToString() ?? "";
             var tool = req["params"]?["name"]?.ToString() ?? "";
-            if (!string.IsNullOrWhiteSpace(log))
-                try { File.AppendAllText(log, $"{DateTime.UtcNow.Ticks} {Environment.ProcessId} {method} {tool}\n"); } catch { }
+            if (!string.IsNullOrWhiteSpace(log)) AppendLine(log, $"{DateTime.UtcNow.Ticks} {Environment.ProcessId} {method} {tool}\n");
             if (method == "tools/call" && !string.IsNullOrEmpty(exitOn) && tool == exitOn)
                 return 0;   // gone mid-call, no answer — stdout closes with the process
+            if (method == "tools/list" && int.TryParse(Environment.GetEnvironmentVariable(ListDelayEnv), out var listMs) && listMs > 0)
+            {
+                var held = Environment.GetEnvironmentVariable(ListHeldEnv);
+                if (!string.IsNullOrWhiteSpace(held)) try { File.WriteAllText(held, ""); } catch { }
+                await Task.Delay(Math.Min(listMs, 30_000));
+            }
 
             JObject result = (req["method"]?.ToString()) switch
             {
@@ -105,6 +115,20 @@ internal static class ChromeStubServer
             await stdout.FlushAsync();
         }
         return 0;   // stdin EOF — exactly how the real server leaves
+    }
+
+    /// <summary>
+    /// A call's stub and discovery's stub share these files, and AppendAllText
+    /// wants one to itself: the loser's line used to vanish into a catch, and a
+    /// check then read that discovery had never run.
+    /// </summary>
+    private static void AppendLine(string path, string line)
+    {
+        for (var attempt = 0; attempt < 400; attempt++)
+        {
+            try { File.AppendAllText(path, line); return; }
+            catch { Thread.Sleep(5); }
+        }
     }
 
     private static JArray LoadFixtureTools()
