@@ -196,6 +196,28 @@ public static partial class CodeGraphStore
         return slug;
     }
 
+    /// <summary>
+    /// The slug a folder is stored under when nobody names one: its folder name.
+    /// A name with nothing usable in it (a Thai folder) gets a slug from the path,
+    /// and a second checkout with the same folder name gets its own graph rather
+    /// than replacing the first. A file that no longer loads holds nothing to keep.
+    /// </summary>
+    public static string SlugFor(string vaultPath, string repoRoot)
+    {
+        var root = Path.GetFullPath(repoRoot).TrimEnd('\\', '/');
+        var tail = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(root.ToLowerInvariant())))[..6].ToLowerInvariant();
+        var name = Regex.Replace(Regex.Replace(Path.GetFileName(root).ToLowerInvariant(), "[^a-z0-9._-]+", "-"), @"\.{2,}", ".").Trim('-', '.', '_');
+        if (name.Length > 57) name = name[..57].TrimEnd('-', '.', '_');
+        if (name.Length == 0) return "repo-" + tail;
+        try
+        {
+            var held = Load(vaultPath, name)?.RepoRoot;
+            return string.IsNullOrEmpty(held) || string.Equals(Path.GetFullPath(held).TrimEnd('\\', '/'), root, StringComparison.OrdinalIgnoreCase)
+                ? name : name + "-" + tail;
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or JsonException or UnauthorizedAccessException) { return name; }
+    }
+
     public static string Directory(string vaultPath) => Path.Combine(vaultPath, ".obsidianx", "code-graphs");
 
     public static string PathFor(string vaultPath, string repo) => Path.Combine(Directory(vaultPath), NormaliseRepo(repo) + ".json");

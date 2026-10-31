@@ -1921,6 +1921,19 @@ export function createScene(canvas, callbacks = {}) {
         if (t >= 1) { camera.position.copy(fly.toCam); fly = null; }
     }
 
+    /** focusNode by id, for callers that hold a note or symbol and not a slot. */
+    function focusNodeId(id) {
+        const idx = idToIndex?.get(id);
+        if (idx == null) return false;
+        focusNode(idx);
+        return true;
+    }
+
+    /** The payload the next theme switch mounts, without mounting it now. */
+    function holdPayload(brain) {
+        lastBrainPayload = brain;
+    }
+
     function focusGalaxy(category) {
         if (!universe) return;
         const g = universe.galaxies.find(x => x.category === category);
@@ -3478,6 +3491,8 @@ export function createScene(canvas, callbacks = {}) {
         mount,
         setSize,
         focusNode,
+        focusNodeId,
+        holdPayload,
         focusGalaxy,
         resetView,
         resettle,

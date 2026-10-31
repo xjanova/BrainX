@@ -4,7 +4,7 @@
 // the setting — it persists it with every other display setting, routed to
 // the wallpaper prefs or the app's own exactly as the rest are — and publishes
 // it here. hud.js only listens, to swap its agent-bus picture: a solar system
-// beside the universe, an anatomical body beside the brain.
+// beside the universe, a single neuron beside the brain.
 //
 // A module rather than a DOM event because ES modules are singletons: a late
 // subscriber can still ask what the theme IS, where an event it missed would

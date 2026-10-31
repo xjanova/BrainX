@@ -38,6 +38,16 @@ a separate cyan code galaxy for the most relevant symbols. Exact note mentions
 form the bridges to that galaxy. The info card labels a code node's source as
 BrainX or Graphify. The neural-brain theme keeps its note-only anatomy.
 
+The **Code** button on the HUD opens the code dashboard: one card per stored
+graph (symbols, edges, commit, build age, whether the checkout has moved on),
+how sure the edges are, relation and coverage counts, the most connected
+symbols, and search across the whole graph. A symbol's page lists its callers,
+callees and the notes that name it, and flies to its star. **Add repo** picks a
+folder and runs `brainx-mcp code-build <folder>`; **Refresh**, **Full rebuild**
+and **Stop** act on the build, one at a time. A second folder with the same name
+gets its own graph instead of replacing the first. Only Graphify imports have no
+build button: rebuilding would swap their source, so refresh them as below.
+
 ## Import an existing Graphify graph
 
 If a `graph.json` already exists, pass it from a local MCP client:

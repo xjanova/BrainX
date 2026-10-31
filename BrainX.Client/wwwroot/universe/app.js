@@ -441,7 +441,7 @@ function exitEditUI() {
     $infoPrev.hidden = false;
     $infoEditor.hidden = true;
     $infoEditor.value = '';
-    $infoEdit.hidden = false;
+    $infoEdit.hidden = _infoCurrentNode?.sourceKind === 'code';
     $infoSave.hidden = true;
     $infoCancel.hidden = true;
     setInfoStatus(null);
@@ -1025,11 +1025,7 @@ function onHostMessage(evt) {
             handleBrain(msg.payload);
             break;
         case 'codeGraph':
-            pendingCodeGraph = msg.payload;
-            if (pendingBrain && scene) {
-                renderStats({ ...pendingBrain, CodeOverlay: pendingCodeGraph });
-                mountScene({ ...pendingBrain, CodeOverlay: pendingCodeGraph });
-            }
+            applyCodeGraph(msg.payload);
             break;
         case 'pulse':
             // C# forwards every MCP read/write touch as {noteId, op}. When
@@ -1257,6 +1253,35 @@ function handleBrain(brain) {
     renderStats({ ...brain, CodeOverlay: pendingCodeGraph });
     pendingBrain = brain;
     if (scene) mountScene({ ...brain, CodeOverlay: pendingCodeGraph });
+}
+
+/** A code layer that changed what is drawn re-mounts the sky once, from where the
+ *  camera already is. Only a card changed, or the brain theme is up (it draws no
+ *  code): nothing moves, and the next mount carries the new layer. */
+function applyCodeGraph(payload) {
+    const drawnBefore = pendingCodeGraph?.drawKey ?? '';
+    pendingCodeGraph = payload;
+    if (!pendingBrain || !scene) return;
+    const merged = { ...pendingBrain, CodeOverlay: payload };
+    renderStats(merged);
+    if ((payload?.drawKey ?? '') === drawnBefore) return;
+    if (scene.getTheme?.() === 'brain') { scene.holdPayload?.(merged); return; }
+    const pose = scene.snapshotCamera?.();
+    mountScene(merged);
+    scene.restoreCamera?.(pose);
+}
+
+/** The code dashboard's way into the sky. Says what happened, so it can say why
+ *  when nothing could: 'node' · 'galaxy' · 'brain-theme' · 'none'. */
+function flyToCode({ id, category }) {
+    if (!scene) return 'none';
+    if (id && scene.focusNodeId?.(id)) return 'node';
+    if (scene.getTheme?.() === 'brain') return 'brain-theme';
+    if (category && _lastUniverse?.galaxies.some(g => g.category === category)) {
+        scene.focusGalaxy(category);
+        return 'galaxy';
+    }
+    return 'none';
 }
 
 /** The status line after a mount, in the vocabulary of the picture on screen. */
@@ -1936,7 +1961,8 @@ if (document.readyState === 'loading') {
 window.UniverseHost = {
     viewport: getViewport,
     canvas: () => $canvas,
-    refresh: () => pendingBrain && handleBrain(pendingBrain)
+    refresh: () => pendingBrain && handleBrain(pendingBrain),
+    flyToCode
 };
 
 // ─── Dashboard floating chips ─────────────────────────────────────

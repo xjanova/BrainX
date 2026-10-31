@@ -14,6 +14,151 @@ internal static partial class Program
         checks.Add(("code graph: traversal is directed, typed, deterministic and bounded", CodeGraphTraceChecks));
         checks.Add(("code graph: Graphify import and trace through the real MCP, search left intact", CodeGraphEndToEnd));
         checks.Add(("code graph: native C# build, cache, rebind and trace through MCP", CodeGraphNativeBuild));
+        checks.Add(("code graph: syntax languages keep receivers, imports and deep files through code-build", CodeGraphSyntaxBuild));
+        checks.Add(("code graph: what the Universe and its dashboard are told", CodeGraphViewShapes));
+    }
+
+    private static async Task CodeGraphSyntaxBuild()
+    {
+        var exe = FindMcpExe() ?? throw new InvalidOperationException("Build brainx-mcp first");
+        var (root, vault, _) = EmbedVault(0);
+        var repo = Path.Combine(root, "sample");
+        var files = new Dictionary<string, string>
+        {
+            ["a.js"] = "function send() {}\nclass Svc { run() { this.client.send(); } }\nconst {helper} = require('./lib');\nfunction go(){ helper(); }\n",
+            ["lib.js"] = "function helper() {}\nmodule.exports = {helper};\n",
+            ["deep.js"] = "const x = " + string.Join(" + ", Enumerable.Repeat("a", 60000)) + ";\nfunction afterDeep() {}\n",
+            ["b.ts"] = "import { Base } from './base';\nexport abstract class Kid extends Base implements Face { hi() { this.up(); } }\ninterface Face {}\n",
+            ["base.ts"] = "export class Base { up() {} }\n",
+            ["src/pkg/__init__.py"] = "",
+            ["src/pkg/store.py"] = "def save():\n    pass\n",
+            ["src/main.py"] = "from pkg.store import save as keep\ndef run():\n    keep()\n",
+            ["app/Models/User.php"] = "<?php\nnamespace App\\Models;\nclass User { public function save() { $this->touch(); } public function touch() {} }\n",
+            ["app/Http/Ctl.php"] = "<?php\nnamespace App\\Http;\nuse App\\Models\\User;\nclass Ctl { function go() { $u = new User(); } }\n",
+            ["packages/core/index.js"] = "export function inMono() {}\n",
+        };
+        foreach (var (path, text) in files)
+        {
+            var full = Path.Combine(repo, path.Replace('/', Path.DirectorySeparatorChar));
+            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+            File.WriteAllText(full, text);
+        }
+        var thaiFolder = Path.Combine(root, "\u0E42\u0E04\u0E49\u0E14");
+        Directory.CreateDirectory(thaiFolder);
+        File.WriteAllText(Path.Combine(thaiFolder, "x.py"), "def only():\n    pass\n");
+        async Task<(int Code, JObject? Line)> Build(params string[] args)
+        {
+            var psi = new ProcessStartInfo(exe) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+            foreach (var a in new[] { "code-build" }.Concat(args).Concat(["--vault", vault])) psi.ArgumentList.Add(a);
+            using var p = Process.Start(psi)!;
+            var stderr = p.StandardError.ReadToEndAsync();
+            var line = (await p.StandardOutput.ReadToEndAsync()).Trim();
+            await p.WaitForExitAsync();
+            await stderr;
+            return (p.ExitCode, line.Length == 0 ? null : JObject.Parse(line.Split('\n')[^1]));
+        }
+        try
+        {
+            var (code, line) = await Build(repo, "--repo", "sample");
+            Check("code-build exits 0 and reports one line of JSON", code == 0 && line?["status"]?.ToString() == "built", line?.ToString());
+            var g = CodeGraphStore.Load(vault, "sample") ?? throw new InvalidOperationException("no graph");
+            var named = g.Symbols.Where(s => s.Kind != "file").ToLookup(s => s.Name);
+            bool Linked(string relation, string from, string to) => g.Edges.Any(e => e.Relation == relation
+                && named[from].Any(s => s.Id == e.From) && named[to].Any(s => s.Id == e.To));
+            Check("a 60,000-term expression does not end the build", named["afterDeep"].Any());
+            Check("packages/ is scanned unless it is a NuGet folder", named["inMono"].Any());
+            Check("this.client.send() is not the top-level send", !Linked("calls", "run", "send"));
+            Check("destructured require reaches the other file", Linked("calls", "go", "helper"));
+            Check("TS extends through an import", Linked("inherits", "Kid", "Base"));
+            Check("TS abstract class implements its interface", Linked("implements", "Kid", "Face"));
+            Check("Python aliased import reaches the function", Linked("calls", "run", "save"));
+            Check("PHP $this->touch() binds in its class", Linked("calls", "save", "touch"));
+            Check("PHP new binds through use", Linked("creates", "go", "User"));
+            var stamp = File.GetLastWriteTimeUtc(CodeGraphStore.PathFor(vault, "sample"));
+            (code, line) = await Build(repo, "--repo", "sample");
+            Check("an unchanged repo leaves the file alone", code == 0 && line?["status"]?.ToString() == "unchanged"
+                && File.GetLastWriteTimeUtc(CodeGraphStore.PathFor(vault, "sample")) == stamp, line?.ToString());
+            (code, line) = await Build(thaiFolder);
+            Check("a folder name with no usable letters still gets a slug", code == 0
+                && line?["repo"]?.ToString()?.StartsWith("repo-", StringComparison.Ordinal) == true, line?.ToString());
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); } catch { }
+        }
+    }
+
+    private static Task CodeGraphViewShapes()
+    {
+        CodeSymbol Sym(string id, string name, string kind = "method", string file = "a.cs") =>
+            new() { Id = id, Name = name, Kind = kind, File = file, Line = 1 };
+        var g = new CodeGraph
+        {
+            Repo = "r", Commit = "abc", ImportedAt = new DateTime(2026, 10, 31, 0, 0, 0, DateTimeKind.Utc),
+            Source = new CodeGraphSource { Kind = "brainx" },
+            Symbols = [Sym("f", "a.cs", "file"), Sym("run", "Run"), Sym("go", "Go"), Sym("gone", "Goner", file: "zebra/Run.cs"), Sym("x", "Runner")],
+            Edges =
+            [
+                new CodeEdge { From = "run", To = "go", Relation = "calls", Provenance = "EXTRACTED", Lines = [3, 9] },
+                new CodeEdge { From = "x", To = "go", Relation = "calls", Provenance = "INFERRED" },
+                new CodeEdge { From = "f", To = "run", Relation = "contains", Provenance = "EXTRACTED" },
+            ],
+            Mentions = [new CodeMention { NoteId = "n1", NotePath = "Notes/n.md", SymbolId = "go", Count = 2, Text = "Go" }]
+        };
+        var layer = CodeGraphView.Layer(g, "r");
+        var drawn = ((JArray)layer["nodes"]!).Select(n => n["id"]!.ToString()).ToHashSet();
+        Check("the layer holds the mentioned symbol and its file", drawn.Contains("go") && drawn.Contains("f") && !drawn.Contains("gone"), string.Join(",", drawn));
+        Check("the layer's nodes name their repo", layer["nodes"]![0]!["repo"]?.ToString() == "r");
+        var bare = new CodeGraph { Repo = "b", Symbols = [Sym("f", "a.cs", "file"), Sym("run", "Run")] };
+        Check("a graph no note names still draws its files", ((JArray)CodeGraphView.Layer(bare, "b")["nodes"]!).Count == 1);
+
+        Check("draw key: same layer, same key", CodeGraphView.DrawKey(layer) == CodeGraphView.DrawKey((JObject)layer.DeepClone()));
+        Check("draw key: nothing drawn is empty", CodeGraphView.DrawKey(new JObject { ["nodes"] = new JArray() }) == "");
+
+        var over = CodeGraphView.Overview(g);
+        Check("overview counts provenance from the edges", over["provenance"]?["EXTRACTED"]?.Value<int>() == 2 && over["provenance"]?["INFERRED"]?.Value<int>() == 1);
+        Check("overview sorts relations by count", ((JObject)over["relations"]!).Properties().First().Name == "calls");
+        var hubs = (JArray)over["hubs"]!;
+        Check("the hub is the most connected symbol and files are left out", hubs[0]["id"]?.ToString() == "go" && hubs[0]["in"]?.Value<int>() == 2
+            && hubs.All(h => h["kind"]?.ToString() != "file"), hubs.ToString());
+
+        var found = CodeGraphView.Search(g, "run");
+        var order = ((JArray)found["hits"]!).Select(h => h["id"]!.ToString()).ToList();
+        Check("search: whole name, then prefix, then file", order.SequenceEqual(["run", "x", "gone"]), string.Join(",", order));
+        Check("search: empty asks for nothing", CodeGraphView.Search(g, "  ")["total"]?.Value<int>() == 0);
+
+        var detail = CodeGraphView.Detail(g, "go")!;
+        var calledBy = ((JArray)detail["groups"]!).Single(x => x["label"]?.ToString() == "Called by");
+        Check("detail: callers come extracted first", calledBy["total"]?.Value<int>() == 2 && calledBy["items"]![0]!["id"]?.ToString() == "run"
+            && calledBy["items"]![0]!["sites"]?.Value<int>() == 2, calledBy.ToString());
+        Check("detail: the note that names it", detail["notes"]![0]!["noteId"]?.ToString() == "n1" && detail["notesTotal"]?.Value<int>() == 1);
+        Check("detail: an unknown symbol is null, not a throw", CodeGraphView.Detail(g, "nope") == null && CodeGraphView.Detail(g, null) == null);
+
+        var card = CodeGraphView.Card(g, "r", 3);
+        CodeGraphView.MarkState(card);
+        Check("a card with no folder is gone", card["state"]?.ToString() == "gone");
+
+        var (root, vault, _) = EmbedVault(0);
+        try
+        {
+            var one = Path.Combine(root, "one", "app");
+            var two = Path.Combine(root, "two", "app");
+            Directory.CreateDirectory(one);
+            Directory.CreateDirectory(two);
+            Check("slug: a new folder takes its name", CodeGraphStore.SlugFor(vault, one) == "app");
+            CodeGraphStore.Save(vault, new CodeGraph { Repo = "app", RepoRoot = one });
+            Check("slug: the same folder keeps its name", CodeGraphStore.SlugFor(vault, one + Path.DirectorySeparatorChar) == "app");
+            var other = CodeGraphStore.SlugFor(vault, two);
+            Check("slug: another folder of that name does not replace it", other.StartsWith("app-", StringComparison.Ordinal) && other == CodeGraphStore.NormaliseRepo(other), other);
+            Check("slug: dots and underscores cannot start one", CodeGraphStore.SlugFor(vault, Path.Combine(root, "_a..b")) == "a.b");
+            File.WriteAllText(CodeGraphStore.PathFor(vault, "app"), "{ not json");
+            Check("slug: an unreadable graph is replaced, it holds nothing", CodeGraphStore.SlugFor(vault, two) == "app");
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); } catch { }
+        }
+        return Task.CompletedTask;
     }
 
     private static async Task CodeGraphNativeBuild()

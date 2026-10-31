@@ -9033,8 +9033,7 @@ public partial class MainWindow : Window
                 SetUniverseLoadingStatus(
                     $"Streaming {_graph.TotalNodes:N0} notes into galaxy",
                     "Final frame");
-                PushCodeGraphToUniverse();
-                PushBrainSnapshotToUniverse();
+                _ = PushUniverseOnReadyAsync();
                 // FALLBACK hide only. The handover belongs to hudReady (below):
                 // `ready` fires when the galaxy module boots, and measured here
                 // the HUD's own boot curtain — the thing that takes over from
@@ -9043,6 +9042,10 @@ public partial class MainWindow : Window
                 // is the hole this overlay exists to close. Four seconds is for
                 // a page that somehow never reports a HUD at all.
                 ScheduleUniverseLoaderHandover(4000, isFallback: true);
+            }
+            else if (msg?.type?.StartsWith("code", StringComparison.Ordinal) == true)
+            {
+                HandleCodeMessage(msg.type, e.WebMessageAsJson);
             }
             else if (msg?.type == "toggleFullscreen")
             {

@@ -163,9 +163,9 @@ internal static partial class Program
         catch (Exception ex) when (ex is not OutOfMemoryException) { return new FinishedBuild(() => throw ex); }
     }
 
-    private static string CodeBuildRepo(string root, string? repoArg) => CodeGraphStore.NormaliseRepo(string.IsNullOrWhiteSpace(repoArg)
-        ? Regex.Replace(Path.GetFileName(root.TrimEnd('\\', '/')).ToLowerInvariant(), "[^a-z0-9._-]+", "-").Trim('-', '.')
-        : repoArg);
+    private static string CodeBuildRepo(string root, string? repoArg) => string.IsNullOrWhiteSpace(repoArg)
+        ? CodeGraphStore.SlugFor(_vaultPath, root)
+        : CodeGraphStore.NormaliseRepo(repoArg);
 
     /// <summary>
     /// <c>brainx-mcp code-build &lt;repo_root&gt; [--repo slug] [--full] [--vault path]</c>:
@@ -181,7 +181,9 @@ internal static partial class Program
         {
             if (args[i] == "--full") full = true;
             else if (args[i] == "--repo" && i + 1 < args.Length) repoArg = args[++i];
-            else if (args[i] == "--vault" && i + 1 < args.Length) i++;      // read by ResolveVault
+            // ResolveVault takes the first folder on the command line, which here
+            // would be the repo: the graph would land inside the code it describes.
+            else if (args[i] == "--vault" && i + 1 < args.Length) _vaultPath = Path.GetFullPath(args[++i]);
             else positional.Add(args[i]);
         }
         if (positional.Count != 1 || !Directory.Exists(positional[0]))
@@ -189,15 +191,25 @@ internal static partial class Program
             Console.Error.WriteLine("usage: brainx-mcp code-build <repo_root> [--repo slug] [--full] [--vault path]");
             return 2;
         }
-        var root = Path.GetFullPath(positional[0]);
-        var repo = CodeBuildRepo(root, repoArg);
-        var (graph, report) = BrainX.CodeGraph.CodeGraphBuilder.Build(_vaultPath, root, repo, BrainX.CodeGraph.SyntaxFileExtractor.Defaults, full);
-        Console.WriteLine(new JObject
+        try
         {
-            ["repo"] = repo, ["status"] = report.Status, ["symbols"] = graph?.Symbols.Count, ["edges"] = graph?.Edges.Count,
-            ["filesRead"] = report.FilesRead, ["milliseconds"] = report.Ms.GetValueOrDefault("total")
-        }.ToString(Newtonsoft.Json.Formatting.None));
-        return graph != null ? 0 : 1;
+            var root = Path.GetFullPath(positional[0]);
+            var repo = CodeBuildRepo(root, repoArg);
+            var (graph, report) = BrainX.CodeGraph.CodeGraphBuilder.Build(_vaultPath, root, repo, BrainX.CodeGraph.SyntaxFileExtractor.Defaults, full);
+            Console.WriteLine(new JObject
+            {
+                ["repo"] = repo, ["status"] = report.Status, ["symbols"] = graph?.Symbols.Count, ["edges"] = graph?.Edges.Count,
+                ["filesRead"] = report.FilesRead, ["milliseconds"] = report.Ms.GetValueOrDefault("total")
+            }.ToString(Newtonsoft.Json.Formatting.None));
+            return graph != null ? 0 : 1;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidDataException or Newtonsoft.Json.JsonException)
+        {
+            // The dashboard shows this line, so it stays a sentence and not a stack.
+            Log($"code-build failed: {ex}");
+            Console.WriteLine(new JObject { ["status"] = "failed", ["error"] = ex.Message }.ToString(Newtonsoft.Json.Formatting.None));
+            return 1;
+        }
     }
 
     private static JToken BrainCodeBuild(JObject args)
