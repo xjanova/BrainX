@@ -97,6 +97,7 @@ internal static partial class Program
         RegisterAgentOnboardingChecks(sshChecks);
         RegisterIndexerChecks(sshChecks);
         RegisterSearchIndexChecks(sshChecks);
+        RegisterCodeGraphChecks(sshChecks);
         RegisterAvatarChecks(sshChecks);
         RegisterLiveIndexChecks(sshChecks);
         RegisterCloudChecks(sshChecks);

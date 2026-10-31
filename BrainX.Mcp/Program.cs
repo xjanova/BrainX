@@ -1341,6 +1341,44 @@ internal static partial class Program
                     },
                     ["required"] = new JArray("reference")
                 }),
+            Tool("brain_code_trace",
+                "Who calls/imports/inherits what in an imported code graph, plus the notes that explain it. " +
+                "Pass symbol (name, path#name, Class.method or id) or a query naming identifiers. " +
+                "Bounded by hops, max_edges and max_tokens; hubs are reported, not expanded. " +
+                "Each edge keeps provenance (EXTRACTED/INFERRED/AMBIGUOUS), file:line and freshness; " +
+                "an ambiguous name returns candidates, never a guess. status no-graph = run brain_code_import first.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["symbol"] = new JObject { ["type"] = "string" },
+                        ["query"] = new JObject { ["type"] = "string", ["description"] = "Question; its identifiers seed the walk and it ranks the notes." },
+                        ["repo"] = new JObject { ["type"] = "string", ["description"] = "Required when more than one graph is imported." },
+                        ["direction"] = new JObject { ["type"] = "string", ["enum"] = new JArray("both", "callers", "callees"), ["default"] = "both" },
+                        ["relations"] = new JObject { ["type"] = "string", ["description"] = "Comma list, e.g. calls,imports,inherits. Default all." },
+                        ["hops"] = new JObject { ["type"] = "integer", ["default"] = 1, ["maximum"] = 3 },
+                        ["max_edges"] = new JObject { ["type"] = "integer", ["default"] = 30, ["maximum"] = 150 },
+                        ["max_tokens"] = new JObject { ["type"] = "integer", ["default"] = 1500, ["maximum"] = 6000 },
+                        ["notes"] = new JObject { ["type"] = "integer", ["default"] = 3, ["maximum"] = 10, ["description"] = "Related notes via hybrid search; 0 = none." },
+                        ["scope"] = new JObject { ["type"] = "string", ["description"] = "Scope for the notes. Never broadened." }
+                    }
+                }),
+            Tool("brain_code_import",
+                "Import a Graphify graph.json (code symbols + typed edges) for one repository. Local machine only. " +
+                "Checks the format, records the git commit and file fingerprints so later answers can say when code moved on, " +
+                "and reports dropped edges with missing endpoints.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["path"] = new JObject { ["type"] = "string", ["description"] = "graph.json, or the repo folder holding graphify-out/graph.json" },
+                        ["repo"] = new JObject { ["type"] = "string", ["description"] = "Slug to store it under; default the folder name." },
+                        ["repo_root"] = new JObject { ["type"] = "string", ["description"] = "Default: the folder above graphify-out." }
+                    },
+                    ["required"] = new JArray("path")
+                }),
             Tool("brain_scope_list",
                 "List the brain's scope namespaces (top-level folders + their direct children) with note counts. Use BEFORE passing a scope arg to brain_search/brain_list/brain_walk so you know what scopes exist. Helps the user see how their brain is organised.",
                 new JObject
@@ -2027,6 +2065,8 @@ internal static partial class Program
                 "brain_recall"              => BrainRecall(args),
                 "brain_search"              => BrainSearch(args),
                 "brain_lookup"              => BrainLookup(args),
+                "brain_code_trace"          => BrainCodeTrace(args),
+                "brain_code_import"         => BrainCodeImport(args),
                 "brain_get_note"            => BrainGetNote(args),
                 "brain_expertise"           => BrainExpertise(),
                 "brain_list"                => BrainList(args),
