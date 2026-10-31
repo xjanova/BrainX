@@ -671,6 +671,8 @@ internal static partial class Program
         // fallback when the owner gives an order to an empty room; a line
         // addressed to somebody, or said while people are sitting in there,
         // never reaches them.
+        var patience = TimeSpan.FromSeconds(cfg.UnreadableLineSeconds);
+        if (!dryRun) CoworkFindPlace(patience);
         var coworkCalls = CoworkCallsWaiting(
             cfg.Runners.Where(r => r.Value.OnCall).Select(r => r.Key), out var coworkScanned, out var coworkUnheard, out var coworkUnreadable);
         var coworkHandled = false;
@@ -1078,7 +1080,6 @@ internal static partial class Program
         {
             // Told first: a broker that stops between the two tells it twice,
             // which beats a line gone with nothing said.
-            var patience = TimeSpan.FromSeconds(cfg.UnreadableLineSeconds);
             var givenUp = CoworkOutOfPatience(coworkUnreadable, patience);
             if (givenUp.Count > 0) CoworkTellUnreadable(givenUp, patience);
 
