@@ -9,19 +9,24 @@ namespace BrainX.Core.Services;
 /// A repository's symbols and typed, directed relationships, kept beside the
 /// vault so a lesson can be joined to the code it is about.
 ///
-/// BrainX does not parse code into this. <see cref="CodeIndexer"/> stays a
-/// regex symbol list for findability; edges come only from an external
-/// extractor (today Graphify's graph.json, see <see cref="GraphifyAdapter"/>)
-/// and every edge carries the extractor's own provenance — EXTRACTED,
-/// INFERRED or AMBIGUOUS — instead of a confidence BrainX invented.
+/// Two sources fill it. BrainX's own extractor (BrainX.CodeGraph: Roslyn for
+/// C#, tree-sitter for the rest, its logic ported from Graphify) builds and
+/// refreshes it per file; <see cref="GraphifyAdapter"/> still imports a
+/// Graphify graph.json as an alternative. <see cref="CodeIndexer"/> stays a
+/// regex symbol list for findability. Every edge carries its provenance —
+/// EXTRACTED (the compiler or syntax tree says so), INFERRED (a name rule
+/// resolved it) or AMBIGUOUS — instead of a confidence BrainX invented.
 ///
-/// Identity is repo + commit + vault-independent relative path + symbol name
-/// + source line, because each of those alone is wrong somewhere: names
+/// Identity is repo + vault-independent relative path + symbol name, plus the
+/// source line for imported graphs (Graphify ids carry it) or the extractor's
+/// stable key for native ones, because each alone is wrong somewhere: names
 /// repeat across files, paths move, and lines drift between commits.
 /// </summary>
 public sealed class CodeGraph
 {
-    public const string SchemaVersion = "brainx-code-graph/v1";
+    /// <summary>v2 adds end lines, every call site, stable keys and note mentions. v1 files still load.</summary>
+    public const string SchemaVersion = "brainx-code-graph/v2";
+    public const string SchemaVersionV1 = "brainx-code-graph/v1";
 
     public string Schema { get; set; } = SchemaVersion;
     /// <summary>Slug the graph is stored and queried under.</summary>
@@ -36,9 +41,14 @@ public sealed class CodeGraph
     public CodeGraphSource Source { get; set; } = new();
     public List<CodeSymbol> Symbols { get; set; } = [];
     public List<CodeEdge> Edges { get; set; } = [];
-    /// <summary>Fingerprints of the files the evidence points at, taken at import.</summary>
+    /// <summary>Fingerprints of the files the evidence points at, taken at import (native graphs: every file read).</summary>
     public Dictionary<string, CodeFileStamp> Files { get; set; } = new(StringComparer.Ordinal);
     public CodeGraphIssues Issues { get; set; } = new();
+    /// <summary>Notes that name a symbol of this graph exactly, so a note leads to its code and code to its notes.</summary>
+    public List<CodeMention> Mentions { get; set; } = [];
+    /// <summary>When <see cref="Mentions"/> was last computed, and over how many notes.</summary>
+    public DateTime? MentionsAt { get; set; }
+    public int MentionNotesScanned { get; set; }
 
     private CodeGraphIndex? _index;
     /// <summary>Lookups for traversal, built once per loaded graph and rebuilt if the lists change size.</summary>
@@ -84,13 +94,35 @@ public sealed class CodeSymbol
     public string Name { get; set; } = string.Empty;
     /// <summary>Container-qualified name when the extractor gives one, e.g. <c>Program.ScoreNode</c>.</summary>
     public string? Qualified { get; set; }
-    /// <summary>function · method · class · module · file · external · unknown.</summary>
+    /// <summary>
+    /// file · class · struct · interface · enum · record · delegate · function ·
+    /// method · constructor · property · field · event · module · external ·
+    /// unresolved · unknown (imported graphs add rationale, concept…).
+    /// </summary>
     public string Kind { get; set; } = "unknown";
     /// <summary>Repo-relative, '/' separated. Null for nodes outside the repo (external modules).</summary>
     public string? File { get; set; }
     public int? Line { get; set; }
-    /// <summary>The extractor's own id, kept so a re-import can be diffed against it.</summary>
+    /// <summary>Last line of the declaration. Null when the extractor gives start lines only (Graphify).</summary>
+    public int? EndLine { get; set; }
+    /// <summary>csharp · typescript · javascript · python · php … Null for imported graphs that do not say.</summary>
+    public string? Language { get; set; }
+    /// <summary>A short display signature, e.g. <c>Resolve(CodeGraph, string)</c>.</summary>
+    public string? Signature { get; set; }
+    /// <summary>The extractor's own id (Graphify's node id, or BrainX's stable key), kept so a rebuild can be diffed against it.</summary>
     public string ExternalId { get; set; } = string.Empty;
+}
+
+/// <summary>A note that names a symbol of the graph, found by exact resolution of the note's code-shaped words.</summary>
+public sealed class CodeMention
+{
+    public string NoteId { get; set; } = string.Empty;
+    public string NotePath { get; set; } = string.Empty;
+    public string SymbolId { get; set; } = string.Empty;
+    /// <summary>How many times the note names it.</summary>
+    public int Count { get; set; }
+    /// <summary>The word as the note wrote it (e.g. <c>Program.KeywordScores</c>).</summary>
+    public string Text { get; set; } = string.Empty;
 }
 
 public sealed class CodeEdge
@@ -104,7 +136,14 @@ public sealed class CodeEdge
     public double? Confidence { get; set; }
     /// <summary>Where the relationship is written, repo-relative.</summary>
     public string? File { get; set; }
+    /// <summary>The first site; <see cref="Lines"/> holds every one.</summary>
     public int? Line { get; set; }
+    /// <summary>
+    /// Every line in <see cref="File"/> where the relationship is written, ascending
+    /// (a caller that calls twice has two). Null when the extractor kept one
+    /// site per pair (Graphify), in which case <see cref="Line"/> is all there is.
+    /// </summary>
+    public List<int>? Lines { get; set; }
 }
 
 public sealed class CodeFileStamp
@@ -130,6 +169,16 @@ public sealed class CodeGraphIssues
     public Dictionary<string, int> Relations { get; set; } = new(StringComparer.Ordinal);
     public Dictionary<string, int> Provenance { get; set; } = new(StringComparer.Ordinal);
     public List<string> Warnings { get; set; } = [];
+    /// <summary>Native graphs: references no rule could place, per relation. Counted, never guessed.</summary>
+    public Dictionary<string, int> Unresolved { get; set; } = new(StringComparer.Ordinal);
+    /// <summary>Native graphs: references to code outside the repo (framework, packages), per relation. Not stored.</summary>
+    public Dictionary<string, int> External { get; set; } = new(StringComparer.Ordinal);
+    /// <summary>Native graphs: files per language.</summary>
+    public Dictionary<string, int> Languages { get; set; } = new(StringComparer.Ordinal);
+    /// <summary>Native graphs: files the parser met a syntax error in (what parsed is kept).</summary>
+    public List<string> SyntaxErrorFiles { get; set; } = [];
+    /// <summary>Native graphs: files listed but not read, with the reason.</summary>
+    public List<string> SkippedFiles { get; set; } = [];
 }
 
 /// <summary>Stores one graph per repo under <c>.obsidianx/code-graphs</c>.</summary>
@@ -172,7 +221,9 @@ public static partial class CodeGraphStore
         var tmp = path + "." + Environment.ProcessId + ".tmp";
         try
         {
-            File.WriteAllText(tmp, JsonConvert.SerializeObject(graph), new UTF8Encoding(false));
+            // Nulls left out: most symbols have no qualified name or signature,
+            // and a 15k-symbol graph would carry them all.
+            File.WriteAllText(tmp, JsonConvert.SerializeObject(graph, new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore }), new UTF8Encoding(false));
             File.Move(tmp, path, overwrite: true);
         }
         catch
@@ -189,9 +240,27 @@ public static partial class CodeGraphStore
         if (!File.Exists(path)) return null;
         var graph = JsonConvert.DeserializeObject<CodeGraph>(File.ReadAllText(path))
             ?? throw new InvalidDataException("code graph file is empty");
-        if (graph.Schema != CodeGraph.SchemaVersion)
-            throw new InvalidDataException($"code graph schema '{graph.Schema}' is not {CodeGraph.SchemaVersion}; re-import it");
+        // v1 is v2 without the optional fields, so it reads as is.
+        if (graph.Schema != CodeGraph.SchemaVersion && graph.Schema != CodeGraph.SchemaVersionV1)
+            throw new InvalidDataException($"code graph schema '{graph.Schema}' is not {CodeGraph.SchemaVersion}; rebuild it");
         return graph;
+    }
+
+    /// <summary>
+    /// Summary of every stored graph without keeping the graphs: what the
+    /// Universe view and brain_stats show. A file that does not load is listed
+    /// with its error rather than dropped.
+    /// </summary>
+    public static IReadOnlyList<(string Repo, CodeGraph? Graph, string? Error)> LoadAll(string vaultPath)
+    {
+        var all = new List<(string, CodeGraph?, string?)>();
+        foreach (var repo in List(vaultPath))
+        {
+            try { all.Add((repo, Load(vaultPath, repo), null)); }
+            catch (Exception ex) when (ex is IOException or InvalidDataException or JsonException or UnauthorizedAccessException)
+            { all.Add((repo, null, ex.Message)); }
+        }
+        return all;
     }
 }
 

@@ -1,0 +1,21 @@
+<Project>
+  <!-- TreeSitter.DotNet ships 30 grammars per platform (≈69 MB on win-x64,
+       verilog alone 18 MB). BrainX.CodeGraph loads only the ones listed here,
+       so the rest are dropped from every project that copies them: this
+       project and each app that references it (import this file there too).
+       Add a grammar here when an extractor starts using it. -->
+  <PropertyGroup>
+    <BrainXTreeSitterKeep>;tree-sitter;tree-sitter-javascript;tree-sitter-typescript;tree-sitter-tsx;tree-sitter-python;tree-sitter-php;</BrainXTreeSitterKeep>
+  </PropertyGroup>
+
+  <Target Name="BrainXTrimTreeSitterGrammars" AfterTargets="ResolvePackageAssets">
+    <ItemGroup>
+      <_BxTsDrop Include="@(RuntimeTargetsCopyLocalItems)"
+                 Condition="'%(RuntimeTargetsCopyLocalItems.NuGetPackageId)' == 'TreeSitter.DotNet' and !$(BrainXTreeSitterKeep.Contains(';%(Filename);'))" />
+      <RuntimeTargetsCopyLocalItems Remove="@(_BxTsDrop)" />
+      <_BxTsDropNative Include="@(NativeCopyLocalItems)"
+                       Condition="'%(NativeCopyLocalItems.NuGetPackageId)' == 'TreeSitter.DotNet' and !$(BrainXTreeSitterKeep.Contains(';%(Filename);'))" />
+      <NativeCopyLocalItems Remove="@(_BxTsDropNative)" />
+    </ItemGroup>
+  </Target>
+</Project>
