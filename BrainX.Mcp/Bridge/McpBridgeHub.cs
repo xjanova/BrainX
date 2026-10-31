@@ -1159,7 +1159,7 @@ public static class McpBridgeHub
             var path = StatusPathFor(def.Id);
             var tmp = path + ".tmp";                 // pid in the name — no cross-session collision
             File.WriteAllText(tmp, o.ToString(Formatting.None), new UTF8Encoding(false));
-            File.Move(tmp, path, overwrite: true);
+            AtomicFile.MoveOver(tmp, path);
 
             ReapDeadSessions(dir);
         }
@@ -1291,15 +1291,10 @@ public static class McpBridgeHub
             // and a half-written cache would be parsed as a corrupt one.
             var tmp = path + "." + Environment.ProcessId + ".tmp";
             File.WriteAllText(tmp, body, new UTF8Encoding(false));
-            try { File.Move(tmp, path, overwrite: true); }
-            catch
-            {
-                // Another session was reading the cache at that moment. Its own
-                // write will land; this copy must not stay behind — six of them,
-                // 266 KB each, had piled up in .obsidianx since August.
-                try { File.Delete(tmp); } catch { }
-                throw;
-            }
+            // A session reading the cache is waited out. One that outlasts that
+            // costs this write and leaves no copy behind: six of them, 266 KB
+            // each, had piled up in .obsidianx since August.
+            AtomicFile.MoveOver(tmp, path);
             SweepStaleCacheTemps(path);
         }
         catch (Exception ex) { _log($"bridge cache write failed (non-fatal): {ex.Message}"); }

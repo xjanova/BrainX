@@ -396,7 +396,7 @@ internal static partial class Program
         try
         {
             File.WriteAllText(tmp, updated, new UTF8Encoding(false));
-            File.Move(tmp, path, overwrite: true);
+            BrainX.Core.Services.AtomicFile.MoveOver(tmp, path);
         }
         catch
         {

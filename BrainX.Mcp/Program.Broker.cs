@@ -672,7 +672,7 @@ internal static partial class Program
         // addressed to somebody, or said while people are sitting in there,
         // never reaches them.
         var coworkCalls = CoworkCallsWaiting(
-            cfg.Runners.Where(r => r.Value.OnCall).Select(r => r.Key), out var coworkScanned, out var coworkUnheard);
+            cfg.Runners.Where(r => r.Value.OnCall).Select(r => r.Key), out var coworkScanned, out var coworkUnheard, out var coworkUnreadable);
         var coworkHandled = false;
         var keepCalls = false;
 
@@ -1074,10 +1074,23 @@ internal static partial class Program
                 // else: everyone called is already seated. Silence is correct.
             }
         }
-        // Up to what was scanned and no further — including lines with nothing
-        // to dispatch, so a forged line is logged once, not every tick.
-        if (!dryRun && !keepCalls) CoworkMarkCalled(coworkScanned);
-        if (!dryRun) CoworkTellWhyNoAnswerYet(cfg, live);
+        if (!dryRun)
+        {
+            // Told first: a broker that stops between the two tells it twice,
+            // which beats a line gone with nothing said.
+            var patience = TimeSpan.FromSeconds(cfg.UnreadableLineSeconds);
+            var givenUp = CoworkOutOfPatience(coworkUnreadable, patience);
+            if (givenUp.Count > 0) CoworkTellUnreadable(givenUp, patience);
+
+            // Up to what was scanned and no further — including lines with nothing
+            // to dispatch, so a forged line is logged once, not every tick. And
+            // never past a line that is still to come: one being tried again, or
+            // this tick's own when a live run could not take them.
+            var trying = coworkUnreadable.Except(givenUp).ToList();
+            CoworkMarkCalled(keepCalls ? givenUp : coworkScanned.Concat(givenUp),
+                             keepCalls ? trying.Concat(coworkScanned) : trying);
+            CoworkTellWhyNoAnswerYet(cfg, live);
+        }
 
         await PumpDecisionsAsync(cfg).ConfigureAwait(false);
 
@@ -2902,6 +2915,11 @@ internal static partial class Program
         /// <summary>How long the owner waits on a busy run before the room says why.</summary>
         public int OwnerWaitSeconds { get; init; } = 60;
 
+        /// <summary>How long a room line that cannot be read is tried again
+        /// before the room is told. A minute is when the owner starts to wonder,
+        /// and far longer than a scanner or a backup holds a file.</summary>
+        public int UnreadableLineSeconds { get; init; } = 60;
+
         /// <summary>False: a room run starts without the hooks in the owner's
         /// settings.json, for the speed (Program.BrokerOpenRun.cs says how much).</summary>
         public bool RoomHooks { get; init; } = true;
@@ -3108,6 +3126,7 @@ internal static partial class Program
             IdleGraceSeconds = Math.Max(10, Int(o["idleGraceSeconds"], 45)),
             HoldOpenMinutes = Math.Max(0, o["holdOpenMinutes"]?.ToObject<double?>() ?? 30),
             OwnerWaitSeconds = Math.Max(1, Int(o["ownerWaitSeconds"], 60)),
+            UnreadableLineSeconds = Math.Max(1, Int(o["unreadableLineSeconds"], 60)),
             RoomHooks = o["roomHooks"]?.Type != JTokenType.Boolean || o["roomHooks"]!.ToObject<bool>(),
             MaxRunSeconds = Math.Max(60, Int(b["maxRunSeconds"], 900)),
             MaxHopsPerWork = Math.Max(1, Int(b["maxHopsPerWork"], 12)),

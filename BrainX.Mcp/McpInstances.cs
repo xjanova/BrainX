@@ -298,7 +298,7 @@ internal static class McpInstances
             // record is one the sweep is allowed to kill on --legacy.
             var tmp = _file + "." + Environment.ProcessId + ".tmp";
             File.WriteAllText(tmp, json, new UTF8Encoding(false));
-            File.Move(tmp, _file, overwrite: true);
+            BrainX.Core.Services.AtomicFile.MoveOver(tmp, _file);
         }
         catch { }
     }

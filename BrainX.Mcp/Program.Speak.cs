@@ -296,7 +296,7 @@ internal static partial class Program
 
             // Atomic: a killed run leaves a .part, never a truncated .mp3 that
             // the cache would then serve forever as a complete file.
-            File.Move(part, dest, overwrite: true);
+            BrainX.Core.Services.AtomicFile.MoveOver(part, dest);
         }
         catch (Exception ex) { return (null, false, $"{ex.GetType().Name}: {ex.Message}"); }
         finally { try { File.Delete(tmpTxt); } catch { } }

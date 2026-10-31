@@ -639,7 +639,7 @@ internal static class ChromeBridge
             var path = CachePath;
             var tmp = path + "." + Environment.ProcessId + ".tmp";
             File.WriteAllText(tmp, entry.ToString(Formatting.Indented), new UTF8Encoding(false));
-            File.Move(tmp, path, overwrite: true);
+            AtomicFile.MoveOver(tmp, path);
         }
         catch (Exception ex) { _log($"chrome: tool cache write failed ({ex.GetType().Name})"); }
     }

@@ -309,7 +309,7 @@ internal static partial class Program
         // temp file, so a run killed halfway cannot leave half a config.
         var tmp = $"{settingsPath}.{Environment.ProcessId}.tmp";
         File.WriteAllText(tmp, merged, noBom);
-        File.Move(tmp, settingsPath, overwrite: true);
+        AtomicFile.MoveOver(tmp, settingsPath);
         Say($"  wrote    {settingsPath}");
 
         Say("");
