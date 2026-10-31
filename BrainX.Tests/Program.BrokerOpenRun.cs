@@ -68,15 +68,20 @@ internal static partial class Program
         public string Seen => Path.Combine(Root, "seen.log");
         public string Next => Path.Combine(Root, "next.txt");
 
+        /// <summary>A file the broker or the runner may be writing right now.
+        /// File.ReadAllText is refused while a file that just landed is still
+        /// held open, and one such read threw the whole check.</summary>
+        private static string ReadShared(string path)
+        {
+            using var f = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var r = new StreamReader(f);
+            return r.ReadToEnd();
+        }
+
         /// <summary>The file, with the runner possibly still writing to it.</summary>
         public string[] SeenLines()
         {
-            try
-            {
-                using var f = new FileStream(Seen, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-                using var r = new StreamReader(f);
-                return r.ReadToEnd().Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            }
+            try { return ReadShared(Seen).Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries); }
             catch (IOException) { return Array.Empty<string>(); }
         }
 
@@ -85,7 +90,7 @@ internal static partial class Program
 
         public List<string> BrokerLines() =>
             Directory.GetFiles(Room, "*.json").OrderBy(Path.GetFileName, StringComparer.Ordinal)
-                     .Select(f => JObject.Parse(File.ReadAllText(f)))
+                     .Select(f => JObject.Parse(ReadShared(f)))
                      .Where(o => o["from"]?.ToString() == "broker")
                      .Select(o => o["body"]?.ToString() ?? "")
                      .ToList();
@@ -93,7 +98,7 @@ internal static partial class Program
         public JObject? RunnerState(string agent)
         {
             var p = Path.Combine(Bus, "broker", agent + ".state.json");
-            try { return File.Exists(p) ? JObject.Parse(File.ReadAllText(p)) : null; }
+            try { return File.Exists(p) ? JObject.Parse(ReadShared(p)) : null; }
             catch (Exception ex) when (ex is IOException or Newtonsoft.Json.JsonException) { return null; }
         }
 
@@ -148,7 +153,7 @@ internal static partial class Program
         return rig;
     }
 
-    private static void StartOpenRunBroker(OpenRunRig rig, string exe)
+    private static void StartOpenRunBroker(OpenRunRig rig, string exe, int tickHoldMs = 0)
     {
         var psi = new ProcessStartInfo(exe, $"broker --vault \"{rig.Vault}\"")
         {
@@ -158,6 +163,7 @@ internal static partial class Program
         psi.Environment["BRAINX_BUS_SEAL_KEY"] = rig.Key;
         psi.Environment["BRAINX_SANDBOX"] = "1";
         psi.Environment[OpenRunnerEnv] = rig.Root;
+        if (tickHoldMs > 0) psi.Environment["BRAINX_BROKER_TICK_HOLD_MS"] = tickHoldMs.ToString();
         psi.Environment.Remove(StubMcpServer.EnvFlag);
         var p = Process.Start(psi)!;
         p.OutputDataReceived += (_, e) => { lock (rig.Log) rig.Log.AppendLine(e.Data); };
@@ -242,6 +248,90 @@ internal static partial class Program
         Check("a turn that fails is told to the room, with what it said",
               await OpenRunUntil(() => rig.BrokerLines().Any(l => l.Contains("boom-from-the-api")), 25), rig.Said);
         Check("…and the run is sent home", await OpenRunUntil(() => rig.SeenLines().Contains("EOF"), 10), rig.Said);
+    }
+
+    /// <summary>
+    /// A line that lands after the tick has read the room is the nap's to catch.
+    /// The nap used to take its mark when it began, by which time that line was
+    /// already the newest, so nobody looked at it for a whole poll. The hold only
+    /// makes the window wide enough to hit every time; a long poll means a miss
+    /// cannot be mistaken for a slow machine.
+    /// </summary>
+    private static async Task CoworkBrokerHearsLineDuringTick()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the check", false); return; }
+
+        await using var rig = NewOpenRunRig(c => c["pollSeconds"] = 60);
+        StartOpenRunBroker(rig, exe, tickHoldMs: 1500);
+
+        bool Held() { lock (rig.Log) return rig.Log.ToString().Contains("tick held"); }
+        Check("the tick has read the empty room and is still busy", await OpenRunUntil(Held, 30), rig.Said);
+
+        var sent = DateTime.UtcNow;
+        OwnerSays(rig.Room, rig.Key, "anyone here?");
+        var heard = await OpenRunUntil(() => rig.Turns == 1, 30);
+        Check($"a line that lands now is picked up after the tick, not a poll later (took {(DateTime.UtcNow - sent).TotalSeconds:F1}s)",
+              heard, rig.Said);
+    }
+
+    /// <summary>
+    /// Temp + move does not make a line readable the moment it can be listed: it
+    /// can still be held open for a millisecond or two, and File.ReadAllText was
+    /// refused on 19 of 12,000 lines read as they landed. A refused read looked
+    /// like a line with nothing in it, which the broker marked as dealt with.
+    /// </summary>
+    private static async Task CoworkBrokerReadsLineAsItLands()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the check", false); return; }
+
+        await using var rig = NewOpenRunRig(c => c["pollSeconds"] = 60);
+        OwnerSays(rig.Room, rig.Key, "anyone here?");
+        // Open for writing, so a read that does not share is refused, as it was.
+        using var held = new FileStream(Directory.GetFiles(rig.Room, "*-owner-*.json").Single(),
+            FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete);
+        StartOpenRunBroker(rig, exe);
+
+        Check("a line still held open as it lands is read all the same", await OpenRunUntil(() => rig.Turns == 1, 30), rig.Said);
+    }
+
+    /// <summary>
+    /// A move over a file somebody has open is refused, however they opened it:
+    /// 311 of 3,000 with a reader there every millisecond. SaveRunnerState swallows
+    /// that, so the state on disk stayed behind the broker for good, and the run
+    /// never read as waiting. Here the file is open nearly all the time.
+    /// </summary>
+    private static async Task CoworkBrokerStateSurvivesReader()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the check", false); return; }
+
+        await using var rig = NewOpenRunRig(c => { c["pollSeconds"] = 5; c["holdOpenMinutes"] = 30; });
+        var state = Path.Combine(rig.Bus, "broker", "claude.state.json");
+        using var stop = new CancellationTokenSource();
+        var reader = Task.Run(async () =>
+        {
+            while (!stop.IsCancellationRequested)
+            {
+                try
+                {
+                    using var f = new FileStream(state, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                    await Task.Delay(150);
+                }
+                catch (IOException) { }
+                await Task.Delay(20);
+            }
+        });
+
+        OwnerSays(rig.Room, rig.Key, "anyone here?");
+        StartOpenRunBroker(rig, exe);
+        Check("the run takes its turn", await OpenRunUntil(() => rig.Turns == 1, 30), rig.Said);
+        Check("…and the state still says it is waiting, with the file open as it was written",
+              await OpenRunUntil(() => rig.RunnerState("claude")?["runQuiet"]?.ToObject<bool?>() == true, 20), rig.Said);
+
+        stop.Cancel();
+        await reader;
     }
 
     /// <summary>Quiet past the hold, an open run leaves. That is not a failure.</summary>

@@ -410,11 +410,20 @@ internal static partial class Program
                     }
                 }
 
+                // Before the tick reads the room, or a line that lands once it
+                // has is seen by neither: not in what the tick read, and already
+                // the newest when the nap begins, so it waits out the whole poll.
+                // One that lands before the read costs a spare tick and no more.
+                var heard = NewestOwnerLine();
                 try { await BrokerTick(cfg, live, dryRun).ConfigureAwait(false); }
                 catch (Exception ex) { BrokerLog("tick failed: " + Redact(ex.Message)); }
 
                 if (once) { await SuperviseToCompletion(cfg, live).ConfigureAwait(false); break; }
-                try { await BrokerNap(cfg, live, ct).ConfigureAwait(false); }
+                try
+                {
+                    await SandboxTickHold(ct).ConfigureAwait(false);
+                    await BrokerNap(cfg, live, heard, ct).ConfigureAwait(false);
+                }
                 catch (OperationCanceledException) { break; }
             } while (!ct.IsCancellationRequested);
         }
@@ -2776,9 +2785,9 @@ internal static partial class Program
     {
         try
         {
-            var p = RunnerStatePath(agent);
-            if (!File.Exists(p)) return new RunnerState();
-            var o = JObject.Parse(File.ReadAllText(p));
+            // A refused read here comes back blank, and the next save then writes
+            // the blank over the run, the failure streak and the quota.
+            if (ReadJsonOrNull(RunnerStatePath(agent)) is not { } o) return new RunnerState();
             return new RunnerState
             {
                 LastCalls = o["lastCalls"]?.ToObject<long?>(),
