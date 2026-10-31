@@ -238,6 +238,8 @@ function renderStats(brain) {
     const expertise = brain.expertise ?? brain.Expertise ?? [];
     const address = brain.brainAddress ?? brain.BrainAddress ?? 'unknown';
     const display = brain.displayName ?? brain.DisplayName ?? '';
+    const code = brain.CodeOverlay ?? brain.codeOverlay;
+    const codeNodes = code?.nodes?.length ?? 0;
 
     setStatus(`Connected · ${display} · ${address}`);
 
@@ -246,6 +248,7 @@ function renderStats(brain) {
         <div>Words</div><div class="num">${words.toLocaleString()}</div>
         <div>Wiki-links</div><div class="num">${edges.toLocaleString()}</div>
         <div>Galaxies</div><div class="num">${expertise.length}</div>
+        ${codeNodes ? `<div>Code · loaded</div><div class="num">${codeNodes.toLocaleString()}</div>` : ''}
     `;
 }
 
@@ -272,7 +275,14 @@ function renderLegend(galaxies) {
         // to a count-derived heuristic if the brain didn't ship one.
         const pct = Math.round((g.score ?? 0) * 100);
         const wordsK = g.totalWords ? (g.totalWords / 1000).toFixed(0) + 'k' : '';
-        row.innerHTML = `
+        row.innerHTML = g.isCode ? `
+            <div class="expertise-head">
+                <span class="legend-swatch" style="background:${hex};color:${hex};"></span>
+                <span class="legend-label" title="${escapeHtml(g.label)}">${escapeHtml(g.label)}</span>
+                <span class="legend-count">${g.count}</span>
+            </div>
+            <div class="expertise-meta"><span class="expertise-score">CODE GRAPH · ${g.count} visible</span></div>
+        ` : `
             <div class="expertise-head">
                 <span class="legend-swatch" style="background:${hex};color:${hex};"></span>
                 <span class="legend-label" title="${escapeHtml(g.label)}">${escapeHtml(g.label)}</span>
@@ -375,12 +385,19 @@ function showInfo(payload) {
     $infoCat.style.color = hex;
     $infoCat.textContent = node.categoryLabel ?? node.category ?? '';
     $infoTitle.textContent = node.title;
-    $infoMeta.innerHTML = `
+    $infoMeta.innerHTML = node.sourceKind === 'code' ? `
+        <span><span class="meta-key">source</span>${escapeHtml(node.codeSource || 'code')}</span>
+        <span><span class="meta-key">kind</span>${escapeHtml(node.codeKind || 'symbol')}</span>
+        <span><span class="meta-key">file</span>${escapeHtml(node.codeFile || '—')}${node.codeLine ? ':' + node.codeLine : ''}</span>
+        <span><span class="meta-key">links</span>${(related?.length ?? 0)}</span>
+    ` : `
         <span><span class="meta-key">words</span>${node.wordCount.toLocaleString()}</span>
         <span><span class="meta-key">links</span>${(related?.length ?? 0)}</span>
         <span><span class="meta-key">modified</span>${fmtDate(node.modifiedAt)}</span>
     `;
     $infoPrev.textContent = node.preview || '(no preview available)';
+    $infoEdit.hidden = node.sourceKind === 'code';
+    $infoOpen.hidden = node.sourceKind === 'code';
     $infoTags.innerHTML = '';
     const tags = (node.tags || []).slice(0, 8);
     for (const t of tags) {
@@ -424,7 +441,7 @@ function exitEditUI() {
     $infoPrev.hidden = false;
     $infoEditor.hidden = true;
     $infoEditor.value = '';
-    $infoEdit.hidden = false;
+    $infoEdit.hidden = _infoCurrentNode?.sourceKind === 'code';
     $infoSave.hidden = true;
     $infoCancel.hidden = true;
     setInfoStatus(null);
@@ -967,6 +984,7 @@ function postToHost(msg) {
 
 let scene = null;
 let pendingBrain = null;
+let pendingCodeGraph = null;
 // Last galaxy list handed to renderLegend(). Kept so a lightweight
 // 'expertise' message can refresh the legend %s in place WITHOUT a
 // scene.mount() geometry rebuild (that full rebuild on every re-index
@@ -1005,6 +1023,9 @@ function onHostMessage(evt) {
     switch (msg.type) {
         case 'brain':
             handleBrain(msg.payload);
+            break;
+        case 'codeGraph':
+            applyCodeGraph(msg.payload);
             break;
         case 'pulse':
             // C# forwards every MCP read/write touch as {noteId, op}. When
@@ -1229,19 +1250,49 @@ function onHostMessage(evt) {
 }
 
 function handleBrain(brain) {
-    renderStats(brain);
+    renderStats({ ...brain, CodeOverlay: pendingCodeGraph });
     pendingBrain = brain;
-    if (scene) mountScene(brain);
+    if (scene) mountScene({ ...brain, CodeOverlay: pendingCodeGraph });
+}
+
+/** A code layer that changed what is drawn re-mounts the sky once, from where the
+ *  camera already is. Only a card changed, or the brain theme is up (it draws no
+ *  code): nothing moves, and the next mount carries the new layer. */
+function applyCodeGraph(payload) {
+    const drawnBefore = pendingCodeGraph?.drawKey ?? '';
+    pendingCodeGraph = payload;
+    if (!pendingBrain || !scene) return;
+    const merged = { ...pendingBrain, CodeOverlay: payload };
+    renderStats(merged);
+    if ((payload?.drawKey ?? '') === drawnBefore) return;
+    if (scene.getTheme?.() === 'brain') { scene.holdPayload?.(merged); return; }
+    const pose = scene.snapshotCamera?.();
+    mountScene(merged);
+    scene.restoreCamera?.(pose);
+}
+
+/** The code dashboard's way into the sky. Says what happened, so it can say why
+ *  when nothing could: 'node' · 'galaxy' · 'brain-theme' · 'none'. */
+function flyToCode({ id, category }) {
+    if (!scene) return 'none';
+    if (id && scene.focusNodeId?.(id)) return 'node';
+    if (scene.getTheme?.() === 'brain') return 'brain-theme';
+    if (category && _lastUniverse?.galaxies.some(g => g.category === category)) {
+        scene.focusGalaxy(category);
+        return 'galaxy';
+    }
+    return 'none';
 }
 
 /** The status line after a mount, in the vocabulary of the picture on screen. */
 function renderedStatus(universe) {
     if (!universe) return '';
-    const n = universe.nodes.length.toLocaleString();
-    const e = universe.edges.length.toLocaleString();
+    const n = universe.nodes.filter(node => node.sourceKind !== 'code').length.toLocaleString();
+    const e = universe.edges.filter(edge => !edge.kind).length.toLocaleString();
+    const code = universe.nodes.filter(node => node.sourceKind === 'code').length;
     return scene?.getTheme?.() === 'brain'
         ? `Neural brain rendered · ${n} neurons · ${e} fibres · ${universe.galaxies.length} regions`
-        : `Universe rendered · ${n} stars · ${e} wiki-links · ${universe.galaxies.length} galaxies`;
+        : `Universe rendered · ${n} note stars · ${e} wiki-links${code ? ` · ${code} code nodes` : ''}`;
 }
 let _lastUniverse = null;
 
@@ -1910,7 +1961,8 @@ if (document.readyState === 'loading') {
 window.UniverseHost = {
     viewport: getViewport,
     canvas: () => $canvas,
-    refresh: () => pendingBrain && handleBrain(pendingBrain)
+    refresh: () => pendingBrain && handleBrain(pendingBrain),
+    flyToCode
 };
 
 // ─── Dashboard floating chips ─────────────────────────────────────

@@ -270,6 +270,11 @@ internal static partial class Program
             try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
             return await CloudCliAsync(args.Skip(1).ToArray()).ConfigureAwait(false);
         }
+        if (args.Length > 0 && args[0].Equals("code-build", StringComparison.OrdinalIgnoreCase))
+        {
+            try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
+            return CodeBuildCli(args.Skip(1).ToArray());
+        }
         if (args.Length > 0 && (args[0] == "--version" || args[0] == "-v" || args[0].Equals("version", StringComparison.OrdinalIgnoreCase)))
         {
             Console.OutputEncoding = new UTF8Encoding(false);
@@ -464,6 +469,8 @@ internal static partial class Program
             // A wait for the room or the inbox waits off this loop, so the
             // client's next call is not queued behind it (Program.LongPoll.cs).
             if (LongPollOf(line) is { } poll && TryServeLongPoll(poll, writer)) continue;
+            // So does a code build, which can take minutes (Program.CodeGraph.cs).
+            if (CodeBuildOf(line) is { } build) { ServeCodeBuild(build, line, writer); continue; }
             string response;
             try
             {
@@ -1324,6 +1331,76 @@ internal static partial class Program
                         ["limit"] = new JObject { ["type"] = "integer", ["default"] = 50 }
                     }
                 }),
+            Tool("brain_lookup",
+                "Resolve an EXACT note id, vault-relative path, title or code symbol without embeddings. " +
+                "Use for a known name; use brain_search/brain_semantic_search for questions. " +
+                "Reports ambiguity instead of guessing. Scope is strict, never broadened. " +
+                "Retired notes stay flagged: resolving identity does not verify claims. " +
+                "Symbol lookup needs indexed code; old exports have only 40 symbol tags until re-indexed.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["reference"] = new JObject { ["type"] = "string" },
+                        ["kind"] = new JObject { ["type"] = "string", ["enum"] = new JArray("auto", "id", "path", "title", "symbol"), ["default"] = "auto" },
+                        ["scope"] = new JObject { ["type"] = "string", ["description"] = "Project, kind or folder scope. Never broadened automatically." }
+                    },
+                    ["required"] = new JArray("reference")
+                }),
+            Tool("brain_code_trace",
+                "Who calls/imports/inherits what in a built or imported code graph, plus the notes that explain it. " +
+                "Pass symbol (name, path#name, Class.method or id), a query naming identifiers, or note_id to follow exact note-to-code mentions. " +
+                "Bounded by hops, max_edges and max_tokens; hubs are reported, not expanded. " +
+                "Each edge keeps provenance (EXTRACTED/INFERRED/AMBIGUOUS), file:line and freshness; " +
+                "an ambiguous name returns candidates, never a guess. status no-graph = run brain_code_build or brain_code_import first.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["symbol"] = new JObject { ["type"] = "string" },
+                        ["query"] = new JObject { ["type"] = "string", ["description"] = "Question; its identifiers seed the walk and it ranks the notes." },
+                        ["note_id"] = new JObject { ["type"] = "string", ["description"] = "Exact note id or vault-relative path; seeds code symbols that note explicitly names." },
+                        ["repo"] = new JObject { ["type"] = "string", ["description"] = "Required when more than one graph is imported." },
+                        ["direction"] = new JObject { ["type"] = "string", ["enum"] = new JArray("both", "callers", "callees"), ["default"] = "both" },
+                        ["relations"] = new JObject { ["type"] = "string", ["description"] = "Comma list, e.g. calls,imports,inherits. Default all." },
+                        ["hops"] = new JObject { ["type"] = "integer", ["default"] = 1, ["maximum"] = 3 },
+                        ["max_edges"] = new JObject { ["type"] = "integer", ["default"] = 30, ["maximum"] = 150 },
+                        ["max_tokens"] = new JObject { ["type"] = "integer", ["default"] = 1500, ["maximum"] = 6000 },
+                        ["notes"] = new JObject { ["type"] = "integer", ["default"] = 3, ["maximum"] = 10, ["description"] = "Related notes via hybrid search; 0 = none." },
+                        ["scope"] = new JObject { ["type"] = "string", ["description"] = "Scope for the notes. Never broadened." }
+                    }
+                }),
+            Tool("brain_code_import",
+                "Import a Graphify graph.json (code symbols + typed edges) for one repository. Local machine only. " +
+                "Checks the format, records the git commit and file fingerprints so later answers can say when code moved on, " +
+                "and reports dropped edges with missing endpoints.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["path"] = new JObject { ["type"] = "string", ["description"] = "graph.json, or the repo folder holding graphify-out/graph.json" },
+                        ["repo"] = new JObject { ["type"] = "string", ["description"] = "Slug to store it under; default the folder name." },
+                        ["repo_root"] = new JObject { ["type"] = "string", ["description"] = "Default: the folder above graphify-out." }
+                    },
+                    ["required"] = new JArray("path")
+                }),
+            Tool("brain_code_build",
+                "Build or refresh a repository code graph from local C# (Roslyn), JavaScript, TypeScript, Python and PHP (tree-sitter). Does not install or run Graphify. Local machine only. " +
+                "Records declarations, typed references, call sites, file stamps and provenance.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["repo_root"] = new JObject { ["type"] = "string", ["description"] = "Repository folder to scan." },
+                        ["repo"] = new JObject { ["type"] = "string", ["description"] = "Graph slug; defaults to folder name." },
+                        ["full"] = new JObject { ["type"] = "boolean", ["default"] = false, ["description"] = "Ignore the per-file cache and rebuild." }
+                    },
+                    ["required"] = new JArray("repo_root")
+                }),
             Tool("brain_scope_list",
                 "List the brain's scope namespaces (top-level folders + their direct children) with note counts. Use BEFORE passing a scope arg to brain_search/brain_list/brain_walk so you know what scopes exist. Helps the user see how their brain is organised.",
                 new JObject
@@ -2009,6 +2086,10 @@ internal static partial class Program
             {
                 "brain_recall"              => BrainRecall(args),
                 "brain_search"              => BrainSearch(args),
+                "brain_lookup"              => BrainLookup(args),
+                "brain_code_trace"          => BrainCodeTrace(args),
+                "brain_code_import"         => BrainCodeImport(args),
+                "brain_code_build"          => BrainCodeBuild(args),
                 "brain_get_note"            => BrainGetNote(args),
                 "brain_expertise"           => BrainExpertise(),
                 "brain_list"                => BrainList(args),
@@ -2432,8 +2513,8 @@ internal static partial class Program
 
         var ql = query.ToLowerInvariant();
         List<T> Rank<T>(Func<NodeSummary, bool> pred, Func<NodeSummary, double, T> make) =>
-            export.Nodes.Where(pred)
-                .Select(n => (n, s: ScoreNode(n, ql, GetContentLower(export, n))))
+            KeywordScores(export, export.Nodes.Where(pred), ql)
+                .Select(x => (n: x.Node, s: x.Score))
                 .Where(x => x.s > 0)
                 .OrderByDescending(x => x.s)
                 .Take(limit)

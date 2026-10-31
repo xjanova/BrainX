@@ -217,11 +217,11 @@ function firstPendingRow(host, ignore) {
     return last ? last.nextSibling : host.firstChild;
 }
 
-/** The Agent Bus picture: a solar system beside the universe, an anatomical
- *  body beside the neural brain. Loaded lazily so a HUD-less page (wallpaper,
+/** The Agent Bus picture: a solar system beside the universe, a single
+ *  neuron beside the neural brain. Loaded lazily so a HUD-less page (wallpaper,
  *  dashboard embed) never pays for three.js twice. */
 let bus = null;
-/** 'system' | 'body' — which picture `bus` is. */
+/** 'system' | 'neuron' — which picture `bus` is. */
 let busKind = null;
 /** The roster as last received, so a picture built mid-session (a theme
  *  switch) starts with every agent in place instead of waiting for the next
@@ -1401,14 +1401,14 @@ async function initBus() {
  */
 let busSwapSeq = 0;
 async function swapBus(theme) {
-    const kind = theme === 'brain' ? 'body' : 'system';
-    // Numbered BEFORE the early-out: brain → universe while the body module is
+    const kind = theme === 'brain' ? 'neuron' : 'system';
+    // Numbered BEFORE the early-out: brain → universe while the neuron module is
     // still loading lands here with the solar system already on the canvas,
-    // and the pending body build must learn that it lost.
+    // and the pending neuron build must learn that it lost.
     const seq = ++busSwapSeq;
     if (bus && busKind === kind) return;
-    const factory = kind === 'body'
-        ? (await import('./agentbody3d.js')).createAgentBody3D
+    const factory = kind === 'neuron'
+        ? (await import('./agentneuron3d.js')).createAgentNeuron3D
         : (await import('./agentbus3d.js')).createAgentBus3D;
     if (seq !== busSwapSeq) return;
     const canvas = $('hud-bus-canvas');
@@ -1467,7 +1467,7 @@ function markScrollable() {
 }
 
 function wireActions() {
-    document.querySelectorAll('.hud-action').forEach(btn => {
+    document.querySelectorAll('.hud-action[data-action]').forEach(btn => {
         btn.addEventListener('click', () => post({ type: 'hudAction', action: btn.dataset.action }));
     });
 }

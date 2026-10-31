@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- BrainX's own code-graph extractor: it reads a repository and builds the
+       CodeGraph that brain_code_trace walks, with no Python and no Graphify
+       install. C# is bound by Roslyn (compiler-accurate calls); TypeScript,
+       JavaScript, Python and PHP are parsed by tree-sitter with extraction
+       and resolution logic ported from Graphify (Apache-2.0, see
+       ThirdParty/Graphify). Kept out of BrainX.Core on purpose: only the MCP
+       server builds graphs, so the client, server and node monitor do not
+       carry Roslyn or the native grammars. -->
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>BrainX.CodeGraph</RootNamespace>
+    <AssemblyName>BrainX.CodeGraph</AssemblyName>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\BrainX.Core\BrainX.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 5.x parses C# 14; on net9 it loads its netstandard2.0 build. -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.9.0" />
+    <!-- MIT. Same tree-sitter runtime Graphify uses, native per RID. -->
+    <PackageReference Include="TreeSitter.DotNet" Version="1.3.0" />
+  </ItemGroup>
+
+  <!-- Apache-2.0 §4: the license, the MIT portions and the NOTICE travel with
+       every build that contains the ported code. -->
+  <ItemGroup>
+    <None Include="ThirdParty\Graphify\LICENSE;ThirdParty\Graphify\LICENSE-MIT;ThirdParty\Graphify\NOTICE"
+          CopyToOutputDirectory="PreserveNewest"
+          Link="ThirdParty\Graphify\%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <Import Project="TreeSitterGrammars.targets" />
+
+</Project>

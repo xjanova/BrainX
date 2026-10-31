@@ -62,6 +62,9 @@ public static class McpRemotePolicy
         "ssh_tail",
         "ssh_profiles_list",
         "brain_import_path",
+        // Reads a graph.json anywhere on the owner's disk, like brain_import_path.
+        "brain_code_import",
+        "brain_code_build",
         "brain_apply_audit_fix",
         "bridge_status",
         // Start a local Grok process on the owner's subscription.
@@ -87,6 +90,7 @@ public static class McpRemotePolicy
     private static readonly HashSet<string> ReadTools = new(StringComparer.OrdinalIgnoreCase)
     {
         "brain_search",
+        "brain_lookup",
         "brain_semantic_search",
         "brain_walk",
         "brain_get_note",

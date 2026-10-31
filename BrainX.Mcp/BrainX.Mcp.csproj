@@ -27,6 +27,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\BrainX.Core\BrainX.Core.csproj" />
+    <ProjectReference Include="..\BrainX.CodeGraph\BrainX.CodeGraph.csproj" />
   </ItemGroup>
 
   <!-- The broker can run as a Windows Service (see Program.BrokerService.cs),
@@ -82,5 +83,7 @@
     </PropertyGroup>
     <Message Importance="high" Text="brainx-mcp version → $(Version)" />
   </Target>
+
+  <Import Project="..\BrainX.CodeGraph\TreeSitterGrammars.targets" />
 
 </Project>

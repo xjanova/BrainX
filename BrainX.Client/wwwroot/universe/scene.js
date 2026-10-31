@@ -701,7 +701,7 @@ function buildEdges(nodes, edges) {
         // per-edge alpha drops so total scene luminosity stays where the
         // original 0.18/0.07 tuning intended.
         const same = a.category === b.category;
-        const base = same ? 0.12 : 0.035;
+        const base = edges[i].kind === 'mention' ? 0.26 : edges[i].kind === 'code' ? 0.18 : same ? 0.12 : 0.035;
         alphas[2 * i + 0] = base;
         alphas[2 * i + 1] = base;
         baseAlpha[i] = base;
@@ -1919,6 +1919,19 @@ export function createScene(canvas, callbacks = {}) {
             camera.position.lerpVectors(fly.fromCam, fly.toCam, k);
         }
         if (t >= 1) { camera.position.copy(fly.toCam); fly = null; }
+    }
+
+    /** focusNode by id, for callers that hold a note or symbol and not a slot. */
+    function focusNodeId(id) {
+        const idx = idToIndex?.get(id);
+        if (idx == null) return false;
+        focusNode(idx);
+        return true;
+    }
+
+    /** The payload the next theme switch mounts, without mounting it now. */
+    function holdPayload(brain) {
+        lastBrainPayload = brain;
     }
 
     function focusGalaxy(category) {
@@ -3478,6 +3491,8 @@ export function createScene(canvas, callbacks = {}) {
         mount,
         setSize,
         focusNode,
+        focusNodeId,
+        holdPayload,
         focusGalaxy,
         resetView,
         resettle,

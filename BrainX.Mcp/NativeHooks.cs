@@ -164,6 +164,7 @@ internal static partial class NativeHooks
     {
         "brain_recall", "brain_search", "brain_semantic_search", "brain_get_note",
         "brain_synthesize", "brain_get_backlinks", "brain_walk", "brain_bundle",
+        "brain_lookup", "brain_code_trace",
     };
 
     /// <summary>

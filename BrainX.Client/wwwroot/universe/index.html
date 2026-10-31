@@ -8,6 +8,7 @@
     <!-- HUD skin. Inert unless the page is opened with ?hud=1, so wallpaper
          and dashboard-embed modes of this same page are unaffected. -->
     <link rel="stylesheet" href="hud.css" />
+    <link rel="stylesheet" href="codedash.css" />
 
     <!-- three.js + addons + d3 are VENDORED under ./vendor/ (three@0.169.0,
          d3-force@3) and served from disk via the WebView2 virtual host.
@@ -486,6 +487,8 @@
                 <button class="hud-action" data-action="garden" type="button"
                         data-idle="&#x1F331; Garden" data-busy="&#x25A0; Stop garden"
                         title="Tend the brain now: re-bake stale bundles, fill missing embeddings, audit health, write Notes/Brain health.md. Runs by itself when you are away. Safe to stop: finished work is kept, nothing is left half-written.">&#x1F331; Garden</button>
+                <button class="hud-action" id="code-dash-open" type="button"
+                        title="Code graphs: repositories, how calls connect, and the notes that name them.">Code</button>
                 <button class="hud-action" data-action="obsidian" type="button"
                         title="Open this vault in Obsidian.">Obsidian</button>
                 <button class="hud-action" data-action="vault" type="button"
@@ -542,9 +545,9 @@
              star, each connected agent a planet on its own orbit; traffic
              falls in as a mote and comes back out. The picture is the whole
              panel — zoom in on a planet to read its name.
-             In the Neural Brain theme the same card is an anatomical body
-             (agentbody3d.js): the brain sits in the head, each agent is an
-             organ, and a message is a nerve impulse up the spinal cord. -->
+             In the Neural Brain theme the same card is a single neuron
+             (agentneuron3d.js): BrainX is the cell body, each agent is a
+             dendrite and its synapse, and a message is an action potential. -->
         <section class="hud-panel hud-bl hud-panel-bus">
             <div class="hud-title"><span class="hud-dot"></span>Agent Bus
                 <span class="hud-sub" id="hud-agents-count">—</span>
@@ -615,5 +618,6 @@
 
     <script type="module" src="app.js"></script>
     <script type="module" src="hud.js"></script>
+    <script type="module" src="codedash.js"></script>
 </body>
 </html>

@@ -10,6 +10,8 @@
   <!-- BrainX Server Manager (exe BrainX.ServerManager). Listed so CI compiles it
        on every PR; the release job publishes it into the node zip at manager\. -->
   <Project Path="BrainX.NodeMonitor/BrainX.NodeMonitor.csproj" />
+  <!-- The code-graph extractor (Roslyn + tree-sitter); only the MCP server references it. -->
+  <Project Path="BrainX.CodeGraph/BrainX.CodeGraph.csproj" />
   <Project Path="BrainX.Mcp/BrainX.Mcp.csproj" />
   <Project Path="BrainX.Mind/BrainX.Mind.csproj" />
   <Project Path="BrainX.Tests/BrainX.Tests.csproj" />

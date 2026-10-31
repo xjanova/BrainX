@@ -447,8 +447,8 @@ internal static partial class Program
             // queries); keyword alone misses paraphrases. Reciprocal-
             // rank fusion combines both rankings without needing the
             // two score scales to be comparable.
-            var keyword = filtered
-                .Select(n => (node: n, score: ScoreNode(n, ql, GetContentLower(export, n))))
+            var keyword = KeywordScores(export, filtered, ql)
+                .Select(x => (node: x.Node, score: x.Score))
                 .Where(x => x.score > 0)
                 .OrderByDescending(x => x.score)
                 .ToList();
@@ -508,8 +508,8 @@ internal static partial class Program
         {
             // Either Ollama is offline or no embeddings exist yet.
             // Keyword fallback so callers always get useful output.
-            ranked = filtered
-                .Select(n => (n, ScoreNode(n, ql, GetContentLower(export, n))))
+            ranked = KeywordScores(export, filtered, ql)
+                .Select(x => (x.Node, x.Score))
                 .Where(x => x.Item2 > 0)
                 .OrderByDescending(x => x.Item2)
                 .Take(limit)
