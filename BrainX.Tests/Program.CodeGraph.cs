@@ -16,6 +16,143 @@ internal static partial class Program
         checks.Add(("code graph: native C# build, cache, rebind and trace through MCP", CodeGraphNativeBuild));
         checks.Add(("code graph: syntax languages keep receivers, imports and deep files through code-build", CodeGraphSyntaxBuild));
         checks.Add(("code graph: what the Universe and its dashboard are told", CodeGraphViewShapes));
+        checks.Add(("code graph: a session asks for its project, and only what is due gets built", CodeAutoBuildChecks));
+        checks.Add(("code graph: a scan leaves work folders and other checkouts out", CodeScanSkipsChecks));
+    }
+
+    private static async Task CodeScanSkipsChecks()
+    {
+        var exe = FindMcpExe() ?? throw new InvalidOperationException("Build brainx-mcp first");
+        var (root, vault, _) = EmbedVault(0);
+        var repo = Path.Combine(root, "scan");
+        foreach (var rel in new[] { "src/a.js", "src/output/kept.js", "src/tmp/gone.js", "tmp/gone.js", "output/gone.js", "out/gone.js", "sub/.git/HEAD", "sub/gone.js", "linked/.git", "linked/gone.js" })
+        {
+            var full = Path.Combine(repo, rel.Replace('/', Path.DirectorySeparatorChar));
+            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+            File.WriteAllText(full, rel.EndsWith(".js", StringComparison.Ordinal) ? "function f() {}\n" : "x");
+        }
+        try
+        {
+            var psi = new ProcessStartInfo(exe) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+            foreach (var a in new[] { "code-build", repo, "--repo", "scan", "--vault", vault }) psi.ArgumentList.Add(a);
+            using var p = Process.Start(psi)!;
+            var stderr = p.StandardError.ReadToEndAsync();
+            await p.StandardOutput.ReadToEndAsync();
+            await p.WaitForExitAsync();
+            await stderr;
+            var files = (CodeGraphStore.Load(vault, "scan") ?? throw new InvalidOperationException("no graph")).Files.Keys.OrderBy(f => f, StringComparer.Ordinal).ToList();
+            Check("source folders are read, an output folder below the top included", files.SequenceEqual(new[] { "src/a.js", "src/output/kept.js" }), string.Join(", ", files));
+
+            // The whole trip a new install makes, the client's half by hand: a
+            // session asks, the project is due, a build saves it, nothing is left.
+            var noTemp = Path.Combine(root, "not-temp-here");
+            Directory.CreateDirectory(Path.Combine(repo, ".git"));
+            File.WriteAllText(Path.Combine(repo, ".git", "HEAD"), new string('d', 40) + "\n");
+            Check("a session in a project asks for it", CodeAutoBuild.Ask(vault, Path.Combine(repo, "src"), noTemp));
+            var due = CodeAutoBuild.Due(vault, tempRoot: noTemp);
+            Check("that project is due", due.Count == 1 && due[0] == Path.GetFullPath(repo), string.Join(",", due));
+            CodeAutoBuild.Record(vault, repo, CodeGraphStore.SlugFor(vault, repo), GitHead.Read(repo), "done", DateTime.UtcNow.AddSeconds(1));
+            Check("it stays the graph it already has", CodeGraphStore.SlugFor(vault, repo) == "scan" && CodeAutoBuild.Due(vault, tempRoot: noTemp).Count == 0);
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); } catch { }
+        }
+    }
+
+    private static Task CodeAutoBuildChecks()
+    {
+        var (root, vault, _) = EmbedVault(0);
+        var noTemp = Path.Combine(root, "not-temp-here");
+        string Repo(string name, bool git = true)
+        {
+            var dir = Path.Combine(root, name);
+            Directory.CreateDirectory(Path.Combine(dir, "src"));
+            if (git)
+            {
+                Directory.CreateDirectory(Path.Combine(dir, ".git", "refs", "heads"));
+                File.WriteAllText(Path.Combine(dir, ".git", "HEAD"), "ref: refs/heads/main\n");
+                File.WriteAllText(Path.Combine(dir, ".git", "refs", "heads", "main"), new string('a', 40) + "\n");
+            }
+            return dir;
+        }
+        void Move(string dir, char c) => File.WriteAllText(Path.Combine(dir, ".git", "refs", "heads", "main"), new string(c, 40) + "\n");
+        IReadOnlyList<string> Due(DateTime? now = null) => CodeAutoBuild.Due(vault, now, noTemp);
+        bool Ask(string? dir) => CodeAutoBuild.Ask(vault, dir, noTemp);
+        var key = (string dir) => Path.GetFullPath(dir);
+        try
+        {
+            var plain = Repo("plain", git: false);
+            Check("a plain folder is not a project", !Ask(plain) && Due().Count == 0);
+            Check("a repo around the vault is not a project", CodeAutoBuild.ProjectRoot(Path.Combine(Repo("around"), "src"), Path.Combine(root, "around", "src"), noTemp) == null);
+            Check("no folder at all is not a project", !Ask(null));
+            var inTemp = Repo("in-temp");
+            Check("temp is left alone", CodeAutoBuild.ProjectRoot(vault, inTemp, root) == null);
+
+            var app = Repo("app");
+            Check("a subfolder asks for its repo", Ask(Path.Combine(app, "src")) && Due().SequenceEqual([key(app)]), string.Join(",", Due()));
+
+            void Built() => CodeAutoBuild.Record(vault, key(app), "app", GitHead.Read(app), "done", DateTime.UtcNow.AddSeconds(1));
+            void NextSession(string dir) { System.Threading.Thread.Sleep(1100); Ask(dir); }
+            Built();
+            Check("a built project is not due", Due().Count == 0);
+            NextSession(app);
+            Check("a graph deleted by hand comes back", Due().SequenceEqual([key(app)]), string.Join(",", Due()));
+            File.WriteAllText(CodeGraphStore.PathFor(vault, "app"), "{}");
+            Check("the same commit with its graph is not due", Due().Count == 0);
+            Built();
+            Move(app, 'b');
+            Check("a moved commit waits for a session", Due().Count == 0);
+            NextSession(app);
+            Check("a session after a moved commit refreshes it", Due().SequenceEqual([key(app)]), string.Join(",", Due()));
+
+            var failing = Repo("failing");
+            Ask(failing);
+            var at = DateTime.UtcNow.AddSeconds(1);
+            CodeAutoBuild.Record(vault, key(failing), "failing", null, "failed", at);
+            NextSession(failing);
+            Check("a failure is not tried by the next session", !Due(at.AddHours(1)).Contains(key(failing)));
+            Check("a failure is tried again after the wait", Due(at + CodeAutoBuild.FailedRetry).Contains(key(failing)));
+
+            var stopped = Repo("stopped");
+            Ask(stopped);
+            CodeAutoBuild.Record(vault, key(stopped), "stopped", new string('a', 40), "stopped", DateTime.UtcNow.AddSeconds(1));
+            NextSession(stopped);
+            Check("a stopped build stays stopped on its commit", !Due().Contains(key(stopped)));
+            Move(stopped, 'c');
+            Check("and runs again once the commit moves", Due().Contains(key(stopped)));
+
+            // A linked worktree, laid out the way git writes one.
+            var main = Repo("main-repo");
+            var gitDir = Path.Combine(main, ".git", "worktrees", "wt");
+            Directory.CreateDirectory(gitDir);
+            File.WriteAllText(Path.Combine(gitDir, "commondir"), "../..\n");
+            var wt = Path.Combine(root, "wt");
+            Directory.CreateDirectory(wt);
+            File.WriteAllText(Path.Combine(wt, ".git"), "gitdir: " + gitDir + "\n");
+            Check("a worktree stands for its main checkout", CodeAutoBuild.ProjectRoot(vault, wt, noTemp) == key(main));
+            var sub = Path.Combine(root, "sub");
+            var modules = Path.Combine(main, ".git", "modules", "sub");
+            Directory.CreateDirectory(modules);
+            Directory.CreateDirectory(sub);
+            File.WriteAllText(Path.Combine(sub, ".git"), "gitdir: " + modules + "\n");
+            Check("a submodule stays its own project", CodeAutoBuild.ProjectRoot(vault, sub, noTemp) == key(sub));
+
+            var fresh = Repo("fresh");
+            var damaged = Repo("damaged");
+            Ask(fresh);
+            Ask(damaged);
+            var before = Due();
+            foreach (var ask in Directory.GetFiles(Path.Combine(CodeGraphStore.Directory(vault), "cache", "auto"), "*.ask.json"))
+                if (File.ReadAllText(ask).Contains("damaged", StringComparison.Ordinal)) File.WriteAllText(ask, "{ not json");
+            Check("a damaged request costs that request and no others", Due().SequenceEqual(before.Where(d => d != key(damaged))), string.Join(",", Due()));
+            Check("requests are not graphs", !CodeGraphStore.List(vault).Any(r => r.Contains("ask", StringComparison.Ordinal)));
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); } catch { }
+        }
+        return Task.CompletedTask;
     }
 
     private static async Task CodeGraphSyntaxBuild()
@@ -81,6 +218,12 @@ internal static partial class Program
             (code, line) = await Build(thaiFolder);
             Check("a folder name with no usable letters still gets a slug", code == 0
                 && line?["repo"]?.ToString()?.StartsWith("repo-", StringComparison.Ordinal) == true, line?.ToString());
+            var noCode = Path.Combine(root, "no-code");
+            Directory.CreateDirectory(noCode);
+            File.WriteAllText(Path.Combine(noCode, "readme.md"), "# nothing to read\n");
+            (code, line) = await Build(noCode, "--repo", "no-code");
+            Check("a folder with no code saves no graph and says so", code == 1 && line?["status"]?.ToString() == "empty"
+                && !File.Exists(CodeGraphStore.PathFor(vault, "no-code")), line?.ToString());
         }
         finally
         {

@@ -21,8 +21,15 @@ public sealed class RepoFiles : IRepoFileSet
         ".git", ".hg", ".svn", ".vs", ".idea", ".vscode", "bin", "obj", "node_modules", "bower_components",
         "vendor", "third_party", "third-party", "__pycache__", ".venv", "venv", ".tox", ".mypy_cache",
         ".pytest_cache", ".next", ".nuxt", ".svelte-kit", "dist", "coverage", ".obsidianx",
-        "graphify-out", ".gradle", "target"
+        "graphify-out", ".gradle", "target", "tmp", "temp"
     };
+
+    /// <summary>
+    /// A run's leftovers when they sit at the top of a repo. Only there: src/output/
+    /// is somebody's module. Untracked work folders are why these exist at all:
+    /// 4,203 of the 17,136 symbols of this repo's first graph came from tmp/.
+    /// </summary>
+    private static readonly HashSet<string> SkipAtRoot = new(StringComparer.OrdinalIgnoreCase) { "output", "out" };
 
     private readonly HashSet<string> _set = new(StringComparer.Ordinal);
     private readonly List<string> _all = [];
@@ -70,6 +77,16 @@ public sealed class RepoFiles : IRepoFileSet
             || File.Exists(Path.Combine(Path.GetDirectoryName(dir.FullName)!, "packages.config"));
     }
 
+    /// <summary>
+    /// A folder with its own .git is another checkout: a submodule, or a worktree
+    /// parked inside the repo, which would read the whole repo a second time.
+    /// </summary>
+    private static bool IsOtherCheckout(FileSystemInfo dir)
+    {
+        var git = Path.Combine(dir.FullName, ".git");
+        return Directory.Exists(git) || File.Exists(git);
+    }
+
     private static void Walk(DirectoryInfo dir, string rel, List<IgnoreRules> inherited, IReadOnlySet<string> extensions,
                              List<string> found, List<(string, string)> skipped)
     {
@@ -95,7 +112,8 @@ public sealed class RepoFiles : IRepoFileSet
             if (e.Attributes.HasFlag(FileAttributes.ReparsePoint)) continue;
             if (isDir)
             {
-                if (SkipDirs.Contains(e.Name) || IgnoreRules.Ignored(rules, path, true) || IsNuGetFolder(e)) continue;
+                if (SkipDirs.Contains(e.Name) || (rel.Length == 0 && SkipAtRoot.Contains(e.Name))
+                    || IgnoreRules.Ignored(rules, path, true) || IsNuGetFolder(e) || IsOtherCheckout(e)) continue;
                 Walk((DirectoryInfo)e, path, rules, extensions, found, skipped);
                 continue;
             }

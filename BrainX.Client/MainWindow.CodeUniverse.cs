@@ -181,6 +181,11 @@ public partial class MainWindow
             case "codeBuild": _ = BuildCardRepoAsync(o["repo"]?.ToString(), o["full"]?.Value<bool>() ?? false); break;
             case "codeBuildStop": StopCodeBuild(); break;
             case "codeAddRepo": _ = Dispatcher.BeginInvoke(new Action(() => _ = AddCodeRepoAsync())); break;
+            case "codeAutoSet":
+                _codeAutoBuildEnabled = o["on"]?.Value<bool>() ?? true;
+                SaveMachineSettings();
+                PostCodeBuildState(null);
+                break;
             case "codeReveal": RevealCodeFile(o["repo"]?.ToString(), o["file"]?.ToString()); break;
         }
     }
@@ -290,7 +295,7 @@ public partial class MainWindow
         PostCode(new JObject
         {
             ["type"] = "codeBuildState", ["running"] = run != null, ["repo"] = run?.Repo ?? repo,
-            ["state"] = outcome?.State, ["message"] = outcome?.Message
+            ["state"] = outcome?.State, ["message"] = outcome?.Message, ["auto"] = _codeAutoBuildEnabled
         });
     }
 
@@ -311,10 +316,65 @@ public partial class MainWindow
         var root = repo != null && _codeViews.TryGetValue(repo, out var view) ? view.Card["root"]?.ToString() : null;
         if (string.IsNullOrEmpty(root) || repo == null)
         {
-            PostCodeBuildState(new CodeBuildOutcome("failed", "This graph does not say which folder it came from. Add the folder again."), repo);
+            PostCodeBuildState(new CodeBuildOutcome("failed", "This graph does not say which folder it came from. Enable code search for the folder again."), repo);
             return Task.CompletedTask;
         }
         return RunCodeBuildAsync(root, repo, full);
+    }
+
+    // ── Builds nobody asked for ──
+    //
+    // A session that opens in a project leaves a request (CodeAutoBuild), and this
+    // answers it one project at a time, through the same build the dashboard runs,
+    // so a new install has its graphs without anyone looking for a button. The
+    // polling is a few small file reads, and it starts with the window rather than
+    // the Universe, which may never be opened.
+
+    private static readonly TimeSpan CodeAutoEvery = TimeSpan.FromSeconds(20);
+    private bool _codeAutoBuildEnabled = true;
+    private bool _codeAutoLooking;
+    private DispatcherTimer? _codeAutoTimer;
+
+    private void StartCodeAutoBuild()
+    {
+        if (_codeAutoTimer != null) return;
+        _codeAutoTimer = new DispatcherTimer { Interval = CodeAutoEvery };
+        _codeAutoTimer.Tick += (_, _) => _ = BuildNextCodeProjectAsync();
+        _codeAutoTimer.Start();
+        Closed += (_, _) =>
+        {
+            _codeClosed = true;
+            _codeAutoTimer?.Stop();
+            StopCodeBuild();
+        };
+    }
+
+    private async Task BuildNextCodeProjectAsync()
+    {
+        if (!_codeAutoBuildEnabled || _codeAutoLooking || _codeBuild != null || _codeClosed) return;
+        _codeAutoLooking = true;
+        try
+        {
+            var vault = _vaultPath;
+            var next = await Task.Run<(string Root, string Repo, string? Head)?>(() =>
+            {
+                var root = CodeAutoBuild.Due(vault).FirstOrDefault();
+                return root == null ? null : (root, CodeGraphStore.SlugFor(vault, root), GitHead.Read(root));
+            });
+            // A manual build can have started during that look: it goes first, and
+            // this project is still due on the next tick.
+            if (next is not { } job || _codeBuild != null || vault != _vaultPath) return;
+            var outcome = await RunCodeBuildAsync(job.Root, job.Repo, full: false, auto: true);
+            // Closing the app stops a build too, and that must not read as the
+            // owner saying no: it picks up again on the next start.
+            if (outcome == null || outcome.State == "busy" || _codeClosed) return;
+            await Task.Run(() => CodeAutoBuild.Record(vault, job.Root, job.Repo, job.Head, outcome.State));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or JsonException)
+        {
+            Debug.WriteLine($"Code auto-build: {ex.Message}");
+        }
+        finally { _codeAutoLooking = false; }
     }
 
     private async Task AddCodeRepoAsync()
@@ -344,23 +404,27 @@ public partial class MainWindow
         await RunCodeBuildAsync(root, repo, full: false);
     }
 
-    private async Task RunCodeBuildAsync(string root, string repo, bool full)
+    /// <param name="auto">Nobody asked for this one: its card arrives by itself, and only a Stop gets an answer.</param>
+    private async Task<CodeBuildOutcome?> RunCodeBuildAsync(string root, string repo, bool full, bool auto = false)
     {
         if (_codeBuild != null)
         {
-            PostCodeBuildState(new CodeBuildOutcome("busy", "Finish or stop the build that is running first."));
-            return;
+            var busy = new CodeBuildOutcome("busy", "Finish or stop the build that is running first.");
+            if (!auto) PostCodeBuildState(busy);
+            return busy;
         }
         if (!Directory.Exists(root))
         {
-            PostCodeBuildState(new CodeBuildOutcome("failed", $"The folder is not there any more: {root}"), repo);
-            return;
+            var gone = new CodeBuildOutcome("failed", $"The folder is not there any more: {root}");
+            if (!auto) PostCodeBuildState(gone, repo);
+            return gone;
         }
         var exe = ResolveBestMcpExe();
         if (exe == null)
         {
-            PostCodeBuildState(new CodeBuildOutcome("failed", "brainx-mcp.exe was not found. Reinstall or rebuild BrainX."), repo);
-            return;
+            var missing = new CodeBuildOutcome("failed", "brainx-mcp.exe was not found. Reinstall or rebuild BrainX.");
+            if (!auto) PostCodeBuildState(missing, repo);
+            return missing;
         }
         var run = new CodeBuildRun { Repo = repo };
         _codeBuild = run;
@@ -374,8 +438,9 @@ public partial class MainWindow
             outcome = new CodeBuildOutcome("failed", "The build could not be started.");
         }
         _codeBuild = null;
-        PostCodeBuildState(outcome, repo);
+        PostCodeBuildState(!auto || outcome.State == "stopped" ? outcome : null, repo);
         await PushCodeGraphAsync();
+        return outcome;
     }
 
     private static CodeBuildOutcome SpawnCodeBuild(string exe, string root, string repo, bool full, string vault, CodeBuildRun run)
@@ -427,6 +492,7 @@ public partial class MainWindow
         {
             "unchanged" => new CodeBuildOutcome("done", "Already up to date."),
             "locked" => new CodeBuildOutcome("failed", "Another build of this repo is running."),
+            "empty" => new CodeBuildOutcome("failed", "No C#, JavaScript, TypeScript, Python or PHP files in that folder. Nothing was saved."),
             "built" or "refreshed" => new CodeBuildOutcome("done",
                 $"{report["symbols"]?.Value<int>():N0} symbols, {report["edges"]?.Value<int>():N0} edges in {(report["milliseconds"]?.Value<double>() ?? 0) / 1000:0.#} s."),
             _ => new CodeBuildOutcome("failed", report["error"]?.ToString() is { Length: > 0 } why ? why : "The build did not finish.")

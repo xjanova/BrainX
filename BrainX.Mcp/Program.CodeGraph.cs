@@ -241,7 +241,7 @@ internal static partial class Program
             ["filesUnchanged"] = report.FilesUnchanged,
             ["projects"] = new JArray(report.Projects), ["warnings"] = new JArray(report.Warnings),
             ["changed"] = new JArray(report.Changed), ["milliseconds"] = JObject.FromObject(report.Ms),
-            ["next"] = $"brain_code_trace {{\"repo\":\"{repo}\",\"symbol\":\"<name>\"}}"
+            ["next"] = graph == null ? null : $"brain_code_trace {{\"repo\":\"{repo}\",\"symbol\":\"<name>\"}}"
         };
     }
 

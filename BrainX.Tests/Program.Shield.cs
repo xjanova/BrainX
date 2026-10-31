@@ -89,6 +89,14 @@ internal static partial class Program
                 Check("…and the verdict carries the rule", recall["provenance"] != null, recall.ToString());
             }
             else Check("recall answered (any note) without throwing", recall["verdict"] != null, recall.ToString());
+
+            var wrongScope = await Call(13, "brain_recall", new JObject { ["query"] = "deploy checklist", ["scope"] = "no-such-project" });
+            Check("recall: a scope that matches nothing searches the vault and says so",
+                  wrongScope["scopeFallback"]?.Value<bool>() == true && wrongScope["signals"]?["candidates"]?.Value<int>() == 2
+                  && wrongScope["scopeFallbackNote"]?.ToString().Contains("no-such-project") == true
+                  && (wrongScope["answer"] ?? wrongScope["nearest"]) is JObject, wrongScope.ToString());
+            var rightScope = await Call(14, "brain_recall", new JObject { ["query"] = "deploy checklist", ["scope"] = "Notes" });
+            Check("…a scope that matches stays a scope", rightScope["scopeFallback"] == null, rightScope.ToString());
         }
         finally
         {

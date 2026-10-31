@@ -307,6 +307,33 @@ public static partial class GitHead
         return null;
     }
 
+    /// <summary>
+    /// The checkout a linked worktree belongs to, or the folder itself. A worktree's
+    /// ".git" names .git/worktrees/x, and only that folder holds a commondir file,
+    /// so a submodule (.git/modules/x) stays its own repository.
+    /// </summary>
+    public static string? MainCheckout(string? repoRoot)
+    {
+        if (string.IsNullOrEmpty(repoRoot)) return repoRoot;
+        try
+        {
+            var dotGit = Path.Combine(repoRoot, ".git");
+            if (!File.Exists(dotGit)) return repoRoot;
+            var line = File.ReadAllText(dotGit).Trim();
+            if (!line.StartsWith("gitdir:", StringComparison.Ordinal)) return repoRoot;
+            var gitDir = line[7..].Trim();
+            if (!Path.IsPathRooted(gitDir)) gitDir = Path.GetFullPath(Path.Combine(repoRoot, gitDir));
+            var commonFile = Path.Combine(gitDir, "commondir");
+            if (!File.Exists(commonFile)) return repoRoot;
+            var c = File.ReadAllText(commonFile).Trim();
+            var common = new DirectoryInfo(Path.IsPathRooted(c) ? c : Path.GetFullPath(Path.Combine(gitDir, c)));
+            return common.Name.Equals(".git", StringComparison.OrdinalIgnoreCase) && common.Exists && common.Parent != null
+                ? common.Parent.FullName : repoRoot;
+        }
+        catch (IOException) { return repoRoot; }
+        catch (UnauthorizedAccessException) { return repoRoot; }
+    }
+
     public static string? Read(string? repoRoot)
     {
         if (string.IsNullOrEmpty(repoRoot)) return null;

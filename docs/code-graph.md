@@ -34,19 +34,52 @@ Qualified names such as `A.Run` and unique names written in backticks become
 note-to-symbol links. `brain_code_trace` accepts `note_id` (id or vault-relative
 path) to start from those symbols and includes `linkedNotes` for symbol seeds.
 The Universe's galaxy view keeps existing note stars and wiki-links, and draws
-a separate cyan code galaxy for the most relevant symbols. Exact note mentions
-form the bridges to that galaxy. The info card labels a code node's source as
-BrainX or Graphify. The neural-brain theme keeps its note-only anatomy.
+the most relevant symbols as a loose core at the centre, inside every note
+galaxy: the most connected file in the middle, each repo a cluster of its own.
+The neural-brain theme draws the same symbols in the thalamus. Exact note
+mentions form the bridges to them. The info card labels a code node's source as
+BrainX or Graphify.
 
-The **Code** button on the HUD opens the code dashboard: one card per stored
-graph (symbols, edges, commit, build age, whether the checkout has moved on),
-how sure the edges are, relation and coverage counts, the most connected
+Points on one subject act as one point in both themes. Notes join by a title
+that differs only by date or hash, else by the rarest tag they share; symbols
+join by file. Members sit beside the group's head and flow into it once the
+group is too small on screen to tell them apart, and flow back out on zooming
+in (`nodegroups.js`, and the star shader in `scene.js`). Edges keep their real
+ends, so a merged group's lines stop a few pixels short of the point.
+
+The **Code search** button on the HUD opens the code dashboard: one card per
+stored graph (symbols, edges, commit, build age, whether the checkout has moved
+on), how sure the edges are, relation and coverage counts, the most connected
 symbols, and search across the whole graph. A symbol's page lists its callers,
-callees and the notes that name it, and flies to its star. **Add repo** picks a
-folder and runs `brainx-mcp code-build <folder>`; **Refresh**, **Full rebuild**
-and **Stop** act on the build, one at a time. A second folder with the same name
-gets its own graph instead of replacing the first. Only Graphify imports have no
-build button: rebuilding would swap their source, so refresh them as below.
+callees and the notes that name it, and flies to its star. **Enable code search**
+picks a folder and runs `brainx-mcp code-build <folder>`; **Refresh**, **Full
+rebuild** and **Stop** act on the build, one at a time. A second folder with the
+same name gets its own graph instead of replacing the first. Only Graphify
+imports have no build button: rebuilding would swap their source, so refresh
+them as below.
+
+## Nothing to install
+
+The builder ships inside `brainx-mcp`, and a new install needs no step to get
+graphs. Every agent starts an MCP server in the project it opened in, and the
+server leaves a request in `.obsidianx/code-graphs/cache/auto/`. The BrainX app
+reads those requests and builds one project at a time through the same build the
+dashboard runs, so it shows a progress bar and a **Stop** button.
+
+- A project is a git checkout. A plain folder, a drive, the home folder, anything
+  in temp, and a repo holding the vault are left alone.
+- A linked worktree counts as its main checkout, so worktrees do not each store a
+  copy of the graph.
+- A later session refreshes a project when its commit has moved. A build that
+  failed waits six hours; a graph deleted by hand comes back.
+- **Map projects automatically** on the dashboard turns this off for this machine.
+
+Requests wait while the app is closed. An agent whose server does not start in
+the project folder leaves no request; use **Enable code search** there.
+
+A scan skips `tmp` and `temp` anywhere, `output` and `out` at the top of a repo,
+and any folder with its own `.git`, on top of `.gitignore` and the usual
+dependency and build folders.
 
 ## Import an existing Graphify graph
 

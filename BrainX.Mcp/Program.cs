@@ -351,6 +351,14 @@ internal static partial class Program
         // app they would re-point those at the cache. Same treatment as sandbox.
         if (cloud) sandbox = true;
 
+        // Every agent starts this server in the project it opened in, so this is
+        // where a new install's graphs come from. The client does the building.
+        if (!sandbox && !IsRemoteChild) _ = Task.Run(() =>
+        {
+            try { CodeAutoBuild.Ask(_vaultPath, Environment.CurrentDirectory); }
+            catch (Exception ex) { Log($"code auto-build ask skipped: {ex.Message}"); }
+        });
+
         // Can the brain hooks in Claude Code's settings.json actually run? They
         // cannot say so themselves when they are dead (2026-09-25: two silent
         // weeks), and this server runs in every session either way, so the

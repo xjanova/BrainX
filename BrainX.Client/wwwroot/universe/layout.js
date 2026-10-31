@@ -11,6 +11,8 @@
 //     gaussian thickness, seeded by the node id so layout is stable
 //     across reloads even when the source array order shuffles.
 
+import { gatherGroups, groupNotes, recordGroupReach } from './nodegroups.js';
+
 const GALAXY_PALETTE = {
     // hand-picked HSL colors that read well against deep space + bloom.
     Programming:         { hex: 0x6cf0ff, label: 'Programming'         }, // cyan
@@ -99,7 +101,7 @@ export function buildUniverse(brain) {
     const rawNodes = brain.Nodes ?? brain.nodes ?? [];
     if (!rawNodes.length) {
         const nodes = [], edges = [], galaxies = [];
-        addCodeLayer(brain.CodeOverlay ?? brain.codeOverlay, nodes, edges, galaxies, new Map(), 80);
+        addCodeLayer(brain.CodeOverlay ?? brain.codeOverlay, nodes, edges, galaxies, new Map());
         return { nodes, edges, galaxies };
     }
 
@@ -207,6 +209,7 @@ export function buildUniverse(brain) {
                 id,
                 sourceKind: 'note',
                 title: n.Title ?? n.title ?? '(untitled)',
+                scope: n.Scope ?? n.scope ?? '',
                 category: g.category,
                 galaxyIdx,
                 categoryLabel: g.label,
@@ -230,58 +233,116 @@ export function buildUniverse(brain) {
         });
     }
 
+    groupNotes(nodes);
+    gatherGroups(nodes, n => {
+        const g = galaxies[n.galaxyIdx];
+        n.position.x = g.center.x + g.basisU.x * n.local.u + g.basisV.x * n.local.v + g.normal.x * n.local.n;
+        n.position.y = g.center.y + g.basisU.y * n.local.u + g.basisV.y * n.local.v + g.normal.y * n.local.n;
+        n.position.z = g.center.z + g.basisU.z * n.local.u + g.basisV.z * n.local.v + g.normal.z * n.local.n;
+    });
+
     const edges = linkEdges(nodes, idIndex);
-    addCodeLayer(brain.CodeOverlay ?? brain.codeOverlay, nodes, edges, galaxies, idIndex, galaxyR);
+    addCodeLayer(brain.CodeOverlay ?? brain.codeOverlay, nodes, edges, galaxies, idIndex);
     return { nodes, edges, galaxies };
 }
 
-/** Code is an outer, cyan galaxy. Note stars keep their original ids and homes. */
-export function addCodeLayer(layer, nodes, edges, galaxies, idIndex, galaxyR) {
-    if (!Array.isArray(layer?.nodes) || layer.nodes.length === 0) return;
+// The code core's radius for a repo of this many files. Loose on purpose: the
+// edges and the additive glow are what would melt a dense ball, not the points.
+const CORE_RADIUS = (files) => 14 + 6 * Math.cbrt(files);
+// The core may fill this much of the space inside the note galaxies.
+const CORE_SHARE = 0.42;
+// Note galaxies nearer the origin than this leave no room for a core. The sphere
+// they sit on is never under 80, so in practice this is the one-galaxy vault.
+const HOLLOW_MIN = 60;
+// Spacing between the symbols of one file, in ball-local units.
+const SYMBOL_PITCH = 2.2;
+
+/** The drawn symbols, per repo, in layer order. Ids a note already holds are skipped. */
+export function codeRepos(layer, idIndex) {
     const byRepo = new Map();
+    if (!Array.isArray(layer?.nodes)) return byRepo;
     for (const raw of layer.nodes) {
         if (!raw?.id || idIndex.has(raw.id)) continue;
         const repo = raw.repo || 'code';
         if (!byRepo.has(repo)) byRepo.set(repo, []);
         byRepo.get(repo).push(raw);
     }
-    // Start beyond the outermost note disk, including its radius. A large
-    // Programming galaxy can reach farther than the nominal sphere radius.
-    let offset = Math.max(galaxyR, ...galaxies.map(g => Math.hypot(g.center.x, g.center.y, g.center.z) + g.radius)) + 35;
-    for (const [repo, list] of byRepo) {
-        const radius = 18 + Math.sqrt(list.length) * 2.2;
-        const center = { x: offset + radius, y: 0, z: 0 };
-        const normal = { x: 0, y: 1, z: 0 };
-        const basis = basisFromNormal(normal);
-        const galaxyIdx = galaxies.length;
-        const source = list[0]?.source === 'graphify' ? 'Graphify' : 'BrainX';
-        const category = `code:${repo}`;
-        galaxies.push({ category, label: `Code · ${repo} (${source})`, color: 0x30ddea,
-            center, normal, basisU: basis.u, basisV: basis.v, count: list.length,
-            score: 0, totalWords: 0, radius, isCode: true });
-        list.forEach((raw, i) => {
-            const angle = i * 2.399963229728653;
-            const r = radius * 0.82 * Math.sqrt((i + 0.5) / list.length);
-            const u = r * Math.cos(angle), v = r * Math.sin(angle);
-            const n = (hashStr(raw.id) % 1000) / 1000 * 3 - 1.5;
-            const position = {
-                x: center.x + basis.u.x * u + basis.v.x * v + normal.x * n,
-                y: center.y + basis.u.y * u + basis.v.y * v + normal.y * n,
-                z: center.z + basis.u.z * u + basis.v.z * v + normal.z * n
-            };
-            const node = { id: raw.id, title: raw.title || raw.id, category, galaxyIdx,
-                categoryLabel: `Code · ${repo} (${source})`, sourceKind: 'code', codeKind: raw.kind,
-                codeSource: source, codeRepo: repo, codeFile: raw.file, codeLine: raw.line,
-                color: raw.kind === 'file' ? 0x8ef5ff : 0x30ddea,
-                position, local: { u, v, n }, size: raw.kind === 'file' ? 2.0 : 1.2,
-                brightness: raw.kind === 'file' ? 0.9 : 0.7, wordCount: 0,
-                tags: [raw.kind || 'symbol', source], preview: raw.signature || raw.file || '',
-                modifiedAt: null, linkedIds: [] };
-            idIndex.set(node.id, nodes.length);
-            nodes.push(node);
-        });
-        offset += radius * 2 + 25;
+    return byRepo;
+}
+
+/** How many links touch each symbol: a hub is what the most other points reach for. */
+export function codeDegree(layer) {
+    const degree = new Map();
+    const bump = id => degree.set(id, (degree.get(id) ?? 0) + 1);
+    for (const e of layer?.edges ?? []) { bump(e.from); bump(e.to); }
+    for (const m of layer?.mentions ?? []) bump(m.symbolId);
+    return degree;
+}
+
+/**
+ * Where each symbol of a repo sits in a ball of `radius`, in ball-local (u, v, n).
+ * One point per file group: the most connected file at the middle, the least at
+ * the rim, its symbols gathered around it. Writes straight into the result; the
+ * caller projects it into whichever frame the theme lives in.
+ */
+export function placeCode(list, degree, radius) {
+    const files = new Map();
+    for (const raw of list) {
+        const key = raw.file ?? raw.id;
+        if (!files.has(key)) files.set(key, []);
+        files.get(key).push(raw);
     }
+    const reach = symbols => symbols.reduce((sum, s) => sum + (degree.get(s.id) ?? 0), 0);
+    const ranked = [...files.entries()]
+        .map(([file, symbols]) => ({ file, symbols, reach: reach(symbols) }))
+        .sort((a, b) => (b.reach - a.reach) || (a.file < b.file ? -1 : 1));
+    const out = [];
+    ranked.forEach(({ file, symbols }, rank) => {
+        const nearness = 1 - rank / Math.max(1, ranked.length - 1);
+        const home = fibSphere(rank, ranked.length, radius * Math.cbrt((rank + 0.5) / ranked.length));
+        const head = symbols.find(s => s.kind === 'file')
+            ?? symbols.reduce((best, s) => ((degree.get(s.id) ?? 0) > (degree.get(best.id) ?? 0) ? s : best));
+        const members = symbols.filter(s => s !== head);
+        out.push({ raw: head, local: { u: home.x, v: home.z, n: home.y }, nearness, file, count: symbols.length, head: true });
+        members.forEach((raw, k) => {
+            const off = fibSphere(k, members.length, SYMBOL_PITCH * Math.cbrt(k + 2));
+            out.push({ raw, local: { u: home.x + off.x, v: home.z + off.z, n: home.y + off.y }, nearness, file, count: symbols.length, head: false });
+        });
+    });
+    return out;
+}
+
+/** The sky's node for one placed symbol. position is the caller's to fill. */
+export function codeNode(slot, repo, galaxyIdx, position, source) {
+    const { raw, local, nearness } = slot;
+    const isFile = raw.kind === 'file';
+    return { id: raw.id, title: raw.title || raw.id, category: `code:${repo}`, galaxyIdx,
+        categoryLabel: `Code · ${repo} (${source})`, sourceKind: 'code', codeKind: raw.kind,
+        codeSource: source, codeRepo: repo, codeFile: raw.file, codeLine: raw.line,
+        color: isFile ? 0x8ef5ff : 0x30ddea,
+        position, local, size: (isFile ? 1.6 : 1.0) + nearness * 0.8,
+        brightness: 0.35 + nearness * 0.6, wordCount: 0,
+        tags: [raw.kind || 'symbol', source], preview: raw.signature || raw.file || '',
+        modifiedAt: null, linkedIds: [] };
+}
+
+export const codeSourceLabel = list => (list[0]?.source === 'graphify' ? 'Graphify' : 'BrainX');
+
+/** The head of each placed file group, as a node index, then the groups stamped. */
+export function joinCodeGroups(nodes, firstIdx, slots) {
+    const heads = new Map();
+    slots.forEach((slot, k) => { if (slot.head) heads.set(slot.file, firstIdx + k); });
+    slots.forEach((slot, k) => {
+        if (slot.count < 2) return;
+        const n = nodes[firstIdx + k];
+        n.groupHead = heads.get(slot.file);
+        n.groupCount = slot.count;
+        n.groupLabel = (slot.file.split('/').pop() || slot.file);
+    });
+}
+
+/** Code and mention edges, once per pair of points and kind. */
+export function linkCode(layer, edges, idIndex) {
     const seen = new Set();
     function link(aId, bId, kind, relation) {
         const a = idIndex.get(aId), b = idIndex.get(bId);
@@ -291,8 +352,60 @@ export function addCodeLayer(layer, nodes, edges, galaxies, idIndex, galaxyR) {
         seen.add(key);
         edges.push({ a, b, kind, relation });
     }
-    for (const e of layer.edges ?? []) link(e.from, e.to, 'code', e.relation);
-    for (const m of layer.mentions ?? []) link(m.noteId, m.symbolId, 'mention', 'mentions');
+    for (const e of layer?.edges ?? []) link(e.from, e.to, 'code', e.relation);
+    for (const m of layer?.mentions ?? []) link(m.noteId, m.symbolId, 'mention', 'mentions');
+}
+
+/**
+ * Code is the universe's loose core: every note galaxy sits around it, so any of
+ * them can reach it. Each repo is a ball of its own inside that core. Note stars
+ * keep their original ids and homes.
+ */
+export function addCodeLayer(layer, nodes, edges, galaxies, idIndex) {
+    const repos = [...codeRepos(layer, idIndex).entries()];
+    if (!repos.length) return;
+    const degree = codeDegree(layer);
+    const radii = repos.map(([, list]) => CORE_RADIUS(new Set(list.map(s => s.file ?? s.id)).size));
+    const widest = Math.max(...radii);
+    const ring = repos.length > 1 ? widest * 1.25 : 0;
+    // The disks lie tangent to their sphere, so a galaxy's centre is also its
+    // nearest point to the origin. A vault with one category has its only
+    // galaxy AT the origin: there the core goes beside it, as far out as it reaches.
+    const free = Math.min(...galaxies.map(g => Math.hypot(g.center.x, g.center.y, g.center.z)));
+    const hollow = free >= HOLLOW_MIN;
+    const fit = hollow ? Math.min(1, CORE_SHARE * free / (ring + widest)) : 1;
+    const base = hollow ? { x: 0, y: 0, z: 0 }
+        : { x: Math.max(...galaxies.map(g => g.radius)) + 35 + (ring + widest), y: 0, z: 0 };
+
+    const normal = { x: 0, y: 1, z: 0 };
+    const basis = basisFromNormal(normal);
+    repos.forEach(([repo, list], i) => {
+        const radius = radii[i] * fit;
+        const offset = fibSphere(i, repos.length, ring * fit);
+        const center = { x: base.x + offset.x, y: base.y + offset.y, z: base.z + offset.z };
+        const galaxyIdx = galaxies.length;
+        const source = codeSourceLabel(list);
+        const label = `Code · ${repo} (${source})`;
+        galaxies.push({ category: `code:${repo}`, label, color: 0x30ddea,
+            center, normal, basisU: basis.u, basisV: basis.v, count: list.length,
+            score: 0, totalWords: 0, radius, isCode: true });
+        const firstIdx = nodes.length;
+        const slots = placeCode(list, degree, radius);
+        for (const slot of slots) {
+            const { u, v, n } = slot.local;
+            const position = {
+                x: center.x + basis.u.x * u + basis.v.x * v + normal.x * n,
+                y: center.y + basis.u.y * u + basis.v.y * v + normal.y * n,
+                z: center.z + basis.u.z * u + basis.v.z * v + normal.z * n
+            };
+            const node = codeNode(slot, repo, galaxyIdx, position, source);
+            idIndex.set(node.id, nodes.length);
+            nodes.push(node);
+        }
+        joinCodeGroups(nodes, firstIdx, slots);
+    });
+    recordGroupReach(nodes);
+    linkCode(layer, edges, idIndex);
 }
 
 /**
