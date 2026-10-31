@@ -148,6 +148,8 @@ public sealed class QuotaCalibrator
                     w.WriteLine(o.ToString(Newtonsoft.Json.Formatting.None));
                 }
             }
+            // Not AtomicFile.MoveOver: this is only a trim, on the dashboard's
+            // UI thread. Refused, the samples stay whole and the next trim does it.
             File.Move(tmp, SamplesPath, overwrite: true);
         }
         catch { }

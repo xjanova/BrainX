@@ -72,7 +72,7 @@ public partial class MainWindow
             Directory.CreateDirectory(Path.GetDirectoryName(SecretaryPath)!);
             var tmp = SecretaryPath + ".tmp-" + Guid.NewGuid().ToString("N")[..6];
             File.WriteAllText(tmp, o.ToString(Formatting.Indented), new UTF8Encoding(false));
-            File.Move(tmp, SecretaryPath, overwrite: true);
+            AtomicFile.MoveOver(tmp, SecretaryPath);
         }
         catch (Exception ex) { _secretaryError = "บันทึกการตั้งค่าเลขาไม่ได้: " + ex.Message; }
     }

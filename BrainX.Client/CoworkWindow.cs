@@ -113,6 +113,9 @@ internal sealed class CoworkWindow : Window
             Directory.CreateDirectory(Path.GetDirectoryName(PlacementPath)!);
             var tmp = PlacementPath + ".tmp";
             File.WriteAllText(tmp, o.ToString(), new System.Text.UTF8Encoding(false));
+            // Not AtomicFile.MoveOver: this runs on the UI thread as the window
+            // closes, and nobody else opens this file. A refusal costs the window
+            // its last spot, which is less than a closing window hanging.
             File.Move(tmp, PlacementPath, overwrite: true);
         }
         catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"CoworkWindow placement: {ex.Message}"); }

@@ -190,7 +190,7 @@ public static class SectionEmbeddings
         }
         var tmp = path + "." + Environment.ProcessId + ".tmp";
         File.WriteAllBytes(tmp, bytes);
-        File.Move(tmp, path, overwrite: true);
+        AtomicFile.MoveOver(tmp, path);
     }
 
     /// <summary>

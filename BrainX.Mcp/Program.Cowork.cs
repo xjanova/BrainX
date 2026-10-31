@@ -1006,14 +1006,17 @@ internal static partial class Program
     /// recorded; re-listing the folder here would mark a line that landed late
     /// as read without anybody reading it, which is the race this exists for.
     /// </summary>
-    private static (string Cursor, JArray Seen) CoworkSettle(string? oldCursor, JToken? oldSeen, IEnumerable<string> delivered)
+    /// <param name="stopAt">A line the cursor must stay short of. What was
+    /// delivered beyond it is kept by name.</param>
+    private static (string Cursor, JArray Seen) CoworkSettle(string? oldCursor, JToken? oldSeen, IEnumerable<string> delivered, string? stopAt = null)
     {
         oldCursor ??= "";
         var names = (oldSeen as JArray)?.Select(t => t.ToString()).ToList() ?? new List<string>();
         names.AddRange(delivered.Select(f => Path.GetFileName(f)));
         names = names.Where(n => n.Length > 0).Distinct(StringComparer.Ordinal).ToList();
 
-        var upTo = names.Count == 0 ? oldCursor : names.Max(StringComparer.Ordinal)!;
+        var settled = stopAt == null ? names : names.Where(n => string.CompareOrdinal(n, stopAt) < 0).ToList();
+        var upTo = settled.Count == 0 ? oldCursor : settled.Max(StringComparer.Ordinal)!;
         var floor = (DateTime.UtcNow - CoworkCursorGrace).Ticks.ToString("D19", CultureInfo.InvariantCulture);
         var cursor = string.CompareOrdinal(upTo, floor) <= 0 ? upTo : floor;
         if (string.CompareOrdinal(cursor, oldCursor) < 0) cursor = oldCursor;   // never backwards
@@ -1509,7 +1512,7 @@ internal static partial class Program
     /// agent that could not be spawned would be forgotten after one tick.
     /// </summary>
     internal static Dictionary<string, int> CoworkCallsWaiting(IEnumerable<string>? onCall = null) =>
-        CoworkCallsWaiting(onCall, out _, out _);
+        CoworkCallsWaiting(onCall, out _, out _, out _);
 
     /// <param name="scanned">The lines this answer was made from — what
     /// <see cref="CoworkMarkCalled"/> may move past, and nothing newer: a line
@@ -1517,11 +1520,16 @@ internal static partial class Program
     /// been looked at, and marking "everything up to now" dropped it.</param>
     /// <param name="unheard">Genuine owner lines nobody could be called for
     /// (no seat, nobody on call).</param>
+    /// <param name="unreadable">Lines that are there and could not be read: held
+    /// shut by a program, or not JSON. Nothing is known about them yet, not even
+    /// that they are forged, so they are not in <paramref name="scanned"/>.</param>
     internal static Dictionary<string, int> CoworkCallsWaiting(IEnumerable<string>? onCall,
-                                                               out List<string> scanned, out int unheard)
+                                                               out List<string> scanned, out int unheard,
+                                                               out List<string> unreadable)
     {
         var result = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         scanned = new List<string>();
+        unreadable = new List<string>();
         unheard = 0;
 
         // A dark room calls nobody. The owner's own line turns the light on
@@ -1533,7 +1541,6 @@ internal static partial class Program
         {
             var state = ReadJsonOrNull(CoworkBrokerCursorPath);
             var fresh = CoworkAfter(state?["cursor"]?.ToString(), state?["seen"]);
-            scanned = fresh;
             if (fresh.Count == 0) return result;
 
             var members = CoworkMembersSnapshot()
@@ -1544,7 +1551,13 @@ internal static partial class Program
             foreach (var f in fresh)
             {
                 var o = ReadJsonOrNull(f);
-                if (o == null) continue;
+                if (o == null)
+                {
+                    // Gone is gone: the window's history bin takes lines too.
+                    (File.Exists(f) ? unreadable : scanned).Add(f);
+                    continue;
+                }
+                scanned.Add(f);
                 // The owner's answer to a question asked from the room calls
                 // the agent that asked, exactly like an order to it by name.
                 if (CoworkIsOwnerDecisionLine(o, f))
@@ -1705,14 +1718,18 @@ internal static partial class Program
     /// scanned) have been acted on. Called after a spawn, never before: a cursor
     /// moved on intent rather than on action silently drops the order when the
     /// spawn is refused by the budget.</summary>
-    internal static void CoworkMarkCalled(IEnumerable<string> handled)
+    /// <param name="notYet">Lines still to be dealt with. The cursor stays short
+    /// of the oldest, because once it is past a line nothing looks at that line
+    /// again.</param>
+    internal static void CoworkMarkCalled(IEnumerable<string> handled, IEnumerable<string>? notYet = null)
     {
         try
         {
             var list = handled.ToList();
             if (list.Count == 0) return;
             var state = ReadJsonOrNull(CoworkBrokerCursorPath);
-            var (cursor, seen) = CoworkSettle(state?["cursor"]?.ToString(), state?["seen"], list);
+            var stopAt = notYet?.Select(f => Path.GetFileName(f)).Min(StringComparer.Ordinal);
+            var (cursor, seen) = CoworkSettle(state?["cursor"]?.ToString(), state?["seen"], list, stopAt);
             Directory.CreateDirectory(CoworkRoot);
             var o = new JObject
             {
@@ -1723,6 +1740,79 @@ internal static partial class Program
             AtomicWriteJson(CoworkBrokerCursorPath, o);
         }
         catch { }
+    }
+
+    /* A line that cannot be read.
+     *
+     * It used to be taken for a line with nothing in it: marked handled, and the
+     * owner's order was never called for, with no word to anybody. A scanner or
+     * a backup lets go in a moment, so it is tried again, every couple of seconds
+     * rather than every poll, because somebody is waiting on it. What keeps the
+     * line from being lost meanwhile is the cursor stopping short of it, in
+     * broker-cursor.json like every other line's place; this file is only the
+     * clock, and losing it costs a longer wait, never the line.
+     */
+
+    private static string CoworkRetryClockPath => Path.Combine(CoworkRoot, "broker-unreadable.json");
+
+    /// <summary>How soon the broker looks again at a line it could not read.</summary>
+    private const int CoworkRetrySeconds = 2;
+
+    /// <summary>Is a line being tried again? Read by the nap, which is why it is
+    /// a file that goes away rather than a flag.</summary>
+    private static bool CoworkRetrying => File.Exists(CoworkRetryClockPath);
+
+    /// <summary>Which of this tick's unreadable lines have had their time, from
+    /// when each was first found. A line that is no longer in the list has been
+    /// read or has gone, and leaves the clock.</summary>
+    internal static List<string> CoworkOutOfPatience(IReadOnlyList<string> unreadable, TimeSpan patience)
+    {
+        var spent = new List<string>();
+        try
+        {
+            var clock = ReadJsonOrNull(CoworkRetryClockPath) ?? new JObject();
+            var now = DateTime.UtcNow.Ticks;
+            var trying = new JObject();
+            foreach (var f in unreadable)
+            {
+                var name = Path.GetFileName(f);
+                // A time still to come is a clock put back, and no bound at all.
+                var since = clock[name] is JValue { Value: long at } ? Math.Min(at, now) : now;
+                if (now - since >= patience.Ticks) spent.Add(f);
+                else trying[name] = since;
+            }
+            if (trying.Count == 0) File.Delete(CoworkRetryClockPath);
+            else if (!JToken.DeepEquals(clock, trying)) AtomicWriteJson(CoworkRetryClockPath, trying);
+        }
+        catch { }
+        return spent;
+    }
+
+    /// <summary>
+    /// The room hears a line was given up on. Counts and a time and nothing from
+    /// the file: anybody can name a file and this goes up in the broker's voice,
+    /// so the name stays in the log. It calls nobody, the file stays where it is,
+    /// and a line that has been told about is not read later: the owner has been
+    /// asked to say it again.
+    /// </summary>
+    private static void CoworkTellUnreadable(IReadOnlyList<string> lines, TimeSpan patience)
+    {
+        foreach (var f in lines)
+            BrokerLog($"cowork: gave up on {Path.GetFileName(f)} — unreadable for {patience.TotalSeconds:F0}s, left where it is");
+
+        var owner = lines.Count(f => CoworkSpeakerFromName(f).Equals("owner", StringComparison.OrdinalIgnoreCase));
+        var what = owner == 0 ? $"ข้อความในห้อง {lines.Count} บรรทัด"
+            : owner == lines.Count ? $"ข้อความของบอส {owner} บรรทัด"
+            : $"ข้อความ {lines.Count} บรรทัด (ของบอส {owner})";
+
+        var stamps = lines.Select(f => Path.GetFileName(f))
+            .Select(n => long.TryParse(n.AsSpan(0, Math.Min(19, n.Length)), NumberStyles.None, CultureInfo.InvariantCulture, out var t) ? t : 0)
+            .Where(t => t > 0 && t <= DateTime.MaxValue.Ticks)
+            .ToList();
+        var when = stamps.Count > 0 ? $" เมื่อ {new DateTime(stamps.Min(), DateTimeKind.Utc).ToLocalTime():HH:mm}" : "";
+
+        CoworkSystemLine($"⚠️ อ่าน{what}{when} ไม่ได้ — ไฟล์ถูกโปรแกรมอื่นล็อกไว้หรือเสียหาย "
+            + $"ลองซ้ำมา {SpanTh(patience)} แล้วไม่สำเร็จ ยังไม่มีใครได้รับ ถ้ายังต้องการ ช่วยพิมพ์ใหม่อีกครั้ง");
     }
 
     /// <summary>

@@ -898,7 +898,7 @@ public partial class MainWindow
             };
             var tmp = path + ".tmp";
             File.WriteAllText(tmp, payload.ToString(), new System.Text.UTF8Encoding(false));
-            File.Move(tmp, path, overwrite: true);
+            BrainX.Core.Services.AtomicFile.MoveOver(tmp, path);
 
             // Everybody out. Seats are removed rather than tombstoned: leaving
             // is an agent's own decision and should survive; being sent home
@@ -936,7 +936,7 @@ public partial class MainWindow
             var tmp = path + ".tmp";
             File.WriteAllText(tmp, new JObject { ["view"] = view, ["sinceUtc"] = DateTime.UtcNow.ToString("o") }.ToString(),
                 new System.Text.UTF8Encoding(false));
-            File.Move(tmp, path, overwrite: true);
+            BrainX.Core.Services.AtomicFile.MoveOver(tmp, path);
         }
         catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"CoworkSetView: {ex.Message}"); }
     }
@@ -1143,7 +1143,7 @@ public partial class MainWindow
             // clock, and a half-written answer is a lost one.
             var tmp = path + "." + Guid.NewGuid().ToString("N")[..6] + ".tmp";
             File.WriteAllText(tmp, o.ToString(), new System.Text.UTF8Encoding(false));
-            File.Move(tmp, path, overwrite: true);
+            BrainX.Core.Services.AtomicFile.MoveOver(tmp, path);
             PostCowork();
         }
         catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"CoworkAnswer: {ex.Message}"); }

@@ -150,6 +150,6 @@ public static class NdjsonLog
     {
         var tmp = path + "." + Environment.ProcessId + ".tmp";
         File.WriteAllText(tmp, content, Utf8NoBom);
-        File.Move(tmp, path, overwrite: true);
+        AtomicFile.MoveOver(tmp, path);
     }
 }

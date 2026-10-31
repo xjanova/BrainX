@@ -152,7 +152,7 @@ internal static partial class Program
                 try
                 {
                     File.WriteAllText(tmp, after, new UTF8Encoding(false));
-                    File.Move(tmp, path, overwrite: true);
+                    AtomicFile.MoveOver(tmp, path);
                 }
                 catch
                 {

@@ -139,7 +139,7 @@ public partial class MainWindow
             // machine-settings file would silently re-arm auto-update.
             var tmp = path + "." + Environment.ProcessId + ".tmp";
             File.WriteAllText(tmp, o.ToString(Newtonsoft.Json.Formatting.Indented), new UTF8Encoding(false));
-            File.Move(tmp, path, overwrite: true);
+            AtomicFile.MoveOver(tmp, path);
         }
         catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"Machine settings save: {ex.Message}"); }
     }
@@ -188,7 +188,7 @@ public partial class MainWindow
 
             var tmp = SettingsFilePath + "." + Environment.ProcessId + ".tmp";
             File.WriteAllText(tmp, vault.ToString(Newtonsoft.Json.Formatting.Indented), new UTF8Encoding(false));
-            File.Move(tmp, SettingsFilePath, overwrite: true);
+            AtomicFile.MoveOver(tmp, SettingsFilePath);
             return true;
         }
         catch (Exception ex)
@@ -203,8 +203,9 @@ public partial class MainWindow
     ///
     /// Keeps a .bak of the previous contents REGARDLESS of whether they parsed
     /// — a backup taken only when the file is already broken is a backup of the
-    /// breakage. Then writes through a temp file and File.Replace, so the
-    /// window in which the path holds a truncated file does not exist.
+    /// breakage. Then writes through a temp file and a move, so the window in
+    /// which the path holds a truncated file does not exist, and an agent reading
+    /// the file at that moment does not cost us the write.
     /// </summary>
     internal static void WriteJsonSafely(string path, string content)
     {
@@ -219,8 +220,7 @@ public partial class MainWindow
 
         var tmp = path + "." + Environment.ProcessId + ".tmp";
         File.WriteAllText(tmp, content, new UTF8Encoding(false));
-        if (File.Exists(path)) File.Replace(tmp, path, null);
-        else File.Move(tmp, path);
+        AtomicFile.MoveOver(tmp, path);
     }
 
     /// <summary>

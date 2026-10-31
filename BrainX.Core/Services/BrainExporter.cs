@@ -53,7 +53,7 @@ public class BrainExporter
         try
         {
             File.WriteAllText(tmp, content);
-            File.Move(tmp, path, overwrite: true);
+            AtomicFile.MoveOver(tmp, path);
         }
         catch
         {

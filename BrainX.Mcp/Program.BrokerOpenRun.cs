@@ -367,7 +367,7 @@ internal static partial class Program
     /// </summary>
     private static async Task BrokerNap(BrokerConfig cfg, Dictionary<string, BrokerRun> live, string heard, CancellationToken ct)
     {
-        var until = DateTime.UtcNow.AddSeconds(cfg.PollSeconds);
+        var until = DateTime.UtcNow.AddSeconds(CoworkRetrying ? CoworkRetrySeconds : cfg.PollSeconds);
         while (DateTime.UtcNow < until)
         {
             await Task.Delay(TimeSpan.FromSeconds(1), ct).ConfigureAwait(false);

@@ -266,7 +266,7 @@ public sealed class SshApprovalStore
     {
         var tmp = path + "." + Environment.ProcessId + ".tmp";
         File.WriteAllText(tmp, JsonConvert.SerializeObject(rec, Formatting.Indented), new UTF8Encoding(false));
-        File.Move(tmp, path, overwrite: true);
+        AtomicFile.MoveOver(tmp, path);
     }
 
     private static string NewId()

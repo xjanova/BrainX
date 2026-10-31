@@ -327,23 +327,14 @@ internal static partial class Program
             .ToList();
     }
 
-    /// <summary>
-    /// Temp-then-move so a concurrent reader never sees partial JSON. The move
-    /// over the old file is refused while anybody has it open, however they
-    /// opened it, and the app reads these files all day: 311 of 3,000 moves with
-    /// a reader there every millisecond, all through within 115 ms of trying
-    /// again. Several callers swallow a failure here, so a write lost this way
-    /// leaves the disk behind the broker with nothing said.
-    /// </summary>
+    /// <summary>Temp-then-move so a concurrent reader never sees partial JSON.
+    /// The app reads these files all day, and several callers swallow a failure
+    /// here, so the move waits out a reader (see AtomicFile).</summary>
     private static void AtomicWriteJson(string path, JObject payload)
     {
         var tmp = path + "." + Guid.NewGuid().ToString("N")[..8] + ".tmp";
         File.WriteAllText(tmp, payload.ToString(Formatting.Indented));
-        for (var tries = 0; ; tries++)
-        {
-            try { File.Move(tmp, path, overwrite: true); return; }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && tries < 40) { Thread.Sleep(10); }
-        }
+        BrainX.Core.Services.AtomicFile.MoveOver(tmp, path);
     }
 
     /// <summary>

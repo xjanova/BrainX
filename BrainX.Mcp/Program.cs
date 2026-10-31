@@ -3227,7 +3227,7 @@ internal static partial class Program
         var path = Path.Combine(bundleDir, slug + ".json");
         var tmp = path + ".tmp";
         File.WriteAllText(tmp, bundle.ToString(Newtonsoft.Json.Formatting.Indented));
-        File.Move(tmp, path, overwrite: true);
+        AtomicFile.MoveOver(tmp, path);
         return true;
     }
 
@@ -6973,7 +6973,7 @@ internal static partial class Program
             try
             {
                 File.WriteAllText(tmp, updated, new System.Text.UTF8Encoding(false));
-                File.Move(tmp, path, overwrite: true);
+                AtomicFile.MoveOver(tmp, path);
             }
             catch
             {
@@ -7906,7 +7906,7 @@ internal static partial class Program
     {
         var tmp = path + "." + Environment.ProcessId + ".tmp";
         File.WriteAllText(tmp, content, new System.Text.UTF8Encoding(false));
-        File.Move(tmp, path, overwrite: true);
+        AtomicFile.MoveOver(tmp, path);
     }
 
     /// <summary>
