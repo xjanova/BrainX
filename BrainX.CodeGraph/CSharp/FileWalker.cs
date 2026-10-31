@@ -20,7 +20,6 @@ internal sealed class FileWalker
     private readonly Dictionary<SyntaxNode, string> _keyByNode = new();
     private readonly Dictionary<ISymbol, string> _localKeys = new(SymbolEqualityComparer.Default);
     private readonly Dictionary<string, UnitSymbol> _byKey = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _unbound = new(StringComparer.Ordinal);
 
     public FileWalker(Compilation compilation, SyntaxTree tree, CodeFileUnit unit, HashSet<SyntaxTree> repoTrees, HashSet<string> memberNames, CancellationToken ct)
     {
@@ -40,7 +39,6 @@ internal sealed class FileWalker
 
         foreach (var node in root.DescendantNodes()) Declare(node);
         foreach (var node in root.DescendantNodes()) Reference(node);
-        _unit.Unbound.AddRange(_unbound.OrderBy(n => n, StringComparer.Ordinal).Take(500));
     }
 
     // ── declarations ──
@@ -138,7 +136,7 @@ internal sealed class FileWalker
             foreach (var b in bases.Types)
             {
                 var t = _model.GetTypeInfo(b.Type, _ct).Type as INamedTypeSymbol;
-                if (t == null || t.TypeKind == TypeKind.Error) { Unbound("inherits", (b.Type as SimpleNameSyntax)?.Identifier.ValueText ?? b.Type.ToString()); continue; }
+                if (t == null || t.TypeKind == TypeKind.Error) { Unbound("inherits"); continue; }
                 var relation = t.TypeKind == TypeKind.Interface && type.TypeKind != TypeKind.Interface ? "implements" : "inherits";
                 Bound(key, relation, t.OriginalDefinition, Line(b.Type));
             }
@@ -249,13 +247,13 @@ internal sealed class FileWalker
             var inRepo = mapped.Where(t => InRepo(t) || IsLocal(t)).Select(KeyOf).Where(k => k != null).Distinct(StringComparer.Ordinal).Take(5).ToList();
             if (inRepo.Count == 0)
             {
-                if (mapped.Count > 0) External(relation); else Unbound(relation, NameOf(at));
+                if (mapped.Count > 0) External(relation); else Unbound(relation);
                 return;
             }
             _unit.Refs.Add(new UnitRef { FromKey = from, Relation = relation, CandidateKeys = inRepo!, TargetName = NameOf(at), Line = Line(at) });
             return;
         }
-        Unbound(relation, NameOf(at));
+        Unbound(relation);
     }
 
     private void Bound(string? from, string relation, ISymbol target, int line)
@@ -267,11 +265,7 @@ internal sealed class FileWalker
 
     private void External(string relation) => _unit.External[relation] = _unit.External.GetValueOrDefault(relation) + 1;
 
-    private void Unbound(string relation, string? name)
-    {
-        _unit.UnboundCounts[relation] = _unit.UnboundCounts.GetValueOrDefault(relation) + 1;
-        if (!string.IsNullOrEmpty(name)) _unbound.Add(name);
-    }
+    private void Unbound(string relation) => _unit.UnboundCounts[relation] = _unit.UnboundCounts.GetValueOrDefault(relation) + 1;
 
     /// <summary>The member a reference is written in: the nearest declaration above it, or the file.</summary>
     private string? From(SyntaxNode node)
@@ -322,7 +316,9 @@ internal sealed class FileWalker
         if (_localKeys.TryGetValue(s, out var local)) return local;
         if (s is IMethodSymbol { MethodKind: MethodKind.LocalFunction }) return null;
         var def = s.OriginalDefinition;
-        return def.GetDocumentationCommentId();
+        // Two projects can each have Ns.Program. They are different symbols, and
+        // the documentation id alone would fold them into one.
+        return def.GetDocumentationCommentId() is { } id ? def.ContainingAssembly?.Name + "|" + id : null;
     }
 
     private static ISymbol Method(IMethodSymbol m)

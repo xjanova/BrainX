@@ -95,6 +95,111 @@ internal static partial class Program
         };
     }
 
+    // ── A build waits off the request loop ──
+    //
+    // The first build of a large repo takes minutes, all of it under the gate
+    // every other tool call waits on, and the client's next request sits behind
+    // it. The long polls solved this already (Program.LongPoll.cs), so a build
+    // does the same: the slow part runs on a task with the gate free, and the
+    // finished result goes through Handle like any other call, so it is logged
+    // and answered the ordinary way. The result reaches BrainCodeBuild in a
+    // thread-static, set only around that one Handle.
+
+    private sealed record FinishedBuild(Func<(BrainX.Core.Services.CodeGraph? Graph, BrainX.CodeGraph.CodeGraphBuilder.Report Report)> Run);
+    [ThreadStatic] private static FinishedBuild? _codeBuildOffLoop;
+    /// <summary>One at a time per process: Roslyn on a whole repo is memory-hungry.</summary>
+    private static readonly SemaphoreSlim _codeBuildGate = new(1, 1);
+
+    /// <summary>A tools/call of brain_code_build this server can serve off the loop, or null.</summary>
+    internal static JObject? CodeBuildOf(string line)
+    {
+        if (!line.Contains("brain_code_build", StringComparison.Ordinal)) return null;
+        JObject req;
+        try { req = JObject.Parse(line.TrimStart('\uFEFF')); }
+        catch { return null; }
+        if (req["method"]?.ToString() != "tools/call" || req["id"] is null or { Type: JTokenType.Null }) return null;
+        if (req["params"] is not JObject p || p["name"]?.ToString() != "brain_code_build") return null;
+        return !IsRemoteChild && !_cloudMode && p["arguments"] is JObject ? req : null;
+    }
+
+    private static void ServeCodeBuild(JObject req, string line, TextWriter writer) => _ = Task.Run(async () =>
+    {
+        string response;
+        try
+        {
+            FinishedBuild finished;
+            await _codeBuildGate.WaitAsync().ConfigureAwait(false);
+            try { finished = RunCodeBuild((JObject)req["params"]!["arguments"]!); }
+            finally { _codeBuildGate.Release(); }
+            lock (_requestGate)
+            {
+                _codeBuildOffLoop = finished;
+                try { response = Handle(line); }
+                finally { _codeBuildOffLoop = null; }
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"code build error: {ex}");
+            response = BuildError(req["id"], -32603, $"internal error: {ex.Message}");
+        }
+        try { await WriteResponseAsync(writer, response).ConfigureAwait(false); }
+        catch (Exception ex) { Log($"code build answer not written (client gone?): {ex.Message}"); }
+    });
+
+    /// <summary>
+    /// Run the build now and hold the outcome. A bad argument or a failed build
+    /// is held too and rethrown inside Handle, where the tool reports it itself.
+    /// </summary>
+    private static FinishedBuild RunCodeBuild(JObject args)
+    {
+        try
+        {
+            var root = Path.GetFullPath(args["repo_root"]?.ToString()?.Trim() ?? "");
+            var result = BrainX.CodeGraph.CodeGraphBuilder.Build(_vaultPath, root, CodeBuildRepo(root, args["repo"]?.ToString()),
+                BrainX.CodeGraph.SyntaxFileExtractor.Defaults, args["full"]?.Value<bool>() ?? false);
+            return new FinishedBuild(() => result);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException) { return new FinishedBuild(() => throw ex); }
+    }
+
+    private static string CodeBuildRepo(string root, string? repoArg) => CodeGraphStore.NormaliseRepo(string.IsNullOrWhiteSpace(repoArg)
+        ? Regex.Replace(Path.GetFileName(root.TrimEnd('\\', '/')).ToLowerInvariant(), "[^a-z0-9._-]+", "-").Trim('-', '.')
+        : repoArg);
+
+    /// <summary>
+    /// <c>brainx-mcp code-build &lt;repo_root&gt; [--repo slug] [--full] [--vault path]</c>:
+    /// what the Universe's build button runs, so the client carries no Roslyn.
+    /// One line of JSON on stdout; exit 0 when the graph is saved.
+    /// </summary>
+    internal static int CodeBuildCli(string[] args)
+    {
+        var positional = new List<string>();
+        string? repoArg = null;
+        var full = false;
+        for (var i = 0; i < args.Length; i++)
+        {
+            if (args[i] == "--full") full = true;
+            else if (args[i] == "--repo" && i + 1 < args.Length) repoArg = args[++i];
+            else if (args[i] == "--vault" && i + 1 < args.Length) i++;      // read by ResolveVault
+            else positional.Add(args[i]);
+        }
+        if (positional.Count != 1 || !Directory.Exists(positional[0]))
+        {
+            Console.Error.WriteLine("usage: brainx-mcp code-build <repo_root> [--repo slug] [--full] [--vault path]");
+            return 2;
+        }
+        var root = Path.GetFullPath(positional[0]);
+        var repo = CodeBuildRepo(root, repoArg);
+        var (graph, report) = BrainX.CodeGraph.CodeGraphBuilder.Build(_vaultPath, root, repo, BrainX.CodeGraph.SyntaxFileExtractor.Defaults, full);
+        Console.WriteLine(new JObject
+        {
+            ["repo"] = repo, ["status"] = report.Status, ["symbols"] = graph?.Symbols.Count, ["edges"] = graph?.Edges.Count,
+            ["filesRead"] = report.FilesRead, ["milliseconds"] = report.Ms.GetValueOrDefault("total")
+        }.ToString(Newtonsoft.Json.Formatting.None));
+        return graph != null ? 0 : 1;
+    }
+
     private static JToken BrainCodeBuild(JObject args)
     {
         if (IsRemoteChild || _cloudMode)
@@ -103,12 +208,11 @@ internal static partial class Program
         if (string.IsNullOrEmpty(raw)) throw new ArgumentException("repo_root is required");
         var root = Path.GetFullPath(raw);
         if (!Directory.Exists(root)) throw new DirectoryNotFoundException($"repo_root {root} does not exist");
-        var repoArg = args["repo"]?.ToString();
-        var repo = CodeGraphStore.NormaliseRepo(string.IsNullOrWhiteSpace(repoArg)
-            ? Regex.Replace(Path.GetFileName(root.TrimEnd('\\', '/')).ToLowerInvariant(), "[^a-z0-9._-]+", "-").Trim('-', '.')
-            : repoArg);
-        var (graph, report) = BrainX.CodeGraph.CodeGraphBuilder.Build(_vaultPath, root, repo,
-            BrainX.CodeGraph.SyntaxFileExtractor.Defaults, args["full"]?.Value<bool>() ?? false);
+        var repo = CodeBuildRepo(root, args["repo"]?.ToString());
+        var (graph, report) = _codeBuildOffLoop is { } done
+            ? done.Run()
+            : BrainX.CodeGraph.CodeGraphBuilder.Build(_vaultPath, root, repo,
+                BrainX.CodeGraph.SyntaxFileExtractor.Defaults, args["full"]?.Value<bool>() ?? false);
         if (graph != null) _codeGraphs.Remove(repo);
         LogQuery("brain_code_build", repo, graph?.Edges.Count ?? 0, report.Status);
         return new JObject
@@ -253,6 +357,7 @@ internal static partial class Program
             };
             if (e.Confidence is { } c) o["confidence"] = c;
             if (e.File != null) { o["file"] = e.File; o["line"] = e.Line; o["freshness"] = Fresh(e.File); }
+            if (e.Lines is { Count: > 1 } sites) o["lines"] = new JArray(sites);
             return edgeRows[e] = o;
         }
 

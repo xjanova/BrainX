@@ -20,12 +20,13 @@ public sealed class RepoFiles : IRepoFileSet
     {
         ".git", ".hg", ".svn", ".vs", ".idea", ".vscode", "bin", "obj", "node_modules", "bower_components",
         "vendor", "third_party", "third-party", "__pycache__", ".venv", "venv", ".tox", ".mypy_cache",
-        ".pytest_cache", ".next", ".nuxt", ".svelte-kit", "dist", "coverage", "packages", ".obsidianx",
+        ".pytest_cache", ".next", ".nuxt", ".svelte-kit", "dist", "coverage", ".obsidianx",
         "graphify-out", ".gradle", "target"
     };
 
     private readonly HashSet<string> _set = new(StringComparer.Ordinal);
     private readonly List<string> _all = [];
+    private readonly Dictionary<string, List<string>> _byName = new(StringComparer.Ordinal);
 
     public string Root { get; }
     /// <summary>Repo-relative paths, '/', ordinal order.</summary>
@@ -34,6 +35,7 @@ public sealed class RepoFiles : IRepoFileSet
     public List<(string Path, string Reason)> Skipped { get; } = [];
     public IEnumerable<string> All => _all;
     public bool Contains(string relativePath) => _set.Contains(relativePath);
+    public IEnumerable<string> Named(string fileName) => _byName.TryGetValue(fileName, out var list) ? list : [];
 
     private RepoFiles(string root) => Root = root;
 
@@ -46,24 +48,26 @@ public sealed class RepoFiles : IRepoFileSet
         var found = new List<string>();
         Walk(new DirectoryInfo(full), "", [], extensions, found, files.Skipped);
         found.Sort(StringComparer.Ordinal);
-        foreach (var f in found) { files._all.Add(f); files._set.Add(f); }
+        foreach (var f in found)
+        {
+            files._all.Add(f);
+            files._set.Add(f);
+            var name = f[(f.LastIndexOf('/') + 1)..];
+            if (!files._byName.TryGetValue(name, out var list)) files._byName[name] = list = [];
+            list.Add(f);
+        }
         return files;
     }
 
-    /// <summary>Language for a path, or null when no extractor reads it.</summary>
-    public static string? LanguageOf(string path)
+    /// <summary>
+    /// "packages" means two things: the old NuGet download folder, or a
+    /// monorepo's own code. Only the first holds nobody's source.
+    /// </summary>
+    private static bool IsNuGetFolder(FileSystemInfo dir)
     {
-        var ext = Path.GetExtension(path).ToLowerInvariant();
-        return ext switch
-        {
-            ".cs" => "csharp",
-            ".ts" or ".mts" or ".cts" => "typescript",
-            ".tsx" => "tsx",
-            ".js" or ".mjs" or ".cjs" or ".jsx" => "javascript",
-            ".py" or ".pyi" => "python",
-            ".php" => "php",
-            _ => null
-        };
+        if (!dir.Name.Equals("packages", StringComparison.OrdinalIgnoreCase)) return false;
+        return File.Exists(Path.Combine(dir.FullName, "repositories.config"))
+            || File.Exists(Path.Combine(Path.GetDirectoryName(dir.FullName)!, "packages.config"));
     }
 
     private static void Walk(DirectoryInfo dir, string rel, List<IgnoreRules> inherited, IReadOnlySet<string> extensions,
@@ -91,7 +95,7 @@ public sealed class RepoFiles : IRepoFileSet
             if (e.Attributes.HasFlag(FileAttributes.ReparsePoint)) continue;
             if (isDir)
             {
-                if (SkipDirs.Contains(e.Name) || IgnoreRules.Ignored(rules, path, true)) continue;
+                if (SkipDirs.Contains(e.Name) || IgnoreRules.Ignored(rules, path, true) || IsNuGetFolder(e)) continue;
                 Walk((DirectoryInfo)e, path, rules, extensions, found, skipped);
                 continue;
             }

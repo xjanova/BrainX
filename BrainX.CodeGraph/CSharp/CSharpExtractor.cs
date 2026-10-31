@@ -29,7 +29,7 @@ public sealed class CSharpExtractor
 {
     public const string LanguageName = "csharp";
     /// <summary>Bump when extraction logic changes: every C# file is re-read.</summary>
-    public const string LogicVersion = "brainx-cs/1";
+    public const string LogicVersion = "brainx-cs/2";
     public static readonly string Version = $"roslyn/{RoslynVersion()}+{LogicVersion}";
 
     private readonly ConcurrentDictionary<string, CachedTree> _trees = new(StringComparer.Ordinal);
@@ -123,7 +123,6 @@ public sealed class CSharpExtractor
             _trees.TryRemove(stale, out _);
 
         var repoTrees = new HashSet<SyntaxTree>(treeByPath.Values);
-        var relByTree = treeByPath.ToDictionary(kv => kv.Value, kv => kv.Key);
 
         // ── compilations, referenced projects first ──
         var built = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

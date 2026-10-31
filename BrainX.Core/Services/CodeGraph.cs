@@ -224,7 +224,7 @@ public static partial class CodeGraphStore
             // Nulls left out: most symbols have no qualified name or signature,
             // and a 15k-symbol graph would carry them all.
             File.WriteAllText(tmp, JsonConvert.SerializeObject(graph, new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore }), new UTF8Encoding(false));
-            File.Move(tmp, path, overwrite: true);
+            AtomicFile.MoveOver(tmp, path);
         }
         catch
         {

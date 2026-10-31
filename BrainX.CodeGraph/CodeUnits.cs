@@ -32,12 +32,6 @@ public sealed class CodeFileUnit
     public List<UnitSymbol> Symbols { get; set; } = [];
     public List<UnitRef> Refs { get; set; } = [];
     public List<UnitImport> Imports { get; set; } = [];
-    /// <summary>
-    /// Names this file used that its extractor could not bind (C#). A later
-    /// declaration with one of these names re-reads the file, so a call to a
-    /// method that did not exist yet is picked up once it does.
-    /// </summary>
-    public List<string> Unbound { get; set; } = [];
     /// <summary>References a compiler-backed extractor bound outside the repo (framework, packages), per relation. Counted, not stored.</summary>
     public Dictionary<string, int> External { get; set; } = new(StringComparer.Ordinal);
     /// <summary>References a compiler-backed extractor could not bind at all, per relation.</summary>
@@ -132,4 +126,6 @@ public interface IRepoFileSet
 {
     bool Contains(string relativePath);
     IEnumerable<string> All { get; }
+    /// <summary>Every file with this exact name, for imports that name a tail of a path.</summary>
+    IEnumerable<string> Named(string fileName);
 }

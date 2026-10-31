@@ -270,6 +270,11 @@ internal static partial class Program
             try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
             return await CloudCliAsync(args.Skip(1).ToArray()).ConfigureAwait(false);
         }
+        if (args.Length > 0 && args[0].Equals("code-build", StringComparison.OrdinalIgnoreCase))
+        {
+            try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
+            return CodeBuildCli(args.Skip(1).ToArray());
+        }
         if (args.Length > 0 && (args[0] == "--version" || args[0] == "-v" || args[0].Equals("version", StringComparison.OrdinalIgnoreCase)))
         {
             Console.OutputEncoding = new UTF8Encoding(false);
@@ -464,6 +469,8 @@ internal static partial class Program
             // A wait for the room or the inbox waits off this loop, so the
             // client's next call is not queued behind it (Program.LongPoll.cs).
             if (LongPollOf(line) is { } poll && TryServeLongPoll(poll, writer)) continue;
+            // So does a code build, which can take minutes (Program.CodeGraph.cs).
+            if (CodeBuildOf(line) is { } build) { ServeCodeBuild(build, line, writer); continue; }
             string response;
             try
             {

@@ -5,7 +5,7 @@
        project and each app that references it (import this file there too).
        Add a grammar here when an extractor starts using it. -->
   <PropertyGroup>
-    <BrainXTreeSitterKeep>;tree-sitter;tree-sitter-javascript;tree-sitter-typescript;tree-sitter-tsx;tree-sitter-python;tree-sitter-php;</BrainXTreeSitterKeep>
+    <BrainXTreeSitterKeep>;tree-sitter;tree-sitter-javascript;tree-sitter-typescript;tree-sitter-tsx;tree-sitter-python;tree-sitter-php;libtree-sitter;libtree-sitter-javascript;libtree-sitter-typescript;libtree-sitter-tsx;libtree-sitter-python;libtree-sitter-php;</BrainXTreeSitterKeep>
   </PropertyGroup>
 
   <Target Name="BrainXTrimTreeSitterGrammars" AfterTargets="ResolvePackageAssets">

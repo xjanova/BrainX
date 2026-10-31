@@ -84,4 +84,6 @@
     <Message Importance="high" Text="brainx-mcp version → $(Version)" />
   </Target>
 
+  <Import Project="..\BrainX.CodeGraph\TreeSitterGrammars.targets" />
+
 </Project>

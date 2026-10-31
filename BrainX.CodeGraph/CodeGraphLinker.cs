@@ -1,3 +1,6 @@
+// Derived from Graphify (https://github.com/Graphify-Labs/graphify), Apache-2.0.
+// Changed for BrainX: directed graph, one edge per file with every call site.
+// See ThirdParty/Graphify/NOTICE.
 using System.Globalization;
 using BrainX.Core.Services;
 
@@ -19,13 +22,6 @@ namespace BrainX.CodeGraph;
 /// </summary>
 public static class CodeGraphLinker
 {
-    public sealed class LinkResult
-    {
-        public required Core.Services.CodeGraph Graph { get; init; }
-        /// <summary>Files with a bound reference whose target no longer exists: their binding is stale.</summary>
-        public HashSet<string> DanglingFiles { get; } = new(StringComparer.Ordinal);
-    }
-
     private sealed class Placed
     {
         public required UnitSymbol Symbol;
@@ -33,7 +29,7 @@ public static class CodeGraphLinker
         public required CodeSymbol Node;
     }
 
-    public static LinkResult Link(string repo, string repoRoot, IReadOnlyList<CodeFileUnit> unitsIn, string? commit, string? gitRoot, string extractorVersion)
+    public static Core.Services.CodeGraph Link(string repo, string repoRoot, IReadOnlyList<CodeFileUnit> unitsIn, string? commit, string? gitRoot, string extractorVersion)
     {
         var units = unitsIn.OrderBy(u => u.Path, StringComparer.Ordinal).ToList();
         var graph = new Core.Services.CodeGraph
@@ -45,7 +41,6 @@ public static class CodeGraphLinker
             ImportedAt = DateTime.UtcNow,
             Source = new CodeGraphSource { Kind = "brainx", Version = extractorVersion, Path = repoRoot, WrittenAt = DateTime.UtcNow }
         };
-        var result = new LinkResult { Graph = graph };
         var issues = graph.Issues;
 
         // ── file nodes ──
@@ -165,17 +160,13 @@ public static class CodeGraphLinker
                             AddEdge(from, t.Node, r.Relation, "EXTRACTED", 1.0, u.Path, r.Line);
                             if (isBase) resolver.AddBase(r.FromKey, r.TargetKey);
                         }
-                        else
-                        {
-                            Count(issues.Unresolved, r.Relation);
-                            result.DanglingFiles.Add(u.Path);
-                        }
+                        else Count(issues.Unresolved, r.Relation);
                         continue;
                     }
                     if (r.CandidateKeys is { Count: > 0 } cands)
                     {
                         var present = cands.Where(byKey.ContainsKey).Distinct(StringComparer.Ordinal).ToList();
-                        if (present.Count == 0) { Count(issues.Unresolved, r.Relation); result.DanglingFiles.Add(u.Path); continue; }
+                        if (present.Count == 0) { Count(issues.Unresolved, r.Relation); continue; }
                         foreach (var c in present)
                             AddEdge(from, byKey[c].Node, r.Relation, present.Count == 1 ? "INFERRED" : "AMBIGUOUS", present.Count == 1 ? 0.8 : 0.3, u.Path, r.Line);
                         continue;
@@ -201,7 +192,7 @@ public static class CodeGraphLinker
             Count(issues.Relations, e.Relation);
             Count(issues.Provenance, e.Provenance);
         }
-        return result;
+        return graph;
     }
 
     private static int Rank(string p) => p switch { "EXTRACTED" => 0, "INFERRED" => 1, "AMBIGUOUS" => 2, _ => 3 };

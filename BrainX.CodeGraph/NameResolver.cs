@@ -1,3 +1,6 @@
+// Derived from Graphify (https://github.com/Graphify-Labs/graphify), Apache-2.0.
+// Changed for BrainX: rewritten in C#; nothing is guessed between candidates, and
+// imports of outside packages are recorded as such. See ThirdParty/Graphify/NOTICE.
 namespace BrainX.CodeGraph;
 
 /// <summary>
@@ -106,12 +109,14 @@ public sealed class NameResolver
         if (SuperReceivers.Contains(receiver))
             return enclosingType == null ? res : Inherited(res, enclosingType, name);
 
-        // A module or class it was called on.
-        var head = receiver.Split('.')[0];
+        // A module or class it was called on. PHP writes a class by its whole
+        // namespace, so its name is the last segment rather than the first.
+        var segments = receiver.Split('.');
+        var head = family == "php" ? segments[^1] : segments[0];
         foreach (var imp in unit.Imports)
         {
             var moduleAlias = imp.Alias ?? (imp.Names.Count == 0 ? LastSegment(imp.Module) : null);
-            if (moduleAlias == head && imp.Names.Count == 0)
+            if (moduleAlias == head || receiver == imp.Module)
             {
                 if (imp.ResolvedFile == null) { res.External = true; return res; }
                 if (Pick(_topLevel, (imp.ResolvedFile, name), Fits) is { Count: > 0 } inModule) return Take(res, inModule, "INFERRED", 0.95);

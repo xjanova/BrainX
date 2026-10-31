@@ -172,6 +172,21 @@ $hostingAssets = @(
     "System.ServiceProcess.ServiceController.dll"
 )
 
+# The code graph: Roslyn for C#, tree-sitter and its grammars for the rest, and
+# the licence files Apache-2.0 section 4 says travel with Graphify's ported code.
+# These are listed because deps.json is swapped with everything else: a
+# brainx-mcp.deps.json that names a dll the folder does not have stops the host
+# before Main, so every agent's brain would fail to start, not just the graph.
+# Grammars are the set BrainX.CodeGraph/TreeSitterGrammars.targets keeps.
+$codeGraphManaged = @(
+    "BrainX.CodeGraph.dll", "Microsoft.CodeAnalysis.dll", "Microsoft.CodeAnalysis.CSharp.dll", "TreeSitter.dll",
+    "ThirdParty\Graphify\LICENSE", "ThirdParty\Graphify\LICENSE-MIT", "ThirdParty\Graphify\NOTICE"
+)
+$codeGraphNative = @(
+    "tree-sitter.dll", "tree-sitter-javascript.dll", "tree-sitter-typescript.dll",
+    "tree-sitter-tsx.dll", "tree-sitter-python.dll", "tree-sitter-php.dll"
+)
+
 # 4. Deploy to the dev Release dir (framework-dependent code + runtimeconfig).
 $devAssets = @(
     "brainx-mcp.dll", "brainx-mcp.exe", "brainx-mcp.pdb",
@@ -198,7 +213,7 @@ $devAssets = @(
     # without complaint and only the deps.json beside it says 2.6.1. The MCP
     # opens no MySQL connection, so this is about the mirror telling the truth.
     "MySqlConnector.dll"
-) + $hostingAssets
+) + $hostingAssets + $codeGraphManaged + ($codeGraphNative | ForEach-Object { "runtimes\win-x64\native\$_" })
 $devFailed = Deploy-Set $fwBuild $devRelease $devAssets $ts "dev Release"
 
 # 5. Deploy to the installed app (the folder the shipped client's status bar
@@ -216,7 +231,7 @@ $appAssets = @(
     "Microsoft.ML.OnnxRuntime.dll", "System.Numerics.Tensors.dll",
     "onnxruntime.dll", "onnxruntime_providers_shared.dll",
     "Renci.SshNet.dll", "MySqlConnector.dll"
-) + $hostingAssets
+) + $hostingAssets + $codeGraphManaged + $codeGraphNative
 
 $appFailed = @()
 if (Test-Path $installedMcp) {

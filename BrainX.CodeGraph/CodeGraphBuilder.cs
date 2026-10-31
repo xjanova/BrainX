@@ -19,12 +19,12 @@ namespace BrainX.CodeGraph;
 ///
 /// C# needs one more step: a new overload can change a caller's binding even
 /// when its old target still exists. After a C# edit all unchanged C# files
-/// are re-bound against the new compilation; their syntax trees stay cached.
+/// are re-bound against the new compilation. The trees live for one build: an
+/// agent's MCP process runs for days and rarely builds twice.
 /// </summary>
 public static class CodeGraphBuilder
 {
     public const string UnitsSchema = "brainx-code-units/v1";
-    private static readonly ConcurrentDictionary<string, CSharpExtractor> CSharp = new(StringComparer.OrdinalIgnoreCase);
 
     public sealed class Report
     {
@@ -125,8 +125,17 @@ public static class CodeGraphBuilder
         if (cache != null && changedCs.Count == 0 && changedOther.Count == 0 && removed.Count == 0
             && CodeGraphStore.Load(vaultPath, repo) is { } current && current.Source.Kind == "brainx")
         {
+            // A commit that touched none of these files moves HEAD all the same.
+            var head = GitHead.Read(GitHead.FindRoot(root));
+            var mentionsBefore = Mentions(current);
             CodeMentionLinker.Link(vaultPath, current);
-            CodeGraphStore.Save(vaultPath, current);
+            // Unchanged writes nothing: every save wakes the Universe's watcher,
+            // and it would redraw the whole galaxy for a refresh that found nothing.
+            if (head != current.Commit || mentionsBefore != Mentions(current))
+            {
+                current.Commit = head;
+                CodeGraphStore.Save(vaultPath, current);
+            }
             report.Status = "unchanged";
             report.Ms["total"] = total.Elapsed.TotalMilliseconds;
             return (current, report);
@@ -142,7 +151,7 @@ public static class CodeGraphBuilder
         report.Ms["extract-syntax"] = Lap(sw);
 
         var csFiles = files.Files.Where(f => f.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)).ToList();
-        var cs = CSharp.GetOrAdd(root, _ => new CSharpExtractor());
+        var cs = new CSharpExtractor();
         var csUnits = new Dictionary<string, CodeFileUnit>(StringComparer.Ordinal);
         if (changedCs.Count > 0)
         {
@@ -161,7 +170,7 @@ public static class CodeGraphBuilder
         var gitRoot = GitHead.FindRoot(root);
         var version = $"brainx-codegraph/1 ({CSharpExtractor.Version}; {string.Join("; ", extractors.Select(x => x.Language + " " + x.Version))})";
         var units = Assemble();
-        var link = CodeGraphLinker.Link(repo, root, units, commit, gitRoot, version);
+        var graph = CodeGraphLinker.Link(repo, root, units, commit, gitRoot, version);
         report.Ms["link"] = Lap(sw);
 
         // ── Rebind unchanged C# files against the new declarations. ──
@@ -174,12 +183,11 @@ public static class CodeGraphBuilder
                 foreach (var u in r.Units) csUnits[u.Path] = u;
                 report.FilesRebound = r.Units.Count;
                 units = Assemble();
-                link = CodeGraphLinker.Link(repo, root, units, commit, gitRoot, version);
+                graph = CodeGraphLinker.Link(repo, root, units, commit, gitRoot, version);
                 report.Ms["rebind"] = Lap(sw);
             }
         }
 
-        var graph = link.Graph;
         graph.Source.WrittenAt = DateTime.UtcNow;
         foreach (var (path, reason) in files.Skipped) graph.Issues.SkippedFiles.Add($"{path}: {reason}");
         if (cache != null && CodeGraphStore.Load(vaultPath, repo) is { } previous)
@@ -226,6 +234,9 @@ public static class CodeGraphBuilder
             return new CodeFileUnit { Path = rel, Language = x.Language, Extractor = x.Version, HasErrors = true, Skipped = "extractor failed: " + ex.GetType().Name };
         }
     }
+
+    private static string Mentions(Core.Services.CodeGraph graph) =>
+        string.Join('\n', graph.Mentions.Select(m => $"{m.NoteId}|{m.SymbolId}|{m.Count}"));
 
     /// <summary>Length and write time first; the hash only when they differ, so a touched file is not re-read.</summary>
     private static bool Unchanged(string root, string rel, CodeFileUnit old)
@@ -300,7 +311,7 @@ public static class CodeGraphBuilder
             using (var gz = new GZipStream(fs, CompressionLevel.Fastest))
             using (var writer = new StreamWriter(gz, new UTF8Encoding(false)))
                 JsonSerializer.Create(new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore }).Serialize(writer, cache);
-            File.Move(tmp, path, overwrite: true);
+            AtomicFile.MoveOver(tmp, path);
         }
         catch
         {
