@@ -62,15 +62,29 @@ internal static partial class Program
             var body = GetContentLower(export, n);
             var headings = body != null && _contentCache.TryGetValue(n.Id, out var ce) ? ce.Headings : null;
             if (_keywordDocuments.TryGetValue(n.Id, out var old)
-                && ReferenceEquals(old.Node, n) && ReferenceEquals(old.Body, body)
-                && ReferenceEquals(old.Headings, headings)) continue;
+                && string.Equals(old.Body, body, StringComparison.Ordinal)
+                && string.Equals(old.Headings, headings, StringComparison.Ordinal))
+            {
+                if (ReferenceEquals(old.Node, n)) continue;
+                // A rewritten export hands every note a new object. Comparing
+                // references alone re-hashed the whole vault on the next query.
+                if (SameIndexedFields(old.Node, n)) { _keywordDocuments[n.Id] = (n, body, headings); continue; }
+            }
             _keywordIndex.Set(n.Id, new[] { n.Title, n.Preview, n.PrimaryCategory, body ?? "", headings ?? "" }.Concat(n.Tags));
             _keywordDocuments[n.Id] = (n, body, headings);
         }
         bodiesFresh = true;
         var ids = _keywordIndex.Candidates(needles);
-        return ids == null || ids.Count >= selected.Count * 0.8 ? selected : selected.Where(n => ids.Contains(n.Id));
+        if (ids == null) return selected;
+        // Count hits inside the pool: the index also holds notes outside the
+        // caller's scope, and counting those made scoped queries never prune.
+        var kept = selected.Where(n => ids.Contains(n.Id)).ToList();
+        return kept.Count >= selected.Count * 0.8 ? selected : kept;
     }
+
+    private static bool SameIndexedFields(NodeSummary a, NodeSummary b) =>
+        a.Title == b.Title && a.Preview == b.Preview && a.PrimaryCategory == b.PrimaryCategory
+        && a.Tags.SequenceEqual(b.Tags, StringComparer.Ordinal);
 
     private static BrainExport? _lookupView;
     private static readonly Dictionary<string, List<NodeSummary>> _exactNodes = new(StringComparer.OrdinalIgnoreCase);
@@ -98,7 +112,7 @@ internal static partial class Program
             Add("title", n.Title, n);
             if (!CodeIndexer.IsCodeFile(n.RelativePath)) continue;
             // New exports keep every symbol; older exports retain their tag cap.
-            if (n.Properties.TryGetValue("symbols", out var raw) && raw != null && JToken.FromObject(raw) is JArray symbols)
+            if (n.Properties.TryGetValue("symbols", out var raw) && raw != null && (raw as JArray ?? JToken.FromObject(raw)) is JArray symbols)
             {
                 foreach (var symbol in symbols.Where(s => s.Type == JTokenType.String).Values<string>())
                     if (symbol != null) Add("symbol", symbol, n);
@@ -116,7 +130,8 @@ internal static partial class Program
     {
         var reference = args["reference"]?.ToString()?.Trim() ?? "";
         if (reference.Length == 0) throw new ArgumentException("reference is required");
-        var kind = args["kind"]?.ToString()?.ToLowerInvariant() ?? "auto";
+        // Some clients send every optional parameter, null or "" included.
+        var kind = args["kind"]?.ToString()?.Trim().ToLowerInvariant() is { Length: > 0 } given ? given : "auto";
         if (kind is not ("auto" or "id" or "path" or "title" or "symbol"))
             throw new ArgumentException("kind must be auto, id, path, title or symbol");
         var export = LoadExport() ?? throw new InvalidOperationException("no brain-export");

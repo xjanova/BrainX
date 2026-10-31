@@ -61,8 +61,11 @@ public static partial class CodeIndexer
 
         var tags = new List<string> { "code", langTag };
         // Cap symbols added as tags so a generated stub with 500 method
-        // names doesn't bloat the tag index.
-        tags.AddRange(symbols.Take(40));
+        // names doesn't bloat the tag index. Each pattern's first branch
+        // (C# types, TS declarations, Go/Rust functions) goes first: those
+        // were the only tags before the second branch was read, and forty
+        // methods ahead of a class must not push the class out of them.
+        tags.AddRange(symbols.Where(s => s.Primary).Concat(symbols.Where(s => !s.Primary)).Select(s => s.Name).Take(40));
 
         return new KnowledgeNode
         {
@@ -83,7 +86,7 @@ public static partial class CodeIndexer
                 ["isCode"] = true,
                 ["language"] = langTag,
                 ["symbolCount"] = symbols.Count,
-                ["symbols"] = symbols
+                ["symbols"] = symbols.Select(s => s.Name).ToList()
             }
         };
     }
@@ -91,9 +94,10 @@ public static partial class CodeIndexer
     /// <summary>
     /// Extract top-level symbol names per language. Pattern union per
     /// extension keeps the regex compiled once. Returns deduped names
-    /// preserving discovery order.
+    /// preserving discovery order, each marked with whether the pattern's
+    /// first branch found it.
     /// </summary>
-    private static List<string> ExtractSymbols(string content, string ext)
+    private static List<(string Name, bool Primary)> ExtractSymbols(string content, string ext)
     {
         var pattern = ext switch
         {
@@ -107,29 +111,35 @@ public static partial class CodeIndexer
         };
         if (pattern == null) return [];
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var list = new List<string>();
+        var list = new List<(string, bool)>();
         foreach (Match m in pattern.Matches(content))
         {
             var name = m.Groups["name"].Value;
-            if (string.IsNullOrEmpty(name)) name = m.Groups["name2"].Value;
+            var primary = !string.IsNullOrEmpty(name);
+            if (!primary) name = m.Groups["name2"].Value;
             if (string.IsNullOrEmpty(name) || name.Length < 2) continue;
-            if (seen.Add(name)) list.Add(name);
+            if (seen.Add(name)) list.Add((name, primary));
         }
         return list;
     }
 
+    // The member branch must begin a statement — line start, or after { } ; ]
+    // (one-line classes, attributes). Without that, prose in a comment such
+    // as "/// the public key bytes (big-endian)" yielded a method "bytes".
     [GeneratedRegex(@"\b(?:class|interface|record|struct|enum)\s+(?<name>[A-Za-z_][\w]*)" +
-                    @"|\b(?:public|private|internal|protected)\s+(?:static\s+)?(?:async\s+)?[\w<>,\?\[\]]+\s+(?<name2>[A-Za-z_][\w]*)\s*\(",
+                    @"|(?<=^[ \t]*|[{};\]][ \t]*)(?:public|private|internal|protected)\s+(?:static\s+)?(?:async\s+)?[\w<>,\?\[\]]+\s+(?<name2>[A-Za-z_][\w]*)\s*\(",
         RegexOptions.Multiline)]
     private static partial Regex CsSymbolsPattern();
 
+    // An assignment counts as a function only when an arrow follows before the
+    // statement ends: "const total = (a + b) / 2" is not one.
     [GeneratedRegex(@"\b(?:export\s+(?:default\s+)?)?(?:class|interface|type|function)\s+(?<name>[A-Za-z_$][\w$]*)" +
-                    @"|\b(?:export\s+)?(?:const|let|var)\s+(?<name2>[A-Za-z_$][\w$]*)\s*[:=]\s*(?:async\s+)?\(",
+                    @"|\b(?:export\s+)?(?:const|let|var)\s+(?<name2>[A-Za-z_$][\w$]*)\s*[:=]\s*(?:async\s+)?\((?=[^;]{0,400}?=>)",
         RegexOptions.Multiline)]
     private static partial Regex TsSymbolsPattern();
 
     [GeneratedRegex(@"\b(?:export\s+(?:default\s+)?)?(?:class|function)\s+(?<name>[A-Za-z_$][\w$]*)" +
-                    @"|\b(?:export\s+)?(?:const|let|var)\s+(?<name2>[A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?\(",
+                    @"|\b(?:export\s+)?(?:const|let|var)\s+(?<name2>[A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?\((?=[^;]{0,400}?=>)",
         RegexOptions.Multiline)]
     private static partial Regex JsSymbolsPattern();
 

@@ -42,6 +42,27 @@ internal static partial class Program
             var many = CodeIndexer.Index(big);
             Check("all symbols survive the 40-tag display cap", many.Tags.Count == 42
                 && JArray.FromObject(many.Properties["symbols"]!).Count == 80);
+
+            var late = Path.Combine(root, "Late.cs");
+            File.WriteAllText(late, "public class Early {\n" + string.Join("\n", Enumerable.Range(0, 45).Select(i => $"    public void Step{i}() {{}}"))
+                + "\n}\npublic class Late {}\n");
+            var lateNode = CodeIndexer.Index(late);
+            Check("forty methods ahead of a class do not push the class out of the tags",
+                lateNode.Tags.Contains("Late") && lateNode.Tags.Contains("Early") && lateNode.Tags.Count == 42, string.Join(",", lateNode.Tags));
+
+            var prose = Path.Combine(root, "Prose.cs");
+            File.WriteAllText(prose, "/// the public key bytes (big-endian)\n/* private by design (see notes) */\npublic class Key {\n    [Fact] public void Works() {}\n    public int Size(int x) => x;\n}\n");
+            var proseNode = CodeIndexer.Index(prose);
+            var proseSymbols = JArray.FromObject(proseNode.Properties["symbols"]!).Values<string>().ToList();
+            Check("C#: comment prose yields no methods; attributed and expression members still do",
+                !proseSymbols.Contains("bytes") && !proseSymbols.Contains("design") && proseSymbols.Contains("Works") && proseSymbols.Contains("Size"),
+                string.Join(",", proseSymbols));
+
+            var arith = Path.Combine(root, "arith.ts");
+            File.WriteAllText(arith, "const total = (a + b) / 2;\nexport const land = async (x: number) => x;\nconst multi = (\n  a,\n  b\n) => a + b;\n");
+            var arithSymbols = JArray.FromObject(CodeIndexer.Index(arith).Properties["symbols"]!).Values<string>().ToList();
+            Check("TS: arithmetic in parentheses is not a function; arrows are, even across lines",
+                !arithSymbols.Contains("total") && arithSymbols.Contains("land") && arithSymbols.Contains("multi"), string.Join(",", arithSymbols));
         }
         finally { Directory.Delete(root, true); }
         return Task.CompletedTask;
@@ -142,6 +163,8 @@ internal static partial class Program
             Check("lookup: symbols beyond the tag cap resolve", (await Lookup("Widget59", "symbol"))["status"]?.ToString() == "exact");
             Check("lookup: a retired note keeps its replacement", (await Lookup("Old", "title"))["results"]?[0]?["superseded"]?.Value<bool>() == true);
             Check("lookup: a missing name is explicit", (await Lookup("NoSuchExactName"))["status"]?.ToString() == "not-found");
+            var nullKind = await Call(indexed, "brain_lookup", new JObject { ["reference"] = "Widget59", ["kind"] = JValue.CreateNull() });
+            Check("lookup: a client sending kind null gets auto", nullKind["status"]?.ToString() == "exact" && nullKind["kind"]?.ToString() == "auto", nullKind.ToString());
             Check("lookup: no query embeddings were requested", ollama.Embeds == before, $"{before} -> {ollama.Embeds}");
             Check("lookup: remote read scope can use it", McpRemotePolicy.IsAllowed("brain_lookup", McpScope.Read));
             var listed = await Rpc(indexed, rpc++, "tools/list", new JObject());
