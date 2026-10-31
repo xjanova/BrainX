@@ -61,6 +61,15 @@ internal static partial class Program
     /// stays the gesture's length — callers poll again.</summary>
     private const int CoworkMaxWaitSeconds = 10;
 
+    /// <summary>How long one cowork_read looks again at a line that would not
+    /// open. Whoever has a file open is usually gone within 115 ms (AtomicFile),
+    /// and this is an agent's turn, spent on the request gate.</summary>
+    private const int CoworkReadRetryMs = 250;
+
+    /// <summary>How long a seat stays behind a line it cannot read, across reads,
+    /// before it is told so and moves on. As long as the broker waits by default.</summary>
+    private static readonly TimeSpan CoworkReadPatience = TimeSpan.FromSeconds(60);
+
     private static string CoworkRoot => Path.Combine(BusRoot, "cowork");
     private static string CoworkSkillsPath => Path.Combine(CoworkRoot, "skills.json");
     private static string CoworkMessagesDir => Path.Combine(CoworkRoot, "messages");
@@ -313,6 +322,9 @@ internal static partial class Program
             ["cursor"] = cursor,
         };
         if (!returning && existing?["seen"] is JArray seenBefore && seenBefore.Count > 0) member["seen"] = seenBefore;
+        // A run joins every time it starts: clearing this here would start the
+        // wait on an unreadable line again for each of them, and it would never end.
+        if (!returning && existing?["unreadable"] is JObject { Count: > 0 } clock) member["unreadable"] = clock;
         // The other sessions of this agent keep their places — joining from one
         // window used to rewrite the seat and take everybody else's with it.
         member["sessions"] = !returning && existing?["sessions"] is JObject others ? others.DeepClone() : new JObject();
@@ -892,14 +904,24 @@ internal static partial class Program
         while (true)
         {
             pending = CoworkAfter(cursor, mySeen);
-            if (pending.Count > 0 || DateTime.UtcNow >= deadline) break;
+            if (pending.Any(f => CoworkIsNews(f, member)) || DateTime.UtcNow >= deadline) break;
             Thread.Sleep(500);
         }
 
+        // What is known to be shut takes no place in the limit: a run of broken
+        // lines would stand between the reader and everything behind them for
+        // a minute at a time.
+        var shutBefore = pending.Where(f => !CoworkIsNews(f, member)).ToList();
         var files = history
             ? CoworkMessageFiles().TakeLast(limit).ToList()
-            : pending.Take(limit).ToList();
-        var messages = CoworkReadMessages(files, me);
+            : shutBefore.Concat(pending.Except(shutBefore).Take(limit)).OrderBy(Path.GetFileName, StringComparer.Ordinal).ToList();
+        var messages = CoworkReadMessages(files, me, out var shut);
+        var lookAgainUntil = DateTime.UtcNow.AddMilliseconds(CoworkReadRetryMs);
+        while (!history && shut.Count > 0 && DateTime.UtcNow < lookAgainUntil)
+        {
+            Thread.Sleep(50);
+            messages = CoworkReadMessages(files, me, out shut);
+        }
 
         // Only a member has a cursor to move. Advancing one for a non-member
         // would silently make its first join miss everything it had peeked at.
@@ -908,11 +930,17 @@ internal static partial class Program
         // of the wall, not what is waiting: moving the cursor to its end ate
         // every unread line in between — "moreWaiting: 35", and then none of
         // the 35 ever arrived.
+        //
+        // A line that would not open has not been handed over either. The
+        // cursor stopping short of it is what brings it back on the next read,
+        // and what was read beyond it is kept by name.
+        var gaveUp = history ? new List<string>() : CoworkSeatOutOfPatience(me, member, shut);
+        var trying = history ? new List<string>() : shut.Except(gaveUp).ToList();
         if (member != null && !history && files.Count > 0)
-            CoworkAdvanceCursor(me, files);
+            CoworkAdvanceCursor(me, files.Except(trying), trying);
 
         var left = history ? pending.Count : Math.Max(0, pending.Count - files.Count);
-        return new JObject
+        var reply = new JObject
         {
             // A leave tombstone, or this session having left, is not "in".
             ["inRoom"] = _coworkJoinedHere && member != null && member["optedOut"]?.ToObject<bool?>() != true
@@ -931,6 +959,20 @@ internal static partial class Program
                     ? "Nothing new. Call again with wait_seconds to hold the door open, or carry on — you are told on your next tool call."
                     : "Answer in the room with cowork_say. Do not reply to this by mail; the owner keeps these lanes apart."
         };
+        // Counts only: anybody can name a file, and this is read as the room talking.
+        if (trying.Count + gaveUp.Count > 0)
+            reply["unreadable"] = new JObject
+            {
+                ["trying"] = trying.Count,
+                ["gaveUp"] = gaveUp.Count,
+                ["note"] = (trying.Count > 0
+                               ? $"{trying.Count} line(s) in the room could not be read yet: a program has the file, or it is damaged. They are kept for you, read again in a few seconds. "
+                               : "")
+                           + (gaveUp.Count > 0
+                               ? $"{gaveUp.Count} line(s) stayed unreadable for {CoworkReadPatience.TotalSeconds:F0} seconds and were passed. If one was meant for you, ask for it to be said again."
+                               : ""),
+            };
+        return reply;
     }
 
     // ───────────── shared helpers ─────────────
@@ -1025,13 +1067,23 @@ internal static partial class Program
                                        .OrderBy(n => n, StringComparer.Ordinal)));
     }
 
-    private static JArray CoworkReadMessages(IEnumerable<string> files, string me)
+    private static JArray CoworkReadMessages(IEnumerable<string> files, string me) =>
+        CoworkReadMessages(files, me, out _);
+
+    /// <param name="shut">Lines that are there and could not be read. A line
+    /// that has gone is not one of them: the window's history bin takes lines too.</param>
+    private static JArray CoworkReadMessages(IEnumerable<string> files, string me, out List<string> shut)
     {
         var arr = new JArray();
+        shut = new List<string>();
         foreach (var f in files)
         {
             var o = ReadJsonOrNull(f);
-            if (o == null) continue;
+            if (o == null)
+            {
+                if (File.Exists(f)) shut.Add(f);
+                continue;
+            }
 
             // Shown for what it is: a peer line wearing the owner's name.
             if (IsForgedOwnerLine(o, f))
@@ -1077,7 +1129,9 @@ internal static partial class Program
         catch { return null; }
     }
 
-    private static void CoworkAdvanceCursor(string agent, IEnumerable<string> delivered)
+    /// <param name="notYet">Lines still to be read. Both cursors stay short of the
+    /// oldest, as the broker's does (<see cref="CoworkMarkCalled"/>).</param>
+    private static void CoworkAdvanceCursor(string agent, IEnumerable<string> delivered, IEnumerable<string>? notYet = null)
     {
         // Only a session that joined has a place to move. Writing one for a
         // session that merely spoke or peeked (agent_send said in the room, a
@@ -1086,18 +1140,19 @@ internal static partial class Program
         // the owner's order with a session that hears nothing.
         if (!_coworkJoinedHere) return;
         var handed = delivered.ToList();
+        var stopAt = notYet?.Select(f => Path.GetFileName(f)).Min(StringComparer.Ordinal);
         try
         {
             CoworkUpdateMember(agent, member =>
             {
                 // This session's own place…
                 var (mine, mySeen) = CoworkMyCursor(member);
-                var (myCursor, myNewSeen) = CoworkSettle(mine, mySeen, handed);
+                var (myCursor, myNewSeen) = CoworkSettle(mine, mySeen, handed, stopAt);
                 CoworkSetMySession(member, myCursor, myNewSeen, left: CoworkMySession(member)?["left"]?.ToObject<bool?>() == true);
                 // …and the seat's: the furthest ANY session of this agent has
                 // read, which is what the broker asks ("is this agent behind?")
                 // and where a newly opened window starts.
-                var (cursor, seen) = CoworkSettle(member["cursor"]?.ToString(), member["seen"], handed);
+                var (cursor, seen) = CoworkSettle(member["cursor"]?.ToString(), member["seen"], handed, stopAt);
                 member["cursor"] = cursor;
                 if (seen.Count > 0) member["seen"] = seen; else member.Remove("seen");
                 member["lastSeenUtc"] = DateTime.UtcNow.ToString("o");
@@ -1106,6 +1161,38 @@ internal static partial class Program
         }
         catch { /* cursor is best-effort */ }
     }
+
+    /// <summary>
+    /// The wait on a line a seat cannot read, and which of them have had their
+    /// time. The clock lives on the seat rather than in this process because a
+    /// run reads and goes: a clock that went with it would start again for every
+    /// run, and one corrupt line would stand ahead of that seat for good.
+    /// </summary>
+    private static List<string> CoworkSeatOutOfPatience(string agent, JObject? seat, IReadOnlyList<string> unreadable)
+    {
+        var spent = new List<string>();
+        if (!_coworkJoinedHere || (unreadable.Count == 0 && seat?["unreadable"] == null)) return spent;
+        try
+        {
+            CoworkUpdateMember(agent, member =>
+            {
+                var (timeUp, trying) = CoworkOnTheClock(unreadable, member["unreadable"], CoworkReadPatience);
+                spent = timeUp;
+                if (trying.Count > 0) member["unreadable"] = trying; else member.Remove("unreadable");
+            });
+        }
+        catch { /* the clock only costs a longer wait */ }
+        return spent;
+    }
+
+    /// <summary>
+    /// Is this line a reason to come back to the room? One this seat already
+    /// knows it cannot read is not, until it can: it stands ahead of the cursor
+    /// on purpose, and would end every long poll at once and put a notice on
+    /// every tool call for as long as the seat waits on it.
+    /// </summary>
+    private static bool CoworkIsNews(string file, JObject? seat) =>
+        (seat?["unreadable"] as JObject)?[Path.GetFileName(file)] == null || ReadJsonOrNull(file) != null;
 
     // ───────────── one seat, several sessions ─────────────
 
@@ -1539,7 +1626,8 @@ internal static partial class Program
 
         try
         {
-            var state = ReadJsonOrNull(CoworkBrokerCursorPath);
+            var state = CoworkBrokerPlace(out var lost);
+            if (lost) return result;
             var fresh = CoworkAfter(state?["cursor"]?.ToString(), state?["seen"]);
             if (fresh.Count == 0) return result;
 
@@ -1557,10 +1645,18 @@ internal static partial class Program
                     (File.Exists(f) ? unreadable : scanned).Add(f);
                     continue;
                 }
+                // The line is read, but whether it is the owner's answer is in a
+                // file that is not. Nothing is known about it yet.
+                var decision = CoworkCheckDecisionLine(o, f);
+                if (decision == null)
+                {
+                    unreadable.Add(f);
+                    continue;
+                }
                 scanned.Add(f);
                 // The owner's answer to a question asked from the room calls
                 // the agent that asked, exactly like an order to it by name.
-                if (CoworkIsOwnerDecisionLine(o, f))
+                if (decision == true)
                 {
                     foreach (var t in CoworkRecipients(o["to"]).Select(CollapseToReadableBox).Distinct(StringComparer.OrdinalIgnoreCase))
                         if (!IsReservedIdentity(t)) result[t] = result.TryGetValue(t, out var k) ? k + 1 : 1;
@@ -1727,7 +1823,8 @@ internal static partial class Program
         {
             var list = handled.ToList();
             if (list.Count == 0) return;
-            var state = ReadJsonOrNull(CoworkBrokerCursorPath);
+            var state = CoworkBrokerPlace(out var lost);
+            if (lost) return;
             var stopAt = notYet?.Select(f => Path.GetFileName(f)).Min(StringComparer.Ordinal);
             var (cursor, seen) = CoworkSettle(state?["cursor"]?.ToString(), state?["seen"], list, stopAt);
             Directory.CreateDirectory(CoworkRoot);
@@ -1737,9 +1834,99 @@ internal static partial class Program
                 ["atUtc"] = DateTime.UtcNow.ToString("o"),
             };
             if (seen.Count > 0) o["seen"] = seen;
+            _coworkPlace = o;
             AtomicWriteJson(CoworkBrokerCursorPath, o);
         }
         catch { }
+    }
+
+    /* A cursor that cannot be read.
+     *
+     * It read as no cursor at all, so the room's whole history went out as orders
+     * nobody had heard. Skipping the tick instead only trades that for a broker
+     * that stays deaf for as long as the file stays broken. A broker that has been
+     * running knows where it stands, because it wrote the file, and carries on;
+     * its next write puts the file right. One that has just started has nothing
+     * to go on: it waits as it would for a line, because whoever holds a file lets
+     * go, and then starts listening from when the file was last written and tells
+     * the room. Nothing older than that is called, and nothing newer is missed.
+     */
+
+    /// <summary>Where this broker stands, for when the file cannot say. The broker
+    /// is the file's only writer, so a refused write or a damaged file costs
+    /// nothing while this is here.</summary>
+    private static JObject? _coworkPlace;
+
+    /// <summary>When this broker found it had no place to go on. On the machine's
+    /// uptime: the wall clock can be put back, and then this would be no bound.</summary>
+    private static long? _coworkPlaceLostAt;
+
+    /// <summary>A cursor is the name of a line or a moment, never one still to come:
+    /// nothing is ever past that, and the cursor does not go backwards by itself.</summary>
+    private static bool CoworkPlaceIsSound(JObject place)
+    {
+        if (place["cursor"] is not JValue { Type: JTokenType.String, Value: string cursor }) return false;
+        return cursor.Length == 0
+               || (cursor.Length >= 19
+                   && long.TryParse(cursor.AsSpan(0, 19), NumberStyles.None, CultureInfo.InvariantCulture, out var ticks)
+                   && ticks <= DateTime.UtcNow.Ticks);
+    }
+
+    /// <summary>
+    /// The broker's place in the room: the file, unless what this broker last
+    /// read or wrote is as far on, which it is when the file was refused a write.
+    /// </summary>
+    /// <param name="lost">The file is there, says nothing usable, and this broker
+    /// has nothing of its own. Null then means "unknown", not "no cursor".</param>
+    private static JObject? CoworkBrokerPlace(out bool lost)
+    {
+        lost = false;
+        var onDisk = ReadJsonOrNull(CoworkBrokerCursorPath);
+        if (onDisk != null && !CoworkPlaceIsSound(onDisk)) onDisk = null;
+        if (_coworkPlace != null
+            && (onDisk == null || string.CompareOrdinal(onDisk["cursor"]!.ToString(), _coworkPlace["cursor"]!.ToString()) <= 0))
+            return _coworkPlace;
+        if (onDisk != null) return _coworkPlace = onDisk;
+        lost = File.Exists(CoworkBrokerCursorPath);
+        return null;
+    }
+
+    /// <summary>
+    /// Run before the room is read. A place that has stayed lost for
+    /// <paramref name="patience"/> is found again here, so the same tick already
+    /// hears what was said meanwhile. Says when, and nothing from the file.
+    /// </summary>
+    private static void CoworkFindPlace(TimeSpan patience)
+    {
+        // A dark room calls nobody, so it needs no place, and the nap must not
+        // stay short for it.
+        var lost = false;
+        if (CoworkRoomIsOpen()) CoworkBrokerPlace(out lost);
+        if (!lost) { _coworkPlaceLostAt = null; return; }
+
+        _coworkPlaceLostAt ??= Environment.TickCount64;
+        if (Environment.TickCount64 - _coworkPlaceLostAt < patience.TotalMilliseconds) return;
+        _coworkPlaceLostAt = null;
+
+        // The date outlives what is in the file. A date still to come is a clock
+        // put back, and one past the horizon is history, which starts nobody.
+        var now = DateTime.UtcNow;
+        var moved = File.GetLastWriteTimeUtc(CoworkBrokerCursorPath);
+        if (moved > now) moved = now;
+        if (moved < now - CoworkOrderHorizon) moved = now - CoworkOrderHorizon;
+        var from = moved - CoworkCursorGrace;
+
+        BrokerLog($"cowork: broker-cursor.json unreadable for {patience.TotalSeconds:F0}s — listening from {from:u}");
+        CoworkSystemLine($"⚠️ ตำแหน่งที่ห้องอ่านค้างไว้เสียหาย จึงเริ่มฟังใหม่ตั้งแต่ {from.ToLocalTime():HH:mm} "
+            + "ข้อความก่อนหน้านั้นที่ยังไม่มีใครตอบ ถ้ายังต้องการ ช่วยพิมพ์ใหม่อีกครั้ง");
+
+        _coworkPlace = new JObject
+        {
+            ["cursor"] = from.Ticks.ToString("D19", CultureInfo.InvariantCulture),
+            ["atUtc"] = now.ToString("o"),
+        };
+        try { AtomicWriteJson(CoworkBrokerCursorPath, _coworkPlace); }
+        catch { /* still held: this broker has its place, and the next write tries again */ }
     }
 
     /* A line that cannot be read.
@@ -1758,29 +1945,36 @@ internal static partial class Program
     /// <summary>How soon the broker looks again at a line it could not read.</summary>
     private const int CoworkRetrySeconds = 2;
 
-    /// <summary>Is a line being tried again? Read by the nap, which is why it is
-    /// a file that goes away rather than a flag.</summary>
-    private static bool CoworkRetrying => File.Exists(CoworkRetryClockPath);
+    /// <summary>Is a line, or the cursor, being tried again? Read by the nap.</summary>
+    private static bool CoworkRetrying => File.Exists(CoworkRetryClockPath) || _coworkPlaceLostAt != null;
 
-    /// <summary>Which of this tick's unreadable lines have had their time, from
-    /// when each was first found. A line that is no longer in the list has been
+    /// <summary>Which lines have had their time, from when each was first found,
+    /// and the clock on the rest. A line that is no longer in the list has been
     /// read or has gone, and leaves the clock.</summary>
+    private static (List<string> Spent, JObject Trying) CoworkOnTheClock(IEnumerable<string> unreadable, JToken? clock, TimeSpan patience)
+    {
+        var spent = new List<string>();
+        var trying = new JObject();
+        var now = DateTime.UtcNow.Ticks;
+        foreach (var f in unreadable)
+        {
+            var name = Path.GetFileName(f);
+            // A time still to come is a clock put back, and no bound at all.
+            var since = (clock as JObject)?[name] is JValue { Value: long at } ? Math.Min(at, now) : now;
+            if (now - since >= patience.Ticks) spent.Add(f);
+            else trying[name] = since;
+        }
+        return (spent, trying);
+    }
+
+    /// <summary>Which of this tick's unreadable lines have had their time.</summary>
     internal static List<string> CoworkOutOfPatience(IReadOnlyList<string> unreadable, TimeSpan patience)
     {
         var spent = new List<string>();
         try
         {
             var clock = ReadJsonOrNull(CoworkRetryClockPath) ?? new JObject();
-            var now = DateTime.UtcNow.Ticks;
-            var trying = new JObject();
-            foreach (var f in unreadable)
-            {
-                var name = Path.GetFileName(f);
-                // A time still to come is a clock put back, and no bound at all.
-                var since = clock[name] is JValue { Value: long at } ? Math.Min(at, now) : now;
-                if (now - since >= patience.Ticks) spent.Add(f);
-                else trying[name] = since;
-            }
+            (spent, var trying) = CoworkOnTheClock(unreadable, clock, patience);
             if (trying.Count == 0) File.Delete(CoworkRetryClockPath);
             else if (!JToken.DeepEquals(clock, trying)) AtomicWriteJson(CoworkRetryClockPath, trying);
         }
@@ -1856,7 +2050,14 @@ internal static partial class Program
     /// can write a file into the room; a copy with the real decision id and a
     /// different answer in its body is not that file, and is peer text.
     /// </summary>
-    internal static bool CoworkIsOwnerDecisionLine(JObject? o, string fileName)
+    internal static bool CoworkIsOwnerDecisionLine(JObject? o, string fileName) =>
+        CoworkCheckDecisionLine(o, fileName) == true;
+
+    /// <summary>The same check, with one more answer: null when the decision the
+    /// line names is there and cannot be read. Such a line is not the owner's
+    /// answer yet and not peer text yet, and it is only ever honoured once the
+    /// decision has been read; the broker holds its cursor short of it until then.</summary>
+    internal static bool? CoworkCheckDecisionLine(JObject? o, string fileName)
     {
         if (o == null || !CoworkSpeakerFromName(fileName).Equals("broker", StringComparison.OrdinalIgnoreCase)) return false;
         if (!string.Equals(o["topic"]?.ToString(), "owner-decision", StringComparison.Ordinal)) return false;
@@ -1864,9 +2065,10 @@ internal static partial class Program
         if (string.IsNullOrWhiteSpace(id)) return false;
         try
         {
-            var d = ReadJsonOrNull(Path.Combine(BrokerDecisionDir, SanitizeAgentSlug(id!) + ".json"));
-            return d != null
-                && string.Equals(d["status"]?.ToString(), "answered", StringComparison.OrdinalIgnoreCase)
+            var path = Path.Combine(BrokerDecisionDir, SanitizeAgentSlug(id!) + ".json");
+            var d = ReadJsonOrNull(path);
+            if (d == null) return File.Exists(path) ? null : false;
+            return string.Equals(d["status"]?.ToString(), "answered", StringComparison.OrdinalIgnoreCase)
                 && string.Equals(d["roomLine"]?.ToString(), Path.GetFileName(fileName), StringComparison.Ordinal)
                 && CoworkRecipients(o["to"]).Contains(d["agent"]?.ToString() ?? "", StringComparer.OrdinalIgnoreCase);
         }
@@ -1956,7 +2158,7 @@ internal static partial class Program
             // Your own lines are not news to you. They can wait past the cursor
             // behind a line you have not read yet (see CoworkAppend).
             var pending = CoworkAfter(cursor, mySeen)
-                .Where(f => !CoworkSpeakerFromName(f).Equals(me, StringComparison.OrdinalIgnoreCase))
+                .Where(f => !CoworkSpeakerFromName(f).Equals(me, StringComparison.OrdinalIgnoreCase) && CoworkIsNews(f, member))
                 .ToList();
             if (pending.Count == 0) return null;
 

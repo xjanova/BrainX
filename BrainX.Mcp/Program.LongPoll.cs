@@ -123,7 +123,7 @@ internal static partial class Program
             }
             var member = ReadJsonOrNull(CoworkMemberFile(me));
             var (cursor, seen) = member != null ? CoworkMyCursor(member) : ("", null);
-            return CoworkAfter(cursor, seen).Count > 0;
+            return CoworkAfter(cursor, seen).Any(f => CoworkIsNews(f, member));
         }
         catch { return false; }
     }
