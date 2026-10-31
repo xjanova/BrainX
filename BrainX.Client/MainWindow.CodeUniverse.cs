@@ -427,6 +427,7 @@ public partial class MainWindow
         {
             "unchanged" => new CodeBuildOutcome("done", "Already up to date."),
             "locked" => new CodeBuildOutcome("failed", "Another build of this repo is running."),
+            "empty" => new CodeBuildOutcome("failed", "No C#, JavaScript, TypeScript, Python or PHP files in that folder. Nothing was saved."),
             "built" or "refreshed" => new CodeBuildOutcome("done",
                 $"{report["symbols"]?.Value<int>():N0} symbols, {report["edges"]?.Value<int>():N0} edges in {(report["milliseconds"]?.Value<double>() ?? 0) / 1000:0.#} s."),
             _ => new CodeBuildOutcome("failed", report["error"]?.ToString() is { Length: > 0 } why ? why : "The build did not finish.")

@@ -21,7 +21,11 @@
 // facing +z with +y up has their right hand toward -x, so the left
 // hemisphere sits at +x and the right one at -x.
 
-import { hashStr, rng, gauss, paletteFor, expertiseByCategory, linkEdges, drawnLinks } from './layout.js';
+import {
+    hashStr, rng, gauss, paletteFor, expertiseByCategory, linkEdges, drawnLinks,
+    codeRepos, codeDegree, placeCode, codeNode, codeSourceLabel, joinCodeGroups, linkCode,
+} from './layout.js';
+import { gatherGroups, groupNotes, recordGroupReach } from './nodegroups.js';
 
 // ── small math ──────────────────────────────────────────────────────────
 
@@ -311,7 +315,9 @@ const DEEP = {
 
 /* What each category's notes are, mapped onto what that part of a brain does.
  * Left hemisphere carries logic and language, the right one spatial and
- * visual work — a simplification, but the one people recognise. */
+ * visual work — a simplification, but the one people recognise. The thalamus
+ * is not handed out: it is the relay nearly every cortical area wires into,
+ * which is what a repo's code is to the notes, so addBrainCode keeps it. */
 const CATEGORY_REGION = {
     Programming:        ['L', 'FRONTAL'],        // planning, executive logic
     AI_MachineLearning: ['R', 'FRONTAL'],        // higher cognition
@@ -343,7 +349,7 @@ const SPARE_REGIONS = [
     ['L', 'OCCIPITAL'], ['R', 'TEMPORAL_POLE'], ['L', 'TEMPORAL_POLE'], ['L', 'SOMATO'],
     ['R', 'MOTOR'], ['R', 'BROCA'], ['L', 'ORBITO'], ['L', 'FRONTAL_POLE'],
     ['L', 'INSULA'], ['L', 'CINGULATE'], ['R', 'HIPPOCAMPUS'], ['L', 'AMYGDALA'],
-    ['L', 'THALAMUS'], ['R', 'THALAMUS'], ['R', 'TEMPORAL_SUP'], ['L', 'PARIETAL_SUP'],
+    ['R', 'TEMPORAL_SUP'], ['L', 'PARIETAL_SUP'],
 ];
 
 const signOf = (h) => (h === 'L' ? 1 : h === 'R' ? -1 : 0);
@@ -480,7 +486,62 @@ function packPatches(patches) {
 
 const SURFACE_R = (n) => 6 + 2.7 * Math.sqrt(n);
 const VOLUME_R = (n) => 4 + 2.4 * Math.sqrt(n);
+// A nucleus has the skull around it; a repo's symbols have to fit the thalamus.
+const THALAMUS_R = (n) => Math.min(VOLUME_R(n), 24);
 const GOLDEN = Math.PI * (3 - Math.sqrt(5));
+
+/** Orient a deep structure in one hemisphere, onto its region. */
+function volumeFrame(g, d, sign) {
+    g.kind = 'volume';
+    g.basisU = norm3({ x: sign * d.u[0], y: d.u[1], z: d.u[2] });
+    const v0 = norm3({ x: sign * d.v[0], y: d.v[1], z: d.v[2] });
+    // Orthonormalise v against u, then n = u × v.
+    const dv = v0.x * g.basisU.x + v0.y * g.basisU.y + v0.z * g.basisU.z;
+    g.basisV = norm3({ x: v0.x - g.basisU.x * dv, y: v0.y - g.basisU.y * dv, z: v0.z - g.basisU.z * dv });
+    g.normal = norm3(cross(g.basisU, g.basisV));
+    g.su = d.su; g.sv = d.sv; g.sn = d.sn;
+}
+
+/**
+ * Code in the brain: each repo is a thalamus, the first on the left and the next
+ * on the right, then stacked above them. A mention becomes a fibre from the
+ * cortex down into it, the way thalamic radiations run.
+ */
+export function addBrainCode(layer, nodes, edges, galaxies, idIndex) {
+    const repos = [...codeRepos(layer, idIndex).entries()];
+    if (!repos.length) return;
+    const degree = codeDegree(layer);
+    const d = DEEP.THALAMUS;
+    repos.forEach(([repo, list], i) => {
+        const hemi = i % 2 ? 'R' : 'L';
+        const sign = signOf(hemi);
+        const source = codeSourceLabel(list);
+        const g = {
+            category: `code:${repo}`, label: `Code · ${repo} (${source})`, color: 0x30ddea, count: list.length,
+            score: 0, totalWords: 0, growthRate: 0, regionKey: 'THALAMUS', regionLabel: regionLabelFor(hemi, 'THALAMUS'),
+            hemi, sign, radius: THALAMUS_R(list.length), isCode: true,
+            center: { x: sign * d.c[0], y: d.c[1] + 7 * Math.floor(i / 2), z: d.c[2] },
+        };
+        volumeFrame(g, d, sign);
+        const galaxyIdx = galaxies.length;
+        galaxies.push(g);
+        const firstIdx = nodes.length;
+        const slots = placeCode(list, degree, g.radius);
+        for (const slot of slots) {
+            const position = { x: 0, y: 0, z: 0 }, normal = { x: 0, y: 1, z: 0 };
+            projectBrainNode(g, slot.local.u, slot.local.v, slot.local.n, position, normal);
+            const node = codeNode(slot, repo, galaxyIdx, position, source);
+            node.normal = normal;
+            node.surf = 'V';
+            node.side = Math.sign(position.x);
+            idIndex.set(node.id, nodes.length);
+            nodes.push(node);
+        }
+        joinCodeGroups(nodes, firstIdx, slots);
+    });
+    recordGroupReach(nodes);
+    linkCode(layer, edges, idIndex);
+}
 
 /**
  * Build the neural brain from a brain-export payload.
@@ -489,7 +550,6 @@ const GOLDEN = Math.PI * (3 - Math.sqrt(5));
  */
 export function buildBrainGraph(brain) {
     const rawNodes = brain.Nodes ?? brain.nodes ?? [];
-    if (!rawNodes.length) return { nodes: [], edges: [], galaxies: [] };
 
     const byCat = new Map();
     for (const n of rawNodes) {
@@ -555,16 +615,9 @@ export function buildBrainGraph(brain) {
             g.dir = { ...g.home };
         } else {
             const d = DEEP[key];
-            g.kind = 'volume';
             g.radius = VOLUME_R(list.length);
             g.center = { x: d.midline ? 0 : sign * d.c[0], y: d.c[1], z: d.c[2] };
-            g.basisU = norm3({ x: sign * d.u[0], y: d.u[1], z: d.u[2] });
-            const v0 = norm3({ x: sign * d.v[0], y: d.v[1], z: d.v[2] });
-            // Orthonormalise v against u, then n = u × v.
-            const dv = v0.x * g.basisU.x + v0.y * g.basisU.y + v0.z * g.basisU.z;
-            g.basisV = norm3({ x: v0.x - g.basisU.x * dv, y: v0.y - g.basisU.y * dv, z: v0.z - g.basisU.z * dv });
-            g.normal = norm3(cross(g.basisU, g.basisV));
-            g.su = d.su; g.sv = d.sv; g.sn = d.sn;
+            volumeFrame(g, d, sign);
         }
         return g;
     });
@@ -614,6 +667,7 @@ export function buildBrainGraph(brain) {
             const node = {
                 id,
                 title: n.Title ?? n.title ?? '(untitled)',
+                scope: n.Scope ?? n.scope ?? '',
                 category: g.category,
                 galaxyIdx,
                 categoryLabel: `${g.label} · ${g.regionLabel}`,
@@ -639,7 +693,14 @@ export function buildBrainGraph(brain) {
         });
     });
 
-    return { nodes, edges: linkEdges(nodes, idIndex), galaxies };
+    groupNotes(nodes);
+    gatherGroups(nodes, n => {
+        projectBrainNode(galaxies[n.galaxyIdx], n.local.u, n.local.v, n.local.n, n.position, n.normal);
+    });
+
+    const edges = linkEdges(nodes, idIndex);
+    addBrainCode(brain.CodeOverlay ?? brain.codeOverlay, nodes, edges, galaxies, idIndex);
+    return { nodes, edges, galaxies };
 }
 
 // ── fibres ───────────────────────────────────────────────────────────────

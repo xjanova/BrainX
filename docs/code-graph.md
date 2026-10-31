@@ -34,9 +34,18 @@ Qualified names such as `A.Run` and unique names written in backticks become
 note-to-symbol links. `brain_code_trace` accepts `note_id` (id or vault-relative
 path) to start from those symbols and includes `linkedNotes` for symbol seeds.
 The Universe's galaxy view keeps existing note stars and wiki-links, and draws
-a separate cyan code galaxy for the most relevant symbols. Exact note mentions
-form the bridges to that galaxy. The info card labels a code node's source as
-BrainX or Graphify. The neural-brain theme keeps its note-only anatomy.
+the most relevant symbols as a loose core at the centre, inside every note
+galaxy: the most connected file in the middle, each repo a cluster of its own.
+The neural-brain theme draws the same symbols in the thalamus. Exact note
+mentions form the bridges to them. The info card labels a code node's source as
+BrainX or Graphify.
+
+Points on one subject act as one point in both themes. Notes join by a title
+that differs only by date or hash, else by the rarest tag they share; symbols
+join by file. Members sit beside the group's head and flow into it once the
+group is too small on screen to tell them apart, and flow back out on zooming
+in (`nodegroups.js`, and the star shader in `scene.js`). Edges keep their real
+ends, so a merged group's lines stop a few pixels short of the point.
 
 The **Code** button on the HUD opens the code dashboard: one card per stored
 graph (symbols, edges, commit, build age, whether the checkout has moved on),

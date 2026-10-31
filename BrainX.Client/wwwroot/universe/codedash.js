@@ -150,9 +150,7 @@ function hideBack() { $back.hidden = true; }
 
 function fly(target, label) {
     const went = window.UniverseHost?.flyToCode?.(target) ?? 'none';
-    if (went === 'brain-theme') {
-        notice('Code stars are drawn in the Universe theme. The Neural Brain theme shows notes only.', 'warn');
-    } else if (went === 'none') {
+    if (went === 'none') {
         notice(target.id && !target.category
             ? 'This note is not in the current view.'
             : 'Not drawn: the sky holds only what notes name and its near neighbours.', 'warn');

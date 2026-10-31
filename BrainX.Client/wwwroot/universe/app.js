@@ -5,6 +5,7 @@
 // agnostic of the surrounding chrome.
 
 import { createScene } from './scene.js';
+import { flyToCode } from './codefly.js';
 import { publishTheme } from './theme.js';
 import { WALLPAPER_CARDS, normalizeCards, setWallpaperCards, onWallpaperCardsChange } from './cards.js';
 
@@ -385,7 +386,10 @@ function showInfo(payload) {
     $infoCat.style.color = hex;
     $infoCat.textContent = node.categoryLabel ?? node.category ?? '';
     $infoTitle.textContent = node.title;
-    $infoMeta.innerHTML = node.sourceKind === 'code' ? `
+    const group = node.groupCount > 1
+        ? `<span><span class="meta-key">group</span>${escapeHtml(node.groupLabel ?? '')} · ${node.groupCount}</span>`
+        : '';
+    $infoMeta.innerHTML = group + (node.sourceKind === 'code' ? `
         <span><span class="meta-key">source</span>${escapeHtml(node.codeSource || 'code')}</span>
         <span><span class="meta-key">kind</span>${escapeHtml(node.codeKind || 'symbol')}</span>
         <span><span class="meta-key">file</span>${escapeHtml(node.codeFile || '—')}${node.codeLine ? ':' + node.codeLine : ''}</span>
@@ -394,7 +398,7 @@ function showInfo(payload) {
         <span><span class="meta-key">words</span>${node.wordCount.toLocaleString()}</span>
         <span><span class="meta-key">links</span>${(related?.length ?? 0)}</span>
         <span><span class="meta-key">modified</span>${fmtDate(node.modifiedAt)}</span>
-    `;
+    `);
     $infoPrev.textContent = node.preview || '(no preview available)';
     $infoEdit.hidden = node.sourceKind === 'code';
     $infoOpen.hidden = node.sourceKind === 'code';
@@ -1256,8 +1260,7 @@ function handleBrain(brain) {
 }
 
 /** A code layer that changed what is drawn re-mounts the sky once, from where the
- *  camera already is. Only a card changed, or the brain theme is up (it draws no
- *  code): nothing moves, and the next mount carries the new layer. */
+ *  camera already is. Only a card changed: nothing moves. */
 function applyCodeGraph(payload) {
     const drawnBefore = pendingCodeGraph?.drawKey ?? '';
     pendingCodeGraph = payload;
@@ -1265,23 +1268,9 @@ function applyCodeGraph(payload) {
     const merged = { ...pendingBrain, CodeOverlay: payload };
     renderStats(merged);
     if ((payload?.drawKey ?? '') === drawnBefore) return;
-    if (scene.getTheme?.() === 'brain') { scene.holdPayload?.(merged); return; }
     const pose = scene.snapshotCamera?.();
     mountScene(merged);
     scene.restoreCamera?.(pose);
-}
-
-/** The code dashboard's way into the sky. Says what happened, so it can say why
- *  when nothing could: 'node' · 'galaxy' · 'brain-theme' · 'none'. */
-function flyToCode({ id, category }) {
-    if (!scene) return 'none';
-    if (id && scene.focusNodeId?.(id)) return 'node';
-    if (scene.getTheme?.() === 'brain') return 'brain-theme';
-    if (category && _lastUniverse?.galaxies.some(g => g.category === category)) {
-        scene.focusGalaxy(category);
-        return 'galaxy';
-    }
-    return 'none';
 }
 
 /** The status line after a mount, in the vocabulary of the picture on screen. */
@@ -1291,7 +1280,7 @@ function renderedStatus(universe) {
     const e = universe.edges.filter(edge => !edge.kind).length.toLocaleString();
     const code = universe.nodes.filter(node => node.sourceKind === 'code').length;
     return scene?.getTheme?.() === 'brain'
-        ? `Neural brain rendered · ${n} neurons · ${e} fibres · ${universe.galaxies.length} regions`
+        ? `Neural brain rendered · ${n} neurons · ${e} fibres · ${universe.galaxies.length} regions${code ? ` · ${code} code nodes` : ''}`
         : `Universe rendered · ${n} note stars · ${e} wiki-links${code ? ` · ${code} code nodes` : ''}`;
 }
 let _lastUniverse = null;
@@ -1520,6 +1509,8 @@ function applySettingsToScene(s) {
     applyBackground(s.background);
     if (switched) {
         postThemeState(s.theme);
+        // setTheme mounted by itself, from a payload that may hold a newer code layer.
+        _lastUniverse = scene.getUniverse?.() ?? _lastUniverse;
         if (_lastGalaxies?.length) setStatus(renderedStatus(_lastUniverse));
         // The rebuild drops the islands highlight with everything else, but
         // the button is still lit — carry the owner's choice across instead of
@@ -1962,7 +1953,7 @@ window.UniverseHost = {
     viewport: getViewport,
     canvas: () => $canvas,
     refresh: () => pendingBrain && handleBrain(pendingBrain),
-    flyToCode
+    flyToCode: target => flyToCode(scene, target)
 };
 
 // ─── Dashboard floating chips ─────────────────────────────────────

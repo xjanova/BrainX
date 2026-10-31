@@ -1114,6 +1114,23 @@ internal static partial class Program
         if (scope.Length > 0) candidates = candidates.Where(n => ScopeMatches(n, scope));
         var filtered = candidates.ToList();
 
+        // What brain_search and brain_semantic_search already do. A scope that
+        // matches no note is a wrong name, not a question about the vault: left
+        // empty it answered MISS "the brain does not know this" in mode
+        // keyword-fallback, a claim about the brain and a report of a degraded
+        // search, and neither was true.
+        var scopeFallback = scope.Length > 0 && filtered.Count == 0;
+        if (scopeFallback) filtered = export.Nodes.ToList();
+        JObject Answered(JObject reply)
+        {
+            if (scopeFallback)
+            {
+                reply["scopeFallback"] = true;
+                reply["scopeFallbackNote"] = $"scope '{scope}' matched 0 notes; results are UNSCOPED";
+            }
+            return reply;
+        }
+
         using var _lens = AsOfScope(args["asOf"]);
         EnsureValidityIndex(export);
 
@@ -1125,7 +1142,7 @@ internal static partial class Program
         if (ranked.Count == 0)
         {
             LogAccess("-", "recall", $"MISS conf=0.00 · {query}");
-            return new JObject
+            return Answered(new JObject
             {
                 ["query"] = query,
                 ["verdict"] = "MISS",
@@ -1134,7 +1151,7 @@ internal static partial class Program
                 ["answer"] = null,
                 ["evidence"] = new JArray(),
                 ["advice"] = MissAdvice
-            };
+            });
         }
 
         var top = ranked[0].Node;
@@ -1302,7 +1319,7 @@ internal static partial class Program
         // A STRONG verdict on someone else's text is where the shield matters
         // most: "cite it and move on" must not become "obey it and move on".
         if (verdict != "MISS") AddProvenance(response, answer, evidence);
-        return response;
+        return Answered(response);
     }
 
     private const string MissAdvice =

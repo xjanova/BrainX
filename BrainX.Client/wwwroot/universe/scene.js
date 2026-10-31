@@ -26,6 +26,8 @@ const starVert = /* glsl */`
     attribute float aPhase;
     attribute vec3  aColor;
     attribute float aPulse;    // 0..1, decays with time after a touch
+    attribute vec3  aHeadPos;  // the head of this star's group
+    attribute vec2  aGroup;    // x: the group's world radius, 0 = no group; y: the head's gain, 0 = a member
 
     uniform float uTime;
     uniform float uPixelRatio;
@@ -34,14 +36,38 @@ const starVert = /* glsl */`
     uniform float uMotion;
     uniform float uSizeScale;
     uniform float uTwinkle;    // 0.30 for stars; a neuron glows steadily and FIRES instead
+    uniform float uPxPerUnit;  // screen pixels one world unit covers at distance 1
+    uniform vec2  uMergePx;    // a group this small on screen is one point .. this big, all its stars
 
     varying vec3  vColor;
     varying float vBrightness;
     varying float vSelected;
     varying float vPulse;
+    varying float vFade;
 
     void main() {
-        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        float fIndex = float(gl_VertexID);
+        float isSel = step(abs(fIndex - uSelectedIndex), 0.5);
+
+        // A group reads as one point once it is too small on screen to tell its
+        // stars apart: they flow into the head, which takes on their weight. All
+        // here, so a camera move costs no CPU and a settled sky no buffer upload.
+        float merge = 0.0;
+        if (aGroup.x > 0.0) {
+            float depth = max(-(modelViewMatrix * vec4(aHeadPos, 1.0)).z, 0.1);
+            merge = 1.0 - smoothstep(uMergePx.x, uMergePx.y, aGroup.x * uPxPerUnit / depth);
+        }
+        // A member that is hidden keeps its flash and its selection: a touched
+        // note has to show, and it shows at the point it has become part of.
+        vFade = aGroup.y > 0.0 ? 1.0 : max(1.0 - merge, max(isSel, min(aPulse * 4.0, 1.0)));
+        if (vFade < 0.004) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);     // outside the clip volume: no fragments at all
+            gl_PointSize = 0.0;
+            vColor = vec3(0.0); vBrightness = 0.0; vSelected = 0.0; vPulse = 0.0;
+            return;
+        }
+
+        vec4 mv = modelViewMatrix * vec4(mix(position, aHeadPos, merge), 1.0);
         gl_Position = projectionMatrix * mv;
 
         // distance-attenuated point size; gl_PointSize is in pixels.
@@ -50,9 +76,8 @@ const starVert = /* glsl */`
         float twinkleAmp = uTwinkle * uMotion;
         float twinkle = (1.0 - twinkleAmp) + twinkleAmp * sin(uTime * 1.4 + aPhase * 6.2831);
         float size = aSize * twinkle * (320.0 / -mv.z) * uPixelRatio * uSizeScale;
+        if (aGroup.y > 0.0) size *= mix(1.0, aGroup.y, merge);
 
-        float fIndex = float(gl_VertexID);
-        float isSel = step(abs(fIndex - uSelectedIndex), 0.5);
         float isHov = step(abs(fIndex - uHoverIndex), 0.5);
         // Pulse: balloon the star up to ~3.5× during peak. Quick attack
         // (within the first ~0.15 s of life) handled on the CPU; this just
@@ -73,6 +98,7 @@ const starFrag = /* glsl */`
     varying float vBrightness;
     varying float vSelected;
     varying float vPulse;
+    varying float vFade;
     uniform float uStarScale;
 
     void main() {
@@ -102,7 +128,7 @@ const starFrag = /* glsl */`
 
         // uStarScale (slider) attenuates BOTH color brightness and alpha so
         // dimming visibly tames the bloom feed, not just the inner core.
-        float alpha = a * (0.55 + vBrightness * 0.55 + vPulse * 0.55) * uStarScale;
+        float alpha = a * (0.55 + vBrightness * 0.55 + vPulse * 0.55) * uStarScale * vFade;
         gl_FragColor = vec4(col * uStarScale, alpha);
     }
 `;
@@ -515,16 +541,19 @@ function buildNebulaSprites(galaxies) {
             map: tex,
             color: g.color,
             transparent: true,
-            opacity: 0.22,
+            opacity: g.isCode ? 0.09 : 0.22,
             depthWrite: false,
             blending: THREE.AdditiveBlending
         });
         const sprite = new THREE.Sprite(mat);
         sprite.position.set(g.center.x, g.center.y, g.center.z);
-        const s = g.radius * 4.5;
+        // The code core sits in the middle of everything: a galaxy's wide haze
+        // and hot bulge there would wash over the whole sky.
+        const s = g.radius * (g.isCode ? 2.6 : 4.5);
         sprite.scale.set(s, s, s);
         sprite.userData.galaxy = g.category;
         group.add(sprite);
+        if (g.isCode) continue;
 
         // Galactic bulge: a small, hot core at the disk center — real spiral
         // galaxies read as "bright nucleus + arms", and bloom turns this into
@@ -557,7 +586,8 @@ function buildNebulaSprites(galaxies) {
 function buildGalaxyDust(galaxies) {
     let total = 0;
     const counts = galaxies.map(g => {
-        const c = Math.min(900, Math.max(140, Math.round(g.count * 14)));
+        // Dust traces spiral arms, and the code core has none.
+        const c = g.isCode ? 0 : Math.min(900, Math.max(140, Math.round(g.count * 14)));
         total += c;
         return c;
     });
@@ -613,6 +643,12 @@ function buildGalaxyDust(galaxies) {
     return new THREE.Points(geom, mat);
 }
 
+// A group's radius on screen, in CSS pixels: at `whole` it is one point, at
+// `apart` every star is back in its own place. Between them they flow.
+const MERGE_PX = { whole: 12, apart: 30 };
+/** How much larger a head grows to stand for its members. */
+const groupGain = (count) => 1 + 0.5 * Math.log2(Math.max(2, count ?? 2));
+
 function buildStars(nodes) {
     const COUNT = nodes.length;
     const positions = new Float32Array(COUNT * 3);
@@ -621,6 +657,8 @@ function buildStars(nodes) {
     const brights   = new Float32Array(COUNT);
     const phases    = new Float32Array(COUNT);
     const pulses    = new Float32Array(COUNT);
+    const heads     = new Float32Array(COUNT * 3);
+    const groups    = new Float32Array(COUNT * 2);
 
     const color = new THREE.Color();
     for (let i = 0; i < COUNT; i++) {
@@ -628,6 +666,13 @@ function buildStars(nodes) {
         positions[3 * i + 0] = n.position.x;
         positions[3 * i + 1] = n.position.y;
         positions[3 * i + 2] = n.position.z;
+
+        const head = n.groupHead == null ? n : nodes[n.groupHead];
+        heads[3 * i + 0] = head.position.x;
+        heads[3 * i + 1] = head.position.y;
+        heads[3 * i + 2] = head.position.z;
+        groups[2 * i + 0] = n.groupR ?? 0;
+        groups[2 * i + 1] = n.groupHead === i ? groupGain(n.groupCount) : 0;
 
         color.setHex(n.color);
         colors[3 * i + 0] = color.r;
@@ -647,6 +692,8 @@ function buildStars(nodes) {
     geom.setAttribute('aBrightness', new THREE.BufferAttribute(brights, 1));
     geom.setAttribute('aPhase', new THREE.BufferAttribute(phases, 1));
     geom.setAttribute('aPulse', new THREE.BufferAttribute(pulses, 1));
+    geom.setAttribute('aHeadPos', new THREE.BufferAttribute(heads, 3));
+    geom.setAttribute('aGroup', new THREE.BufferAttribute(groups, 2));
 
     const mat = new THREE.ShaderMaterial({
         uniforms: {
@@ -657,7 +704,9 @@ function buildStars(nodes) {
             uMotion: { value: 1.0 },
             uStarScale: { value: 0.85 },
             uSizeScale: { value: 1.0 },
-            uTwinkle: { value: 0.30 }
+            uTwinkle: { value: 0.30 },
+            uPxPerUnit: { value: 1 },
+            uMergePx: { value: new THREE.Vector2(MERGE_PX.whole, MERGE_PX.apart) }
         },
         vertexShader: starVert,
         fragmentShader: starFrag,
@@ -701,7 +750,9 @@ function buildEdges(nodes, edges) {
         // per-edge alpha drops so total scene luminosity stays where the
         // original 0.18/0.07 tuning intended.
         const same = a.category === b.category;
-        const base = edges[i].kind === 'mention' ? 0.26 : edges[i].kind === 'code' ? 0.18 : same ? 0.12 : 0.035;
+        // Every mention line ends in the core, so they add up there the way a
+        // brain's tracts add up at the callosum: faint alone, and lit on selection.
+        const base = edges[i].kind === 'mention' ? 0.025 : edges[i].kind === 'code' ? 0.08 : same ? 0.12 : 0.035;
         alphas[2 * i + 0] = base;
         alphas[2 * i + 1] = base;
         baseAlpha[i] = base;
@@ -888,6 +939,7 @@ export function createScene(canvas, callbacks = {}) {
     let _animationPaused = false;
     let edgeAlphaAttr = null;   // direct reference for fast updates
     let starPosAttr = null;     // direct reference to upload settled positions
+    let headPosAttr = null;     // where each star's group gathers; follows the heads
     let edgePosAttr = null;
     // Per-galaxy d3-force simulations. Each runs in disk-local 2D (u, v);
     // we project back to world after every tick. Settles in ~3 s, then
@@ -1081,6 +1133,7 @@ export function createScene(canvas, callbacks = {}) {
         starsObj = buildStars(universe.nodes);
         universeGroup.add(starsObj);
         starPosAttr = starsObj.geometry.getAttribute('position');
+        headPosAttr = starsObj.geometry.getAttribute('aHeadPos');
         pulseAttr = starsObj.geometry.getAttribute('aPulse');
 
         // sync current settings into the freshly-built materials.
@@ -1230,6 +1283,7 @@ export function createScene(canvas, callbacks = {}) {
         islandsOn = false;
         adjacency = null;
         starPosAttr = null;
+        headPosAttr = null;
         edgePosAttr = null;
         for (const s of sims) s.sim.stop();
         sims = [];
@@ -1253,7 +1307,8 @@ export function createScene(canvas, callbacks = {}) {
 
         for (const [gi, nodeIdxs] of byGalaxy) {
             const galaxy = uni.galaxies[gi];
-            if (!galaxy) continue;
+            // The code core is a ball placed by rank, not a disk that settles.
+            if (!galaxy || galaxy.isCode) continue;
 
             // Build mutable particles in disk-local (u, v). d3-force expects
             // .x/.y on each node — we map those to local u/v. Local n
@@ -1273,6 +1328,7 @@ export function createScene(canvas, callbacks = {}) {
                     u0: n.local.u,
                     v0: n.local.v,
                     nz: n.local.n,
+                    grouped: n.groupHead != null,
                     radius: Math.max(1.4, n.size * 0.9)
                 };
             });
@@ -1305,8 +1361,8 @@ export function createScene(canvas, callbacks = {}) {
                 // Spiral-arm anchor: weak spring toward each node's original
                 // log-spiral slot. Strong enough that the arms survive the
                 // settle, weak enough that linked notes still cluster.
-                .force('anchorU', forceX(d => d.u0).strength(ANCHOR_STRENGTH))
-                .force('anchorV', forceY(d => d.v0).strength(ANCHOR_STRENGTH))
+                .force('anchorU', forceX(d => d.u0).strength(d => (d.grouped ? GROUP_ANCHOR : ANCHOR_STRENGTH)))
+                .force('anchorV', forceY(d => d.v0).strength(d => (d.grouped ? GROUP_ANCHOR : ANCHOR_STRENGTH)))
                 .alphaDecay(0.025)
                 .alphaMin(0.005)
                 .stop();   // we tick manually each frame
@@ -1360,6 +1416,7 @@ export function createScene(canvas, callbacks = {}) {
             }
         }
         starPosAttr.needsUpdate = true;
+        syncGroupHeads();
 
         // 2) edges follow — each line segment's two endpoints from current
         //    star world positions.
@@ -1418,6 +1475,20 @@ export function createScene(canvas, callbacks = {}) {
             anyMoved = true;
         }
         starPosAttr.needsUpdate = true;
+        syncGroupHeads();
+    }
+
+    /** A head the sim moved takes its group's meeting point with it. */
+    function syncGroupHeads() {
+        const a = headPosAttr?.array;
+        if (!a) return;
+        const nodes = universe.nodes;
+        for (let i = 0; i < nodes.length; i++) {
+            if (nodes[i].groupHead == null) continue;
+            const p = nodes[nodes[i].groupHead].position;
+            a[3 * i + 0] = p.x; a[3 * i + 1] = p.y; a[3 * i + 2] = p.z;
+        }
+        headPosAttr.needsUpdate = true;
     }
 
     function stepPhysics() {
@@ -1463,6 +1534,7 @@ export function createScene(canvas, callbacks = {}) {
             u.uStarScale.value = settings.stars;
             u.uSizeScale.value = settings.size;
             u.uTwinkle.value = settings.theme === 'brain' ? 0.1 : 0.30;
+            u.uPxPerUnit.value = pxPerUnit();
         }
         if (edgesObj) {
             const u = edgesObj.material.uniforms;
@@ -1536,7 +1608,24 @@ export function createScene(canvas, callbacks = {}) {
         camera.updateProjectionMatrix();
         if (starsObj) {
             starsObj.material.uniforms.uPixelRatio.value = window.devicePixelRatio || 1;
+            starsObj.material.uniforms.uPxPerUnit.value = pxPerUnit();
         }
+    }
+
+    /** CSS pixels one world unit covers at distance 1, for the merge shader. */
+    function pxPerUnit() {
+        const h = canvas.clientHeight || window.innerHeight;
+        return (h * 0.5) / Math.tan(camera.fov * Math.PI / 360);
+    }
+
+    // The shader's merge, asked from the CPU: a click lands on what the eye sees.
+    const _mergeProbe = new THREE.Vector3();
+    function isMerged(n) {
+        if (n.groupHead == null) return false;
+        const h = universe.nodes[n.groupHead].position;
+        _mergeProbe.set(h.x, h.y, h.z).applyMatrix4(universeGroup.matrixWorld).applyMatrix4(camera.matrixWorldInverse);
+        const px = n.groupR * pxPerUnit() / Math.max(-_mergeProbe.z, 0.1);
+        return px < (MERGE_PX.whole + MERGE_PX.apart) / 2;
     }
 
     function pickAtPointer(clientX, clientY) {
@@ -1549,7 +1638,9 @@ export function createScene(canvas, callbacks = {}) {
         if (!hits.length) return -1;
         // hits are sorted by distance — distanceToRay isn't exposed in a
         // useful way, so pick the closest by camera distance.
-        return hits[0].index ?? -1;
+        const idx = hits[0].index ?? -1;
+        const n = universe.nodes[idx];
+        return n && isMerged(n) ? n.groupHead : idx;
     }
 
     function setPointer(clientX, clientY) {
@@ -1929,15 +2020,11 @@ export function createScene(canvas, callbacks = {}) {
         return true;
     }
 
-    /** The payload the next theme switch mounts, without mounting it now. */
-    function holdPayload(brain) {
-        lastBrainPayload = brain;
-    }
-
+    /** @returns {boolean} whether this sky holds that galaxy to fly to */
     function focusGalaxy(category) {
-        if (!universe) return;
+        if (!universe) return false;
         const g = universe.galaxies.find(x => x.category === category);
-        if (!g) return;
+        if (!g) return false;
         // Galaxy center in current rotated world space.
         const target = new THREE.Vector3(g.center.x, g.center.y, g.center.z);
         universeGroup.updateMatrixWorld();
@@ -1955,7 +2042,7 @@ export function createScene(canvas, callbacks = {}) {
                     .applyQuaternion(universeGroup.quaternion).normalize();
             }
             flyTo(target, target.clone().addScaledVector(out, g.radius * 2.4 + 70), 0.8, ARC_FOCUS);
-            return;
+            return true;
         }
         // pull camera back along the galaxy's "outward" normal (its center
         // vector from world origin) so we see the disk roughly face-on.
@@ -1965,6 +2052,7 @@ export function createScene(canvas, callbacks = {}) {
         const dist = g.radius * 3.2 + 20;
         const camVec = target.clone().add(outward.multiplyScalar(dist));
         flyTo(target, camVec, 0.7);
+        return true;
     }
 
     function resetView() {
@@ -2773,6 +2861,9 @@ export function createScene(canvas, callbacks = {}) {
      *  rebuilds these forces, and a second copy of the number here would be a
      *  silent retune of the spiral arms the first time anyone edited one. */
     const ANCHOR_STRENGTH = 0.055;
+    // A gathered group has to hold together against the charge that spreads a
+    // disk out, or its stars drift back apart and it never reads as one point.
+    const GROUP_ANCHOR = 0.35;
     let semanticSprings = null;    // kept so a re-mount can re-apply them
 
     /**
@@ -3492,8 +3583,8 @@ export function createScene(canvas, callbacks = {}) {
         setSize,
         focusNode,
         focusNodeId,
-        holdPayload,
         focusGalaxy,
+        getUniverse: () => universe,
         resetView,
         resettle,
         firePulse,

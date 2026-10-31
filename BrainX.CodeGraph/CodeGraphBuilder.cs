@@ -29,7 +29,7 @@ public static class CodeGraphBuilder
     public sealed class Report
     {
         public string Repo { get; set; } = "";
-        /// <summary>built · refreshed · unchanged · locked.</summary>
+        /// <summary>built · refreshed · unchanged · locked · empty.</summary>
         public string Status { get; set; } = "";
         public int FilesScanned { get; set; }
         public int FilesRead { get; set; }
@@ -78,6 +78,14 @@ public static class CodeGraphBuilder
         var files = RepoFiles.Scan(root, extensions);
         report.FilesScanned = files.Files.Count;
         report.Ms["scan"] = Lap(sw);
+        // Nothing to read is a wrong folder, not a repo with no code: saving it
+        // would put a card of zeros on the dashboard that looks like a build.
+        if (files.Files.Count == 0)
+        {
+            report.Status = "empty";
+            report.Ms["total"] = total.Elapsed.TotalMilliseconds;
+            return (null, report);
+        }
 
         var cache = full ? null : LoadCache(vaultPath, repo, root);
         var cached = cache?.Units.ToDictionary(u => u.Path, StringComparer.Ordinal) ?? new Dictionary<string, CodeFileUnit>(StringComparer.Ordinal);

@@ -117,3 +117,11 @@ jobs:
       # arrangement exact at the size it was made.
       - name: HUD placement rules
         run: node BrainX.Tests/hud/hudplace.check.mjs
+
+      # What the code dashboard says after a flight, with a stand-in scene.
+      - name: Code dashboard flights
+        run: node BrainX.Tests/hud/codefly.check.mjs
+
+      # Which points merge into one, and where code sits in both themes.
+      - name: Node groups and the code core
+        run: node BrainX.Tests/hud/nodegroups.check.mjs

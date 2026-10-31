@@ -81,6 +81,12 @@ internal static partial class Program
             (code, line) = await Build(thaiFolder);
             Check("a folder name with no usable letters still gets a slug", code == 0
                 && line?["repo"]?.ToString()?.StartsWith("repo-", StringComparison.Ordinal) == true, line?.ToString());
+            var noCode = Path.Combine(root, "no-code");
+            Directory.CreateDirectory(noCode);
+            File.WriteAllText(Path.Combine(noCode, "readme.md"), "# nothing to read\n");
+            (code, line) = await Build(noCode, "--repo", "no-code");
+            Check("a folder with no code saves no graph and says so", code == 1 && line?["status"]?.ToString() == "empty"
+                && !File.Exists(CodeGraphStore.PathFor(vault, "no-code")), line?.ToString());
         }
         finally
         {
