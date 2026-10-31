@@ -306,6 +306,10 @@ public partial class MainWindow : Window
         // installed or first opened while BrainX is already up.
         _ = Task.Run(OnboardAndWatchAgentsAsync);
 
+        // Same promise for the code graphs: the projects agents open in get mapped
+        // without anyone adding them (see MainWindow.CodeUniverse.cs).
+        StartCodeAutoBuild();
+
         // F11 toggles a true-fullscreen mode that *covers* the taskbar.
         // Standard WPF Maximize on a WindowStyle=None window only fills
         // the work area; this mode manually overrides bounds + Topmost.

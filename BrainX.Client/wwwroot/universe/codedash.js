@@ -38,9 +38,13 @@ const S = {
     detail: null,
     trail: [],            // symbols behind the one showing, for Back
     build: null,          // { repo, since }
+    auto: true,           // projects get mapped when an agent opens in them
 };
 
-let $root, $sum, $add, $notice, $repos, $search, $searchRow, $view, $back;
+const ENABLE_LABEL = '+ Enable code search';
+const ENABLE_TITLE = 'Recommended for every project. Choose a folder and agents can search its code: what calls what, who uses it, and which notes name it. Nothing leaves this machine.';
+
+let $root, $sum, $add, $auto, $notice, $repos, $search, $searchRow, $view, $back;
 let _askSeq = 0, _noticeTimer = null, _searchTimer = null, _elapsedTimer = null;
 const _waiting = new Map();
 const _latest = {};       // slot → the ask whose answer still counts
@@ -95,18 +99,21 @@ function keyOf(card) { return card ? `${card.builtAt}|${card.symbols}|${card.edg
 
 function build() {
     $sum = h('span', { class: 'cd-sum' });
-    $add = h('button', { class: 'cd-btn cd-primary', type: 'button', onclick: addRepo,
-        title: 'Choose a folder. BrainX reads its code, and maps symbols, calls and imports.' }, '+ Add repo');
-    $notice = h('div', { class: 'cd-notice', role: 'status', hidden: true });
+    $add = h('button', { class: 'cd-btn cd-primary', type: 'button', onclick: addRepo, title: ENABLE_TITLE }, ENABLE_LABEL);
+    $auto = h('input', { type: 'checkbox', onchange: e => post({ type: 'codeAutoSet', on: e.target.checked }) });
+    $notice =h('div', { class: 'cd-notice', role: 'status', hidden: true });
     $repos = h('nav', { class: 'cd-repos', 'aria-label': 'Repositories' });
     $search = h('input', { class: 'cd-search', type: 'search', spellcheck: 'false', autocomplete: 'off',
         placeholder: 'Search symbols and files', 'aria-label': 'Search symbols and files', oninput: onSearchInput,
         onkeydown: e => { if (e.key === 'Enter') { clearTimeout(_searchTimer); runSearch(); } } });
     $searchRow = h('div', { class: 'cd-searchrow' }, $search);
     $view = h('div', { class: 'cd-view' });
-    $root = h('aside', { id: 'code-dash', role: 'dialog', 'aria-label': 'Code graphs', hidden: true },
+    $root = h('aside', { id: 'code-dash', role: 'dialog', 'aria-label': 'Code search', hidden: true },
         h('header', { class: 'cd-head' },
-            h('h2', {}, 'Code graphs'), $sum, h('span', { class: 'cd-grow' }), $add,
+            h('h2', {}, 'Code search'), $sum, h('span', { class: 'cd-grow' }),
+            h('label', { class: 'cd-auto', title: 'When an agent opens in a git project, BrainX maps it in the background and refreshes it when the commit moves. Nothing leaves this machine.' },
+                $auto, 'Map projects automatically'),
+            $add,
             h('button', { class: 'cd-btn cd-x', type: 'button', title: 'Close (Esc)', 'aria-label': 'Close', onclick: () => close() }, '×')),
         $notice,
         h('div', { class: 'cd-body' }, $repos, h('main', { class: 'cd-main' }, $searchRow, $view)));
@@ -252,6 +259,7 @@ function render() {
         ? `${S.repos.length} ${S.repos.length === 1 ? 'repo' : 'repos'} · ${num(good.reduce((n, r) => n + r.symbols, 0))} symbols · ${num(good.reduce((n, r) => n + r.edges, 0))} edges · ${num(good.reduce((n, r) => n + r.links, 0))} note links`
         : '';
     $add.disabled = !!S.build;
+    $auto.checked = S.auto;
     renderRepos();
     renderView();
 }
@@ -324,10 +332,13 @@ function renderView() {
 
 function emptyState() {
     return h('div', { class: 'cd-empty' },
-        h('h3', {}, 'No code graphs yet'),
-        h('p', {}, 'Add a repository folder and BrainX will map its symbols, calls, inheritance and imports, then link them to the notes that name them. Agents can then ask what calls what instead of reading files to find out.'),
-        h('p', { class: 'dim' }, 'C#, JavaScript, TypeScript, Python and PHP. The first build of a large repo takes a few minutes.'),
-        h('button', { class: 'cd-btn cd-primary', type: 'button', onclick: addRepo, disabled: !!S.build }, '+ Add repo'));
+        h('span', { class: 'cd-rec' }, 'Recommended for everyone'),
+        h('h3', {}, S.auto ? 'Code search is ready' : 'Turn on code search'),
+        h('p', {}, S.auto
+            ? 'BrainX maps a project by itself the first time an agent opens in it, then keeps it current. Agents can then ask what calls what instead of reading files to find out.'
+            : 'Choose a project folder and BrainX will map its symbols, calls, inheritance and imports, then link them to the notes that name them. Agents can then ask what calls what instead of reading files to find out.'),
+        h('p', { class: 'dim' }, `C#, JavaScript, TypeScript, Python and PHP. The first build of a large repo takes a few minutes. Nothing leaves this machine.${S.auto ? ' To map one now, choose its folder.' : ''}`),
+        h('button', { class: 'cd-btn cd-primary', type: 'button', onclick: addRepo, disabled: !!S.build, title: ENABLE_TITLE }, ENABLE_LABEL));
 }
 
 function section(title, ...kids) {
@@ -480,6 +491,8 @@ function onHost(evt) {
 
 function onRepos(repos) {
     S.repos = repos;
+    // A new install's only sign that this exists, gone once it holds something.
+    document.getElementById('code-dash-open')?.classList.toggle('cd-new', repos.length === 0);
     if (!cardOf(S.selected)) {
         S.selected = S.build && cardOf(S.build.repo) ? S.build.repo : repos[0]?.repo ?? null;
         S.detail = null; S.trail = []; S.hits = null; S.query = ''; S.overview = null;
@@ -493,6 +506,7 @@ function onRepos(repos) {
 
 function onBuildState(m) {
     const wasRunning = !!S.build;
+    if (typeof m.auto === 'boolean') S.auto = m.auto;
     S.build = m.running ? { repo: m.repo, since: S.build?.since ?? Date.now() } : null;
     if (m.message) notice(m.message, m.state === 'done' ? 'ok' : 'warn');
     else if (m.running && !wasRunning) $notice.hidden = true;
@@ -513,7 +527,7 @@ let _demoRepos = [
     { repo: 'brainx', source: 'brainx', root: 'D:\\BrainX', commit: '774548bc9d21', builtAt: new Date(Date.now() - 7.2e6).toISOString(), symbols: 48213, edges: 183402, visible: 342, links: 1208, languages: { csharp: 1102, javascript: 94, typescript: 8 }, state: 'current' },
     { repo: 'tpix-trade', source: 'brainx', root: 'D:\\Works\\tpix-trade', commit: '4d2e91aa0031', builtAt: new Date(Date.now() - 3.1e8).toISOString(), symbols: 21764, edges: 61230, visible: 188, links: 96, languages: { php: 1450, javascript: 212 }, state: 'behind' },
     { repo: 'old-import', source: 'graphify', root: 'D:\\Archive\\old', commit: null, builtAt: new Date(Date.now() - 2.2e9).toISOString(), symbols: 3120, edges: 8440, visible: 80, links: 0, languages: {}, state: 'gone' },
-    { repo: 'broken', error: 'This graph could not be read. Add the folder again to rebuild it.' },
+    { repo: 'broken', error: 'This graph could not be read. Enable code search for the folder again to rebuild it.' },
 ];
 
 function demoHost(m) {
@@ -525,6 +539,8 @@ function demoHost(m) {
         const repo = m.repo ?? 'new-project';
         onHost({ data: { type: 'codeBuildState', running: true, repo } });
         window.__demoBuild = setTimeout(() => onHost({ data: { type: 'codeBuildState', running: false, repo, state: 'done', message: '12,408 symbols, 40,112 edges in 18.2 s.' } }), 3000);
+    } else if (m.type === 'codeAutoSet') {
+        onHost({ data: { type: 'codeBuildState', running: false, auto: m.on } });
     } else if (m.type === 'codeBuildStop') {
         clearTimeout(window.__demoBuild);
         onHost({ data: { type: 'codeBuildState', running: false, state: 'stopped', message: 'Build stopped. The last saved graph is unchanged.' } });

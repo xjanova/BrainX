@@ -78,6 +78,7 @@ public partial class MainWindow
         // Machine-scoped: whether THIS PC is allowed to spend its GPU on the
         // gardener is not a property of the notes.
         if (m["GardenerAutoEnabled"] is { Type: JTokenType.Boolean } ga) _gardenerAutoEnabled = ga.Value<bool>();
+        if (m["CodeAutoBuildEnabled"] is { Type: JTokenType.Boolean } cab) _codeAutoBuildEnabled = cab.Value<bool>();
         // Same reasoning, and read by brainx-mcp itself (McpInstances.Settings):
         // which processes this machine is allowed to close is a fact about this
         // machine's RAM, and a vault carried to another PC must not decide it.
@@ -119,6 +120,7 @@ public partial class MainWindow
                 ["McpAutoRegisterEnabled"] = _mcpAutoRegisterEnabled,
                 ["AutoIngestHookEnabled"] = _autoIngestHookEnabled,
                 ["GardenerAutoEnabled"] = _gardenerAutoEnabled,
+                ["CodeAutoBuildEnabled"] = _codeAutoBuildEnabled,
                 ["McpReaperEnabled"] = _mcpReaperEnabled,
                 ["McpReaperIdleHours"] = _mcpReaperIdleHours,
                 ["StorageProvider"] = _storageProvider,

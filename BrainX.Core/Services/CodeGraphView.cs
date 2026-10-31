@@ -71,7 +71,7 @@ public static class CodeGraphView
     /// <summary>A stored file that does not load is listed, not dropped: its card says so.</summary>
     public static JObject UnreadableCard(string repo) => new()
     {
-        ["repo"] = repo, ["error"] = "This graph could not be read. Add the folder again to rebuild it."
+        ["repo"] = repo, ["error"] = "This graph could not be read. Enable code search for the folder again to rebuild it."
     };
 
     /// <summary>
