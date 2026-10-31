@@ -194,7 +194,7 @@ public class EmbeddingService
                 ["note"] = "embedded in-process at a reduced budget while Ollama could not; the next pass with the daemon re-embeds them in full",
                 ["updatedAt"] = DateTime.UtcNow.ToString("O")
             }.ToString());
-            File.Move(tmp, p, overwrite: true);
+            AtomicFile.MoveOver(tmp, p);
         }
         catch { /* best-effort: worst case a partial vector is not upgraded until the note changes */ }
     }
@@ -230,7 +230,7 @@ public class EmbeddingService
                 ["failed"] = FailedCount,
                 ["partial"] = ReadPartial(dir).Count,
             }.ToString());
-            File.Move(tmp, p, overwrite: true);
+            AtomicFile.MoveOver(tmp, p);
         }
         catch { }
     }
@@ -339,7 +339,7 @@ public class EmbeddingService
             var manifestPath = Path.Combine(dir, "model.json");
             var tmp = manifestPath + "." + Environment.ProcessId + ".tmp";
             File.WriteAllText(tmp, json);
-            File.Move(tmp, manifestPath, overwrite: true);
+            AtomicFile.MoveOver(tmp, manifestPath);
         }
         catch { /* best-effort — a missing manifest just means DefaultModel */ }
     }
@@ -493,7 +493,7 @@ public class EmbeddingService
                 // truncated embedding from a bad one.
                 var tmp = sidecar + "." + Environment.ProcessId + ".tmp";
                 await File.WriteAllBytesAsync(tmp, FloatsToBytes(vec), ct).ConfigureAwait(false);
-                File.Move(tmp, sidecar, overwrite: true);
+                AtomicFile.MoveOver(tmp, sidecar);
             }
             // The client's VaultWatcher can be precomputing the same sidecar.
             // A full pass is ~30 minutes; losing all of it to one contended
@@ -570,7 +570,7 @@ public class EmbeddingService
             {
                 var tmp = sidecar + "." + Environment.ProcessId + ".tmp";
                 File.WriteAllBytes(tmp, FloatsToBytes(vec));
-                File.Move(tmp, sidecar, overwrite: true);
+                AtomicFile.MoveOver(tmp, sidecar);
             }
             catch (IOException) { continue; }
             catch (UnauthorizedAccessException) { continue; }
@@ -785,7 +785,7 @@ public class EmbeddingService
             var sidecar = Path.Combine(dir, noteId + ".bin");
             var tmp = sidecar + "." + Environment.ProcessId + ".tmp";
             await File.WriteAllBytesAsync(tmp, FloatsToBytes(vec), ct).ConfigureAwait(false);
-            File.Move(tmp, sidecar, overwrite: true);
+            AtomicFile.MoveOver(tmp, sidecar);
 
             var marked = ReadPartial(dir);
             if (partial ? marked.Add(noteId) : marked.Remove(noteId)) WritePartial(dir, marked);

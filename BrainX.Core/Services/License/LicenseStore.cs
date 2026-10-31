@@ -102,7 +102,7 @@ public static class LicenseStore
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         var tmp = path + ".tmp";
         File.WriteAllText(tmp, JsonSerializer.Serialize(sealedSnap, Json), new UTF8Encoding(false));
-        File.Move(tmp, path, overwrite: true);
+        AtomicFile.MoveOver(tmp, path);
     }
 
     public static void Delete(string? path = null)

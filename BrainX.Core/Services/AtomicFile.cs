@@ -20,7 +20,10 @@ public static class AtomicFile
     /// comes out as File.Move's would and the temp file is gone: most of these
     /// land in the owner's vault, and nothing sweeps up after every writer.
     /// Not for a move that decides something, like taking mail out of an inbox:
-    /// there a refusal is the answer.
+    /// there a refusal is the answer. Not for anything but a scratch copy either:
+    /// giving up deletes <paramref name="tmp"/>, so a real file handed in here is
+    /// a real file lost. And the half second is spent on the calling thread, which
+    /// on the UI thread is the whole window standing still.
     /// </summary>
     public static void MoveOver(string tmp, string path)
     {

@@ -67,7 +67,7 @@ public static class GoogleAiKey
         };
         var tmp = FilePath + "." + Environment.ProcessId + ".tmp";
         File.WriteAllText(tmp, o.ToString(), new UTF8Encoding(false));
-        File.Move(tmp, FilePath, overwrite: true);
+        AtomicFile.MoveOver(tmp, FilePath);
     }
 
     public static void Clear()

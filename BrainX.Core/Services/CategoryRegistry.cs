@@ -123,7 +123,7 @@ public class CategoryRegistry
         try
         {
             File.WriteAllText(tmp, JsonConvert.SerializeObject(merged, Formatting.Indented));
-            File.Move(tmp, _filePath, overwrite: true);
+            AtomicFile.MoveOver(tmp, _filePath);
             _categories = merged;
         }
         catch

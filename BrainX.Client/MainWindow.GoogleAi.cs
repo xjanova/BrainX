@@ -111,7 +111,7 @@ public partial class MainWindow
             r["onCall"] = on;
             var tmp = path + ".tmp";
             File.WriteAllText(tmp, root.ToString(), new System.Text.UTF8Encoding(false));
-            File.Move(tmp, path, overwrite: true);
+            AtomicFile.MoveOver(tmp, path);
             return true;
         }
         catch (Exception ex) { Debug.WriteLine($"runner onCall {agent}: {ex.Message}"); return false; }

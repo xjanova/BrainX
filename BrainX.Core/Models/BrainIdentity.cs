@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using BrainX.Core.Services;
 using Newtonsoft.Json;
 
 namespace BrainX.Core.Models;
@@ -128,7 +129,7 @@ public class BrainIdentity
         try
         {
             File.WriteAllText(tmp, json);
-            File.Move(tmp, path, overwrite: true);
+            AtomicFile.MoveOver(tmp, path);
         }
         catch
         {

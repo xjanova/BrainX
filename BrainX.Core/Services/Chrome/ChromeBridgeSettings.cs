@@ -102,6 +102,6 @@ public sealed class ChromeBridgeSettings
         if (!string.IsNullOrWhiteSpace(ClaudePathOverride)) o["claudePathOverride"] = ClaudePathOverride;
         var tmp = path + "." + Environment.ProcessId + ".tmp";
         File.WriteAllText(tmp, o.ToString(Formatting.Indented), new UTF8Encoding(false));
-        File.Move(tmp, path, overwrite: true);
+        AtomicFile.MoveOver(tmp, path);
     }
 }

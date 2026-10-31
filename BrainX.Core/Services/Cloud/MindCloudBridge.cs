@@ -274,7 +274,7 @@ public sealed class MindCloudBridge
             Directory.CreateDirectory(Path.GetDirectoryName(p)!);
             var tmp = p + ".tmp-" + Guid.NewGuid().ToString("N")[..8];
             File.WriteAllBytes(tmp, new UTF8Encoding(false).GetBytes(content));
-            File.Move(tmp, p, overwrite: true);
+            AtomicFile.MoveOver(tmp, p);
         }
     }
 }

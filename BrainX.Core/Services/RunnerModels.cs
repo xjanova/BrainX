@@ -113,7 +113,7 @@ public static class RunnerModels
 
         var tmp = path + "." + Guid.NewGuid().ToString("N")[..6] + ".tmp";
         File.WriteAllText(tmp, o.ToString(), new UTF8Encoding(false));
-        File.Move(tmp, path, overwrite: true);
+        AtomicFile.MoveOver(tmp, path);
     }
 
     // ───────────── the command line ─────────────

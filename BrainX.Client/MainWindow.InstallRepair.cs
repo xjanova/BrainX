@@ -111,7 +111,7 @@ public partial class MainWindow
                     Debug.WriteLine($"Install repair: package hash {hash} does not match the signed feed's {full.SHA256}");
                     return false;
                 }
-                File.Move(partial, nupkg, overwrite: true);
+                AtomicFile.MoveOver(partial, nupkg);
             }
 
             Services.StartupProgress.Report($"Repairing BrainX — unpacking v{version}", 0.25, tag: "update");
