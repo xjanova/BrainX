@@ -20,7 +20,11 @@
          open/DDL/insert/FTS5-MATCH smoke test (2026-07-12). Remove once
          Microsoft.Data.Sqlite bumps its own dependency. -->
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.0" />
-    <PackageReference Include="MySqlConnector" Version="2.4.0" />
+    <!-- 2.6.1 is the FIRST patched version of GHSA-473q-m89c-ghf8 (with
+         VerifyCA/VerifyFull and no SslCa, a clear-text password goes out before
+         the certificate is checked). Password-over-TLS with the default
+         Preferred, and every loopback connection, behave as before. -->
+    <PackageReference Include="MySqlConnector" Version="2.6.1" />
     <!-- Full YAML frontmatter parsing — replaces the regex tag-only
          extractor so users can put any structured data in the note
          header (Obsidian-compatible Properties). -->
