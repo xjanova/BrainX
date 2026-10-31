@@ -452,25 +452,38 @@ internal static partial class Program
     /// closed and has not gone yet cannot take a line, which stays unmarked for
     /// the tick after. The line given up on is newer, and settled by itself the
     /// cursor went straight past the one still waiting.
+    ///
+    /// The broken line is there from the start because it is what holds the
+    /// cursor back: a line dated behind the cursor is never looked at at all,
+    /// which fails this check for the wrong reason. The owner-wait line says a
+    /// tick has the waiting line in hand, and only then does the broken line's
+    /// time run out, by its clock rather than by a stopwatch, because the run
+    /// is only there to be waited on for as long as it lingers.
     /// </summary>
     private static async Task CoworkBrokerGivingUpSkipsNothing()
     {
         var exe = FindMcpExe();
         if (exe == null) { Check("brainx-mcp.exe (built) exists for the check", false); return; }
 
-        await using var rig = NewOpenRunRig(c => { c["pollSeconds"] = 5; c["holdOpenMinutes"] = 0.02; c["unreadableLineSeconds"] = 1; });
-        File.WriteAllText(Path.Combine(rig.Root, "linger.txt"), "8");
+        await using var rig = NewOpenRunRig(c =>
+        {
+            c["pollSeconds"] = 5; c["holdOpenMinutes"] = 0.02; c["unreadableLineSeconds"] = 300; c["ownerWaitSeconds"] = 1;
+        });
+        File.WriteAllText(Path.Combine(rig.Root, "linger.txt"), "12");
         var now = DateTime.UtcNow;
         OwnerSaidAt(rig, "the first line", now.AddMinutes(-5));
+        var broken = Path.Combine(rig.Room, $"{now.AddMinutes(-1).Ticks:D19}-owner-ab12.json");
+        File.WriteAllText(broken, "{\"from\":\"owner\",\"body\":\"half a li", new UTF8Encoding(false));
         StartOpenRunBroker(rig, exe);
         Check("the run takes its turn", await OpenRunUntil(() => rig.Turns == 1, 30), rig.Said);
         Check("…is closed for being quiet, and has not gone", await OpenRunUntil(() => rig.SeenLines().Contains("EOF"), 25), rig.Said);
 
         var waiting = OwnerSaidAt(rig, "the line that has to wait for the run to go", now.AddMinutes(-2));
-        var broken = Path.Combine(rig.Room, $"{now.AddMinutes(-1).Ticks:D19}-owner-ab12.json");
-        File.WriteAllText(broken, "{\"from\":\"owner\",\"body\":\"half a li", new UTF8Encoding(false));
+        Check("a line the closed run cannot take is in the broker's hands",
+              await OpenRunUntil(() => rig.BrokerLines().Any(l => l.Contains("ข้อความถึง claude")), 8), rig.Said);
 
-        Check("the room is told about the broken line", await OpenRunUntil(() => rig.Settled(broken), 8), rig.Said);
+        File.WriteAllText(rig.RetryClock, new JObject { [Path.GetFileName(broken)] = now.AddHours(-1).Ticks }.ToString());
+        Check("the room is told about the broken line", await OpenRunUntil(() => rig.Settled(broken), 5), rig.Said);
         Check("…and the line waiting behind it is still to come", !rig.Settled(waiting), rig.BrokerPlace().Cursor);
         Check("…and is heard once the run has gone", await OpenRunUntil(() => rig.Starts == 2, 30), rig.Said);
     }
