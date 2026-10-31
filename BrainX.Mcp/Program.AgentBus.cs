@@ -327,12 +327,14 @@ internal static partial class Program
             .ToList();
     }
 
-    /// <summary>Temp-then-move so a concurrent reader never sees partial JSON.</summary>
+    /// <summary>Temp-then-move so a concurrent reader never sees partial JSON.
+    /// The app reads these files all day, and several callers swallow a failure
+    /// here, so the move waits out a reader (see AtomicFile).</summary>
     private static void AtomicWriteJson(string path, JObject payload)
     {
         var tmp = path + "." + Guid.NewGuid().ToString("N")[..8] + ".tmp";
         File.WriteAllText(tmp, payload.ToString(Formatting.Indented));
-        File.Move(tmp, path, overwrite: true);
+        BrainX.Core.Services.AtomicFile.MoveOver(tmp, path);
     }
 
     /// <summary>

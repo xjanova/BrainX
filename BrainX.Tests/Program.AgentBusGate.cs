@@ -24,6 +24,15 @@ internal static partial class Program
         checks.Add(("cowork room: the light re-seats, @names route, the board holds who is doing what", CoworkRoomEndToEnd));
         checks.Add(("cowork broker: a call that dies is reported in the room, with the reason", CoworkBrokerReportsFailedCall));
         checks.Add(("cowork broker: a room run stays open and takes the owner's next line on stdin", CoworkBrokerKeepsRunOpen));
+        checks.Add(("cowork broker: a line that lands while a tick is busy is not left for the next poll", CoworkBrokerHearsLineDuringTick));
+        checks.Add(("cowork broker: a line is read the moment it lands, not skipped as unreadable", CoworkBrokerReadsLineAsItLands));
+        checks.Add(("cowork broker: a line that cannot be read yet is tried again, and the one behind it goes through", CoworkBrokerRetriesUnreadableLine));
+        checks.Add(("cowork broker: a line still being tried outlives a restart", CoworkBrokerRetriesAcrossRestart));
+        checks.Add(("cowork broker: a line that stays unreadable is told to the room, once", CoworkBrokerTellsUnreadableLine));
+        checks.Add(("cowork broker: giving up on a line does not skip an older one still waiting", CoworkBrokerGivingUpSkipsNothing));
+        checks.Add(("cowork broker: a forged line is still forged after waiting to be read", CoworkBrokerForgedLineStaysForged));
+        checks.Add(("cowork broker: the wait on a line ends though the clock was put back", CoworkBrokerWaitOutlivesClockPutBack));
+        checks.Add(("cowork broker: a state write goes through with the file open in another process", CoworkBrokerStateSurvivesReader));
         checks.Add(("cowork broker: an open run quiet past its hold leaves, and that is no failure", CoworkBrokerClosesIdleOpenRun));
         checks.Add(("cowork broker: a run still booting holds nobody else up", CoworkBrokerNotHeldByBootingRun));
         checks.Add(("cowork broker: the room hears what a run is stuck on when the owner is waiting", CoworkBrokerSaysWhyNoAnswer));
@@ -2267,7 +2276,11 @@ internal static partial class Program
     private static void WriteRoomLine(string room, JObject line)
     {
         var name = $"{DateTime.UtcNow.Ticks:D19}-{line["from"]}-{Guid.NewGuid().ToString("N")[..4]}.json";
-        File.WriteAllText(Path.Combine(room, name), line.ToString(), new UTF8Encoding(false));
+        // temp + move, as the window does: a broker reading the folder takes a
+        // line it cannot parse for one it has dealt with, and never reads it again.
+        var tmp = Path.Combine(room, name + ".tmp");
+        File.WriteAllText(tmp, line.ToString(), new UTF8Encoding(false));
+        File.Move(tmp, Path.Combine(room, name));
         Thread.Sleep(5);   // names order by ticks; keep two lines from sharing one
     }
 }

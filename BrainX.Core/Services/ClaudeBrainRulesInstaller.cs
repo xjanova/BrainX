@@ -171,6 +171,9 @@ public static class ClaudeBrainRulesInstaller
         {
             try
             {
+                // Not AtomicFile.MoveOver: this is the rule itself, not a scratch
+                // copy, and that deletes its source when it gives up. Refused,
+                // the rule stays where it is and the next install retires it.
                 File.Move(path, Path.Combine(attic, Path.GetFileName(path)), overwrite: true);
                 RemoveIndexEntry(indexPath, Path.GetFileName(path));
                 moved++;

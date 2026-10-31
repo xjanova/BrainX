@@ -362,18 +362,31 @@ internal static partial class Program
     /// The wait between ticks, cut short by what cannot wait. The poll is still
     /// what drives the broker; this only ends it early. A line used to sit for
     /// up to pollSeconds before anything looked at it, and a run that died sat
-    /// the same way before the room heard why.
+    /// the same way before the room heard why. <paramref name="heard"/> is the
+    /// newest owner line from before the tick read the room.
     /// </summary>
-    private static async Task BrokerNap(BrokerConfig cfg, Dictionary<string, BrokerRun> live, CancellationToken ct)
+    private static async Task BrokerNap(BrokerConfig cfg, Dictionary<string, BrokerRun> live, string heard, CancellationToken ct)
     {
-        var until = DateTime.UtcNow.AddSeconds(cfg.PollSeconds);
-        var heard = NewestOwnerLine();
+        var until = DateTime.UtcNow.AddSeconds(CoworkRetrying ? CoworkRetrySeconds : cfg.PollSeconds);
         while (DateTime.UtcNow < until)
         {
             await Task.Delay(TimeSpan.FromSeconds(1), ct).ConfigureAwait(false);
             if (NewestOwnerLine() != heard) return;
             if (live.Values.Any(r => r.Process.HasExited || r.Open is { Error: not null, ClosedUtc: null })) return;
         }
+    }
+
+    /// <summary>
+    /// A tick still busy after it has read the room, for the check that has to
+    /// land a line there. Sandbox only: real ticks do this by themselves, a
+    /// Telegram send inside one can take twenty seconds.
+    /// </summary>
+    private static async Task SandboxTickHold(CancellationToken ct)
+    {
+        if (Environment.GetEnvironmentVariable("BRAINX_SANDBOX") != "1"
+            || !int.TryParse(Environment.GetEnvironmentVariable("BRAINX_BROKER_TICK_HOLD_MS"), out var ms) || ms <= 0) return;
+        BrokerLog($"tick held for {ms} ms");
+        await Task.Delay(ms, ct).ConfigureAwait(false);
     }
 
     /// <summary>The newest line with the owner's name on the file. Only a nudge

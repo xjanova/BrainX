@@ -777,7 +777,11 @@ public static class McpBridgeHub
         // Announced too: a discovery slower than AppendTools' wait lands after
         // the client's first tools/list, and without the notice its tools would
         // wait for the next session. Discover only speaks when the list changed.
-        lock (Gate) state.InFlight = Task.Run(() => Discover(def, fp, announce: true));
+        lock (Gate)
+        {
+            if (def.Private) ChromeBridge.DiscoveryQueued();
+            state.InFlight = Task.Run(() => Discover(def, fp, announce: true));
+        }
     }
 
     /// <summary>
@@ -803,8 +807,17 @@ public static class McpBridgeHub
                 // discovery's own failure was cached for every new
                 // session. A call now starts its own server; this one is
                 // closed as soon as the list is in (~150 MB each).
-                using var own = ChromeBridge.StartConnection(_log);
-                tools = own.ListTools();
+                //
+                // Only BeginDiscover brings chrome here, and it counted this
+                // discovery. Released before state.Tools is set below: a
+                // client that sees the tools must not hear Connecting next.
+                try
+                {
+                    ChromeBridge.SandboxDiscoveryDelay();
+                    using var own = ChromeBridge.StartConnection(_log);
+                    tools = own.ListTools();
+                }
+                finally { ChromeBridge.DiscoveryDone(); }
             }
             else
             {
@@ -1023,7 +1036,8 @@ public static class McpBridgeHub
         try
         {
             // From the one snapshot above. While a chrome spawn holds the
-            // gate the entry says Connecting (ChromeBridge counts its spawns).
+            // gate the entry says Connecting (ChromeBridge counts its spawns
+            // and its discoveries).
             var chromeLive = LiveNow(ChromeBridge.Def.Id);
             var chromeTools = _enabled && !ChromeBridge.IsUnattendedRun ? (StateFor(ChromeBridge.Def.Id).Tools?.OfType<JObject>()
                 .Count(t => !ChromeBridge.IsHidden(t["name"]?.ToString() ?? "")) ?? 0) : 0;
@@ -1145,7 +1159,7 @@ public static class McpBridgeHub
             var path = StatusPathFor(def.Id);
             var tmp = path + ".tmp";                 // pid in the name — no cross-session collision
             File.WriteAllText(tmp, o.ToString(Formatting.None), new UTF8Encoding(false));
-            File.Move(tmp, path, overwrite: true);
+            AtomicFile.MoveOver(tmp, path);
 
             ReapDeadSessions(dir);
         }
@@ -1277,15 +1291,10 @@ public static class McpBridgeHub
             // and a half-written cache would be parsed as a corrupt one.
             var tmp = path + "." + Environment.ProcessId + ".tmp";
             File.WriteAllText(tmp, body, new UTF8Encoding(false));
-            try { File.Move(tmp, path, overwrite: true); }
-            catch
-            {
-                // Another session was reading the cache at that moment. Its own
-                // write will land; this copy must not stay behind — six of them,
-                // 266 KB each, had piled up in .obsidianx since August.
-                try { File.Delete(tmp); } catch { }
-                throw;
-            }
+            // A session reading the cache is waited out. One that outlasts that
+            // costs this write and leaves no copy behind: six of them, 266 KB
+            // each, had piled up in .obsidianx since August.
+            AtomicFile.MoveOver(tmp, path);
             SweepStaleCacheTemps(path);
         }
         catch (Exception ex) { _log($"bridge cache write failed (non-fatal): {ex.Message}"); }

@@ -391,6 +391,10 @@ public partial class MainWindow
                     var now = JObject.Parse(File.ReadAllText(t.Path))["status"]?.ToString();
                     if (now is not ("done" or "dropped")) { skipped++; continue; }
                     Directory.CreateDirectory(Path.Combine(bin, "tasks"));
+                    // Not AtomicFile.MoveOver, here or for the lines below: this
+                    // is the task itself, not a scratch copy, and that deletes its
+                    // source when it gives up. The trash is the owner's way back.
+                    // Refused, it stays on the board and the note says so.
                     File.Move(t.Path, Path.Combine(bin, "tasks", Path.GetFileName(t.Path)), overwrite: true);
                     movedTasks++;
                 }

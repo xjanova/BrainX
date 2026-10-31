@@ -180,7 +180,7 @@ public sealed class CloudCredentialStore
             File.WriteAllText(tmp, JsonConvert.SerializeObject(r, Formatting.Indented,
                 new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore }), new UTF8Encoding(false));
             if (!OperatingSystem.IsWindows()) RestrictToOwner(tmp, dir);
-            File.Move(tmp, FilePath, overwrite: true);
+            AtomicFile.MoveOver(tmp, FilePath);
         }
         catch
         {

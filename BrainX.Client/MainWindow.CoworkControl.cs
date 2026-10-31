@@ -271,7 +271,7 @@ public partial class MainWindow
 
         var tmp = path + "." + Guid.NewGuid().ToString("N")[..6] + ".tmp";
         File.WriteAllText(tmp, t.ToString(), new System.Text.UTF8Encoding(false));
-        File.Move(tmp, path, overwrite: true);
+        BrainX.Core.Services.AtomicFile.MoveOver(tmp, path);
         return true;
     }
 
@@ -371,7 +371,7 @@ public partial class MainWindow
             var tmp = marker + ".tmp";
             File.WriteAllText(tmp, new JObject { ["pid"] = run.Pid, ["atUtc"] = DateTime.UtcNow.ToString("o") }.ToString(),
                               new System.Text.UTF8Encoding(false));
-            File.Move(tmp, marker, overwrite: true);
+            BrainX.Core.Services.AtomicFile.MoveOver(tmp, marker);
 
             using var p = Process.GetProcessById(run.Pid);
             if (p.HasExited || Math.Abs((p.StartTime.ToUniversalTime() - run.StartedUtc).TotalSeconds) >= 2) return false;

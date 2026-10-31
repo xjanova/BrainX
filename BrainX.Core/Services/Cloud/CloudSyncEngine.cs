@@ -949,8 +949,22 @@ public sealed class CloudSyncEngine
                 }
                 Directory.CreateDirectory(Path.GetDirectoryName(full)!);
                 var tmp = full + "." + Environment.ProcessId + ".pulltmp";
-                File.WriteAllBytes(tmp, PayloadToDisk(cloudPath, content));
-                File.Move(tmp, full, overwrite: true);
+                try
+                {
+                    File.WriteAllBytes(tmp, PayloadToDisk(cloudPath, content));
+                    // Not AtomicFile.MoveOver: the re-check above only holds if
+                    // this follows it at once. The lock keeps out this process's
+                    // tools, not Obsidian or another process, and waiting out
+                    // whoever has the note open could land the download over the
+                    // save they were making. Refused, the note is skipped and the
+                    // next sync asks for it again.
+                    File.Move(tmp, full, overwrite: true);
+                }
+                catch
+                {
+                    try { File.Delete(tmp); } catch { }
+                    throw;
+                }
                 _hashes.TryRemove(full, out _);
             }
             return null;

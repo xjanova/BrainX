@@ -265,7 +265,7 @@ public static class UnattendedRuns
                 ["pid"] = pid,
                 ["registeredUtc"] = DateTime.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture),
             }.ToString(Newtonsoft.Json.Formatting.None), new UTF8Encoding(false));
-            File.Move(tmp, path, overwrite: true);
+            AtomicFile.MoveOver(tmp, path);
             return true;
         }
         catch { return false; }

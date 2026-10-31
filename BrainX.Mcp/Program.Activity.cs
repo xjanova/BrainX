@@ -124,7 +124,7 @@ internal static partial class Program
         var keep = lines[^ActivityKeepLines..];
         var tmp = path + "." + Environment.ProcessId + ".tmp";
         File.WriteAllLines(tmp, keep);
-        File.Move(tmp, path, overwrite: true);
+        BrainX.Core.Services.AtomicFile.MoveOver(tmp, path);
     }
 
     /// <summary>

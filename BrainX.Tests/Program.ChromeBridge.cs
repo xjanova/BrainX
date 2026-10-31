@@ -1178,6 +1178,25 @@ internal static partial class Program
     /// <summary>One request the stub received: when, which process, what.</summary>
     private sealed record StubHit(long Ticks, int Pid, string Method, string Tool);
 
+    /// <summary>
+    /// The chrome entry of the private cache, once it holds tools or five
+    /// seconds have passed. Discovery writes the cache just AFTER it publishes
+    /// the tools, so a tools/list can overtake the file, and a read can meet
+    /// the rename that puts it in place.
+    /// </summary>
+    private static async Task<JObject?> ChromeCacheEntry(string privateDir)
+    {
+        var path = Path.Combine(privateDir, "chrome-tools.cache.json");
+        JObject? entry = null;
+        for (var waited = 0; waited < 5000 && entry?["tools"] is not JArray { Count: > 0 }; waited += 50)
+        {
+            try { entry = File.Exists(path) ? JObject.Parse(File.ReadAllText(path))["bridges"]?["chrome"] as JObject : null; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            await Task.Delay(50);
+        }
+        return entry;
+    }
+
     private static List<StubHit> ReadStubLog(string path)
     {
         var list = new List<StubHit>();
@@ -1231,6 +1250,39 @@ internal static partial class Program
             }
         }
 
+        // The same promise at both ends of discovery, each held open so that no
+        // luck is involved: left alone, the first end lost about 1 run in 25.
+        foreach (var (where, knob, atList) in new[]
+                 {
+                     ("queued with no thread yet", "BRAINX_CHROME_DISCOVERY_DELAY_MS", false),
+                     ("past its spawn, tools/list unanswered", ChromeStubServer.ListDelayEnv, true),
+                 })
+        {
+            var (root, vault, privateDir) = ChromeSandboxDirs("brainx-chrome-status-");
+            var held = Path.Combine(root, "stub-holds-list.txt");
+            ChromeSession? s = null;
+            try
+            {
+                s = await StartChromeSession(exe, vault, privateDir, StubEnv("S2", root, new() { [knob] = "2000", [ChromeStubServer.ListHeldEnv] = held }));
+                for (var waited = 0; atList && waited < 10_000 && !File.Exists(held); waited += 25)
+                    await Task.Delay(25);
+                if (atList)
+                    Check("(control) the stub is holding tools/list, so the handshake is behind us", File.Exists(held));
+                var during = await s.Status();
+                Check($"bridge_status says Connecting while discovery is {where}",
+                      during?["state"]?.ToString() == "Connecting", during?["state"]?.ToString());
+                await s.List();   // discovery done
+                var done = await s.Status();
+                Check($"(control) …and stops the moment tools/list has answered ({where})",
+                      done?["state"]?.ToString() is { } st0 && st0 != "Connecting", done?["state"]?.ToString());
+            }
+            finally
+            {
+                if (s != null) await s.DisposeAsync();
+                try { Directory.Delete(root, recursive: true); } catch { }
+            }
+        }
+
         // The race itself: the call goes out right after initialize, while
         // discovery is still spawning (3 s cold start) or racing it (none).
         foreach (var startMs in new[] { 3000, 0 })
@@ -1275,9 +1327,7 @@ internal static partial class Program
 
                 Check($"[{startMs} ms start] discovery survived: this session lists the chrome__ tools",
                       names.Contains("chrome__navigate") && names.Contains("chrome__get_page_text"), $"{names.Count(n => n.StartsWith("chrome__"))} chrome tools");
-                var cache = File.Exists(Path.Combine(privateDir, "chrome-tools.cache.json"))
-                    ? JObject.Parse(File.ReadAllText(Path.Combine(privateDir, "chrome-tools.cache.json")))["bridges"]?["chrome"] as JObject
-                    : null;
+                var cache = await ChromeCacheEntry(privateDir);
                 var cacheText = cache?.ToString(Newtonsoft.Json.Formatting.None) ?? "(no cache)";
                 Check($"[{startMs} ms start] …and the private cache new sessions read holds the tools, not a failure",
                       cache?["tools"] is JArray { Count: > 0 } && cache["failedUtc"]?.Type is null or JTokenType.Null,

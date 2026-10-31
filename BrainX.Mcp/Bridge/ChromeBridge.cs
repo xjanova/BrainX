@@ -44,7 +44,7 @@ internal static class ChromeBridge
     private static ChromeBridgeSettings _settings = new();
     private static DateTime _settingsReadUtc = DateTime.MinValue;
 
-    private static int _connecting;   // spawns in progress (discovery and a call can overlap)
+    private static int _connecting;   // spawns and discoveries in progress (they can overlap)
     private static string? _lastOutcome;
     private static DateTime? _lastOutcomeUtc;
     private static string? _failureDetail;
@@ -224,6 +224,17 @@ internal static class ChromeBridge
         return !string.IsNullOrWhiteSpace(stub) && Path.IsPathRooted(stub) && File.Exists(stub) ? stub : null;
     }
 
+    /// <summary>
+    /// Harness only: a thread pool in no hurry, on demand, so "bridge_status
+    /// knows about a discovery that has no thread yet" can be proven rather
+    /// than hoped.
+    /// </summary>
+    public static void SandboxDiscoveryDelay()
+    {
+        if (Sandbox && int.TryParse(Environment.GetEnvironmentVariable("BRAINX_CHROME_DISCOVERY_DELAY_MS"), out var delay) && delay > 0)
+            Thread.Sleep(Math.Min(delay, 30_000));
+    }
+
     // ───────────── discovery of claude.exe ─────────────
 
     public static ClaudeLocateResult Locate()
@@ -281,6 +292,16 @@ internal static class ChromeBridge
     }
 
     // ───────────── spawning ─────────────
+
+    /// <summary>
+    /// A discovery is on its way. Counted by whoever queues it, on that thread:
+    /// the task took up to 140 ms to reach the spawn on a busy machine, and a
+    /// bridge_status in that gap heard of no discovery at all. <see cref="DiscoveryDone"/>
+    /// ends it once the tool list is in, because the spawn is only its first half.
+    /// </summary>
+    public static void DiscoveryQueued() { lock (Gate) _connecting++; }
+
+    public static void DiscoveryDone() { lock (Gate) _connecting--; }
 
     /// <summary>
     /// Start the server. Re-resolves the exe every time; refuses (with the
@@ -618,7 +639,7 @@ internal static class ChromeBridge
             var path = CachePath;
             var tmp = path + "." + Environment.ProcessId + ".tmp";
             File.WriteAllText(tmp, entry.ToString(Formatting.Indented), new UTF8Encoding(false));
-            File.Move(tmp, path, overwrite: true);
+            AtomicFile.MoveOver(tmp, path);
         }
         catch (Exception ex) { _log($"chrome: tool cache write failed ({ex.GetType().Name})"); }
     }

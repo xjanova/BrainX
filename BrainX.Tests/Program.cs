@@ -80,6 +80,8 @@ internal static partial class Program
         RegisterInstallRepairChecks(sshChecks);
         RegisterEmbeddingChecks(sshChecks);
         RegisterNoteWriteChecks(sshChecks);
+        RegisterBusyFileChecks(sshChecks);
+        RegisterCoworkUnreadableChecks(sshChecks);
         RegisterLearningLoopChecks(sshChecks);
         RegisterShieldChecks(sshChecks);
         RegisterRunnerModelChecks(sshChecks);

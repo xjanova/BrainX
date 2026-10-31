@@ -155,7 +155,7 @@ public sealed class AssistantService
             var tmp = ConfigPath + ".tmp-" + Environment.ProcessId;
             File.WriteAllText(tmp, JsonConvert.SerializeObject(c, Formatting.Indented),
                               new UTF8Encoding(false));
-            File.Move(tmp, ConfigPath, overwrite: true);
+            AtomicFile.MoveOver(tmp, ConfigPath);
         }
         catch { }
     }

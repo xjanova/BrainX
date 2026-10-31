@@ -192,7 +192,12 @@ $devAssets = @(
     # version the old file cannot satisfy, which is a FileLoadException the
     # first time an ssh_* tool loads. Any package UPGRADE whose dll already
     # shipped must be added here by hand.
-    "Renci.SshNet.dll"
+    "Renci.SshNet.dll",
+    # MySqlConnector 2.4.0 -> 2.6.1 (GHSA-473q-m89c-ghf8), the quiet form of the
+    # same blind spot: its assembly version stays 2.0.0.0, so the old file loads
+    # without complaint and only the deps.json beside it says 2.6.1. The MCP
+    # opens no MySQL connection, so this is about the mirror telling the truth.
+    "MySqlConnector.dll"
 ) + $hostingAssets
 $devFailed = Deploy-Set $fwBuild $devRelease $devAssets $ts "dev Release"
 
@@ -210,7 +215,7 @@ $appAssets = @(
     "BrainX.Core.dll",
     "Microsoft.ML.OnnxRuntime.dll", "System.Numerics.Tensors.dll",
     "onnxruntime.dll", "onnxruntime_providers_shared.dll",
-    "Renci.SshNet.dll"
+    "Renci.SshNet.dll", "MySqlConnector.dll"
 ) + $hostingAssets
 
 $appFailed = @()
