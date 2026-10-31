@@ -53,6 +53,8 @@ public static class CodeGraphLinker
         foreach (var u in units)
         {
             issues.Languages[u.Language] = issues.Languages.GetValueOrDefault(u.Language) + 1;
+            foreach (var (rel, n) in u.External) issues.External[rel] = issues.External.GetValueOrDefault(rel) + n;
+            foreach (var (rel, n) in u.UnboundCounts) issues.Unresolved[rel] = issues.Unresolved.GetValueOrDefault(rel) + n;
             if (u.HasErrors) issues.SyntaxErrorFiles.Add(u.Path);
             if (u.Skipped != null) issues.SkippedFiles.Add($"{u.Path}: {u.Skipped}");
             var node = new CodeSymbol

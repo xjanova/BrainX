@@ -9033,6 +9033,7 @@ public partial class MainWindow : Window
                 SetUniverseLoadingStatus(
                     $"Streaming {_graph.TotalNodes:N0} notes into galaxy",
                     "Final frame");
+                PushCodeGraphToUniverse();
                 PushBrainSnapshotToUniverse();
                 // FALLBACK hide only. The handover belongs to hudReady (below):
                 // `ready` fires when the galaxy module boots, and measured here

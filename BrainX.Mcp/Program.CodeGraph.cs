@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.RegularExpressions;
 using BrainX.Core.Services;
 using Newtonsoft.Json.Linq;
+using CodeGraphModel = BrainX.Core.Services.CodeGraph;
 
 namespace BrainX.Mcp;
 
@@ -9,12 +10,12 @@ internal static partial class Program
 {
     // One parsed graph per repo, reloaded when its file changes. Requests run
     // one at a time under _requestGate, so this needs no lock of its own.
-    private static readonly Dictionary<string, (CodeGraph Graph, DateTime WrittenAt)> _codeGraphs = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, (CodeGraphModel Graph, DateTime WrittenAt)> _codeGraphs = new(StringComparer.Ordinal);
 
     private const string GraphifyHint =
-        "Build one with Graphify (AST only, no LLM pass) in the repository, then brain_code_import its graphify-out/graph.json.";
+        "Run brain_code_build on a C# repository, or brain_code_import for a Graphify graph.json.";
 
-    private static CodeGraph? CodeGraphFor(string repo)
+    private static CodeGraphModel? CodeGraphFor(string repo)
     {
         var path = CodeGraphStore.PathFor(_vaultPath, repo);
         if (!File.Exists(path)) { _codeGraphs.Remove(repo); return null; }
@@ -58,6 +59,7 @@ internal static partial class Program
 
         var sw = Stopwatch.StartNew();
         var graph = GraphifyAdapter.Import(file, repoRoot, repo);
+        BrainX.CodeGraph.CodeMentionLinker.Link(_vaultPath, graph);
         CodeGraphStore.Save(_vaultPath, graph);
         _codeGraphs.Remove(repo);
         var ms = sw.Elapsed.TotalMilliseconds;
@@ -93,6 +95,40 @@ internal static partial class Program
         };
     }
 
+    private static JToken BrainCodeBuild(JObject args)
+    {
+        if (IsRemoteChild || _cloudMode)
+            throw new InvalidOperationException("brain_code_build reads local source files and is available only on the owner's machine");
+        var raw = args["repo_root"]?.ToString()?.Trim();
+        if (string.IsNullOrEmpty(raw)) throw new ArgumentException("repo_root is required");
+        var root = Path.GetFullPath(raw);
+        if (!Directory.Exists(root)) throw new DirectoryNotFoundException($"repo_root {root} does not exist");
+        var repoArg = args["repo"]?.ToString();
+        var repo = CodeGraphStore.NormaliseRepo(string.IsNullOrWhiteSpace(repoArg)
+            ? Regex.Replace(Path.GetFileName(root.TrimEnd('\\', '/')).ToLowerInvariant(), "[^a-z0-9._-]+", "-").Trim('-', '.')
+            : repoArg);
+        var (graph, report) = BrainX.CodeGraph.CodeGraphBuilder.Build(_vaultPath, root, repo,
+            BrainX.CodeGraph.SyntaxFileExtractor.Defaults, args["full"]?.Value<bool>() ?? false);
+        if (graph != null) _codeGraphs.Remove(repo);
+        LogQuery("brain_code_build", repo, graph?.Edges.Count ?? 0, report.Status);
+        return new JObject
+        {
+            ["repo"] = repo, ["status"] = report.Status, ["repoRoot"] = root,
+            ["source"] = graph?.Source.Kind, ["commit"] = graph?.Commit,
+            ["symbols"] = graph?.Symbols.Count, ["edges"] = graph?.Edges.Count,
+            ["relations"] = graph == null ? null : JObject.FromObject(graph.Issues.Relations),
+            ["provenance"] = graph == null ? null : JObject.FromObject(graph.Issues.Provenance),
+            ["languages"] = graph == null ? null : JObject.FromObject(graph.Issues.Languages),
+            ["unresolved"] = graph == null ? null : JObject.FromObject(graph.Issues.Unresolved),
+            ["filesScanned"] = report.FilesScanned, ["filesRead"] = report.FilesRead,
+            ["filesRebound"] = report.FilesRebound, ["filesRemoved"] = report.FilesRemoved,
+            ["filesUnchanged"] = report.FilesUnchanged,
+            ["projects"] = new JArray(report.Projects), ["warnings"] = new JArray(report.Warnings),
+            ["changed"] = new JArray(report.Changed), ["milliseconds"] = JObject.FromObject(report.Ms),
+            ["next"] = $"brain_code_trace {{\"repo\":\"{repo}\",\"symbol\":\"<name>\"}}"
+        };
+    }
+
     private static JToken BrainCodeTrace(JObject args)
     {
         var sw = Stopwatch.StartNew();
@@ -121,8 +157,9 @@ internal static partial class Program
 
         var symbol = args["symbol"]?.ToString()?.Trim();
         var query = args["query"]?.ToString()?.Trim();
-        if (string.IsNullOrEmpty(symbol) && string.IsNullOrEmpty(query))
-            throw new ArgumentException("symbol or query is required");
+        var noteId = args["note_id"]?.ToString()?.Trim();
+        if (string.IsNullOrEmpty(symbol) && string.IsNullOrEmpty(query) && string.IsNullOrEmpty(noteId))
+            throw new ArgumentException("symbol, query or note_id is required");
 
         var seeds = new List<CodeSymbol>();
         var unresolved = new JArray();
@@ -140,6 +177,17 @@ internal static partial class Program
                     ["candidates"] = new JArray(m.Symbols.Take(20).Select(SymbolJson))
                 };
             else unresolved.Add(symbol);
+        }
+        else if (!string.IsNullOrEmpty(noteId))
+        {
+            seedsFrom = "note-mentions";
+            var ids = graph.Mentions.Where(m => m.NoteId == noteId ||
+                    m.NotePath.Equals(noteId, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(m => m.Count).ThenBy(m => m.SymbolId, StringComparer.Ordinal)
+                .Select(m => m.SymbolId).Distinct(StringComparer.Ordinal).Take(5);
+            foreach (var id in ids)
+                if (graph.Index.ById.TryGetValue(id, out var code)) seeds.Add(code);
+            if (seeds.Count == 0) unresolved.Add(noteId);
         }
         else
         {
@@ -230,6 +278,15 @@ internal static partial class Program
         };
         if (ambiguity != null) ret["ambiguity"] = ambiguity;
         if (unresolved.Count > 0) ret["unresolved"] = unresolved;
+        var seedIds = seeds.Select(s => s.Id).ToHashSet(StringComparer.Ordinal);
+        var exactNotes = graph.Mentions.Where(m => seedIds.Contains(m.SymbolId))
+            .OrderByDescending(m => m.Count).ThenBy(m => m.NotePath, StringComparer.Ordinal).Take(8).ToList();
+        if (exactNotes.Count > 0)
+            ret["linkedNotes"] = new JArray(exactNotes.Select(m => new JObject
+            {
+                ["id"] = m.NoteId, ["path"] = m.NotePath, ["symbolId"] = m.SymbolId,
+                ["writtenAs"] = m.Text, ["count"] = m.Count
+            }));
 
         // Every row is priced as it will be printed (indented, two levels in),
         // and the envelope is paid first, so max_tokens bounds the answer the

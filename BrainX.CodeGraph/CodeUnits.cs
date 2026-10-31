@@ -38,6 +38,10 @@ public sealed class CodeFileUnit
     /// method that did not exist yet is picked up once it does.
     /// </summary>
     public List<string> Unbound { get; set; } = [];
+    /// <summary>References a compiler-backed extractor bound outside the repo (framework, packages), per relation. Counted, not stored.</summary>
+    public Dictionary<string, int> External { get; set; } = new(StringComparer.Ordinal);
+    /// <summary>References a compiler-backed extractor could not bind at all, per relation.</summary>
+    public Dictionary<string, int> UnboundCounts { get; set; } = new(StringComparer.Ordinal);
 }
 
 public sealed class UnitSymbol

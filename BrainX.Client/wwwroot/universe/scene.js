@@ -701,7 +701,7 @@ function buildEdges(nodes, edges) {
         // per-edge alpha drops so total scene luminosity stays where the
         // original 0.18/0.07 tuning intended.
         const same = a.category === b.category;
-        const base = same ? 0.12 : 0.035;
+        const base = edges[i].kind === 'mention' ? 0.26 : edges[i].kind === 'code' ? 0.18 : same ? 0.12 : 0.035;
         alphas[2 * i + 0] = base;
         alphas[2 * i + 1] = base;
         baseAlpha[i] = base;

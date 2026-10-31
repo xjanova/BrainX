@@ -98,7 +98,9 @@ function basisFromNormal(n) {
 export function buildUniverse(brain) {
     const rawNodes = brain.Nodes ?? brain.nodes ?? [];
     if (!rawNodes.length) {
-        return { nodes: [], edges: [], galaxies: [] };
+        const nodes = [], edges = [], galaxies = [];
+        addCodeLayer(brain.CodeOverlay ?? brain.codeOverlay, nodes, edges, galaxies, new Map(), 80);
+        return { nodes, edges, galaxies };
     }
 
     // 1) Group nodes by primary category.
@@ -203,6 +205,7 @@ export function buildUniverse(brain) {
 
             const node = {
                 id,
+                sourceKind: 'note',
                 title: n.Title ?? n.title ?? '(untitled)',
                 category: g.category,
                 galaxyIdx,
@@ -227,7 +230,69 @@ export function buildUniverse(brain) {
         });
     }
 
-    return { nodes, edges: linkEdges(nodes, idIndex), galaxies };
+    const edges = linkEdges(nodes, idIndex);
+    addCodeLayer(brain.CodeOverlay ?? brain.codeOverlay, nodes, edges, galaxies, idIndex, galaxyR);
+    return { nodes, edges, galaxies };
+}
+
+/** Code is an outer, cyan galaxy. Note stars keep their original ids and homes. */
+export function addCodeLayer(layer, nodes, edges, galaxies, idIndex, galaxyR) {
+    if (!Array.isArray(layer?.nodes) || layer.nodes.length === 0) return;
+    const byRepo = new Map();
+    for (const raw of layer.nodes) {
+        if (!raw?.id || idIndex.has(raw.id)) continue;
+        const repo = raw.repo || 'code';
+        if (!byRepo.has(repo)) byRepo.set(repo, []);
+        byRepo.get(repo).push(raw);
+    }
+    // Start beyond the outermost note disk, including its radius. A large
+    // Programming galaxy can reach farther than the nominal sphere radius.
+    let offset = Math.max(galaxyR, ...galaxies.map(g => Math.hypot(g.center.x, g.center.y, g.center.z) + g.radius)) + 35;
+    for (const [repo, list] of byRepo) {
+        const radius = 18 + Math.sqrt(list.length) * 2.2;
+        const center = { x: offset + radius, y: 0, z: 0 };
+        const normal = { x: 0, y: 1, z: 0 };
+        const basis = basisFromNormal(normal);
+        const galaxyIdx = galaxies.length;
+        const source = list[0]?.source === 'graphify' ? 'Graphify' : 'BrainX';
+        const category = `code:${repo}`;
+        galaxies.push({ category, label: `Code · ${repo} (${source})`, color: 0x30ddea,
+            center, normal, basisU: basis.u, basisV: basis.v, count: list.length,
+            score: 0, totalWords: 0, radius, isCode: true });
+        list.forEach((raw, i) => {
+            const angle = i * 2.399963229728653;
+            const r = radius * 0.82 * Math.sqrt((i + 0.5) / list.length);
+            const u = r * Math.cos(angle), v = r * Math.sin(angle);
+            const n = (hashStr(raw.id) % 1000) / 1000 * 3 - 1.5;
+            const position = {
+                x: center.x + basis.u.x * u + basis.v.x * v + normal.x * n,
+                y: center.y + basis.u.y * u + basis.v.y * v + normal.y * n,
+                z: center.z + basis.u.z * u + basis.v.z * v + normal.z * n
+            };
+            const node = { id: raw.id, title: raw.title || raw.id, category, galaxyIdx,
+                categoryLabel: `Code · ${repo} (${source})`, sourceKind: 'code', codeKind: raw.kind,
+                codeSource: source, codeRepo: repo, codeFile: raw.file, codeLine: raw.line,
+                color: raw.kind === 'file' ? 0x8ef5ff : 0x30ddea,
+                position, local: { u, v, n }, size: raw.kind === 'file' ? 2.0 : 1.2,
+                brightness: raw.kind === 'file' ? 0.9 : 0.7, wordCount: 0,
+                tags: [raw.kind || 'symbol', source], preview: raw.signature || raw.file || '',
+                modifiedAt: null, linkedIds: [] };
+            idIndex.set(node.id, nodes.length);
+            nodes.push(node);
+        });
+        offset += radius * 2 + 25;
+    }
+    const seen = new Set();
+    function link(aId, bId, kind, relation) {
+        const a = idIndex.get(aId), b = idIndex.get(bId);
+        if (a == null || b == null || a === b) return;
+        const key = `${Math.min(a, b)}:${Math.max(a, b)}:${kind}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        edges.push({ a, b, kind, relation });
+    }
+    for (const e of layer.edges ?? []) link(e.from, e.to, 'code', e.relation);
+    for (const m of layer.mentions ?? []) link(m.noteId, m.symbolId, 'mention', 'mentions');
 }
 
 /**

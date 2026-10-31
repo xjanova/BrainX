@@ -64,6 +64,7 @@ public static class McpRemotePolicy
         "brain_import_path",
         // Reads a graph.json anywhere on the owner's disk, like brain_import_path.
         "brain_code_import",
+        "brain_code_build",
         "brain_apply_audit_fix",
         "bridge_status",
         // Start a local Grok process on the owner's subscription.

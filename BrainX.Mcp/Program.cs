@@ -1342,11 +1342,11 @@ internal static partial class Program
                     ["required"] = new JArray("reference")
                 }),
             Tool("brain_code_trace",
-                "Who calls/imports/inherits what in an imported code graph, plus the notes that explain it. " +
-                "Pass symbol (name, path#name, Class.method or id) or a query naming identifiers. " +
+                "Who calls/imports/inherits what in a built or imported code graph, plus the notes that explain it. " +
+                "Pass symbol (name, path#name, Class.method or id), a query naming identifiers, or note_id to follow exact note-to-code mentions. " +
                 "Bounded by hops, max_edges and max_tokens; hubs are reported, not expanded. " +
                 "Each edge keeps provenance (EXTRACTED/INFERRED/AMBIGUOUS), file:line and freshness; " +
-                "an ambiguous name returns candidates, never a guess. status no-graph = run brain_code_import first.",
+                "an ambiguous name returns candidates, never a guess. status no-graph = run brain_code_build or brain_code_import first.",
                 new JObject
                 {
                     ["type"] = "object",
@@ -1354,6 +1354,7 @@ internal static partial class Program
                     {
                         ["symbol"] = new JObject { ["type"] = "string" },
                         ["query"] = new JObject { ["type"] = "string", ["description"] = "Question; its identifiers seed the walk and it ranks the notes." },
+                        ["note_id"] = new JObject { ["type"] = "string", ["description"] = "Exact note id or vault-relative path; seeds code symbols that note explicitly names." },
                         ["repo"] = new JObject { ["type"] = "string", ["description"] = "Required when more than one graph is imported." },
                         ["direction"] = new JObject { ["type"] = "string", ["enum"] = new JArray("both", "callers", "callees"), ["default"] = "both" },
                         ["relations"] = new JObject { ["type"] = "string", ["description"] = "Comma list, e.g. calls,imports,inherits. Default all." },
@@ -1378,6 +1379,20 @@ internal static partial class Program
                         ["repo_root"] = new JObject { ["type"] = "string", ["description"] = "Default: the folder above graphify-out." }
                     },
                     ["required"] = new JArray("path")
+                }),
+            Tool("brain_code_build",
+                "Build or refresh a repository code graph from local C# (Roslyn), JavaScript, TypeScript, Python and PHP (tree-sitter). Does not install or run Graphify. Local machine only. " +
+                "Records declarations, typed references, call sites, file stamps and provenance.",
+                new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["repo_root"] = new JObject { ["type"] = "string", ["description"] = "Repository folder to scan." },
+                        ["repo"] = new JObject { ["type"] = "string", ["description"] = "Graph slug; defaults to folder name." },
+                        ["full"] = new JObject { ["type"] = "boolean", ["default"] = false, ["description"] = "Ignore the per-file cache and rebuild." }
+                    },
+                    ["required"] = new JArray("repo_root")
                 }),
             Tool("brain_scope_list",
                 "List the brain's scope namespaces (top-level folders + their direct children) with note counts. Use BEFORE passing a scope arg to brain_search/brain_list/brain_walk so you know what scopes exist. Helps the user see how their brain is organised.",
@@ -2067,6 +2082,7 @@ internal static partial class Program
                 "brain_lookup"              => BrainLookup(args),
                 "brain_code_trace"          => BrainCodeTrace(args),
                 "brain_code_import"         => BrainCodeImport(args),
+                "brain_code_build"          => BrainCodeBuild(args),
                 "brain_get_note"            => BrainGetNote(args),
                 "brain_expertise"           => BrainExpertise(),
                 "brain_list"                => BrainList(args),

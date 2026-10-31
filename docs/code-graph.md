@@ -1,24 +1,46 @@
 # Code graph: who calls what, and why
 
-BrainX can hold a repository's symbols and their typed, directed relationships
-beside the vault, and answer a code question with both the call graph and the
-notes that explain it. BrainX does not parse code for this. `CodeIndexer` stays
-a regex symbol list for search; edges come from an external extractor, today
-[Graphify](https://github.com/Graphify-Labs/graphify)'s `graph.json`. Graphify
-is never run or imported by BrainX: without it, `brain_code_trace` answers
-`no-graph` and every other tool behaves exactly as before.
+BrainX stores a repository's symbols and typed, directed relationships beside
+the vault. `brain_code_build` reads C# with Roslyn and JavaScript, TypeScript,
+TSX, Python and PHP with tree-sitter; it refreshes changed files and uses
+Graphify's graph model without installing or running Graphify. An
+existing [Graphify](https://github.com/Graphify-Labs/graphify) `graph.json` can
+still be imported with `brain_code_import`. `CodeIndexer` remains the separate
+regex symbol list used by ordinary search.
 
-## Build and import
+## Build from source
 
-Graphify's AST pass needs no LLM or API key:
+From a local MCP client:
 
-```powershell
-pip install graphifyy            # in a venv of your choice
-graphify extract C:\src\myrepo --code-only --out C:\graphs\myrepo
+```json
+{"repo_root": "C:/src/myrepo", "repo": "myrepo"}
 ```
 
-`--out` keeps Graphify's files out of the repository. Then, from any agent on
-this machine:
+Pass this to `brain_code_build`. C# binds calls, creations, inheritance,
+implementations, overrides and member uses with the compiler. The other
+languages record AST declarations, calls and imports, then resolve names with
+conservative lexical, import and unique-name rules. Those edges say INFERRED or
+AMBIGUOUS when the syntax cannot establish a unique target. The command stores
+a `brainx-code-graph/v2` graph plus a compressed per-file cache in the vault.
+A second call checks file stamps and content hashes. After a C# edit it
+rebinds unchanged C# callers against the new compilation, so adding an overload
+cannot leave an old call target in the graph. `full: true` ignores the cache.
+
+The report says which files were read or rebound, the language count, relation
+and provenance counts, unresolved references, project state and time per phase.
+
+Both build and import scan the note vault for exact, unambiguous code names.
+Qualified names such as `A.Run` and unique names written in backticks become
+note-to-symbol links. `brain_code_trace` accepts `note_id` (id or vault-relative
+path) to start from those symbols and includes `linkedNotes` for symbol seeds.
+The Universe's galaxy view keeps existing note stars and wiki-links, and draws
+a separate cyan code galaxy for the most relevant symbols. Exact note mentions
+form the bridges to that galaxy. The info card labels a code node's source as
+BrainX or Graphify. The neural-brain theme keeps its note-only anatomy.
+
+## Import an existing Graphify graph
+
+If a `graph.json` already exists, pass it from a local MCP client:
 
 ```json
 {"path": "C:/graphs/myrepo/graphify-out/graph.json", "repo": "myrepo", "repo_root": "C:/src/myrepo"}
@@ -28,7 +50,7 @@ this machine:
 `graphify-out/graph.json`. Paths in the graph are relative to the folder
 Graphify scanned; `repo_root` defaults to `graphify-out/.graphify_root`, then to
 the folder above `graphify-out`. The graph is stored as
-`.obsidianx/code-graphs/<repo>.json` (schema `brainx-code-graph/v1`), written
+`.obsidianx/code-graphs/<repo>.json` (schema `brainx-code-graph/v2`), written
 atomically. Import again after re-running Graphify; it replaces the old graph.
 
 The import checks and reports:
@@ -54,11 +76,14 @@ hard-blocks it by name.
 ```json
 {"symbol": "Program.KeywordScores", "direction": "callers", "relations": "calls"}
 {"symbol": "lib.py#process_item", "hops": 2, "max_edges": 40}
+{"note_id": "Notes/Call flow.md", "repo": "myrepo", "notes": 0}
 {"query": "ทำไม KeywordScores ต้อง preseed IDF", "notes": 3, "scope": "brainx"}
 ```
 
 **Identity.** A symbol id is `repo:path#name@Lline` (files: `repo:path`;
 nodes with no file, such as external modules: `repo:~<graphify id>`). A
+native symbol id omits the line number so it survives edits above its
+declaration; overloads include their parameter signature when needed. A
 reference resolves as an id, then `path#name`, then a qualified name
 (`Program.ScoreNode` as C# labels carry it, or `Class.method` through
 Graphify's `method`/`contains` edges), then a bare name, case-sensitively;
@@ -111,6 +136,7 @@ is the owner's call.
 dotnet build BrainX.Mcp -c Debug
 dotnet build BrainX.Tests -c Debug
 & .\BrainX.Tests\bin\Debug\net10.0\BrainX.Tests.exe --only 'code graph:'
+node BrainX.Client/wwwroot/universe/code-layer.test.mjs
 python -I tools/benchmark-code-graph.py --mcp BrainX.Mcp/bin/Release/net9.0/brainx-mcp.exe `
   --graph C:/graphs/brainx/graphify-out/graph.json --repo-root C:/src/brainx `
   --source-vault C:/vault --output code-graph-benchmark.json
@@ -130,6 +156,11 @@ opens the source vault) and, per question, reports first-call and warm latency
 including MCP and journaling, the answer's size, and a grep baseline for the
 same question: lines naming the symbol, and the size of the files they are in.
 grep matches names, not resolved calls; the comparison is about context size.
+
+A native smoke build on this checkout (403 C#/JS/Python files, no notes in the
+throwaway vault) produced 12,433 symbols and 40,032 edges in 18.3 s. An
+unchanged second build read no source files and completed in 1.94 s. This is a
+local check of the extractor and cache, not a vault-wide indexing benchmark.
 
 ### Measured on 2026-10-31
 
@@ -176,9 +207,12 @@ tools or MCP server, which were not run.
 ## Limits and next steps
 
 - Graphify records start lines only and one edge per node pair (above).
-- Nothing yet maps a note back to the symbols it mentions; the join runs from
-  code to notes.
-- BrainX never runs Graphify itself; re-run it and import again when code moves.
+- The syntax-only languages cannot bind dynamically dispatched calls as exactly
+  as the C# compiler. Unresolved calls are counted rather than guessed.
+- The Universe draws a bounded code neighborhood to keep the scene responsive;
+  `brain_code_trace` queries the full stored graph.
+- BrainX never runs Graphify itself; if using an imported graph, refresh that
+  graph externally and import again when code moves.
   `stale`, `graph.state` and per-file `freshness` say when that is due.
 - `brain_code_trace` is local only until the owner decides on remote exposure.
 - Each MCP process holds an imported graph in memory after its first trace

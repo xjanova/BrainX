@@ -13,6 +13,99 @@ internal static partial class Program
         checks.Add(("code graph: git HEAD, path containment and file freshness without a process", CodeGraphPlumbingChecks));
         checks.Add(("code graph: traversal is directed, typed, deterministic and bounded", CodeGraphTraceChecks));
         checks.Add(("code graph: Graphify import and trace through the real MCP, search left intact", CodeGraphEndToEnd));
+        checks.Add(("code graph: native C# build, cache, rebind and trace through MCP", CodeGraphNativeBuild));
+    }
+
+    private static async Task CodeGraphNativeBuild()
+    {
+        var exe = FindMcpExe() ?? throw new InvalidOperationException("Build brainx-mcp first");
+        var (root, vault, _) = EmbedVault(0);
+        var repo = Path.Combine(root, "sample");
+        Directory.CreateDirectory(repo);
+        File.WriteAllText(Path.Combine(repo, "A.cs"), "class A\n{\n    public void Run()\n    {\n        B.Go();\n        B.Go();\n    }\n}\n");
+        var b = Path.Combine(repo, "B.cs");
+        File.WriteAllText(b, "static class B { public static void Go() {} }\n");
+        WriteNote(vault, "Notes/Call flow.md", "# Call flow\nA.Run invokes B.Go. The `Go` method is the same target.\n");
+        File.WriteAllText(Path.Combine(vault, ".obsidianx", "brain-export.json"), JsonConvert.SerializeObject(Snapshot(vault)));
+        Process? server = null;
+        try
+        {
+            server = await StartServer(exe, vault);
+            var rpc = 300;
+            async Task<JObject> Call(string name, JObject args) => ToolJson(await Rpc(server, rpc++, "tools/call",
+                new JObject { ["name"] = name, ["arguments"] = args }));
+            var args = new JObject { ["repo_root"] = repo, ["repo"] = "sample" };
+            var built = await Call("brain_code_build", args);
+            Check("native build reads both C# files", built["status"]?.ToString() == "built"
+                && built["filesRead"]?.Value<int>() == 2, built.ToString());
+            var graph = CodeGraphStore.Load(vault, "sample")!;
+            var call = graph.Edges.SingleOrDefault(e => e.Relation == "calls"
+                && graph.Index.ById[e.From].Name == "Run" && graph.Index.ById[e.To].Name == "Go");
+            Check("native build binds to B.Go and keeps both call sites", call?.Provenance == "EXTRACTED"
+                && call.Lines?.SequenceEqual([5, 6]) == true, call == null ? "no edge" : JsonConvert.SerializeObject(call));
+            Check("native build links a note to exact code symbols", graph.Mentions.Count == 2
+                && graph.Mentions.Any(m => m.Text == "A.Run") && graph.Mentions.Any(m => m.Text == "B.Go"), JsonConvert.SerializeObject(graph.Mentions));
+            var trace = await Call("brain_code_trace", new JObject { ["repo"] = "sample", ["symbol"] = "A.Run", ["relations"] = "calls", ["notes"] = 0 });
+            Check("native graph is available through the existing trace", trace["status"]?.ToString() == "ok"
+                && (trace["edges"] as JArray)?.Count == 1, trace.ToString());
+            Check("trace reports exact linked notes", (trace["linkedNotes"] as JArray)?.Any(n => n["writtenAs"]?.ToString() == "A.Run") == true);
+            var fromNote = await Call("brain_code_trace", new JObject { ["repo"] = "sample", ["note_id"] = "Notes/Call flow.md", ["notes"] = 0 });
+            Check("note seeds its named code symbols", fromNote["status"]?.ToString() == "ok"
+                && fromNote["seedsFrom"]?.ToString() == "note-mentions" && (fromNote["seeds"] as JArray)?.Count == 2, fromNote.ToString());
+            var same = await Call("brain_code_build", args);
+            Check("second build uses the persisted cache", same["status"]?.ToString() == "unchanged"
+                && same["filesRead"]?.Value<int>() == 0, same.ToString());
+            File.WriteAllText(b, "static class B { public static void Other() {} }\n");
+            var changed = await Call("brain_code_build", args);
+            graph = CodeGraphStore.Load(vault, "sample")!;
+            Check("removed target rebinds its unchanged caller", changed["status"]?.ToString() == "refreshed"
+                && changed["filesRead"]?.Value<int>() == 1 && changed["filesRebound"]?.Value<int>() == 1
+                && !graph.Edges.Any(e => e.Relation == "calls" && graph.Index.ById[e.From].Name == "Run"), changed.ToString());
+            File.WriteAllText(Path.Combine(repo, "lib.js"), "export function helper() {}\nexport class JsBase {}\n");
+            File.WriteAllText(Path.Combine(repo, "main.js"), "import { helper, JsBase } from './lib.js';\nexport function runJs() { helper(); }\nexport class JsChild extends JsBase {}\n");
+            File.WriteAllText(Path.Combine(repo, "main.ts"), "export function runTs() { doneTs(); }\nfunction doneTs() {}\n");
+            File.WriteAllText(Path.Combine(repo, "main.tsx"), "function helperTsx() { return <div />; }\nexport function View() { return helperTsx(); }\n");
+            File.WriteAllText(Path.Combine(repo, "lib.py"), "def helper_py():\n    pass\n");
+            File.WriteAllText(Path.Combine(repo, "main.py"), "from .lib import helper_py\n\ndef run_py():\n    helper_py()\n    done_py()\n\ndef done_py():\n    pass\n\nclass PyBase: pass\nclass PyChild(PyBase): pass\n");
+            File.WriteAllText(Path.Combine(repo, "main.php"), "<?php\nfunction run_php() { done_php(); }\nfunction done_php() {}\nclass PhpBase {}\nclass PhpChild extends PhpBase {}\n");
+            var mixed = await Call("brain_code_build", args);
+            graph = CodeGraphStore.Load(vault, "sample")!;
+            Check("tree-sitter reads JavaScript, TypeScript, Python and PHP", mixed["status"]?.ToString() == "refreshed"
+                && graph.Issues.Languages.GetValueOrDefault("javascript") == 2
+                && graph.Issues.Languages.GetValueOrDefault("typescript") == 1
+                && graph.Issues.Languages.GetValueOrDefault("tsx") == 1
+                && graph.Issues.Languages.GetValueOrDefault("python") == 2
+                && graph.Issues.Languages.GetValueOrDefault("php") == 1
+                && graph.Issues.SkippedFiles.Count == 0, mixed.ToString());
+            bool HasCall(string from, string to) => graph.Edges.Any(e => e.Relation == "calls"
+                && graph.Index.ById[e.From].Name == from && graph.Index.ById[e.To].Name == to);
+            Check("syntax graph resolves local and imported calls", HasCall("runJs", "helper")
+                && HasCall("runTs", "doneTs") && HasCall("run_py", "done_py")
+                && HasCall("run_py", "helper_py") && HasCall("View", "helperTsx")
+                && HasCall("run_php", "done_php"), JsonConvert.SerializeObject(graph.Issues));
+            bool HasBase(string child, string parent) => graph.Edges.Any(e => e.Relation == "inherits"
+                && graph.Index.ById[e.From].Name == child && graph.Index.ById[e.To].Name == parent);
+            Check("syntax graph records class inheritance", HasBase("JsChild", "JsBase")
+                && HasBase("PyChild", "PyBase") && HasBase("PhpChild", "PhpBase"), JsonConvert.SerializeObject(graph.Issues));
+            File.WriteAllText(Path.Combine(repo, "C.cs"), "class C { void Run() { D.Select(1); } }\n");
+            var overload = Path.Combine(repo, "D.cs");
+            File.WriteAllText(overload, "static class D { public static void Select(long x) {} }\n");
+            await Call("brain_code_build", args);
+            File.WriteAllText(overload, "static class D { public static void Select(long x) {} public static void Select(int x) {} }\n");
+            var rebound = await Call("brain_code_build", args);
+            graph = CodeGraphStore.Load(vault, "sample")!;
+            var selected = graph.Edges.Where(e => e.Relation == "calls" && graph.Index.ById[e.From].Name == "Run")
+                .Select(e => graph.Index.ById[e.To]).FirstOrDefault(s => s.Name == "Select");
+            Check("new overload rebinds an unchanged caller", rebound["filesRebound"]?.Value<int>() >= 1
+                && selected?.ExternalId.Contains("System.Int32", StringComparison.Ordinal) == true, rebound.ToString());
+            Check("native build stays unavailable remotely", !McpRemotePolicy.IsAllowed("brain_code_build", McpScope.ReadWrite));
+        }
+        finally
+        {
+            try { server?.Kill(true); } catch { }
+            server?.Dispose();
+            try { Directory.Delete(root, true); } catch { }
+        }
     }
 
     private const string FixtureCommit = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
