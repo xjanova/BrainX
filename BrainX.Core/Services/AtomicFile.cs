@@ -16,14 +16,15 @@ public static class AtomicFile
 
     /// <summary>
     /// Move <paramref name="tmp"/> over <paramref name="path"/>, waiting out a
-    /// reader for about half a second. Still refused after that, the exception
-    /// comes out as File.Move's would and the temp file is gone: most of these
-    /// land in the owner's vault, and nothing sweeps up after every writer.
+    /// reader for 650 ms to a second (a 10 ms sleep is nearer 16 on Windows). Still
+    /// refused after that, the exception comes out as File.Move's would and the
+    /// temp file is gone: most of these land in the owner's vault, and nothing
+    /// sweeps up after every writer.
     /// Not for a move that decides something, like taking mail out of an inbox:
     /// there a refusal is the answer. Not for anything but a scratch copy either:
     /// giving up deletes <paramref name="tmp"/>, so a real file handed in here is
-    /// a real file lost. And the half second is spent on the calling thread, which
-    /// on the UI thread is the whole window standing still.
+    /// a real file lost. And the wait is spent on the calling thread, which on the
+    /// UI thread is the whole window standing still.
     /// </summary>
     public static void MoveOver(string tmp, string path)
     {

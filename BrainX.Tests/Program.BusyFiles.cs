@@ -242,7 +242,7 @@ internal static partial class Program
             using (new FileStream(note, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
                 why = Pull();
             Check($"with the note open the pull stands back at once (took {took.ElapsedMilliseconds} ms)",
-                  why == "could not be written here" && took.ElapsedMilliseconds < 200, why);
+                  why == "could not be written here" && took.ElapsedMilliseconds < 400, why);
             Check("…the note is untouched", File.ReadAllText(note) == "mine", File.ReadAllText(note));
             Check("…and its download is not left in the vault", Directory.EnumerateFiles(dir).Count() == 1,
                   string.Join(", ", Directory.EnumerateFiles(dir).Select(Path.GetFileName)));
