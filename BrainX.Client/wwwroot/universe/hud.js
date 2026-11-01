@@ -490,7 +490,10 @@ function renderAgents(d = {}) {
     const enabled = bridges.filter(b => b.state !== 'off').length;
     const live = bridges.filter(b => b.state === 'live').length;
     const online = clients.filter(a => a.online).length;
-    setText('hud-agents-count', enabled ? `${online} online · ${live}/${enabled} bridge` : `${online} online`);
+    // A model can be wired to the brain with no session open, so "online" alone
+    // undercounts what is connected.
+    const linked = clients.filter(a => !a.moonOf && (a.state === 'live' || a.state === 'ready')).length;
+    setText('hud-agents-count', enabled ? `${online} online · ${linked} MCP · ${live}/${enabled} bridge` : `${online} online · ${linked} MCP`);
     markStep('agents');
 }
 

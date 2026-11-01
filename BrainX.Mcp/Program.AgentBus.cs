@@ -1,4 +1,5 @@
 using System.Text;
+using BrainX.Core.Services;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -896,6 +897,7 @@ internal static partial class Program
             ["self"] = me,
             ["myUnread"] = myUnread,
             ["peers"] = peers,
+            ["models"] = ModelConnections(),
             // Who is connected answers "who"; this answers "on what, waiting on
             // whom, and for how long" — the three facts a stalled collaboration
             // needs and that a roster of names cannot carry.
@@ -903,8 +905,38 @@ internal static partial class Program
             ["onlineNow"] = new JArray(onlineNow),
             ["hint"] = onlineNow.Count > 0
                 ? $"{string.Join(", ", onlineNow)} is on this brain RIGHT NOW — agent_send reaches them on their next tool call."
-                : "No other agent online (presence TTL 90s). agent_send still works — mail is delivered when they next connect."
+                : "No other agent online (presence TTL 90s). agent_send still works — the broker starts a model with canStart:true, any other gets the mail when it next connects."
         };
+    }
+
+    /// <summary>
+    /// Every model's link to the brain, including ones that have never connected
+    /// and this session's own. peers cannot say this: it is built from presence, so
+    /// a model that is registered but has no session open reads the same as one
+    /// that was never wired up. canStart is the probe the dashboard card uses.
+    /// </summary>
+    private static JArray ModelConnections()
+    {
+        JObject? runners = null;
+        try { runners = JObject.Parse(File.ReadAllText(Path.Combine(BusRoot, "runners.json")))["runners"] as JObject; }
+        catch { /* no runners.json means nothing can be started, which canStart will say */ }
+
+        var models = new JArray();
+        foreach (var model in AgentMcpLink.Models)
+        {
+            var age = PresenceAgeSeconds(model);
+            var online = IsOnline(age);
+            var registered = AgentMcpLink.Registered(model);
+            models.Add(new JObject
+            {
+                ["model"] = model,
+                ["state"] = AgentMcpLink.StateOf(online, age != null, registered),
+                ["mcpRegistered"] = registered,
+                ["online"] = online,
+                ["canStart"] = runners?[model] is JObject r && AgentInstall.Probe(model, r).Ready
+            });
+        }
+        return models;
     }
 
     // ───────────── piggyback notice ─────────────

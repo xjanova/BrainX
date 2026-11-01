@@ -1085,7 +1085,9 @@ internal static partial class Program
             Tool("agent_peers",
                 "Who else is on this brain? Lists every agent that has ever connected, whether each is " +
                 "online RIGHT NOW (presence heartbeat, TTL 90s), which client binary it runs, and how deep " +
-                "its unread inbox is. Call before agent_send to see whether the other side is live, or when " +
+                "its unread inbox is. `models` covers every model whether or not it ever connected: state live = " +
+                "a session is open now, ready = MCP registered in its config but no session open, canStart = the " +
+                "broker can start one. Call before agent_send to see whether the other side is live, or when " +
                 "the user asks 'codex เปิดอยู่ไหม' / 'who's connected'.",
                 new JObject { ["type"] = "object", ["properties"] = new JObject() }),
             Tool("agent_ask_user",
