@@ -185,6 +185,13 @@ public partial class MainWindow
         public double? AgeSeconds;
         public string ClientInfo = "";
         public int Pending;
+        /// <summary>Agent: a usable brainx-brain entry in its own config. null =
+        /// no config to read. See <see cref="BrainX.Core.Services.AgentMcpLink"/>.</summary>
+        public bool? McpRegistered;
+        /// <summary>Agent: the broker can start a session without anyone opening it.</summary>
+        public bool CanStart;
+        /// <summary>Agent: what stands between the broker and starting it, if anything.</summary>
+        public string? StartFix;
         /// <summary>Tool calls this agent has served since its MCP started, or
         /// calls forwarded to this bridge. Deltas become flow animations.</summary>
         public long Calls;
@@ -255,7 +262,8 @@ public partial class MainWindow
         foreach (var a in agents)
         {
             sb.Append(a.Name).Append(a.Online ? '+' : '-')
-              .Append(a.EverSeen ? 'k' : 'n').Append(a.Pending);
+              .Append(a.EverSeen ? 'k' : 'n').Append(a.Pending)
+              .Append(a.McpRegistered == true ? 'r' : '_');
             // A bridge being switched off, or failing, changes the node's
             // colours — so it has to be part of what triggers a redraw.
             if (a.IsBridge)
@@ -322,9 +330,23 @@ public partial class MainWindow
         // Owner (2026-10-17): "เชื่อมอะไรได้จึงจะแสดง" — an agent that never connected, or whose
         // program BrainX cannot find (or Gemini without a key), is not drawn; DashBusMissing says
         // which ones and how to connect them.
+        //
+        // Owner (2026-11-01): "เมื่อมีการเชื่อม mcp ได้ก็ควรโชว์เลยว่าเชื่อมตัวไหนบ้างทุกโมเดล".
+        // A model with a session open or a working MCP entry IS connected, so it
+        // is never hidden for lacking what only a headless start needs. Gemini
+        // without a key read "ยังไม่ได้เชื่อม" while its MCP entry was fine; the
+        // key is still named, on the node's tooltip.
         var reach = BusReach();
+        foreach (var a in byName.Values)
+        {
+            a.McpRegistered = BusLinks().GetValueOrDefault(a.Name);
+            var probed = reach.TryGetValue(a.Name, out var r) ? r : null;
+            a.CanStart = probed?.Ready == true;
+            a.StartFix = probed is { Ready: false } ? probed.Fix : null;
+        }
         _busMissing = byName.Values
-            .Where(a => a.MoonOf == null && (!a.EverSeen || reach.TryGetValue(a.Name, out var r) && !r.Ready))
+            .Where(a => a.MoonOf == null && !a.Online && a.McpRegistered != true
+                        && (!a.EverSeen || reach.TryGetValue(a.Name, out var r) && !r.Ready))
             .Select(a => (a.Name, reach.TryGetValue(a.Name, out var r) ? r : null))
             .OrderBy(m => m.Name, StringComparer.Ordinal).ToList();
         foreach (var (name, _) in _busMissing) byName.Remove(name);
@@ -887,8 +909,7 @@ public partial class MainWindow
             // Enabled and never up is UNKNOWN, not failed — nothing has tried.
             return a.EverSeen ? "ready" : "never";
         }
-        if (a.Online) return "live";
-        return a.EverSeen ? "idle" : "never";
+        return BrainX.Core.Services.AgentMcpLink.StateOf(a.Online, a.EverSeen, a.McpRegistered);
     }
 
     /// <summary>
@@ -945,7 +966,15 @@ public partial class MainWindow
         sb.Append(a.MoonOf != null
             ? $" — agent: ต่อเข้ามาหาสมอง · คนละ inbox กับ {BusDisplayName(a.MoonOf)}\n"
             : " — agent: ต่อเข้ามาหาสมอง\n");
-        sb.Append(a.Online ? "online" : a.EverSeen ? "offline" : "ยังไม่เคยเชื่อมต่อ");
+        sb.Append(a.Online ? "online"
+            : a.McpRegistered == true
+                ? a.CanStart
+                    ? "เชื่อม MCP แล้ว — ยังไม่มีเซสชันเปิดอยู่ · broker เริ่มให้เมื่อมีงาน"
+                    : "เชื่อม MCP แล้ว — จะต่อเมื่อเปิดแอป"
+                : a.EverSeen ? "offline" : "ยังไม่เคยเชื่อมต่อ");
+        if (a.McpRegistered == false) sb.Append("\nไม่พบ brainx-brain ที่ใช้งานได้ในคอนฟิกของตัวนี้");
+        if (a.StartFix != null) sb.Append($"\nให้ broker เริ่มเองได้: {a.StartFix}");
+        if (!a.Online && a.AgeSeconds is double ago) sb.Append($"\nเห็นล่าสุด {BusAgoText(ago)}");
         if (!string.IsNullOrEmpty(a.ClientInfo)) sb.Append($"\nclient: {a.ClientInfo}");
         if (a.Calls > 0) sb.Append($"\n{a.Calls} calls");
         if (a.Pending > 0) sb.Append($"\n{a.Pending} ข้อความรออ่าน");
@@ -981,14 +1010,21 @@ public partial class MainWindow
 
     private static string BusPresenceCaption(BusAgentState a)
     {
-        if (!a.EverSeen) return "ยังไม่เคยเชื่อมต่อ";
         // Presence is rewritten on every tool call, so a very fresh timestamp
         // means the agent is working right now — name what it just did rather
         // than the generic "online".
         if (a.Online && a.AgeSeconds is double fresh && fresh < 25 && !string.IsNullOrEmpty(a.LastTool))
             return Ellipsize(a.LastTool!, 18);
         if (a.Online) return "online";
-        if (a.AgeSeconds is not double s) return "offline";
+        // Registered with no session open is the resting state of a model that
+        // connects per session, and "35 นาทีก่อน" made it read as gone.
+        if (a.McpRegistered == true) return a.CanStart ? "เชื่อมแล้ว · เรียกได้" : "เชื่อมแล้ว · รอเปิดแอป";
+        if (!a.EverSeen) return "ยังไม่เคยเชื่อมต่อ";
+        return a.AgeSeconds is double s ? BusAgoText(s) : "offline";
+    }
+
+    private static string BusAgoText(double s)
+    {
         if (s < 3600) return $"{Math.Max(1, Math.Round(s / 60))} นาทีก่อน";
         if (s < 86400) return $"{Math.Round(s / 3600)} ชม.ก่อน";
         return $"{Math.Round(s / 86400)} วันก่อน";
@@ -1015,6 +1051,19 @@ public partial class MainWindow
         catch { /* an unreadable runners.json hides nobody */ }
         _busReachAt = DateTime.UtcNow;
         return _busReach = map;
+    }
+
+    private Dictionary<string, bool?>? _busLinks;
+    private DateTime _busLinksAt;
+
+    /// <summary>Which models carry a working brainx-brain entry, read at most every
+    /// 30 seconds for the same reason as <see cref="BusReach"/>.</summary>
+    private Dictionary<string, bool?> BusLinks()
+    {
+        if (_busLinks != null && DateTime.UtcNow - _busLinksAt < TimeSpan.FromSeconds(30)) return _busLinks;
+        _busLinksAt = DateTime.UtcNow;
+        return _busLinks = BrainX.Core.Services.AgentMcpLink.Models.ToDictionary(
+            m => m, BrainX.Core.Services.AgentMcpLink.Registered, StringComparer.OrdinalIgnoreCase);
     }
 
     private void DashBusMissing_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
@@ -1052,12 +1101,13 @@ public partial class MainWindow
         var known = clients.Count(a => a.EverSeen);
         var bridgesOn = bridges.Count(b => b.BridgeEnabled);
         var bridgesLive = bridges.Count(b => b.Online);
+        var linked = clients.Where(a => a.MoonOf == null && (a.Online || a.McpRegistered == true)).ToList();
 
         // Two populations, two counts. Folding them into one "N online" was
         // how a live Unity and a dead one looked identical from the header.
         DashBusOnlineCountText.Text = bridgesOn > 0
-            ? $"{online} online · {bridgesLive}/{bridgesOn} bridge"
-            : $"{online} online · {known} known";
+            ? $"{online} online · {linked.Count} MCP · {bridgesLive}/{bridgesOn} bridge"
+            : $"{online} online · {linked.Count} MCP · {known} known";
         DashBusLiveDot.Fill = online > 0 || bridgesLive > 0
             ? new SolidColorBrush(BusColorLive)
             : BusThemeBrush("TextMutedBrush", BusColorIdle);
@@ -1085,10 +1135,11 @@ public partial class MainWindow
             }
         }
 
-        // Bridge health LEADS the line — it is the only part of this card the
-        // owner cannot learn anywhere else without asking an agent to run
-        // bridge_status, and the row trims from the right.
+        // Who is connected LEADS the line, by name (owner, 2026-11-01). Bridge
+        // health follows — the owner cannot learn it anywhere else without
+        // asking an agent to run bridge_status, and the row trims from the right.
         var line = new List<string>();
+        if (linked.Count > 0) line.Add("เชื่อม MCP: " + string.Join(", ", linked.Select(a => BusDisplayName(a.Name))));
         foreach (var b in bridges)
         {
             var who = BusDisplayName(b.Name);

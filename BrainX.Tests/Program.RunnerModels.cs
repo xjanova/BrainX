@@ -16,7 +16,54 @@ internal static partial class Program
         checks.Add(("runner effort: each CLI is told its level its own way, and only a plain level ever goes", RunnerEffortArgs));
         checks.Add(("bus seal: a sealed line is only the owner's under the name it was written as", SealWrittenAsChecks));
         checks.Add(("agent install: a runner BrainX cannot start says so, with where to get it", AgentInstallChecks));
+        checks.Add(("mcp link: a model is connected by what its own config says, not only by an open session", AgentMcpLinkChecks));
         checks.Add(("google ai: image models are read from the key's own list, newest first", GoogleImageModelChecks));
+    }
+
+    private static Task AgentMcpLinkChecks()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "bx-mcplink-" + Guid.NewGuid().ToString("N")[..6]);
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var exe = Path.Combine(dir, "brainx-mcp.exe");
+            File.WriteAllText(exe, "");
+            var gone = Path.Combine(dir, "deleted", "brainx-mcp.exe");
+            string Write(string name, string text) { var p = Path.Combine(dir, name); File.WriteAllText(p, text); return p; }
+            string Json(string entry) => Write("c.json", "{\"mcpServers\":{\"brainx-brain\":" + entry + "}}");
+            string Esc(string s) => s.Replace(@"\", @"\\");
+
+            Check("toml: the shape Codex and Grok write counts",
+                  AgentMcpLink.TomlRegistered(Write("a.toml", $"model = \"x\"\n\n[mcp_servers.brainx-brain]\ncommand = '{exe}'\n\n[mcp_servers.brainx-brain.env]\nBRAINX_VAULT = 'G:\\Obsidian'\n")) == true);
+            Check("toml: a double-quoted path is unescaped first",
+                  AgentMcpLink.TomlRegistered(Write("b.toml", $"[mcp_servers.brainx-brain]\ncommand = \"{Esc(exe)}\"\n")) == true);
+            Check("toml: a command in ANOTHER server's section proves nothing",
+                  AgentMcpLink.TomlRegistered(Write("c.toml", $"[mcp_servers.node_repl]\ncommand = '{exe}'\n")) == false);
+            Check("toml: enabled = false is not a connection",
+                  AgentMcpLink.TomlRegistered(Write("d.toml", $"[mcp_servers.brainx-brain]\ncommand = '{exe}'\nenabled = false\n")) == false);
+            Check("toml: an entry pointing at a deleted exe is not a connection",
+                  AgentMcpLink.TomlRegistered(Write("e.toml", $"[mcp_servers.brainx-brain]\ncommand = '{gone}'\n")) == false);
+            Check("toml: a remote url entry counts", AgentMcpLink.TomlRegistered(Write("f.toml", "[mcp_servers.brainx-brain]\nurl = 'https://brain.example/mcp'\n")) == true);
+            Check("no config file means unknown, never no", AgentMcpLink.TomlRegistered(Path.Combine(dir, "none.toml")) == null
+                                                           && AgentMcpLink.JsonRegistered(Path.Combine(dir, "none.json")) == null);
+
+            Check("json: the mcpServers shape counts", AgentMcpLink.JsonRegistered(Json($"{{\"command\":\"{Esc(exe)}\"}}")) == true);
+            Check("json: a bare command name is left to PATH", AgentMcpLink.JsonRegistered(Json("{\"command\":\"brainx-mcp\"}")) == true);
+            Check("json: enabled:false is not a connection", AgentMcpLink.JsonRegistered(Json($"{{\"command\":\"{Esc(exe)}\",\"enabled\":false}}")) == false);
+            Check("json: a deleted exe is not a connection", AgentMcpLink.JsonRegistered(Json($"{{\"command\":\"{Esc(gone)}\"}}")) == false);
+            Check("json: another server's entry proves nothing", AgentMcpLink.JsonRegistered(Write("g.json", "{\"mcpServers\":{\"other\":{\"command\":\"x\"}}}")) == false);
+
+            Check("a model BrainX has no config for is unknown", AgentMcpLink.Registered("someone") == null);
+            Check("every registrar's name is covered", AgentMcpLink.Models.SequenceEqual(new[] { "claude", "codex", "cluadex", "gemini", "grok" }));
+
+            Check("a session on the bus is live, registered or not", AgentMcpLink.StateOf(true, true, null) == "live" && AgentMcpLink.StateOf(true, true, false) == "live");
+            Check("registered with no session is ready, even if it never connected",
+                  AgentMcpLink.StateOf(false, true, true) == "ready" && AgentMcpLink.StateOf(false, false, true) == "ready");
+            Check("connected once, not registered now, is idle", AgentMcpLink.StateOf(false, true, false) == "idle" && AgentMcpLink.StateOf(false, true, null) == "idle");
+            Check("nothing known is never", AgentMcpLink.StateOf(false, false, null) == "never" && AgentMcpLink.StateOf(false, false, false) == "never");
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+        return Task.CompletedTask;
     }
 
     private static Task AgentInstallChecks()

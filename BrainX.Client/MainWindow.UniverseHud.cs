@@ -886,6 +886,7 @@ public partial class MainWindow
     private static string HudAgentDetail(BusAgentState a)
     {
         if (a.IsBridge) return HudBridgeDetail(a);
+        if (!a.Online && a.McpRegistered == true) return a.CanStart ? "MCP ready · on call" : "MCP ready";
         if (!a.EverSeen) return "never seen";
         if (a.Online && a.AgeSeconds is double fresh && fresh < 25 && !string.IsNullOrEmpty(a.LastTool))
             return Ellipsize(a.LastTool!, 18);

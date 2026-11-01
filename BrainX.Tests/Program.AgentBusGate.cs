@@ -16,6 +16,7 @@ internal static partial class Program
         checks.Add(("bus seal: only a line sealed with this machine's key passes as the owner's", BusSealChecks));
         checks.Add(("remote policy: agent_send may not name local files", RemoteArgumentChecks));
         checks.Add(("agent bus end to end: forged owner lines demoted, attachments confined", AgentBusEndToEnd));
+        checks.Add(("agent_peers: every model is listed with its MCP link, and no config path leaves", AgentPeersListsEveryModel));
         checks.Add(("bridge files: scratch copies a failed move left behind are swept, live ones never", BridgeTempSweepChecks));
         checks.Add(("bridge names: Grok sees unity_x with no '__' anywhere, every other client unity__x, and both spellings route", BridgeNamesPerClient));
         checks.Add(("bridge discovery: no tools is a failure, not a day of cache — and tools announced later arrive mid-session", BridgeEmptyToolListChecks));
@@ -490,6 +491,56 @@ internal static partial class Program
     /// ไปเตือน ไม่ต้องให้รู้ เป็นการทำงานคนละส่วน แต่เห็นกันผ่านสมองเท่านั้น".
     /// Two windows of one agent: one joined the room, one is a chat on other work.
     /// </summary>
+    private static async Task AgentPeersListsEveryModel()
+    {
+        var exe = FindMcpExe();
+        if (exe == null) { Check("brainx-mcp.exe (built) exists for the check", false); return; }
+
+        var root = Path.Combine(Path.GetTempPath(), "brainx-models-e2e-" + Guid.NewGuid().ToString("N"));
+        var vault = Path.Combine(root, "vault");
+        var bus = Path.Combine(vault, ".obsidianx", "agent-bus");
+        var key = Path.Combine(root, "bus-seal.key");
+        var runnerExe = Path.Combine(root, "codex.exe");
+        Directory.CreateDirectory(bus);
+        Directory.CreateDirectory(Path.Combine(vault, "Notes"));
+        File.WriteAllText(runnerExe, "");
+        BusSeal.EnsureKey(key);
+        File.WriteAllText(Path.Combine(bus, "runners.json"), new JObject
+        {
+            ["runners"] = new JObject
+            {
+                ["codex"] = new JObject { ["exe"] = runnerExe },
+                ["grok"] = new JObject { ["exe"] = Path.Combine(root, "nope", "grok.exe") },
+            }
+        }.ToString());
+
+        BusSession? session = null;
+        try
+        {
+            session = await StartBusSession(exe, vault, key, "codex");
+            var reply = await session.Call("agent_peers", new JObject());
+            var models = reply["models"] as JArray ?? new JArray();
+            JToken? Model(string name) => models.FirstOrDefault(m => m["model"]?.ToString() == name);
+
+            Check("every model is listed, including ones that never connected",
+                  models.Select(m => m["model"]?.ToString()).SequenceEqual(AgentMcpLink.Models), reply.ToString());
+            Check("this session's own model is there and live", Model("codex")?["state"]?.ToString() == "live" && Model("codex")?["online"]?.Value<bool>() == true);
+            Check("a runner whose program exists can be started", Model("codex")?["canStart"]?.Value<bool>() == true);
+            Check("a runner whose program is missing cannot", Model("grok")?["canStart"]?.Value<bool>() == false);
+            Check("a model with no runner cannot", Model("cluadex")?["canStart"]?.Value<bool>() == false);
+            Check("each state is one the card can draw",
+                  models.All(m => new[] { "live", "ready", "idle", "never" }.Contains(m["state"]?.ToString())));
+            Check("no path to anyone's config leaves, this tool is served to remote callers",
+                  !reply.ToString().Contains(root, StringComparison.OrdinalIgnoreCase)
+                  && !reply.ToString().Contains(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            if (session != null) await session.DisposeAsync();
+            try { Directory.Delete(root, true); } catch { }
+        }
+    }
+
     private static async Task RoomStaysInTheRoom()
     {
         var exe = FindMcpExe();
