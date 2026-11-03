@@ -287,7 +287,19 @@ internal static partial class Program
             }
         }
 
-        var result = ExecAndAuditAsync(profile, command, spent, hits).GetAwaiter().GetResult();
+        // The network wait runs with the request gate RELEASED. Every Code-tab
+        // session shares one server (Launcher.cs, THE ANSWER BUDGET), so an
+        // ssh_run holding the gate made every other agent's brain_search wait
+        // behind it — 34 s on 2026-11-03. Gate and audit stay under the lock;
+        // only the remote command does not. Monitor is thread-affine, so the
+        // release and the re-take both happen here, on the thread that holds
+        // it (Handle runs this synchronously), never inside the async exec.
+        var held = Monitor.IsEntered(_requestGate);
+        SshExecResult result;
+        if (held) Monitor.Exit(_requestGate);
+        try { result = ExecAsync(profile, command).GetAwaiter().GetResult(); }
+        finally { if (held) Monitor.Enter(_requestGate); }
+        AuditExec(profile, command, result, spent, hits);
         var json = ResultToJson(result, profile.Id, command);
         if (spent != null) json["confirm_id"] = spent;
         return json;
@@ -356,13 +368,27 @@ internal static partial class Program
             : $"{exe.Replace('\\', '/')} ssh-approve {id}";
     }
 
-    private static async Task<SshExecResult> ExecAndAuditAsync(SshProfile profile, string command,
-        string? confirmId, IReadOnlyList<SshCommandRisk.Hit> hits)
+    /// <summary>The remote command alone. Runs outside the request gate, so
+    /// it touches nothing but the executor and its own locals.</summary>
+    private static async Task<SshExecResult> ExecAsync(SshProfile profile, string command)
     {
         // The profile's max_runtime_sec, under a ceiling — and now actually
         // enforced: SshExecutor signals the remote command and closes the
         // session at this deadline instead of waiting it out.
         var deadline = TimeSpan.FromSeconds(Math.Clamp(profile.MaxRuntimeSec, 1, SshMaxRuntimeCeilingSec));
+        // Under the client's own patience, too. Claude Desktop shuts the whole
+        // server down when a call passes 60 s (Launcher.cs, THE ANSWER BUDGET),
+        // and an ssh_run was the call that did it seven times on 2026-11-03.
+        // Ending the command ourselves, a little before the launcher would
+        // answer for us, returns the output so far and keeps every other
+        // session's brain connected. The remote command dies either way.
+        var cappedByClient = false;
+        if (McpLauncher.AnswerBudgetFor(_clientName) is { } budget)
+        {
+            var under = budget - TimeSpan.FromSeconds(5);
+            if (under < TimeSpan.FromSeconds(1)) under = TimeSpan.FromSeconds(1);
+            if (under < deadline) { deadline = under; cappedByClient = true; }
+        }
 
         SshExecResult result;
         try
@@ -377,7 +403,16 @@ internal static partial class Program
         {
             result = SshExecResult.Failure($"exec exception: {ex.Message}");
         }
+        if (cappedByClient && result.TimedOut)
+            result.Error = (result.Error ?? "timed out")
+                + $" — capped at {deadline.TotalSeconds:0}s because this client ({_clientName}) ends the whole brain server when a call passes 60 s."
+                + " For longer work run it in the background (`nohup <cmd> > /tmp/job.log 2>&1 &`) and poll with ssh_tail or a short ssh_run.";
+        return result;
+    }
 
+    private static void AuditExec(SshProfile profile, string command, SshExecResult result,
+        string? confirmId, IReadOnlyList<SshCommandRisk.Hit> hits)
+    {
         // Host-key mismatch is a distinct event — possible MITM or an
         // unapproved server rekey — so it gets its own op.
         var op = result.IsHostKeyMismatch ? "ssh_mitm"
@@ -385,7 +420,6 @@ internal static partial class Program
                : result.Success          ? "ssh_ok"
                                          : "ssh_fail";
         AuditSsh(profile, op, command, result, confirmId, hits);
-        return result;
     }
 
     /// <summary>
@@ -776,4 +810,38 @@ internal static partial class Program
         }
         finally { ReleaseVaultLock(logLock); }
     }
+
+    // ── ssh waits off the request loop ──
+    //
+    // Same shape as the code build (Program.CodeGraph.cs): the call is handled
+    // on a task, so the loop keeps reading, and GateAndRun lets go of the
+    // request gate for the remote command alone. Many agents on one server
+    // (the Code tab's shared one) then wait for an ssh_run only if they are
+    // the one who called it.
+
+    /// <summary>A tools/call of ssh_run or ssh_tail to serve off the loop, or null.</summary>
+    internal static JObject? SshCallOf(string line)
+    {
+        if (!line.Contains("ssh_", StringComparison.Ordinal)) return null;
+        JObject req;
+        try { req = JObject.Parse(line.TrimStart('﻿')); }
+        catch { return null; }
+        if (req["method"]?.ToString() != "tools/call" || req["id"] is null or { Type: JTokenType.Null }) return null;
+        var name = (req["params"] as JObject)?["name"]?.ToString();
+        if (name is not ("ssh_run" or "ssh_tail")) return null;
+        return IsRemoteChild ? null : req;
+    }
+
+    private static void ServeSshOffLoop(JObject req, string line, TextWriter writer) => _ = Task.Run(async () =>
+    {
+        string response;
+        try { lock (_requestGate) response = Handle(line); }
+        catch (Exception ex)
+        {
+            Log($"ssh call error: {ex}");
+            response = BuildError(req["id"], -32603, $"internal error: {ex.Message}");
+        }
+        try { await WriteResponseAsync(writer, response).ConfigureAwait(false); }
+        catch (Exception ex) { Log($"ssh answer not written (client gone?): {ex.Message}"); }
+    });
 }

@@ -32,6 +32,8 @@ internal static class StubMcpServer
     /// <summary>Answer with the vault + sandbox flags this child was started
     /// with — how the cloud checks prove a session runs on ITS account's vault.</summary>
     private const string WhoAmIMarker = "__whoami__";
+    /// <summary>Write a line to stderr and die with exit code 3 — a worker crash.</summary>
+    private const string CrashMarker = "__crash__";
 
     /// <summary>Text stamped into a slow call's result. If this ever comes back
     /// as the answer to a LATER call, the pipe has desynced — which is the whole
@@ -158,6 +160,13 @@ internal static class StubMcpServer
                 + $"embedOnWrite={Environment.GetEnvironmentVariable("BRAINX_EMBED_ON_WRITE")};"
                 + $"escalate={Environment.GetEnvironmentVariable("BRAINX_SEARCH_ESCALATE")}");
 
+        if (query.Contains(CrashMarker, StringComparison.Ordinal))
+        {
+            Console.Error.WriteLine("stub: crashing on purpose");
+            Console.Error.Flush();
+            Environment.Exit(3);
+        }
+
         if (query.Contains(NoiseMarker, StringComparison.Ordinal))
         {
             // The three things a real server leaks onto the pipe that are NOT the
@@ -220,6 +229,7 @@ internal static class StubMcpServer
     public static string SlowQuery(int ms) => $"{SlowMarker}{ms}__";
     public static string NoisyQuery() => NoiseMarker;
     public static string WhoAmIQuery() => WhoAmIMarker;
+    public static string CrashQuery() => CrashMarker;
 
     /// <summary>A tools/call of an arbitrary (allowlisted) tool name.</summary>
     public static string ToolCallBody(object id, string tool, JObject? arguments = null) => new JObject
