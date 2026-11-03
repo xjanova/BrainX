@@ -561,7 +561,9 @@ internal static class McpLauncher
         List<(string Key, InflightCall Call)> overdue;
         lock (Inflight)
         {
-            overdue = Inflight.Where(kv => now - kv.Value.StartedUtc >= budget)
+            // Never the handshake: nothing else is in flight yet to protect, and
+            // an error there fails the connection just as the host's timeout would.
+            overdue = Inflight.Where(kv => kv.Value.Method != "initialize" && now - kv.Value.StartedUtc >= budget)
                               .Select(kv => (kv.Key, kv.Value)).ToList();
             foreach (var (key, call) in overdue) { Inflight.Remove(key); Late[key] = call; }
         }
