@@ -471,6 +471,9 @@ internal static partial class Program
             if (LongPollOf(line) is { } poll && TryServeLongPoll(poll, writer)) continue;
             // So does a code build, which can take minutes (Program.CodeGraph.cs).
             if (CodeBuildOf(line) is { } build) { ServeCodeBuild(build, line, writer); continue; }
+            // And an ssh_run / ssh_tail, which waits on a remote machine for up
+            // to its deadline while other agents' calls queue (Program.Ssh.cs).
+            if (SshCallOf(line) is { } ssh) { ServeSshOffLoop(ssh, line, writer); continue; }
             string response;
             try
             {
@@ -813,9 +816,13 @@ internal static partial class Program
             $"The owner's personal brain{size}: your primary memory, not optional context. " +
             "Tool calls are journaled automatically: never narrate your searches.\n\n" +
             "RULES\n" +
-            "1. Before a non-trivial answer, ask the brain: brain_recall (STRONG = cite it and move on; MISS = do the work) or brain_search with 2-4 keywords, " +
-            "with `scope` when you can name the project. No hits → brain_semantic_search without scope. Cite the titles you read. " +
-            "Skip only for trivial questions, explicit file paths, generic framework knowledge.\n" +
+            // Owner, 2026-11-03: the brain comes first, and "ถ้าหาอะไรไม่เจอทำไม่ได้
+            // ให้กลับมาค้นสมองอีกครั้งก่อนตอบว่าไม่ได้จริงๆ". The Stop hook enforces
+            // the second half (NativeHooks.GiveUpRecheck). Every character here
+            // counts against the 2,000 Claude Code shows.
+            "1. Brain FIRST, before a non-trivial answer: brain_recall (STRONG = cite it and move on; MISS = do the work) or brain_search with 2-4 keywords, " +
+            "with `scope` when you can name the project. No hits, or about to say you can't: other words, then brain_semantic_search unscoped; only then say so. " +
+            "Cite the titles you read. Skip only for trivial or generic questions.\n" +
             "2. After work that took >2 tool calls and taught something, save it without asking: brain_create_note, brain_remember for one line, " +
             "brain_append_note when the topic exists. Use the reply's `hygiene` (wikiLinks to paste, possibleDuplicates)." +
             // Only where an agent can SEE private browsing (the chrome bridge

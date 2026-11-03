@@ -357,7 +357,13 @@ internal static partial class NativeHooks
         var probe = args.Contains("--no-marker", StringComparer.OrdinalIgnoreCase);
 
         string? transcript = null;
-        try { using var doc = JsonDocument.Parse(bytes); transcript = Str(doc.RootElement, "transcript_path"); }
+        var continuing = false;
+        try
+        {
+            using var doc = JsonDocument.Parse(bytes);
+            transcript = Str(doc.RootElement, "transcript_path");
+            continuing = doc.RootElement.TryGetProperty("stop_hook_active", out var sha) && sha.ValueKind == JsonValueKind.True;
+        }
         catch { }
 
         var markerPath = Path.Combine(ClaudeDir, ".last-stop-marker");
@@ -417,6 +423,17 @@ internal static partial class NativeHooks
         }
         catch { }
 
+        // Before any nudge: an answer that gives up ("not found", "ทำไม่ได้")
+        // on a turn that asked the brain less than twice is sent back once to
+        // ask again. Quiet turns included — "I couldn't find it" is most often
+        // the answer to a question, not to an edit.
+        if (!continuing && GiveUpRecheck(lines, cutoff, turnTools) is { } reason)
+        {
+            StopRow(cutoff, "give-up-recheck", "0", "null", I(turnTools.Count), "null", probe);
+            Out("{\"decision\":\"block\",\"reason\":" + Json(reason) + "}");
+            return 0;
+        }
+
         if (!substantive)
         {
             StopRow(cutoff, "quiet-turn", "0", "null", I(turnTools.Count), "null", probe);
@@ -454,6 +471,77 @@ internal static partial class NativeHooks
                 auditAge == null ? "null" : D(auditAge.Value), probe);
         Out(HookOutput("Stop", msgText));
         return 0;
+    }
+
+    // ───────────── give-up recheck ─────────────
+    //
+    // Owner, 2026-11-03: "ถ้าหาอะไรไม่เจอทำไม่ได้ ให้กลับมาค้นสมองอีกครั้งก่อนตอบ
+    // ว่าไม่ได้จริงๆ". Rule 8 of the MCP instructions says it; this makes it so.
+    // Loop-safe twice over: never when Claude Code says this turn is already a
+    // stop-hook continuation, and never once the turn has asked the brain twice.
+
+    /// <summary>Phrases whose point is "I cannot / it is not there". Thai first:
+    /// the owner's sessions answer in Thai.</summary>
+    private static readonly System.Text.RegularExpressions.Regex GiveUp = new(
+        @"หาไม่เจอ|หาไม่พบ|ค้นไม่เจอ|ค้นไม่พบ|ไม่พบข้อมูล|ไม่มีข้อมูล|ไม่เจอข้อมูล|ทำไม่ได้|ไม่สามารถ(ทำ|หา|ค้น|เข้าถึง)|ไม่ทราบ"
+      + @"|\bI (couldn't|could not|can't|cannot|was unable to|am unable to|wasn't able to|am not able to) (find|locate|access|do|determine|tell)"
+      + @"|\bI (don't|do not) (know|have (any )?(information|access|record))"
+      + @"|\bno (information|record|notes?|mention) (about|of|on|for)\b",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// The block reason, or null to let the turn end. Looks only at the turn's
+    /// last assistant text, and only at its opening and closing — where an
+    /// answer states its point — so a long report that mentions, in passing,
+    /// something it could not prove does not trip it.
+    /// </summary>
+    internal static string? GiveUpRecheck(List<string> transcriptLines, DateTimeOffset cutoff, List<string> turnTools)
+    {
+        var brainReads = turnTools.Count(t =>
+        {
+            var us = t.LastIndexOf("__", StringComparison.Ordinal);
+            return BrainReads.Contains(us >= 0 ? t[(us + 2)..] : t);
+        });
+        if (brainReads >= 2) return null;
+
+        var text = LastAssistantText(transcriptLines, cutoff);
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var head = text.Length <= 600 ? text : text[..600];
+        var tail = text.Length <= 1000 ? "" : text[^400..];
+        var hit = GiveUp.Match(head) is { Success: true } h ? h : GiveUp.Match(tail);
+        if (!hit.Success) return null;
+
+        return $"BrainX: this answer says \"{hit.Value}\" but the turn asked the brain only {brainReads} time(s). "
+             + "Before telling the user it cannot be found or done, ask the brain again: brain_search with different keywords "
+             + "(synonyms, the Thai or English name, the project), then brain_semantic_search WITHOUT scope, then brain_walk from the "
+             + "closest note. If one of them answers it, use that. Only if all of them come back empty, say so — and name what you searched. "
+             + "(ค้นสมองอีกครั้งก่อนตอบว่าหาไม่เจอหรือทำไม่ได้)";
+    }
+
+    /// <summary>The text blocks of the last assistant message after the cutoff.</summary>
+    private static string? LastAssistantText(List<string> lines, DateTimeOffset cutoff)
+    {
+        for (var i = lines.Count - 1; i >= 0; i--)
+        {
+            var line = lines[i];
+            if (!line.Contains("\"assistant\"", StringComparison.Ordinal) || !line.Contains("\"text\"", StringComparison.Ordinal)) continue;
+            var row = ParseOrNull(line);
+            if (row == null) continue;
+            using (row)
+            {
+                var r = row.RootElement;
+                if (!IsAfter(Str(r, "timestamp"), cutoff)) return null;
+                if (!r.TryGetProperty("message", out var msg) || msg.ValueKind != JsonValueKind.Object) continue;
+                if (!string.Equals(Str(msg, "role"), "assistant", StringComparison.OrdinalIgnoreCase)) continue;
+                if (!msg.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array) continue;
+                var sb = new StringBuilder();
+                foreach (var b in content.EnumerateArray())
+                    if (string.Equals(Str(b, "type"), "text", StringComparison.OrdinalIgnoreCase) && Str(b, "text") is { } t)
+                        sb.Append(t).Append('\n');
+                if (sb.Length > 0) return sb.ToString();
+            }
+        }
+        return null;
     }
 
     private static bool IsSubstantive(string tool) => IsAnyOf(tool, "Edit", "MultiEdit", "Write", "NotebookEdit", "Task");

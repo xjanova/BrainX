@@ -58,8 +58,11 @@ internal static class McpInstances
 {
     /// <summary>Beside machine-settings.json and vault-path.txt: these are
     /// facts about THIS MACHINE's processes, not about the knowledge base. A
-    /// vault on a synced drive must never carry another PC's pid table.</summary>
-    private static string InstancesDir => Path.Combine(
+    /// vault on a synced drive must never carry another PC's pid table.
+    /// BRAINX_MCP_INSTANCES_DIR moves it, so a test launcher keeps its record
+    /// out of the owner's real table.</summary>
+    private static string InstancesDir =>
+        Environment.GetEnvironmentVariable("BRAINX_MCP_INSTANCES_DIR") is { Length: > 0 } o ? o : Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "BrainX", "mcp-instances");
 
@@ -97,6 +100,12 @@ internal static class McpInstances
     /// <summary>May the idle rule close THIS server? See IdleReapableClients.
     /// The orphan rule ignores this: a dead client is a dead client.</summary>
     public static bool IdleReapable { get { lock (Gate) return _idleReapable; } }
+
+    /// <summary>The pid that spawned this launcher, as recorded at Register.</summary>
+    public static int OwnParentPid
+    {
+        get { lock (Gate) return _registered ? _rec["parentPid"]?.Value<int>() ?? 0 : 0; }
+    }
 
     public static TimeSpan IdleFor
     {
