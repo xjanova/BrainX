@@ -166,7 +166,7 @@ public static class CluadeXSetup
                 TryDelete(partial);
                 return Fail("ไฟล์ที่ดาวน์โหลดไม่ตรงกับต้นฉบับ (sha256 ไม่ตรง) จึงไม่ติดตั้ง", $"{asset.Name} sha256 mismatch");
             }
-            File.Move(partial, target, overwrite: true);
+            AtomicFile.MoveOver(partial, target);
 
             if (!runSetup)
                 return new(CluadeXInstallStatus.Installed, "ดาวน์โหลดและตรวจไฟล์แล้ว", $"verified {target}", null);

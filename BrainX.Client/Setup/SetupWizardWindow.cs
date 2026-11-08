@@ -221,6 +221,8 @@ internal sealed partial class SetupWizardWindow : Window
 
     private void ShowPage(int page)
     {
+        // An answer that lands after the window was closed must not start the install.
+        if (_allowClose && !_render) return;
         _page = page;
         UpdateSteps(page switch { PageWelcome => 0, PageLicense => 1, PageProgress => 2, _ => 3 });
         _bg.Source = page is PageWelcome or PageProgress ? _bk1 : _bk2;

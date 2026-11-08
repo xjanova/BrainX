@@ -25,7 +25,8 @@ public static partial class ConnectionReport
     public static string NewId(DateTimeOffset localNow, Random? rng = null)
     {
         rng ??= Random.Shared;
-        return $"BX-{localNow:yyyyMMdd}-{rng.Next(0, 0x10000):X4}";
+        // Invariant: on a th-TH machine yyyy is the Buddhist year (2569).
+        return string.Create(CultureInfo.InvariantCulture, $"BX-{localNow:yyyyMMdd}-{rng.Next(0, 0x10000):X4}");
     }
 
     public static string Build(

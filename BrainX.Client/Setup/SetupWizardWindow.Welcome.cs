@@ -272,7 +272,8 @@ internal sealed partial class SetupWizardWindow
     /// <summary>
     /// The two boxes become machine settings MainWindow reads at start, so a
     /// box left unticked is not undone by the next launch's auto-connect.
-    /// The file is merged, never replaced; an unreadable one is left alone.
+    /// The file is merged, never replaced. An unreadable one (which MainWindow
+    /// would read as all defaults anyway) is kept as .corrupt.bak first.
     /// </summary>
     internal static void SaveAgentChoices(bool claude, bool cluadeX, string? path = null)
     {
@@ -283,7 +284,11 @@ internal sealed partial class SetupWizardWindow
             if (File.Exists(path))
             {
                 try { o = JObject.Parse(File.ReadAllText(path)); }
-                catch { return; }   // MainWindow backs up and repairs a broken file itself
+                catch
+                {
+                    try { File.Copy(path, path + ".corrupt.bak", overwrite: true); } catch { }
+                    o = new JObject();
+                }
             }
             else o = new JObject();
             o["McpAutoRegisterEnabled"] = claude;
@@ -291,7 +296,7 @@ internal sealed partial class SetupWizardWindow
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             var tmp = path + ".tmp";
             File.WriteAllText(tmp, o.ToString());
-            File.Move(tmp, path, overwrite: true);
+            BrainX.Core.Services.AtomicFile.MoveOver(tmp, path);
         }
         catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"setup: machine settings: {ex.Message}"); }
     }

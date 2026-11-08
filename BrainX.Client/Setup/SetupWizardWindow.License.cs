@@ -75,7 +75,7 @@ internal sealed partial class SetupWizardWindow
 
         // A PC that is already registered (setup run again with --setup).
         var status = _render ? LicenseStatus.Empty : ProGate.Status;
-        if (status.Registered)
+        if (_forced && status.Registered)
         {
             var go = SmallButton("ใช้ต่อแบบนี้");
             go.Click += (_, _) => { _licenseSummary = SummaryOf(ProGate.Status); ShowPage(PageProgress); };
@@ -257,6 +257,8 @@ internal sealed partial class SetupWizardWindow
     {
         var pw = _health?.PasswordLogin != false;
         var device = _health?.DeviceLogin != false;
+        _email = null;
+        _password = null;
         var body = new StackPanel();
         if (pw)
         {
@@ -446,6 +448,11 @@ internal sealed partial class SetupWizardWindow
 
     private async Task PasswordSignInAsync(LicenseService license)
     {
+        if (_email is null || _password is null)
+        {
+            ShowError("เข้าสู่ระบบด้วยปุ่ม Google หรือ LINE ด้านบน", null, null, "", offerDoctor: false);
+            return;
+        }
         var login = _email?.Text.Trim() ?? "";
         var pw = _password?.Password ?? "";
         if (login.Length == 0 || pw.Length == 0)
