@@ -512,7 +512,7 @@ public partial class MainWindow
     /// the wrong vault, or is an outdated build.
     /// </summary>
     private bool EnsureCluadeXRegistered(string exe) =>
-        Services.AgentRegistrar.CluadeX(exe, _vaultPath).Changed;
+        _cluadeXAutoRegisterEnabled && Services.AgentRegistrar.CluadeX(exe, _vaultPath).Changed;
 
     /// <summary>
     /// Idempotent + self-healing Claude Desktop registration. Writes the config

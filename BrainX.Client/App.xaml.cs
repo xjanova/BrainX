@@ -52,6 +52,21 @@ public partial class App : Application
         // entry point — per Velopack's "very beginning of Main()" guidance.
         base.OnStartup(e);
 
+        // `--render-setup <dir>`: draw the setup wizard's pages and dialogs
+        // into PNGs and quit (the design check). Before the mutex, so it can
+        // run beside a BrainX that is already open; nothing is installed.
+        var renderAt = Array.IndexOf(e.Args, BrainX.Core.Services.Setup.SetupFirstRun.RenderArg);
+        if (renderAt >= 0)
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var dir = renderAt + 1 < e.Args.Length ? e.Args[renderAt + 1]
+                : Path.Combine(Path.GetTempPath(), "brainx-setup-render");
+            try { Setup.SetupWizardWindow.RenderAll(dir); }
+            catch (Exception ex) { Debug.WriteLine($"render-setup: {ex}"); Environment.Exit(1); }
+            Environment.Exit(0);
+            return;
+        }
+
         // Try to claim the single-instance mutex. If we don't get it,
         // somebody else is already running — bring their window forward
         // and shut this process down before any heavy init runs.
@@ -77,6 +92,38 @@ public partial class App : Application
         // is a file read and nothing on screen. The dialog closing must not
         // count as the last window closing, hence the explicit mode around it.
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
+
+        // The setup wizard, for a fresh install only: no vault pointer, no
+        // license file, not the dev machine, no vault on the command line.
+        // People who already use BrainX never see it; `--setup` opens it on
+        // purpose. It registers the PC itself, so EnsureRegistered below is
+        // then a file read (and stays as the safety net).
+        var openMinimized = false;
+        var forced = Array.IndexOf(e.Args, BrainX.Core.Services.Setup.SetupFirstRun.ForceArg) >= 0;
+        bool firstRun;
+        try
+        {
+            firstRun = BrainX.Core.Services.Setup.SetupFirstRun.ShouldShow(
+                forced,
+                BrainX.Core.Services.Setup.VaultLocations.PointerExists,
+                File.Exists(BrainX.Core.Services.License.LicenseStore.DefaultPath),
+                Directory.Exists(BrainX.Core.Services.Setup.VaultLocations.DevVault),
+                BrainX.Core.Services.ClientLaunchArgs.Parse(e.Args).VaultPath != null);
+        }
+        catch (Exception ex) { Debug.WriteLine($"setup check: {ex.Message}"); firstRun = false; }
+        if (firstRun)
+        {
+            var outcome = Setup.SetupWizardWindow.Outcome.Continue;
+            try { outcome = Setup.SetupWizardWindow.Run(forced); }
+            catch (Exception ex) { Debug.WriteLine($"setup wizard: {ex}"); }   // never block BrainX on the wizard
+            if (outcome == Setup.SetupWizardWindow.Outcome.Exit)
+            {
+                Environment.Exit(0);
+                return;
+            }
+            openMinimized = outcome == Setup.SetupWizardWindow.Outcome.ContinueMinimized;
+        }
+
         if (!RegistrationWindow.EnsureRegistered())
         {
             Environment.Exit(0);
@@ -122,6 +169,7 @@ public partial class App : Application
             var main = new MainWindow();
             MainWindow = main;
             main.Show();
+            if (openMinimized) main.WindowState = WindowState.Minimized;
         }, DispatcherPriority.Loaded);
     }
 
