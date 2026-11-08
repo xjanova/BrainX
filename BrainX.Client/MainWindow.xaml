@@ -5933,6 +5933,11 @@
                                                     <Button x:Name="LicenseDeactivateBtn" Content="Release from this PC" Style="{StaticResource NeuralBtnGhost}"
                                                             Click="LicenseDeactivate_Click" Padding="14,6" Visibility="Collapsed"/>
                                                 </StackPanel>
+                                                <!-- Linking the Xman Studio account later (the setup wizard's
+                                                     trial says "ผูกบัญชีทีหลังได้จากในแอป"); a linked account
+                                                     keeps auto-update on after the trial. -->
+                                                <Button x:Name="LicenseAccountBtn" Content="เชื่อมบัญชี Xman Studio" Style="{StaticResource NeuralBtnGhost}"
+                                                        Click="LicenseAccount_Click" Padding="14,6" Margin="0,0,0,8" HorizontalAlignment="Left"/>
                                                 <TextBlock FontSize="11.5" TextWrapping="Wrap" Foreground="{StaticResource NeuralText3}" Margin="0,0,0,6">
                                                     <Hyperlink Click="LicenseBuy_Click" Foreground="{StaticResource NeonCyanBrush}"><Run x:Name="LicenseBuyText" Text="Buy BrainX Pro"/></Hyperlink>
                                                     — one key per PC; moving it asks first.

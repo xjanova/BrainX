@@ -6220,6 +6220,10 @@ public partial class MainWindow : Window
                 if (_vpkPending != null) { await TryApplyStagedWhenIdleAsync(); return; }
 
                 await CheckLatestReleaseAsync();
+                // Not entitled to auto-update (no license, trial over, no
+                // account): still CHECK, so the card can say a release is out,
+                // but never download by itself. The manual button still works.
+                if (!AutoUpdateEntitled) { RefreshUpdatePanel(); return; }
                 // Stage only. Whether to APPLY mid-session is a different
                 // decision with a different guard, and it lives in one place.
                 await VelopackCheckAndStageAsync();
@@ -6248,7 +6252,7 @@ public partial class MainWindow : Window
     /// </summary>
     private async System.Threading.Tasks.Task<bool> TryUpdateBeforeBootAsync()
     {
-        if (!_autoUpdateEnabled) return false;
+        if (!_autoUpdateEnabled || !AutoUpdateEntitled) return false;
 
         try
         {
@@ -6353,7 +6357,7 @@ public partial class MainWindow : Window
     /// </summary>
     private async System.Threading.Tasks.Task TryApplyStagedWhenIdleAsync()
     {
-        if (_vpkPending == null || _autoUpdateFiring || !_autoUpdateEnabled) return;
+        if (_vpkPending == null || _autoUpdateFiring || !_autoUpdateEnabled || !AutoUpdateEntitled) return;
         if (InsidePackage is not null) return;               // would install into the package's store
 
         var target = _vpkPending.TargetFullRelease.Version.ToString();
@@ -13581,7 +13585,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private string FindSolutionRoot()
+    private static string FindSolutionRoot()
     {
         // Walk up from AppContext.BaseDirectory looking for BrainX.slnx
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
@@ -13703,7 +13707,7 @@ public partial class MainWindow : Window
     /// locate .cmd files via PATH without an explicit extension, so we
     /// search the usual places ourselves.
     /// </summary>
-    private static string? FindClaudeCli()
+    internal static string? FindClaudeCli()
     {
         var pathVar = Environment.GetEnvironmentVariable("PATH") ?? "";
         var roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
@@ -13725,7 +13729,7 @@ public partial class MainWindow : Window
         return null;
     }
 
-    private static Task<(int code, string stdout, string stderr)> RunClaudeCliAsync(params string[] args)
+    internal static Task<(int code, string stdout, string stderr)> RunClaudeCliAsync(params string[] args)
         => RunClaudeCliInAsync(null, args);
 
     /// <summary>
@@ -13938,7 +13942,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private static string ClaudeDesktopConfigPath()
+    internal static string ClaudeDesktopConfigPath()
     {
         var appdata = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         return Path.Combine(appdata, "Claude", "claude_desktop_config.json");

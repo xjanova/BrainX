@@ -120,6 +120,23 @@ public partial class MainWindow
         LicenseDeactivateBtn.Visibility = activeHere ? Visibility.Visible : Visibility.Collapsed;
         LicenseTrialBtn.Visibility = !s.TrialUsed && !s.IsPaidActive(now) ? Visibility.Visible : Visibility.Collapsed;
         LicenseBuyText.Text = s.IsPaidActive(now) ? "Renew or extend" : "Buy BrainX Pro";
+
+        var account = AccountStore.Load();
+        LicenseAccountBtn.Content = account.AccountLinked
+            ? $"บัญชี Xman Studio: {account.AccountEmailMasked ?? account.AccountName ?? "เชื่อมแล้ว"} · เชื่อมใหม่"
+            : "เชื่อมบัญชี Xman Studio";
+        LicenseAccountBtn.ToolTip = account.AccountLinked ? null : UpdateEntitlement.LinkToAutoUpdate;
+    }
+
+    /// <summary>Sign in to Xman Studio and link this PC (the wizard's sign-in, later).</summary>
+    private void LicenseAccount_Click(object sender, RoutedEventArgs e)
+    {
+        if (_license is null) return;
+        var applied = Setup.AccountSignInWindow.Show(this, GetLocalVersion().compareKey, _license);
+        if (applied is null) return;
+        LicenseMessageText.Text = applied.Thai;
+        ApplyLicense(_license.Current);
+        RefreshUpdatePanel();
     }
 
     private static string Pretty(string? type) => type switch

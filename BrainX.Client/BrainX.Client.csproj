@@ -9,6 +9,8 @@
     <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="10.0.13" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2792.45" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+    <!-- The sign-in QR, drawn locally (same version CluadeX uses). -->
+    <PackageReference Include="QRCoder" Version="1.6.0" />
     <PackageReference Include="Velopack" Version="1.1.1" />
   </ItemGroup>
 
@@ -45,6 +47,21 @@
     <Resource Include="Assets\Fonts\JetBrainsMono-Regular.ttf" />
     <Resource Include="Assets\Fonts\JetBrainsMono-Medium.ttf" />
     <Resource Include="Assets\Fonts\JetBrainsMono-Bold.ttf" />
+    <!--
+      The setup wizard's font (same files CluadeX ships): Noto Sans CX is
+      Noto Sans Thai's Latin part at 400/500/600/700, renamed because it is a
+      modified version. Thai itself is drawn by Leelawadee UI (every Windows
+      10/11 has it): WPF places Thai marks wrongly in OpenType Thai fonts, so
+      the family is "Noto Sans CX, Leelawadee UI" (Setup/SetupTheme.cs).
+      Licence: SIL OFL 1.1, Assets\Fonts\OFL-NotoSans.txt, shipped beside the exe.
+    -->
+    <Resource Include="Assets\Fonts\NotoSansCX-Regular.ttf" />
+    <Resource Include="Assets\Fonts\NotoSansCX-Medium.ttf" />
+    <Resource Include="Assets\Fonts\NotoSansCX-SemiBold.ttf" />
+    <Resource Include="Assets\Fonts\NotoSansCX-Bold.ttf" />
+    <None Include="Assets\Fonts\OFL-NotoSans.txt" Link="Licenses\NotoSans-OFL.txt" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The setup wizard's own pictures. -->
+    <Resource Include="Assets\Installer\CluadeXLogo.png" />
   </ItemGroup>
 
   <!-- Mind's page host, shared with her own exe (BrainX.Mind owns the file):

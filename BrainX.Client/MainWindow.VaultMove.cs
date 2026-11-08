@@ -30,30 +30,13 @@ public partial class MainWindow
     /// <summary>Where the app remembers which vault to open. Read at startup
     /// (CLI argument still wins), written on every successful launch and on
     /// every successful move — so it self-heals if hand-edited wrong.</summary>
-    private static string VaultPointerPath => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "BrainX", "vault-path.txt");
+    private static string VaultPointerPath => BrainX.Core.Services.Setup.VaultLocations.PointerPath;
 
-    private static string? ReadVaultPointer()
-    {
-        try
-        {
-            if (!File.Exists(VaultPointerPath)) return null;
-            var p = File.ReadAllText(VaultPointerPath).Trim();
-            return p.Length > 0 && Directory.Exists(p) ? p : null;
-        }
-        catch { return null; }
-    }
+    // One implementation, shared with the setup wizard, which writes the
+    // pointer before this window exists (BrainX.Core VaultLocations).
+    private static string? ReadVaultPointer() => BrainX.Core.Services.Setup.VaultLocations.ReadPointer();
 
-    private static void WriteVaultPointer(string vaultPath)
-    {
-        try
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(VaultPointerPath)!);
-            File.WriteAllText(VaultPointerPath, vaultPath);
-        }
-        catch { /* pointer is a convenience, not a dependency */ }
-    }
+    private static void WriteVaultPointer(string vaultPath) => BrainX.Core.Services.Setup.VaultLocations.WritePointer(vaultPath);
 
     private void MoveVault_Click(object s, RoutedEventArgs e)
     {

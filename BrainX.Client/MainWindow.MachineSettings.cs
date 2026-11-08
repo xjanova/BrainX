@@ -62,6 +62,10 @@ public partial class MainWindow
     /// </summary>
     private bool _mcpAutoRegisterEnabled = true;
     private bool _autoIngestHookEnabled = true;
+    /// <summary>The setup wizard's "เชื่อมกับ CluadeX" box. Off = BrainX does not
+    /// add itself to CluadeX's mcp_servers.json (the other agents are
+    /// governed by McpAutoRegisterEnabled as before).</summary>
+    private bool _cluadeXAutoRegisterEnabled = true;
 
     private void LoadMachineSettings()
     {
@@ -75,6 +79,7 @@ public partial class MainWindow
         if (m["AutoUpdateEnabled"] is { Type: JTokenType.Boolean } au) _autoUpdateEnabled = au.Value<bool>();
         if (m["McpAutoRegisterEnabled"] is { Type: JTokenType.Boolean } mr) _mcpAutoRegisterEnabled = mr.Value<bool>();
         if (m["AutoIngestHookEnabled"] is { Type: JTokenType.Boolean } ah) _autoIngestHookEnabled = ah.Value<bool>();
+        if (m["CluadeXAutoRegisterEnabled"] is { Type: JTokenType.Boolean } cx) _cluadeXAutoRegisterEnabled = cx.Value<bool>();
         // Machine-scoped: whether THIS PC is allowed to spend its GPU on the
         // gardener is not a property of the notes.
         if (m["GardenerAutoEnabled"] is { Type: JTokenType.Boolean } ga) _gardenerAutoEnabled = ga.Value<bool>();
@@ -119,6 +124,7 @@ public partial class MainWindow
                 ["AutoUpdateEnabled"] = _autoUpdateEnabled,
                 ["McpAutoRegisterEnabled"] = _mcpAutoRegisterEnabled,
                 ["AutoIngestHookEnabled"] = _autoIngestHookEnabled,
+                ["CluadeXAutoRegisterEnabled"] = _cluadeXAutoRegisterEnabled,
                 ["GardenerAutoEnabled"] = _gardenerAutoEnabled,
                 ["CodeAutoBuildEnabled"] = _codeAutoBuildEnabled,
                 ["McpReaperEnabled"] = _mcpReaperEnabled,

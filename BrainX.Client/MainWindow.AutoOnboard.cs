@@ -298,7 +298,7 @@ public partial class MainWindow
     /// to write code no longer points Claude at a stale dev binary.
     /// Returns null when no build exists anywhere.
     /// </summary>
-    private string? ResolveBestMcpExe()
+    internal static string? ResolveBestMcpExe()
     {
         var baseDir = AppContext.BaseDirectory;
 
@@ -416,7 +416,7 @@ public partial class MainWindow
     /// same source ReadMcpFileVersion uses), trimmed to its numeric SemVer
     /// prefix. Null when the file is missing or carries no parseable version.
     /// </summary>
-    private static Version? McpProductVersionOf(string exePath)
+    internal static Version? McpProductVersionOf(string exePath)
     {
         try
         {
@@ -460,7 +460,7 @@ public partial class MainWindow
     /// in that package's private store, so for Codex a registration there is
     /// an agent with no brain at all.
     /// </summary>
-    private static bool PinnedInsideCurrent(string registeredExe, string bestExe) =>
+    internal static bool PinnedInsideCurrent(string registeredExe, string bestExe) =>
         BrainX.Core.Services.McpRuntimePaths.IsRetiredLocation(registeredExe)
         && !BrainX.Core.Services.McpRuntimePaths.IsRetiredLocation(bestExe);
 
@@ -473,7 +473,7 @@ public partial class MainWindow
     /// (2026-07-12). Both versions must parse; equal or unknown = NOT
     /// outdated, so we still never churn a working config without cause.
     /// </summary>
-    private static bool IsMcpOutdated(string registeredExe, string bestExe)
+    internal static bool IsMcpOutdated(string registeredExe, string bestExe)
     {
         if (string.Equals(registeredExe, bestExe, StringComparison.OrdinalIgnoreCase)) return false;
         var reg = McpProductVersionOf(registeredExe);
@@ -489,7 +489,7 @@ public partial class MainWindow
     /// install root CluadeX had stopped reading — so the entry BrainX kept
     /// healing there never reached CluadeX (found 2026-10-19).
     /// </summary>
-    private static string CluadeXMcpConfigPath() => BrainX.Core.Services.AgentHomes.CluadeXMcpConfig;
+    internal static string CluadeXMcpConfigPath() => BrainX.Core.Services.AgentHomes.CluadeXMcpConfig;
 
     /// <summary>
     /// Register the brain with CluadeX — BrainX's sibling local-model coding
@@ -511,60 +511,8 @@ public partial class MainWindow
     /// when the entry is missing, disabled, points at a vanished exe, carries
     /// the wrong vault, or is an outdated build.
     /// </summary>
-    private bool EnsureCluadeXRegistered(string exe)
-    {
-        var cfgPath = CluadeXMcpConfigPath();
-        var cfgDir = Path.GetDirectoryName(cfgPath)!;
-        // No data dir = CluadeX was never run on this machine. Creating one
-        // would fabricate an install that isn't there.
-        if (!Directory.Exists(cfgDir)) return false;
-
-        Newtonsoft.Json.Linq.JObject config;
-        if (File.Exists(cfgPath))
-        {
-            try { config = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(cfgPath)); }
-            catch { BackupCorruptFile(cfgPath); config = new Newtonsoft.Json.Linq.JObject(); }
-        }
-        else config = new Newtonsoft.Json.Linq.JObject();
-
-        var servers = config["mcpServers"] as Newtonsoft.Json.Linq.JObject;
-        if (servers is null)
-        {
-            servers = new Newtonsoft.Json.Linq.JObject();
-            config["mcpServers"] = servers;
-        }
-
-        var existing = servers["brainx-brain"] as Newtonsoft.Json.Linq.JObject;
-        var curCmd = existing?["command"]?.ToString();
-        var curVault = existing?["env"]?["BRAINX_VAULT"]?.ToString();
-        // enabled defaults to true in CluadeX's model, so only an explicit
-        // false counts as disabled — and a disabled entry never starts, which
-        // would leave IsBrainAvailable false just like a missing one.
-        var curEnabled = existing?["enabled"]?.ToObject<bool?>() ?? true;
-
-        var entryHealthy = existing is not null
-            && !string.IsNullOrEmpty(curCmd) && File.Exists(curCmd!)
-            && string.Equals(curVault, _vaultPath, StringComparison.OrdinalIgnoreCase)
-            && curEnabled
-            && !PinnedInsideCurrent(curCmd!, exe)
-            && !IsMcpOutdated(curCmd!, exe);
-        if (entryHealthy) return false;
-
-        var entry = existing is not null
-            ? (Newtonsoft.Json.Linq.JObject)existing.DeepClone()
-            : new Newtonsoft.Json.Linq.JObject();
-        entry["command"] = exe;
-        if (entry["args"] is null) entry["args"] = new Newtonsoft.Json.Linq.JArray();
-        var env = entry["env"] as Newtonsoft.Json.Linq.JObject ?? new Newtonsoft.Json.Linq.JObject();
-        env["BRAINX_VAULT"] = _vaultPath;
-        if (VersionLabelOf(exe) is string stamp) env["BRAINX_MCP_VERSION"] = stamp;
-        entry["env"] = env;
-        entry["enabled"] = true;
-        servers["brainx-brain"] = entry;
-
-        File.WriteAllText(cfgPath, config.ToString(Newtonsoft.Json.Formatting.Indented));
-        return true;
-    }
+    private bool EnsureCluadeXRegistered(string exe) =>
+        _cluadeXAutoRegisterEnabled && Services.AgentRegistrar.CluadeX(exe, _vaultPath).Changed;
 
     /// <summary>
     /// Idempotent + self-healing Claude Desktop registration. Writes the config
@@ -573,88 +521,8 @@ public partial class MainWindow
     /// is a no-op. Preserves any other mcpServers the user has. Returns true
     /// when the file was changed.
     /// </summary>
-    private bool EnsureClaudeDesktopRegistered(string exe)
-    {
-        var cfgPath = ClaudeDesktopConfigPath();
-        var cfgDir = Path.GetDirectoryName(cfgPath)!;
-
-        Newtonsoft.Json.Linq.JObject config;
-        if (File.Exists(cfgPath))
-        {
-            try { config = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(cfgPath)); }
-            catch
-            {
-                // Corrupt JSON — Claude Desktop can't read it either, so rebuilding
-                // it actually un-breaks Claude. But never silently destroy the file:
-                // stash a copy first so any other mcpServers entries stay recoverable.
-                BackupCorruptFile(cfgPath);
-                config = new Newtonsoft.Json.Linq.JObject();
-            }
-        }
-        else config = new Newtonsoft.Json.Linq.JObject();
-
-        var servers = config["mcpServers"] as Newtonsoft.Json.Linq.JObject;
-        if (servers is null)
-        {
-            servers = new Newtonsoft.Json.Linq.JObject();
-            config["mcpServers"] = servers;
-        }
-
-        var existing = servers["brainx-brain"] as Newtonsoft.Json.Linq.JObject;
-        var curCmd = existing?["command"]?.ToString();
-        var curVault = existing?["env"]?["BRAINX_VAULT"]?.ToString();
-
-        // Leave a WORKING config untouched — heal only when the entry is missing,
-        // its exe path no longer exists (stale / moved / deleted build), the
-        // vault is wrong, or the registered build is VERSION-OUTDATED vs the
-        // best available exe. The version check (2026-07-12) is what finally
-        // lets app updates propagate to Claude: same-version rebuilds still
-        // never churn the config, but a genuinely newer release repoints it.
-        var entryHealthy = existing is not null
-            && !string.IsNullOrEmpty(curCmd) && File.Exists(curCmd!)
-            && string.Equals(curVault, _vaultPath, StringComparison.OrdinalIgnoreCase)
-            && !PinnedInsideCurrent(curCmd!, exe)
-            && !IsMcpOutdated(curCmd!, exe);
-        if (entryHealthy)
-        {
-            // Healthy: the path is right and nothing needs repointing. But the
-            // BRAINX_MCP_VERSION LABEL can still lie, and this early return is
-            // exactly why it used to. Auto-update swaps the binary in place at
-            // a STABLE path, so "same path, newer build" never trips the checks
-            // above — leaving the only fixer the MCP server itself, which can
-            // only rewrite the config AFTER it starts, i.e. after Claude
-            // Desktop already read the old value to spawn it. The label was
-            // therefore permanently one restart behind (user: "ทำไมเวอร์ชั่น
-            // ไม่ปรับปรุงตามโปรแกรมอัตโนมัติ"). The client has no such
-            // ordering problem: it runs before Claude Desktop is opened.
-            //
-            // Returns false either way — a label correction is not a
-            // reconnection, and must not trigger the "restart Claude Desktop
-            // to activate" notice.
-            SyncDesktopVersionLabel(cfgPath, config, existing!, curCmd!);
-            return false;
-        }
-
-        // Update IN PLACE so we never clobber extra keys a user (or the MCP
-        // server) added — e.g. BRAINX_MCP_VERSION, custom args. Only `command`
-        // and `env.BRAINX_VAULT` are ours to own; everything else is preserved.
-        var entry = existing is not null
-            ? (Newtonsoft.Json.Linq.JObject)existing.DeepClone()
-            : new Newtonsoft.Json.Linq.JObject();
-        entry["command"] = exe;
-        if (entry["args"] is null) entry["args"] = new Newtonsoft.Json.Linq.JArray();
-        var env = entry["env"] as Newtonsoft.Json.Linq.JObject ?? new Newtonsoft.Json.Linq.JObject();
-        env["BRAINX_VAULT"] = _vaultPath;
-        // Stamp the version we are pointing AT, so the label is right from the
-        // first launch rather than after the server has run once.
-        if (VersionLabelOf(exe) is string stamp) env["BRAINX_MCP_VERSION"] = stamp;
-        entry["env"] = env;
-        servers["brainx-brain"] = entry;
-
-        Directory.CreateDirectory(cfgDir);
-        File.WriteAllText(cfgPath, config.ToString(Newtonsoft.Json.Formatting.Indented));
-        return true;
-    }
+    private bool EnsureClaudeDesktopRegistered(string exe) =>
+        Services.AgentRegistrar.ClaudeDesktop(exe, _vaultPath).Changed;
 
     /// <summary>
     /// Full SemVer label of an MCP binary — the same string the server reports
@@ -663,7 +531,7 @@ public partial class MainWindow
     /// it parses to a <see cref="Version"/> for COMPARISON and would drop the
     /// build metadata that makes the label useful.
     /// </summary>
-    private static string? VersionLabelOf(string exePath)
+    internal static string? VersionLabelOf(string exePath)
     {
         try
         {
@@ -683,7 +551,7 @@ public partial class MainWindow
     /// place. Writes only when the label actually disagrees with the binary,
     /// so a steady-state launch never touches Claude Desktop's config.
     /// </summary>
-    private static void SyncDesktopVersionLabel(
+    internal static void SyncDesktopVersionLabel(
         string cfgPath,
         Newtonsoft.Json.Linq.JObject config,
         Newtonsoft.Json.Linq.JObject entry,
@@ -717,41 +585,10 @@ public partial class MainWindow
     /// registration needs moving within seconds of startup; interleaved, one
     /// run's remove lands between the other's remove and add. Serialized, the
     /// second run finds the entry already healthy and does nothing.</summary>
-    private static readonly SemaphoreSlim ClaudeCliGate = new(1, 1);
+    internal static readonly SemaphoreSlim ClaudeCliGate = new(1, 1);
 
-    private async Task<bool> EnsureClaudeCliRegisteredAsync(string exe)
-    {
-        if (FindClaudeCli() is null) return false;   // CLI not installed → nothing to do
-
-        await ClaudeCliGate.WaitAsync();
-        try
-        {
-            var (_, listOut, _) = await RunClaudeCliAsync("mcp", "list");
-            if (listOut.Contains("brainx-brain", StringComparison.OrdinalIgnoreCase))
-            {
-                // Registered — but at which build? ~/.claude.json holds the
-                // user-scope command path; upgrade in place only when the
-                // registered build is strictly older than the best available.
-                var registered = ReadCliRegisteredCommand();
-                if (registered is null) return false;               // unknown → leave alone
-                if (!PinnedInsideCurrent(registered, exe) && !IsMcpOutdated(registered, exe))
-                    return false;   // right build, right place → leave alone
-                await RunClaudeCliAsync("mcp", "remove", "brainx-brain", "-s", "user");
-            }
-
-            await RunClaudeCliAsync(
-                "mcp", "add", "brainx-brain",
-                "-s", "user",
-                "-e", $"BRAINX_VAULT={_vaultPath}",
-                "--", exe);
-            return true;
-        }
-        catch
-        {
-            return false;   // CLI flaked — fallback is the manual button
-        }
-        finally { ClaudeCliGate.Release(); }
-    }
+    private async Task<bool> EnsureClaudeCliRegisteredAsync(string exe) =>
+        (await Services.AgentRegistrar.ClaudeCliAsync(exe, _vaultPath)).Changed;
 
     /// <summary>
     /// Drop project-scoped brainx-brain registrations that are OLDER than the
@@ -1317,7 +1154,7 @@ public partial class MainWindow
     /// The command path of the user-scope brainx-brain entry in ~/.claude.json,
     /// or null when absent/unreadable.
     /// </summary>
-    private static string? ReadCliRegisteredCommand()
+    internal static string? ReadCliRegisteredCommand()
     {
         try
         {
@@ -1428,7 +1265,7 @@ public partial class MainWindow
     /// Stash a corrupt config next to itself before we rewrite it, so a self-heal
     /// can never silently cost the user hand-made entries. Best-effort.
     /// </summary>
-    private static void BackupCorruptFile(string path)
+    internal static void BackupCorruptFile(string path)
     {
         try
         {
