@@ -71,6 +71,9 @@ public static class XmanApi
         return false;
     }
 
+    /// <summary>The same pin check, for the connection doctor's raw TLS probe.</summary>
+    internal static bool IsPinnedCert(X509Certificate2 cert) => IsPinned(cert);
+
     private static bool IsPinned(X509Certificate2 cert) =>
         PinnedSpkiSha256.Contains(Convert.ToHexString(SHA256.HashData(cert.PublicKey.ExportSubjectPublicKeyInfo())));
 
