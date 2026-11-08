@@ -6220,6 +6220,10 @@ public partial class MainWindow : Window
                 if (_vpkPending != null) { await TryApplyStagedWhenIdleAsync(); return; }
 
                 await CheckLatestReleaseAsync();
+                // Not entitled to auto-update (no license, trial over, no
+                // account): still CHECK, so the card can say a release is out,
+                // but never download by itself. The manual button still works.
+                if (!AutoUpdateEntitled) { RefreshUpdatePanel(); return; }
                 // Stage only. Whether to APPLY mid-session is a different
                 // decision with a different guard, and it lives in one place.
                 await VelopackCheckAndStageAsync();
@@ -6248,7 +6252,7 @@ public partial class MainWindow : Window
     /// </summary>
     private async System.Threading.Tasks.Task<bool> TryUpdateBeforeBootAsync()
     {
-        if (!_autoUpdateEnabled) return false;
+        if (!_autoUpdateEnabled || !AutoUpdateEntitled) return false;
 
         try
         {
@@ -6353,7 +6357,7 @@ public partial class MainWindow : Window
     /// </summary>
     private async System.Threading.Tasks.Task TryApplyStagedWhenIdleAsync()
     {
-        if (_vpkPending == null || _autoUpdateFiring || !_autoUpdateEnabled) return;
+        if (_vpkPending == null || _autoUpdateFiring || !_autoUpdateEnabled || !AutoUpdateEntitled) return;
         if (InsidePackage is not null) return;               // would install into the package's store
 
         var target = _vpkPending.TargetFullRelease.Version.ToString();

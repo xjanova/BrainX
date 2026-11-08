@@ -50,6 +50,21 @@ public partial class MainWindow
     /// the elements exist after InitializeComponent even while Settings is hidden.
     /// Wired into UpdateAboutCard() so it refreshes whenever the version info does.
     /// </summary>
+    /// <summary>
+    /// Auto-update is part of a license (contract §2.5): a valid paid or
+    /// trial license, or an Xman Studio account linked on this PC. Without
+    /// it BrainX still checks and offers the update; it only stops fetching
+    /// and applying one by itself. A file read: cheap enough per tick.
+    /// </summary>
+    private static bool AutoUpdateEntitled
+    {
+        get
+        {
+            try { return BrainX.Core.Services.License.UpdateEntitlement.CurrentlyAllowed(); }
+            catch { return true; }   // an unreadable store must not stop updates
+        }
+    }
+
     private void RefreshUpdatePanel()
     {
         try
@@ -68,6 +83,9 @@ public partial class MainWindow
             }
             UpdInstallMode.Text = !installed
                 ? "Unavailable — this is a portable / dev build. Install via Setup.exe once to enable self-update."
+                : _autoUpdateEnabled && !AutoUpdateEntitled
+                    ? "ตรวจหารุ่นใหม่ให้ แต่ไม่ดาวน์โหลดเอง · " + BrainX.Core.Services.License.UpdateEntitlement.LinkToAutoUpdate
+                      + " (กด Check for updates เพื่ออัปเดตเองได้ทุกเมื่อ)"
                 : _autoUpdateEnabled
                     ? $"Checks every {UpdatePollMinutes} min. A new release is downloaded straight away and applied "
                       + $"as soon as you have been away from the keyboard for {UpdateIdleMinutes} min — never mid-edit."
@@ -97,6 +115,8 @@ public partial class MainWindow
                                    + "Close it and open BrainX from the Desktop or Start menu to update.";
             else if (_vpkPending != null)
                 UpdStatusText.Text = $"✅ Update v{_vpkPending.TargetFullRelease.Version} downloaded — click “Restart & apply”.";
+            else if (newer && installed && !AutoUpdateEntitled && !_updCheckInFlight)
+                UpdStatusText.Text = $"มีรุ่นใหม่ v{_latestRemoteVersion} · " + BrainX.Core.Services.License.UpdateEntitlement.LinkToAutoUpdate;
             // Every earlier branch WROTE and none ever cleared, so a "Check
             // failed: …" line survived every later successful repaint and sat
             // under a card reading "up to date". The guard keeps the in-flight
