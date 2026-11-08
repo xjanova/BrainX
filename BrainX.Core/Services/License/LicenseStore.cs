@@ -123,7 +123,7 @@ public static class LicenseStore
         s.Key ?? "", s.Type ?? "", Stamp(s.ExpiresAtUtc), s.State.ToString(), Stamp(s.VerifiedAtUtc),
         Stamp(s.TrialEndsUtc), s.TrialUsed ? "1" : "0", s.MachineId));
 
-    private static string Hmac(string version, string text)
+    internal static string Hmac(string version, string text)
     {
         var secret = SHA256.HashData(Encoding.UTF8.GetBytes(
             $"{version}|{MachineIdentity.MachineId}|{MachineIdentity.MachineGuid ?? ""}"));
