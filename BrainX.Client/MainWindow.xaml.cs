@@ -13581,7 +13581,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private string FindSolutionRoot()
+    private static string FindSolutionRoot()
     {
         // Walk up from AppContext.BaseDirectory looking for BrainX.slnx
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
@@ -13703,7 +13703,7 @@ public partial class MainWindow : Window
     /// locate .cmd files via PATH without an explicit extension, so we
     /// search the usual places ourselves.
     /// </summary>
-    private static string? FindClaudeCli()
+    internal static string? FindClaudeCli()
     {
         var pathVar = Environment.GetEnvironmentVariable("PATH") ?? "";
         var roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
@@ -13725,7 +13725,7 @@ public partial class MainWindow : Window
         return null;
     }
 
-    private static Task<(int code, string stdout, string stderr)> RunClaudeCliAsync(params string[] args)
+    internal static Task<(int code, string stdout, string stderr)> RunClaudeCliAsync(params string[] args)
         => RunClaudeCliInAsync(null, args);
 
     /// <summary>
@@ -13938,7 +13938,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private static string ClaudeDesktopConfigPath()
+    internal static string ClaudeDesktopConfigPath()
     {
         var appdata = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         return Path.Combine(appdata, "Claude", "claude_desktop_config.json");
