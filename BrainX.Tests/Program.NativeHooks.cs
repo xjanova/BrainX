@@ -37,12 +37,23 @@ internal static partial class Program
         psi.Environment["BRAINX_VAULT"] = vault;
         psi.Environment["BRAINX_SANDBOX"] = "1";
         using var p = Process.Start(psi)!;
-        var utf8 = new UTF8Encoding(false).GetBytes(stdin);
-        await p.StandardInput.BaseStream.WriteAsync(utf8);
-        await p.StandardInput.BaseStream.FlushAsync();
-        p.StandardInput.Close();
+        // Drain both pipes before feeding stdin: a hook that writes before it reads must never stall on a full pipe.
         var so = p.StandardOutput.ReadToEndAsync();
         var se = p.StandardError.ReadToEndAsync();
+        var utf8 = new UTF8Encoding(false).GetBytes(stdin);
+        try
+        {
+            await p.StandardInput.BaseStream.WriteAsync(utf8);
+            await p.StandardInput.BaseStream.FlushAsync();
+            p.StandardInput.Close();
+        }
+        catch (IOException)
+        {
+            // The hook decided and exited without reading all of stdin (mode off, empty prompt, a bad payload...).
+            // That is a valid run, not a broken check: on a loaded CI runner the exit beats the write and the pipe
+            // is already closed ("The pipe is being closed"). Its exit code and output are still compared below.
+            try { p.StandardInput.Close(); } catch (IOException) { }
+        }
         if (!p.WaitForExit(60_000)) { try { p.Kill(true); } catch { } return new HookRun(-1, await so, await se); }
         return new HookRun(p.ExitCode, await so, await se);
     }
