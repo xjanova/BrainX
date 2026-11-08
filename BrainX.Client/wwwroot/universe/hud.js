@@ -261,6 +261,7 @@ function compact(n) {
 const BOOT_GIRL_GLOW = {
     brainx: '62, 155, 255', cluadex: '185, 140, 255', mai: '200, 155, 255',
     grok: '184, 240, 60', claude: '255, 138, 60', codex: '60, 180, 255', gemini: '168, 140, 255',
+    antigravity: '60, 230, 210',
 };
 
 /** The girl the host drew for this launch stands beside the boot box. The
@@ -271,7 +272,8 @@ function showBootGirl() {
     const img = $('hud-boot-girl');
     const name = new URLSearchParams(location.search).get('girl') || '';
     if (!img || !/^[a-z0-9-]{1,32}$/.test(name)) return;
-    const glow = BOOT_GIRL_GLOW[name];
+    // The name may be a pose ("gemini-2"); the glow belongs to the girl.
+    const glow = BOOT_GIRL_GLOW[name.replace(/-\d+$/, '')];
     if (glow) img.style.setProperty('--girl-glow', `rgba(${glow}, 0.5)`);
     img.onload = () => { img.hidden = false; requestAnimationFrame(() => img.classList.add('in')); };
     img.onerror = () => img.remove();

@@ -22,6 +22,12 @@ namespace BrainX.Client;
 // to the WebView as https://universe.local/girls/<name>.png). Every PNG there
 // is in the draw; a new one needs no code change. Never the girl the last
 // launch showed.
+//
+// Owner (2026-11-08) replaced the old cut-outs with a full set: each girl
+// comes in poses, named <girl>.png, <girl>-2.png, <girl>-3.png … The draw is
+// by GIRL first (so one with more poses is not drawn more often, and "never
+// the last one" means a different person, not just a different pose), then
+// a random pose of hers. Antigravity joined the set the same day.
 // ─────────────────────────────────────────────────────────────────────────
 public partial class MainWindow
 {
@@ -41,7 +47,13 @@ public partial class MainWindow
         ["claude"] = Color.FromRgb(0xFF, 0x8A, 0x3C),
         ["codex"] = Color.FromRgb(0x3C, 0xB4, 0xFF),
         ["gemini"] = Color.FromRgb(0xA8, 0x8C, 0xFF),
+        ["antigravity"] = Color.FromRgb(0x3C, 0xE6, 0xD2),
     };
+
+    /// <summary>"gemini-2" → "gemini": a pose's file name to the girl it shows.</summary>
+    private static readonly Regex LoadingGirlPoseSuffix = new("-[0-9]+$", RegexOptions.CultureInvariant);
+
+    private static string LoadingGirlOf(string file) => LoadingGirlPoseSuffix.Replace(file, "");
 
     /// <summary>Below this the card needs the room: she steps aside.</summary>
     private const double LoadingGirlMinWidth = 860;
@@ -60,10 +72,15 @@ public partial class MainWindow
                 : new List<string>();
             if (names.Count == 0 || LoadingGirl == null) return;
 
+            // Draw the girl, then one of her poses (see the header).
+            var girls = names.GroupBy(LoadingGirlOf).ToDictionary(g => g.Key, g => g.ToList());
             var last = ReadLastLoadingGirl();
-            var pool = names.Count > 1 ? names.Where(n => n != last).ToList() : names;
-            var pick = pool[Random.Shared.Next(pool.Count)];
-            WriteLastLoadingGirl(pick);
+            last = last == null ? null : LoadingGirlOf(last);
+            var pool = girls.Count > 1 ? girls.Keys.Where(g => g != last).ToList() : girls.Keys.ToList();
+            var girl = pool[Random.Shared.Next(pool.Count)];
+            var poses = girls[girl];
+            var pick = poses[Random.Shared.Next(poses.Count)];
+            WriteLastLoadingGirl(girl);
             _loadingGirl = pick;
 
             var bmp = new BitmapImage();
@@ -73,7 +90,7 @@ public partial class MainWindow
             bmp.EndInit();
             bmp.Freeze();
             LoadingGirl.Source = bmp;
-            if (LoadingGirlGlowColors.TryGetValue(pick, out var glow)) LoadingGirlGlow.Color = glow;
+            if (LoadingGirlGlowColors.TryGetValue(girl, out var glow)) LoadingGirlGlow.Color = glow;
 
             void Fit() => LoadingGirl.Visibility = ActualWidth >= LoadingGirlMinWidth ? Visibility.Visible : Visibility.Collapsed;
             SizeChanged += (_, _) => { if (UniverseLoadingOverlay.Visibility == Visibility.Visible) Fit(); };
