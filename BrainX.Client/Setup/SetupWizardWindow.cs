@@ -365,15 +365,46 @@ internal sealed partial class SetupWizardWindow : Window
     // ── --render-setup ───────────────────────────────────────────────
 
     /// <summary>
+    /// The picture Setup.exe shows while it copies BrainX (vpk --splashImage;
+    /// the PNG in Assets/Installer is rendered from this). Velopack draws its
+    /// own progress bar under it, so the bottom strip stays quiet.
+    /// </summary>
+    private static FrameworkElement BuildSplash()
+    {
+        var g = new Grid { Width = 640, Height = 360, Background = Brush(Bg), ClipToBounds = true };
+        g.Children.Add(new Image { Source = Pack("Assets/bk1.png", 400), Stretch = Stretch.UniformToFill, Opacity = 0.75 });
+        var shade = new RadialGradientBrush { Center = new Point(0.5, 0.42), GradientOrigin = new Point(0.5, 0.42), RadiusX = 0.75, RadiusY = 0.9 };
+        shade.GradientStops.Add(new GradientStop(Argb(0.25, 5, 8, 22), 0));
+        shade.GradientStops.Add(new GradientStop(Argb(0.85, 5, 8, 22), 1));
+        g.Children.Add(new Rectangle { Fill = shade });
+        var banner = new Border
+        {
+            Width = 380, Height = 150, CornerRadius = new CornerRadius(16),
+            BorderBrush = Brush(0.4, 0x7D, 0xD3, 0xFC), BorderThickness = new Thickness(1),
+            Background = new ImageBrush(Pack("Assets/LogoBanner.png")) { Stretch = Stretch.UniformToFill },
+            Effect = Glow(Sky, 34, 0.55),
+        };
+        var title = T("กำลังติดตั้ง BrainX…", 20, Text, FontWeights.SemiBold, wrap: false);
+        title.HorizontalAlignment = HorizontalAlignment.Center;
+        var sub = T("สมองที่สองของ AI ทุกตัวในเครื่องคุณ", 13.5, Muted, wrap: false);
+        sub.HorizontalAlignment = HorizontalAlignment.Center;
+        var stack = Stack(14, banner, Stack(4, title, sub));
+        stack.HorizontalAlignment = HorizontalAlignment.Center;
+        stack.VerticalAlignment = VerticalAlignment.Top;
+        stack.Margin = new Thickness(0, 54, 0, 0);
+        g.Children.Add(stack);
+        return g;
+    }
+
+    /// <summary>
     /// Draw every page and dialog into PNGs under <paramref name="dir"/>
     /// without showing a window (the design check; nothing is installed).
     /// </summary>
     internal static void RenderAll(string dir)
     {
         Directory.CreateDirectory(dir);
-        const double scale = 1.5;
 
-        void Save(FrameworkElement el, double width, double? height, string file)
+        void Save(FrameworkElement el, double width, double? height, string file, double scale = 1.5)
         {
             el.Measure(new Size(width, height ?? double.PositiveInfinity));
             var h = height ?? el.DesiredSize.Height;
@@ -402,6 +433,8 @@ internal sealed partial class SetupWizardWindow : Window
             setup?.Invoke(w);
             return w;
         }
+
+        Save(BuildSplash(), 640, 360, "00-splash.png", scale: 1);
 
         var w1 = New(w => w._cluadeXPresent = true);
         w1.ShowPage(PageWelcome);

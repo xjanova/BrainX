@@ -147,6 +147,7 @@ jobs:
             --mainExe BrainX.Client.exe `
             --packTitle "BrainX" `
             --icon BrainX.Client/Assets/Logo.ico `
+            --splashImage BrainX.Client/Assets/Installer/splash.png `
             --outputDir Releases
 
       - name: Sign the update feed (client auto-update through xman)
